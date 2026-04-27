@@ -16,6 +16,7 @@ Coverage (_update_domain_file — real method, temp files):
 
 import tempfile
 from pathlib import Path
+from typing import Any, Generator, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -91,13 +92,14 @@ def _prime_analyzer(
         mock_analyzer.invoke_verification_pass.return_value = None  # v2: returns None
 
 
-def _extract_repo_list(mock_analyzer: MagicMock) -> list:
+def _extract_repo_list(mock_analyzer: MagicMock) -> list[Any]:
     """Extract the repo_list argument from the first invoke_verification_pass call."""
     call_args = mock_analyzer.invoke_verification_pass.call_args
     # Accept both positional (path, repo_list, config) and keyword forms
+    # cast needed: MagicMock call_args indexing returns Any
     if call_args[0] and len(call_args[0]) > 1:
-        return call_args[0][1]
-    return call_args[1].get("repo_list", [])
+        return cast(list[Any], call_args[0][1])
+    return cast(list[Any], call_args[1].get("repo_list", []))
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +115,7 @@ class TestDeltaMergeVerificationWiring:
     """
 
     @pytest.fixture()
-    def domain_file(self) -> "Path":
+    def domain_file(self) -> Generator[Path, None, None]:
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "services.md"
             p.write_text(_DOMAIN_FILE_WITH_FRONTMATTER)

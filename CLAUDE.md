@@ -72,7 +72,7 @@ NEVER push to `master` without explicit user authorization in the **current conv
 |-------|-------|---------------|------|
 | `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~6-7 min |
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~10-15 min |
-| `e2e-automation.sh` | 4-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote | Final regression gate — ALL completed work | ~30-60 min |
+| `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate — ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests — it ignores `tests/unit/server/` entirely. Touching server code without running `server-fast-automation.sh` = untested changes.
 
@@ -96,11 +96,12 @@ NEVER push to `master` without explicit user authorization in the **current conv
 ### e2e-automation.sh Usage
 
 ```bash
-./e2e-automation.sh              # All 4 phases
+./e2e-automation.sh              # All 5 phases
 ./e2e-automation.sh --phase 1    # CLI standalone
 ./e2e-automation.sh --phase 2    # CLI daemon
 ./e2e-automation.sh --phase 3    # Server in-process (FastAPI TestClient)
 ./e2e-automation.sh --phase 4    # CLI remote (live uvicorn subprocess)
+./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server, dual provider)
 ```
 
 Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing. Outcomes: SUCCESS = done; failures attributable to your change = root-cause → fix → re-run; new skips = treat as failure.
@@ -132,6 +133,8 @@ ruff check --fix src/ tests/
 
 Zero tolerance — never leave GitHub Actions failed. Fix in the same session. See memory: `feedback_ruff_black_version_alignment.md`.
 
+**Bug #900 prevention** (2026-04-26): 251 mypy errors had accumulated across 79 files on `development` because story DoDs were being interpreted as "no NEW lint errors introduced by this changeset" rather than "`lint.sh` exits 0". Partial cleanups don't compound — they hide. Going forward, every story DoD must require `./lint.sh` to exit 0 BEFORE merging the story branch back to `development`. If a story can't reach a clean lint, it must either fix the upstream debt or be blocked. CI gate must be `./lint.sh` (full ruff check + ruff format check + mypy across `src/` and `tests/`), not just `mypy src/`.
+
 ---
 
 ## Critical Architecture Invariants
@@ -139,6 +142,51 @@ Zero tolerance — never leave GitHub Actions failed. Fix in the same session. S
 ### Query Is Everything
 
 Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, deduplication of indexing. If refactoring removes any of these, STOP. See memory: `project_query_is_everything.md`.
+
+### TOTP Step-Up Elevation (Epic #922 / Story #923)
+
+**ElevatedSessionManager** (`src/code_indexer/server/auth/elevated_session_manager.py`):
+- Dual-backend (SQLite solo / PostgreSQL cluster), mirrors `MfaChallengeManager`
+- Atomic touch: PostgreSQL `UPDATE...WHERE last_touched_at > cutoff RETURNING`; SQLite `BEGIN EXCLUSIVE`
+- session_key = JWT `jti` (Bearer) OR `cidx_session` cookie (Web UI)
+- Rolling 5-min idle timeout, 30-min absolute max age (both runtime-configurable via Web UI Config Screen)
+- `INSERT ... ON CONFLICT (session_key) DO UPDATE` for atomic re-elevation (Codex M1)
+- SQLite db lives at `~/.cidx-server/elevated_sessions.db` (NOT tempfile — survives restarts)
+
+**Three error codes** (NEVER refactor to two or four):
+- `totp_setup_required` (403, with `setup_url`) — admin has no TOTP secret enabled
+- `elevation_required` (403) — no active elevation window for this session
+- `elevation_failed` (401) — wrong code / replay / expired
+
+**Kill switch returns HTTP 503 NOT 403** when `elevation_enforcement_enabled=false`. 403 misleadingly implies "forbidden"; 503 correctly signals "feature administratively off" (Codex M4/M12).
+
+**Recovery code narrow elevation**: 10 codes generated at TOTP registration, stored as bcrypt hashes in `totp_recovery_codes` table (separate table, not column). Recovery code grants `scope=totp_repair` window — usable ONLY for TOTP reset/regenerate/disable. Full-scope endpoints reject. `verify_recovery_code` uses atomic CAS via single `UPDATE ... WHERE used_at IS NULL` (Codex M1) — no TOCTOU race.
+
+**TOTP replay prevention**: `last_used_otp_timestamp` column on totp_secrets table. Atomic CAS rejects same-window replay (Codex C1). `verify_enabled_code()` rejects unactivated secrets (Codex C4).
+
+**Rate limiting**: `POST /auth/elevate` chains through `login_rate_limiter` (per-IP+username key) — 429 when locked out, counter cleared on success (Codex H3).
+
+**Revocation hooks**: `revoke_all_for_username()` called on logout / password change / role change to immediately invalidate active windows (Codex H2).
+
+**Cluster deployment order**:
+1. Apply `022_elevated_sessions.sql` + `023_totp_replay_prevention.sql` to all nodes (additive `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` — harmless on old code)
+2. Deploy new code to all nodes (kill switch OFF by default — no behavior change)
+3. Confirm version on every node via `/health`
+4. Flip `elevation_enforcement_enabled=true` in Web UI Config Screen (hot-reload via 30s reload thread, no restart needed)
+
+Files: `src/code_indexer/server/auth/elevated_session_manager.py`, `src/code_indexer/server/auth/elevation_routes.py`, `src/code_indexer/server/web/elevation_web_routes.py`, `src/code_indexer/server/auth/dependencies.py::require_elevation`.
+
+### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
+
+Maintenance mode write endpoints (`POST /api/admin/maintenance/enter` and `POST /api/admin/maintenance/exit`) are restricted to loopback callers via the `require_localhost` FastAPI dependency in `src/code_indexer/server/auth/dependencies.py`. These endpoints are auto-updater driven (system processes, not humans) so TOTP step-up elevation does not apply — a system process cannot satisfy a TOTP prompt.
+
+**Loopback whitelist**: `127.0.0.0/8`, `::1`, `::ffff:127.0.0.1` (dual-stack), `::ffff:127.x.x.x`.
+
+**MCP enter/exit tools removed entirely** — the `enter_maintenance_mode` and `exit_maintenance_mode` MCP tool registrations and tool docs were deleted. `get_maintenance_status` (read endpoint) remains.
+
+**Read endpoints unaffected**: `GET /api/admin/maintenance/status`, `GET /drain-status`, `GET /drain-timeout` continue to require admin auth only — not localhost.
+
+**Reverse-proxy caveat**: `require_localhost` checks `request.client.host` (the immediate peer). If a proxy fronts these endpoints, the proxy must NOT forward them externally — operators must lock down the proxy's exposure.
 
 ### Golden Repo Versioned Path (IMMUTABLE)
 
@@ -244,6 +292,26 @@ The depmap parser was split from a single 1042-line `dep_map_mcp_parser.py` into
 **Handler serialization**: `src/code_indexer/server/mcp/handlers/depmap.py::_anomaly_to_dict()` handles both `AnomalyEntry` and `AnomalyAggregate` — the same helper is reused at every response assembly site. Aggregates serialize as `{"file": "<aggregated>", "error": "N occurrences: <type>"}`.
 
 Files: `src/code_indexer/server/services/dep_map_{mcp_parser,parser_tables,parser_hygiene,parser_graph}.py`, `src/code_indexer/server/mcp/handlers/depmap.py`. Tests: `tests/unit/server/services/test_dep_map_887_*.py` (70 tests across 8 ACs + 4 remediation blocker files).
+
+### cidx-meta backup contract (Story #926)
+
+The server can maintain a continuous git backup of the cidx-meta directory to a remote repository. Key invariants:
+
+**Mutable base path only**: All git operations (bootstrap, sync, rebase, push) execute against `<server_data_dir>/data/golden-repos/cidx-meta/`. NEVER operate inside `.versioned/cidx-meta/v_{timestamp}/` snapshot directories. Use `get_cidx_meta_path(server_data_dir)` from `src/code_indexer/server/services/cidx_meta_backup/paths.py` — single source of truth for both the route and the refresh scheduler.
+
+**Index always runs after sync**: `CidxMetaBackupSync.sync()` runs BEFORE indexing in the refresh path. If sync succeeds (or partially fails with push-only error), indexing still runs. This is the deferred-failure pattern — a push failure becomes a `sync_failure` on the `SyncResult`, which causes the job to be marked FAILED after indexing completes.
+
+**Push/fetch failure is deferred, conflict failure is immediate**: Network errors (fetch fail, push fail) are captured in `SyncResult.sync_failure` and surfaced as `RuntimeError` at the end of the refresh job. Conflict resolution failure raises `RuntimeError` immediately (after `git rebase --abort`) and short-circuits indexing.
+
+**URL-change idempotency**: Changing the remote URL in the Web UI triggers `CidxMetaBackupBootstrap.bootstrap()` at Save time. The refresh scheduler also calls bootstrap at the start of every backup-enabled refresh cycle (idempotent — reads `git remote get-url origin`, no-ops on match). URL changes applied via direct DB edits are thus applied on the next refresh without requiring a Save.
+
+**Externalized conflict-resolution prompt**: `src/code_indexer/server/mcp/prompts/cidx_meta_conflict_resolution.md` — editable by operators. Must contain `{conflict_files}`, `{branch}`, and `{repo_path}` format placeholders.
+
+**Claude CLI routing**: Conflict resolution invokes Claude via `invoke_claude_cli()` in `src/code_indexer/global_repos/repo_analyzer.py` (Story #885 A10 boundary). On 600 s timeout, SIGTERM is sent first; SIGKILL follows after `_CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS` (30 s).
+
+**Branch detection**: `detect_default_branch(master_path)` from `src/code_indexer/server/services/cidx_meta_backup/branch_detect.py` is called at the start of each backup sync to support remotes with `main` as default. Falls back to `"master"` when detection fails.
+
+Files: `src/code_indexer/server/services/cidx_meta_backup/` (bootstrap, sync, conflict_resolver, branch_detect, paths), `src/code_indexer/global_repos/refresh_scheduler.py` (backup branch), `src/code_indexer/server/web/routes.py` (config save route).
 
 ---
 
@@ -353,6 +421,11 @@ Rationale: batch processing needs rate limiting for API cost; interactive UX exp
 
 No fallbacks — research and propose solutions. JSON errors: use `_validate_and_debug_prompt()`, check non-ASCII characters, long lines, quotes.
 
+**Codex/Claude divergence (v9.23.10)**:
+
+- `cidx-local` MCP is registered automatically at server startup for BOTH CLI paths using the SAME persistent `client_id:client_secret` credentials issued by `MCPCredentialManager`: Claude via `MCPSelfRegistrationService` (HTTP + Basic auth header passed directly), and Codex via `_ensure_codex_mcp_http_registered` in `codex_cli_startup.py` (TOML config — `env_http_headers = { Authorization = "CIDX_MCP_AUTH_HEADER" }` — codex reads `CIDX_MCP_AUTH_HEADER` env var and injects it verbatim as the Authorization header). `CodexInvoker` retrieves the header value via `build_codex_mcp_auth_header_provider()` closure. No JWT, no TTL. See `src/code_indexer/server/startup/codex_mcp_registration.py` and `src/code_indexer/server/services/codex_mcp_auth_header_provider.py`.
+- Hook parity is NOT achieved — codex 0.125 has no `PostToolUse` hook equivalent (verified via `codex --help` and `codex exec --help`; reference: github.com/openai/codex/issues/16732). Citation and audit enforcement at the hook layer remain Claude-only. This is accepted as permanent degradation. See CHANGELOG v9.23.9.
+
 ---
 
 ## Background Jobs (MANDATORY Checklist)
@@ -386,9 +459,9 @@ Runtime loader with caching: `tool_doc_loader.py`. Tests: `tests/unit/tools/test
 
 ## Version Bump
 
-Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/mcpb/setup.md` and `docs/server-deployment.md`.
+Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/server-deployment.md`.
 
-DO NOT bump on CIDX version change: `mcpb/__init__.py` (separate version 1.0.0), `server/app.py` OpenAPI spec, `test-fixtures/` test data.
+DO NOT bump on CIDX version change: `server/app.py` OpenAPI spec, `test-fixtures/` test data.
 
 Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`
 

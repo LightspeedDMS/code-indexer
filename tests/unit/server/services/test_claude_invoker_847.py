@@ -10,6 +10,7 @@ All subprocess calls are mocked via unittest.mock.patch.
 from __future__ import annotations
 
 import subprocess
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +21,9 @@ from code_indexer.server.services.intelligence_cli_invoker import (
     InvocationResult,
 )
 
+if TYPE_CHECKING:
+    from code_indexer.server.services.claude_invoker import ClaudeInvoker
+
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -28,7 +32,7 @@ from code_indexer.server.services.intelligence_cli_invoker import (
 
 def _make_invoker(
     analysis_model: str = "opus", soft_timeout_seconds: int = 90
-) -> "ClaudeInvoker":  # noqa: F821
+) -> "ClaudeInvoker":
     """Import here so import errors surface as test failures, not collection errors."""
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
 

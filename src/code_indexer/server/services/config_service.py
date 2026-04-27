@@ -19,6 +19,7 @@ from ..utils.config_manager import (
     ServerConfig,
     RerankConfig,
     LifecycleAnalysisConfig,
+    CidxMetaBackupConfig,
 )
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 
@@ -620,6 +621,11 @@ class ConfigService:
             "lcp_vendor": cx_cfg.lcp_vendor,
             "codex_weight": cx_cfg.codex_weight,
         }
+        backup_cfg = config.cidx_meta_backup_config or CidxMetaBackupConfig()
+        settings["cidx_meta_backup"] = {
+            "enabled": backup_cfg.enabled,
+            "remote_url": backup_cfg.remote_url,
+        }
 
         return settings
 
@@ -731,6 +737,8 @@ class ConfigService:
         # Story #844 - Codex CLI integration
         elif category == "codex_integration":
             self._update_codex_integration_setting(config, key, value)
+        elif category == "cidx_meta_backup":
+            self._update_cidx_meta_backup_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1265,6 +1273,20 @@ class ConfigService:
             cx.codex_weight = weight
         else:
             raise ValueError(f"Unknown codex_integration setting: {key}")
+
+    def _update_cidx_meta_backup_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update cidx-meta backup runtime settings."""
+        if config.cidx_meta_backup_config is None:
+            config.cidx_meta_backup_config = CidxMetaBackupConfig()
+        backup = config.cidx_meta_backup_config
+        if key == "enabled":
+            backup.enabled = _parse_bool(value)
+        elif key == "remote_url":
+            backup.remote_url = str(value).strip()
+        else:
+            raise ValueError(f"Unknown cidx_meta_backup setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any

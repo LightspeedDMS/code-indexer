@@ -77,7 +77,7 @@ def _compute_status_for_repo(
     stored_hashes = {"my-repo": stored_commit}
     svc = _make_service(json.dumps(stored_hashes), dep_map_svc)
     statuses = svc._compute_repo_statuses(stored_hashes=stored_hashes, domain_map={})
-    return next(s["status"] for s in statuses if s["alias"] == "my-repo")
+    return str(next(s["status"] for s in statuses if s["alias"] == "my-repo"))
 
 
 class TestGetCurrentCommitReadsVoyageFile:

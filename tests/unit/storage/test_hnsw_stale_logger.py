@@ -11,6 +11,7 @@ Tests the HnswStaleTracker public class which provides:
 All time injection and cache sizing go through the public constructor API.
 No private module attributes are patched.
 """
+
 import logging
 import pytest
 
@@ -20,6 +21,7 @@ from code_indexer.storage.hnsw_stale_logger import HnswStaleTracker
 # ---------------------------------------------------------------------------
 # Test 1: single miss -> WARNING with full context
 # ---------------------------------------------------------------------------
+
 
 def test_single_miss_emits_warning_with_context(caplog, tmp_path):
     """First call for a collection path must emit WARNING with alias, path, model."""
@@ -50,6 +52,7 @@ def test_single_miss_emits_warning_with_context(caplog, tmp_path):
 # Test 2: 100 misses within cooldown -> 1 WARNING + 99 DEBUGs
 # ---------------------------------------------------------------------------
 
+
 def test_100_misses_in_cooldown_emit_1_warning_and_99_debugs(caplog, tmp_path):
     """Within 60s cooldown, only the first call is WARNING; the rest are DEBUG."""
     # All calls happen at t=0.0 (within the 60s default cooldown)
@@ -78,6 +81,7 @@ def test_100_misses_in_cooldown_emit_1_warning_and_99_debugs(caplog, tmp_path):
 # Test 3: two distinct collections -> independent cadence
 # ---------------------------------------------------------------------------
 
+
 def test_independent_cadence_for_two_collections(caplog, tmp_path):
     """Each collection gets its own WARNING on first call; then DEBUG within cooldown."""
     tracker = HnswStaleTracker(clock=lambda: 0.0)
@@ -87,11 +91,19 @@ def test_independent_cadence_for_two_collections(caplog, tmp_path):
     logger = logging.getLogger("test_logger_two")
     with caplog.at_level(logging.DEBUG, logger="test_logger_two"):
         # First call for each collection -> WARNING
-        tracker.log_stale(logger, collection_path=path_a, collection_name="voyage-3", alias="repo-a")
-        tracker.log_stale(logger, collection_path=path_b, collection_name="voyage-3", alias="repo-b")
+        tracker.log_stale(
+            logger, collection_path=path_a, collection_name="voyage-3", alias="repo-a"
+        )
+        tracker.log_stale(
+            logger, collection_path=path_b, collection_name="voyage-3", alias="repo-b"
+        )
         # Second call for each (within cooldown) -> DEBUG
-        tracker.log_stale(logger, collection_path=path_a, collection_name="voyage-3", alias="repo-a")
-        tracker.log_stale(logger, collection_path=path_b, collection_name="voyage-3", alias="repo-b")
+        tracker.log_stale(
+            logger, collection_path=path_a, collection_name="voyage-3", alias="repo-a"
+        )
+        tracker.log_stale(
+            logger, collection_path=path_b, collection_name="voyage-3", alias="repo-b"
+        )
 
     warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
@@ -107,6 +119,7 @@ def test_independent_cadence_for_two_collections(caplog, tmp_path):
 # ---------------------------------------------------------------------------
 # Test 4: persistent staleness -> one-shot ERROR escalation
 # ---------------------------------------------------------------------------
+
 
 def test_persistent_staleness_escalates_once_to_error(caplog, tmp_path):
     """After escalate_after_s of continuous staleness, exactly one ERROR is emitted.
@@ -173,12 +186,15 @@ def test_persistent_staleness_escalates_once_to_error(caplog, tmp_path):
 
     assert len(warning_records) == 1, f"Expected 1 WARNING, got {len(warning_records)}"
     assert len(error_records) == 1, f"Expected 1 ERROR, got {len(error_records)}"
-    assert len(debug_records) == 2, f"Expected 2 DEBUGs (t=30 and t=1400), got {len(debug_records)}"
+    assert len(debug_records) == 2, (
+        f"Expected 2 DEBUGs (t=30 and t=1400), got {len(debug_records)}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Test 5: LRU cache bounded by max_size
 # ---------------------------------------------------------------------------
+
 
 def test_cache_bounded_by_max_evicts_oldest(caplog, tmp_path):
     """With max_size=5, feeding 6 distinct paths evicts the oldest.
@@ -193,7 +209,9 @@ def test_cache_bounded_by_max_evicts_oldest(caplog, tmp_path):
     with caplog.at_level(logging.DEBUG, logger="test_logger_bounded"):
         # Insert 6 paths; oldest (paths[0]) gets evicted when paths[5] is inserted
         for path in paths:
-            tracker.log_stale(logger, collection_path=path, collection_name="voyage-3", alias=None)
+            tracker.log_stale(
+                logger, collection_path=path, collection_name="voyage-3", alias=None
+            )
 
         # All 6 first-calls should be WARNINGs
         warning_before = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -204,9 +222,13 @@ def test_cache_bounded_by_max_evicts_oldest(caplog, tmp_path):
         caplog.clear()
 
         # Re-call paths[0] (evicted) -> treated as first miss -> WARNING again
-        tracker.log_stale(logger, collection_path=paths[0], collection_name="voyage-3", alias=None)
+        tracker.log_stale(
+            logger, collection_path=paths[0], collection_name="voyage-3", alias=None
+        )
         # Re-call paths[5] (still in cache, within cooldown) -> DEBUG
-        tracker.log_stale(logger, collection_path=paths[5], collection_name="voyage-3", alias=None)
+        tracker.log_stale(
+            logger, collection_path=paths[5], collection_name="voyage-3", alias=None
+        )
 
     after_records = caplog.records
     warning_after = [r for r in after_records if r.levelno == logging.WARNING]
@@ -224,6 +246,7 @@ def test_cache_bounded_by_max_evicts_oldest(caplog, tmp_path):
 # Test 6: fresh tracker instance has no state
 # ---------------------------------------------------------------------------
 
+
 def test_fresh_tracker_has_no_state(caplog, tmp_path):
     """A new HnswStaleTracker instance always treats every key as first miss -> WARNING.
 
@@ -237,15 +260,30 @@ def test_fresh_tracker_has_no_state(caplog, tmp_path):
     with caplog.at_level(logging.DEBUG, logger="test_logger_fresh"):
         tracker_a = HnswStaleTracker(clock=lambda: 0.0)
         # First call on tracker_a -> WARNING
-        tracker_a.log_stale(logger, collection_path=collection_path, collection_name=collection_name, alias=None)
+        tracker_a.log_stale(
+            logger,
+            collection_path=collection_path,
+            collection_name=collection_name,
+            alias=None,
+        )
         # Second call on tracker_a (same key, cooldown not expired) -> DEBUG
-        tracker_a.log_stale(logger, collection_path=collection_path, collection_name=collection_name, alias=None)
+        tracker_a.log_stale(
+            logger,
+            collection_path=collection_path,
+            collection_name=collection_name,
+            alias=None,
+        )
 
         caplog.clear()
 
         # Fresh tracker_b has no state for this key -> WARNING again
         tracker_b = HnswStaleTracker(clock=lambda: 0.0)
-        tracker_b.log_stale(logger, collection_path=collection_path, collection_name=collection_name, alias=None)
+        tracker_b.log_stale(
+            logger,
+            collection_path=collection_path,
+            collection_name=collection_name,
+            alias=None,
+        )
 
     after_records = caplog.records
     warning_after = [r for r in after_records if r.levelno == logging.WARNING]
@@ -257,6 +295,7 @@ def test_fresh_tracker_has_no_state(caplog, tmp_path):
 # ---------------------------------------------------------------------------
 # Test 7: invalid constructor parameters raise ValueError
 # ---------------------------------------------------------------------------
+
 
 def test_invalid_max_size_raises_value_error():
     """HnswStaleTracker rejects non-positive max_size."""
@@ -298,6 +337,7 @@ def test_invalid_escalate_after_raises_value_error(tmp_path):
 # Test 10: invalid parameter types raise ValueError (not TypeError)
 # ---------------------------------------------------------------------------
 
+
 def test_invalid_max_size_type_raises_value_error():
     """HnswStaleTracker raises ValueError (not TypeError) for non-int max_size.
 
@@ -306,10 +346,10 @@ def test_invalid_max_size_type_raises_value_error():
     """
     # str "10" would raise TypeError on comparison — must be caught as ValueError
     with pytest.raises(ValueError, match="max_size"):
-        HnswStaleTracker(max_size="10")  # type: ignore[arg-type] — intentional wrong type for validation test
+        HnswStaleTracker(max_size="10")  # type: ignore[arg-type]  # intentional wrong type for validation test
     # None would raise TypeError on comparison — must be caught as ValueError
     with pytest.raises(ValueError, match="max_size"):
-        HnswStaleTracker(max_size=None)  # type: ignore[arg-type] — intentional wrong type for validation test
+        HnswStaleTracker(max_size=None)  # type: ignore[arg-type]  # intentional wrong type for validation test
 
 
 def test_invalid_cooldown_type_raises_value_error(tmp_path):
@@ -326,7 +366,7 @@ def test_invalid_cooldown_type_raises_value_error(tmp_path):
             collection_path=tmp_path / "repo",
             collection_name="voyage-3",
             alias=None,
-            cooldown_s="60",  # type: ignore[arg-type] — intentional wrong type for validation test
+            cooldown_s="60",  # type: ignore[arg-type]  # intentional wrong type for validation test
         )
     # None would raise TypeError on comparison — must be caught as ValueError
     with pytest.raises(ValueError, match="cooldown_s"):
@@ -335,7 +375,7 @@ def test_invalid_cooldown_type_raises_value_error(tmp_path):
             collection_path=tmp_path / "repo",
             collection_name="voyage-3",
             alias=None,
-            cooldown_s=None,  # type: ignore[arg-type] — intentional wrong type for validation test
+            cooldown_s=None,  # type: ignore[arg-type]  # intentional wrong type for validation test
         )
 
 
@@ -353,7 +393,7 @@ def test_invalid_escalate_after_type_raises_value_error(tmp_path):
             collection_path=tmp_path / "repo",
             collection_name="voyage-3",
             alias=None,
-            escalate_after_s="600",  # type: ignore[arg-type] — intentional wrong type for validation test
+            escalate_after_s="600",  # type: ignore[arg-type]  # intentional wrong type for validation test
         )
     # None would raise TypeError on comparison — must be caught as ValueError
     with pytest.raises(ValueError, match="escalate_after_s"):
@@ -362,7 +402,7 @@ def test_invalid_escalate_after_type_raises_value_error(tmp_path):
             collection_path=tmp_path / "repo",
             collection_name="voyage-3",
             alias=None,
-            escalate_after_s=None,  # type: ignore[arg-type] — intentional wrong type for validation test
+            escalate_after_s=None,  # type: ignore[arg-type]  # intentional wrong type for validation test
         )
 
 
@@ -370,12 +410,13 @@ def test_invalid_escalate_after_type_raises_value_error(tmp_path):
 # Test 11: clock, logger, collection_path, collection_name validation
 # ---------------------------------------------------------------------------
 
+
 def test_non_callable_clock_raises_value_error():
     """HnswStaleTracker raises ValueError when clock is not callable."""
     with pytest.raises(ValueError, match="clock"):
-        HnswStaleTracker(clock="not_a_function")  # type: ignore[arg-type] — intentional wrong type for validation test
+        HnswStaleTracker(clock="not_a_function")  # type: ignore[arg-type]  # intentional wrong type for validation test
     with pytest.raises(ValueError, match="clock"):
-        HnswStaleTracker(clock=None)  # type: ignore[arg-type] — intentional wrong type for validation test
+        HnswStaleTracker(clock=None)  # type: ignore[arg-type]  # intentional wrong type for validation test
 
 
 def test_none_logger_raises_value_error(tmp_path):
@@ -385,7 +426,7 @@ def test_none_logger_raises_value_error(tmp_path):
     # None logger
     with pytest.raises(ValueError, match="logger"):
         tracker.log_stale(
-            None,  # type: ignore[arg-type] — intentional None for validation test
+            None,  # type: ignore[arg-type]  # intentional None for validation test
             collection_path=tmp_path / "repo",
             collection_name="voyage-3",
             alias=None,
@@ -393,8 +434,12 @@ def test_none_logger_raises_value_error(tmp_path):
 
     class _NoWarning:
         """Logger stub missing the warning() method."""
-        def error(self, msg): pass
-        def debug(self, msg): pass
+
+        def error(self, msg):
+            pass
+
+        def debug(self, msg):
+            pass
 
     with pytest.raises(ValueError, match="logger"):
         tracker.log_stale(
@@ -406,8 +451,12 @@ def test_none_logger_raises_value_error(tmp_path):
 
     class _NoDebug:
         """Logger stub missing the debug() method."""
-        def error(self, msg): pass
-        def warning(self, msg): pass
+
+        def error(self, msg):
+            pass
+
+        def warning(self, msg):
+            pass
 
     with pytest.raises(ValueError, match="logger"):
         tracker.log_stale(
@@ -425,7 +474,7 @@ def test_none_collection_path_raises_value_error(tmp_path):
     with pytest.raises(ValueError, match="collection_path"):
         tracker.log_stale(
             logger,
-            collection_path=None,  # type: ignore[arg-type] — intentional None for validation test
+            collection_path=None,  # type: ignore[arg-type]  # intentional None for validation test
             collection_name="voyage-3",
             alias=None,
         )
@@ -439,7 +488,7 @@ def test_none_or_empty_collection_name_raises_value_error(tmp_path):
         tracker.log_stale(
             logger,
             collection_path=tmp_path / "repo",
-            collection_name=None,  # type: ignore[arg-type] — intentional None for validation test
+            collection_name=None,  # type: ignore[arg-type]  # intentional None for validation test
             alias=None,
         )
     with pytest.raises(ValueError, match="collection_name"):
@@ -454,7 +503,7 @@ def test_none_or_empty_collection_name_raises_value_error(tmp_path):
         tracker.log_stale(
             logger,
             collection_path=tmp_path / "repo",
-            collection_name=123,  # type: ignore[arg-type] — intentional wrong type for validation test
+            collection_name=123,  # type: ignore[arg-type]  # intentional wrong type for validation test
             alias=None,
         )
 
@@ -467,7 +516,7 @@ def test_invalid_collection_path_type_raises_value_error(tmp_path):
     with pytest.raises(ValueError, match="collection_path"):
         tracker.log_stale(
             logger,
-            collection_path=42,  # type: ignore[arg-type] — intentional wrong type for validation test
+            collection_path=42,  # type: ignore[arg-type]  # intentional wrong type for validation test
             collection_name="voyage-3",
             alias=None,
         )
@@ -479,9 +528,10 @@ def test_logger_methods_must_be_callable(tmp_path):
 
     class _NonCallableMethod:
         """Logger stub where 'error' is a non-callable attribute."""
-        error = "not_a_function"   # attribute exists but is not callable
+
+        error = "not_a_function"  # attribute exists but is not callable
         warning = lambda self, msg: None  # noqa: E731
-        debug = lambda self, msg: None    # noqa: E731
+        debug = lambda self, msg: None  # noqa: E731
 
     with pytest.raises(ValueError, match="logger"):
         tracker.log_stale(
@@ -494,7 +544,7 @@ def test_logger_methods_must_be_callable(tmp_path):
 
 def test_clock_returning_non_numeric_raises_value_error(tmp_path):
     """log_stale raises ValueError when the injected clock returns a non-numeric value."""
-    tracker = HnswStaleTracker(clock=lambda: "not-a-number")  # type: ignore[return-value] — intentional bad clock for validation test
+    tracker = HnswStaleTracker(clock=lambda: "not-a-number")  # type: ignore[return-value]  # intentional bad clock for validation test
     logger = logging.getLogger("test_clock_return_validation")
     with pytest.raises(ValueError, match="clock"):
         tracker.log_stale(

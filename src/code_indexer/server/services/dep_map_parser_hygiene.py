@@ -40,6 +40,10 @@ class AnomalyType(Enum):
     (semantic/consistency-level data issues).
     """
 
+    # Class-level annotation so mypy resolves entry.type.channel without
+    # attr-defined errors. The attribute is bound dynamically in __new__.
+    channel: Literal["parser", "data"]
+
     # Parser-channel variants
     MALFORMED_YAML = ("malformed_yaml", "parser")
     PATH_TRAVERSAL_REJECTED = ("path_traversal_rejected", "parser")

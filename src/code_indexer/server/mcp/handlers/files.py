@@ -15,6 +15,8 @@ from . import _utils
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.logging_utils import format_error_log
 from ._utils import (
+    CapBreach,
+    cap_breach_response,
     _coerce_int,
     _expand_wildcard_patterns,
     _get_access_filtering_service,
@@ -561,6 +563,8 @@ def _omni_list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-list-files across multiple repositories."""
     repo_aliases = params.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
+    if isinstance(repo_aliases, CapBreach):
+        return cap_breach_response(repo_aliases)
 
     if not repo_aliases:
         return _mcp_response(

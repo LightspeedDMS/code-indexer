@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import Tuple
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Shared valid response body (matches unified prompt schema)
@@ -89,12 +87,15 @@ def test_invoker_reads_timeouts_from_config_service(tmp_path: Path) -> None:
 
     invoker = LifecycleClaudeCliInvoker()
 
-    with patch(
-        "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
-        side_effect=_fake_invoke,
-    ), patch(
-        "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
-        return_value=mock_config_service,
+    with (
+        patch(
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
+            side_effect=_fake_invoke,
+        ),
+        patch(
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
+            return_value=mock_config_service,
+        ),
     ):
         invoker("test-alias", repo_path)
 
@@ -155,12 +156,15 @@ def test_invoker_reads_updated_timeouts_on_subsequent_call(tmp_path: Path) -> No
 
     invoker = LifecycleClaudeCliInvoker()
 
-    with patch(
-        "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
-        side_effect=_fake_invoke,
-    ), patch(
-        "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
-        return_value=mock_config_service,
+    with (
+        patch(
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
+            side_effect=_fake_invoke,
+        ),
+        patch(
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
+            return_value=mock_config_service,
+        ),
     ):
         # First call: should see 360/420
         invoker("hot-reload-repo", repo_path)

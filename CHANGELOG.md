@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Breaking Changes
+
+- **MCPB Removed (epic #756)**. The MCP Bridge subsystem has been removed in a single hard-removal pass with no deprecation window. Removed in this release: the `cidx-bridge` and `cidx-token-refresh` console-script entry points; the entire `src/code_indexer/mcpb/` Python module (12 files, ~2,053 LOC); the `tests/mcpb/` and `tests/installer/` test trees; the `install-mcpb.sh`, `scripts/setup-mcpb.sh`, `scripts/installer/mcpb-installer.nsi`, and `scripts/installer/README.md` installer scripts; the `scripts/build_binary.py` MCPB-bundle build script and its companion test; the `.github/workflows/release-mcpb.yml` CI workflow (688 lines); the entire `docs/mcpb/` documentation tree (6 files, ~5,862 lines). Migration: any MCP-aware client should connect directly to the CIDX server's native MCP endpoints — `/mcp` (JWT-Bearer-authenticated via `POST /auth/login`) or `/mcp-public` (unauthenticated). The `cidx-bridge` stdio-to-HTTP shim is no longer needed because every modern MCP client supports streaming HTTP/SSE transports natively. **Impact**: any installation that depended on `cidx-bridge` or `cidx-token-refresh` binaries will see `command not found` after upgrade. Past GitHub Release artifacts that bundle `install-mcpb.sh` remain downloadable per the repository's tag-immutability policy, but no new MCPB installer will be built going forward. See `RELEASE_NOTES.md` for the user-facing migration note.
+
+## v9.23.11 — 2026-04-26
+
+### Fixed: v9.23.10 silent registration failure on staging (Python 3.9 / no `tomli`)
+
+- **Symptom**: After v9.23.10 deploy, staging's `codex mcp get cidx-local` still returned the v9.23.9 schema with `bearer_token_env_var = "CIDX_MCP_BEARER_TOKEN"`. End-to-end Codex Pass 2 still failed: stale env-var name, no `env_http_headers` block, codex sent the wrong header on every MCP call.
+
+- **Root cause**: v9.23.10's `_read_toml` did `import tomli`. Production deploys ship Python 3.9 (no `tomllib` builtin) and do not have `tomli` installed. The import raised `ModuleNotFoundError`, the entry point's broad `except Exception` caught it and logged a single WARNING (`cidx-local MCP registration failed — ModuleNotFoundError: No module named 'tomli'`), and the registration was silently skipped. Unit tests in dev passed because `tomli` was already installed on dev machines via a transitive dep — codex review's independent verification ran on the same dev box, masking the bug.
+
+- **Fix**: Dropped the parser dependency entirely from production code. `_read_toml` removed; `_is_already_registered(data, url)` replaced with `_is_already_registered_text(text, url)` using regex/substring checks against the raw config.toml file content. The section-replacement path was already regex-based, so read and write paths are now consistent.
+
+- **Regression tests**:
+  - `test_production_module_imports_without_tomli` — asserts `codex_mcp_registration.py` source contains zero `tomli` or `tomllib` references; locks in the no-parser invariant.
+  - `test_staging_v9_23_9_stale_bearer_token_env_var_triggers_rewrite` — pre-populates config.toml with the v9.23.9 schema and asserts (via plain text matching, no parser) that the entry point rewrites to env_http_headers, removes the stale `bearer_token_env_var` line, and adds the `[mcp_servers.cidx-local.env_http_headers]` sub-table.
+
+- **Lesson**: unit tests passing in dev does not mean production works. The codex E2E auth flow had to actually run on Python 3.9 staging to expose the dependency mismatch. v9.23.10 codex review approved the architecture but couldn't catch the runtime import gap because the review ran in dev too.
+
+## v9.23.10 — 2026-04-25
+
+### Codex MCP auth — persistent Basic credentials replace short-lived JWT
+
+- **Root cause fixed**: v9.23.9 injected a short-lived admin JWT (`CIDX_MCP_BEARER_TOKEN`, default TTL 10 min) into each `CodexInvoker` subprocess. Pass 2 dependency analysis runs lasting 30+ minutes expired mid-flow, causing silent HTTP 401 failover to Claude. Fix: Codex now uses the same persistent `client_id:client_secret` pair issued by `MCPCredentialManager` that Claude uses, encoded as `Basic <base64>` and injected as `CIDX_MCP_AUTH_HEADER`. No JWT, no TTL, no mid-flow expiry.
+
+- **TOML-based MCP registration**: Codex 0.125 `codex mcp add` has no `--http-headers` / `--env-http-headers` flags (only `--bearer-token-env-var`). Registration now writes `$CODEX_HOME/config.toml` directly with `env_http_headers = { Authorization = "CIDX_MCP_AUTH_HEADER" }`. The idempotency check reads the TOML back and skips the write when the section already matches. Atomic write via `.tmp` + `Path.replace()` with parent-dir creation and mode 0o600 preservation. Reference: https://developers.openai.com/codex/mcp.
+
+- **Stale v9.23.9 config migration**: When `config.toml` contains a `[mcp_servers.cidx-local]` section with `bearer_token_env_var` (old schema), it is silently replaced with the new `env_http_headers` section on the next server startup.
+
+- **New module `codex_mcp_auth_header_provider.py`**: `build_codex_mcp_auth_header_provider()` returns a closure that retrieves the cached `Authorization` header value from `MCPSelfRegistrationService` — fast path via `get_cached_auth_header_value()`, cache-miss path via `build_auth_header_from_creds()`. No credential assembly in the provider; the value is sliced from the already-assembled header string in `MCPSelfRegistrationService.register_in_claude_code()`.
+
+- **`CodexInvoker` rename**: `bearer_token_provider` / `_bearer_token_provider` / `CIDX_MCP_BEARER_TOKEN` renamed to `auth_header_provider` / `_auth_header_provider` / `CIDX_MCP_AUTH_HEADER`. Both production wiring sites updated: `DependencyMapAnalyzer._build_pass2_dispatcher()` and `DescriptionRefreshScheduler._build_cli_dispatcher()`.
+
+- **Deleted**: `codex_bearer_provider.py`, `test_codex_invoker_bearer_injection.py`, `test_codex_invoker_jwt_wiring.py`.
+
+## v9.23.9 — 2026-04-25
+
+### Codex MCP integration
+
+- **Codex MCP launcher gap closed**: Codex now registers `cidx-local` MCP via HTTP transport at server startup. Replaces the empty `_DEFAULT_CIDX_MCP_COMMAND = ""` placeholder from Story #848. Closes parity gap with Claude (`MCPSelfRegistrationService` HTTP+Basic-auth path). Note: superseded by v9.23.10 which replaces the JWT credential with persistent Basic auth.
+
+- **Hook gap accepted as permanent degradation**: codex 0.125 has no equivalent of Claude's `PostToolUse` hooks. Verified via `codex --help` and `codex exec --help`; only `--dangerously-bypass-approvals-and-sandbox` and `--sandbox` flags exist (reference: github.com/openai/codex/issues/16732). Citation and audit enforcement at the hook layer remain Claude-only. Documented in `CLAUDE.md` "Codex CLI Integration" subsection.
+
 ## v9.23.8
 
 ### Operator helpers

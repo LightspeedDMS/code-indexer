@@ -15,9 +15,13 @@ Test inventory (3 tests):
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +41,7 @@ def _make_success_result(
     )
 
 
-def _make_manager(cli_dispatcher=None) -> "ClaudeCliManager":  # noqa: F821
+def _make_manager(cli_dispatcher=None) -> ClaudeCliManager:
     """Build a ClaudeCliManager with zero worker threads for deterministic testing."""
     from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import itertools
 import os
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,6 +22,9 @@ from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
     InvocationResult,
 )
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 # ---------------------------------------------------------------------------
 # Named constants — all configuration values named; no inline magic numbers

@@ -72,18 +72,20 @@ class TestInvokeClaudeCliNoColor:
     """Tests for Bug #850: NO_COLOR=1 must be set to prevent ANSI at source."""
 
     def test_invoke_claude_cli_sets_no_color_env(self, tmp_path):
-        """invoke_claude_cli must pass NO_COLOR=1 in the subprocess env dict."""
-        captured_env = {}
+        """invoke_claude_cli must pass NO_COLOR=1 in the subprocess env dict.
 
-        def fake_subprocess_run(cmd, **kwargs):
-            captured_env.update(kwargs.get("env", {}))
-            mock_result = MagicMock()
-            mock_result.returncode = 0
-            mock_result.stdout = "---\nlifecycle:\n  status: active\n"
-            mock_result.stderr = ""
-            return mock_result
+        invoke_claude_cli uses subprocess.Popen; the env dict is passed to the
+        Popen constructor.  We capture it from mock_popen.call_args[1]["env"].
+        """
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                "---\nlifecycle:\n  status: active\n",
+                "",
+            )
+            mock_popen.return_value = mock_proc
 
-        with patch("subprocess.run", side_effect=fake_subprocess_run):
             invoke_claude_cli(
                 repo_path=str(tmp_path),
                 prompt="describe this repo",
@@ -91,8 +93,9 @@ class TestInvokeClaudeCliNoColor:
                 outer_timeout_seconds=_OUTER_TIMEOUT_SECONDS,
             )
 
-        assert captured_env.get("NO_COLOR") == "1", (
-            f"NO_COLOR=1 not found in subprocess env. Got: {captured_env.get('NO_COLOR')!r}"
+        called_env = mock_popen.call_args[1]["env"]
+        assert called_env.get("NO_COLOR") == "1", (
+            f"NO_COLOR=1 not found in subprocess env. Got: {called_env.get('NO_COLOR')!r}"
         )
 
 

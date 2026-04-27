@@ -592,6 +592,14 @@ class CodexIntegrationConfig:
 
 
 @dataclass
+class CidxMetaBackupConfig:
+    """Runtime backup configuration for mutable cidx-meta."""
+
+    enabled: bool = False
+    remote_url: str = ""
+
+
+@dataclass
 class RepositoryConfig:
     """
     Repository configuration (Story #15 - AC4).
@@ -1072,6 +1080,7 @@ class ServerConfig:
 
     # Story #844 - Codex CLI integration configuration (runtime, not bootstrap)
     codex_integration_config: Optional[CodexIntegrationConfig] = None
+    cidx_meta_backup_config: Optional[CidxMetaBackupConfig] = None
 
     # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
     voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
@@ -1087,6 +1096,13 @@ class ServerConfig:
     cluster: Optional[ClusterConfig] = None  # Cluster node identity
     clone_backend: str = "local"  # Story #510: "local", "ontap", or "cow-daemon"
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
+
+    # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
+    # Kill switch: False = elevation enforcement disabled (503 returned on protected routes).
+    # Idle timeout and max age mirror ElevatedSessionManager defaults.
+    elevation_enforcement_enabled: bool = False
+    elevation_idle_timeout_seconds: int = 300  # 5 minutes idle
+    elevation_max_age_seconds: int = 1800  # 30 minutes absolute
 
     # Story #746 - Fault injection harness (bootstrap-only, never DB)
     # Stays False in production. Both must be True together to enable harness.
@@ -1200,6 +1216,8 @@ class ServerConfig:
         # Story #844 - Initialize Codex integration config
         if self.codex_integration_config is None:
             self.codex_integration_config = CodexIntegrationConfig()
+        if self.cidx_meta_backup_config is None:
+            self.cidx_meta_backup_config = CidxMetaBackupConfig()
 
 
 class ServerConfigManager:
@@ -1715,6 +1733,15 @@ class ServerConfigManager:
             _cx_allowed = {f.name for f in fields(CodexIntegrationConfig)}
             config_dict["codex_integration_config"] = CodexIntegrationConfig(
                 **{k: v for k, v in _cx_dict.items() if k in _cx_allowed}
+            )
+
+        if "cidx_meta_backup_config" in config_dict and isinstance(
+            config_dict["cidx_meta_backup_config"], dict
+        ):
+            _backup_dict = config_dict["cidx_meta_backup_config"]
+            _backup_allowed = {f.name for f in fields(CidxMetaBackupConfig)}
+            config_dict["cidx_meta_backup_config"] = CidxMetaBackupConfig(
+                **{k: v for k, v in _backup_dict.items() if k in _backup_allowed}
             )
 
         # Bug #678: Convert sinbin dicts to ProviderSinBinConfig

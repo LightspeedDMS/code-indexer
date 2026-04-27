@@ -5,6 +5,7 @@ These tests verify that dashboard_service.py correctly labels lifecycle_backfill
 jobs with a synthetic "N repos" or "all repos" label when repo_alias is absent.
 """
 
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 
@@ -49,7 +50,8 @@ def _get_repo_name_via_service(job: dict) -> str:
         recent = service._get_recent_jobs("admin")
 
     assert len(recent) == 1, f"Expected 1 job, got {len(recent)}"
-    return recent[0].repo_name
+    # cast needed: MagicMock attribute access (.repo_name) returns Any
+    return cast(str, recent[0].repo_name)
 
 
 class TestLifecycleBackfillLabel:

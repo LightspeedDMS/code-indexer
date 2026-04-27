@@ -14,13 +14,19 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
+from code_indexer.server.services.codex_mcp_auth_header_provider import (
+    build_codex_mcp_auth_header_provider,
+)
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
 )
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -627,11 +633,13 @@ class DescriptionRefreshScheduler:
                 LifecycleFleetScanner,
             )
 
-            scanner = LifecycleFleetScanner(
+            scanner: LifecycleFleetScanner = LifecycleFleetScanner(
                 golden_repos_dir=self._golden_repos_dir,
                 repo_aliases=aliases,
             )
-            return scanner.find_broken_or_missing()
+            # cast needed: LifecycleFleetScanner is imported inside try block so mypy
+            # infers scanner as Any; find_broken_or_missing() is declared -> List[str].
+            return cast(List[str], scanner.find_broken_or_missing())
         except Exception:
             logger.error(
                 "Lifecycle backfill: fleet scan failed — skipping startup sweep",
@@ -1111,6 +1119,10 @@ class DescriptionRefreshScheduler:
         weight from config.  Otherwise codex=None and the effective weight
         collapses to 0.0 inside CliDispatcher.
 
+        Wires auth_header_provider for cidx-local MCP authentication via
+        persistent Basic auth header from MCPCredentialManager (no expiration;
+        same credentials Claude uses — no JWT TTL issue).
+
         Args:
             config: ServerConfig returned by config_manager.load_config().
 
@@ -1134,7 +1146,10 @@ class DescriptionRefreshScheduler:
         if codex_cfg and codex_cfg.enabled:
             codex_home = os.environ.get("CODEX_HOME", "")
             if codex_home:
-                codex_invoker = CodexInvoker(codex_home=codex_home)
+                codex_invoker = CodexInvoker(
+                    codex_home=codex_home,
+                    auth_header_provider=build_codex_mcp_auth_header_provider(),
+                )
                 codex_weight = codex_cfg.codex_weight
 
         return CliDispatcher(

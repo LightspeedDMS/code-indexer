@@ -436,7 +436,9 @@ class UnifiedResponseParser:
                 raise UnifiedResponseParseError(
                     f"lifecycle.branch_environment_map key {key!r} must be a non-empty stripped string",
                     raw=raw,
-                    validation_errors=[f"lifecycle.branch_environment_map: invalid key {key!r}"],
+                    validation_errors=[
+                        f"lifecycle.branch_environment_map: invalid key {key!r}"
+                    ],
                 )
             if not isinstance(value, str):
                 raise UnifiedResponseParseError(
@@ -465,13 +467,17 @@ class UnifiedResponseParser:
                 raise UnifiedResponseParseError(
                     f"lifecycle.ci.environments item {item!r} must be a string",
                     raw=raw,
-                    validation_errors=[f"lifecycle.ci.environments: item {item!r} is not a str"],
+                    validation_errors=[
+                        f"lifecycle.ci.environments: item {item!r} is not a str"
+                    ],
                 )
             if item != item.strip():
                 raise UnifiedResponseParseError(
                     f"lifecycle.ci.environments item {item!r} has leading/trailing whitespace",
                     raw=raw,
-                    validation_errors=[f"lifecycle.ci.environments: item {item!r} has whitespace"],
+                    validation_errors=[
+                        f"lifecycle.ci.environments: item {item!r} has whitespace"
+                    ],
                 )
             if not item:
                 raise UnifiedResponseParseError(
@@ -483,7 +489,9 @@ class UnifiedResponseParser:
                 raise UnifiedResponseParseError(
                     f"lifecycle.ci.environments contains duplicate: {item!r}",
                     raw=raw,
-                    validation_errors=[f"lifecycle.ci.environments: duplicate item {item!r}"],
+                    validation_errors=[
+                        f"lifecycle.ci.environments: duplicate item {item!r}"
+                    ],
                 )
             seen.add(item)
 

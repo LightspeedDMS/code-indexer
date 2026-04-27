@@ -26,6 +26,13 @@ from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.services.cidx_meta_backup import (
+    CidxMetaBackupBootstrap,
+    ClaudeConflictResolver,
+    CidxMetaBackupSync,
+    detect_default_branch,
+)
+from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.utils.config_manager import ScipConfig, ServerResourceConfig
 
@@ -1068,6 +1075,7 @@ class RefreshScheduler:
                 logger.info(
                     f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
                 )
+                sync_failure: Optional[str] = None
 
                 if is_local_repo:
                     # C3: For local repos, source_path is the LIVE directory (where writers put files),
@@ -1107,22 +1115,102 @@ class RefreshScheduler:
                             "message": "Skipped, write lock held",
                         }
 
-                    # C2: Use mtime-based change detection for local repos
-                    has_changes = self._has_local_changes(source_path, alias_name)
+                    # Story #926: After migrate_legacy_cidx_meta() runs at server startup,
+                    # cidx-meta-global gets repo_url="local://cidx-meta", making is_local_repo=True
+                    # and is_meta_repo=False.  The backup gate must fire here (before mtime-based
+                    # change detection) so that remote drift and idempotent bootstrap are always
+                    # handled regardless of whether local files have changed.
+                    # _handled_by_backup=True means the backup path ran; the mtime block below
+                    # is skipped so that the existing single mtime path is not duplicated.
+                    _handled_by_backup = False
+                    if alias_name == "cidx-meta-global":
+                        _backup_cfg_local = None
+                        try:
+                            _backup_cfg_local = (
+                                get_config_service()
+                                .get_config()
+                                .cidx_meta_backup_config
+                            )
+                        except Exception as _cfg_err:
+                            logger.warning(
+                                "Could not load cidx_meta_backup_config for %s, "
+                                "falling back to mtime-based detection: %s",
+                                alias_name,
+                                _cfg_err,
+                            )
 
-                    if not has_changes:
+                        if _backup_cfg_local is not None and _backup_cfg_local.enabled:
+                            _handled_by_backup = True
+
+                            # MED-3: MetaDirectoryUpdater first so description files are
+                            # in place before CidxMetaBackupSync runs `git add -A`.
+                            try:
+                                MetaDirectoryUpdater(
+                                    master_path, self.registry
+                                ).update()
+                            except Exception as _meta_err:
+                                logger.warning(
+                                    "MetaDirectoryUpdater failed for %s before backup sync: %s",
+                                    alias_name,
+                                    _meta_err,
+                                )
+
+                            # MED-2: Idempotent bootstrap — cheap when remote URL unchanged.
+                            if _backup_cfg_local.remote_url:
+                                try:
+                                    CidxMetaBackupBootstrap().bootstrap(
+                                        master_path, _backup_cfg_local.remote_url
+                                    )
+                                except Exception as _bootstrap_err:
+                                    logger.warning(
+                                        "cidx-meta backup bootstrap failed for %s: %s",
+                                        alias_name,
+                                        _bootstrap_err,
+                                    )
+
+                            _branch = detect_default_branch(master_path) or "master"
+                            _sync_result = CidxMetaBackupSync(
+                                master_path,
+                                _branch,
+                                ClaudeConflictResolver(),
+                            ).sync()
+
+                            if _sync_result.skipped and not force_reset:
+                                logger.info(
+                                    "No cidx-meta backup changes detected for %s, "
+                                    "skipping refresh",
+                                    alias_name,
+                                )
+                                return {
+                                    "success": True,
+                                    "alias": alias_name,
+                                    "message": "No changes detected",
+                                }
+
+                            sync_failure = _sync_result.sync_failure
+                            logger.info(
+                                f"Changes detected in local repo {alias_name}, creating new index"
+                            )
+                            # Fall through to the shared indexing pipeline below.
+
+                    # C2: Use mtime-based change detection for local repos.
+                    # Skipped when the backup-aware path already handled cidx-meta-global.
+                    if not _handled_by_backup:
+                        has_changes = self._has_local_changes(source_path, alias_name)
+
+                        if not has_changes:
+                            logger.info(
+                                f"No changes detected for local repo {alias_name}, skipping refresh"
+                            )
+                            return {
+                                "success": True,
+                                "alias": alias_name,
+                                "message": "No changes detected",
+                            }
+
                         logger.info(
-                            f"No changes detected for local repo {alias_name}, skipping refresh"
+                            f"Changes detected in local repo {alias_name}, creating new index"
                         )
-                        return {
-                            "success": True,
-                            "alias": alias_name,
-                            "message": "No changes detected",
-                        }
-
-                    logger.info(
-                        f"Changes detected in local repo {alias_name}, creating new index"
-                    )
                 else:
                     # Bug #239: Check write lock for git repos too. Protects against
                     # reconciliation restoring a master while refresh tries to snapshot it.
@@ -1136,152 +1224,201 @@ class RefreshScheduler:
                             "message": "Skipped, write lock held",
                         }
 
-                    # Meta-directories (repo_url=None) use MetaDirectoryUpdater instead of
-                    # GitPullUpdater — they sync description files, not git history.
-                    updater: UpdateStrategy
-                    if is_meta_repo:
-                        updater = MetaDirectoryUpdater(master_path, self.registry)
-                    else:
-                        # Story #236 Fix 2: Always git pull into the master golden repo, never into
-                        # a versioned snapshot. current_target may be a .versioned/ path after first
-                        # refresh, but git pull must always operate on the canonical master.
-                        updater = GitPullUpdater(master_path)
-
-                    # Bug #469 Fix 1: Verify base clone is on expected default_branch before
-                    # pulling.  If the clone was switched to a wrong branch by any previous
-                    # operation, reset it now so we don't perpetuate the contamination.
-                    try:
-                        branch_result = subprocess.run(
-                            ["git", "branch", "--show-current"],
-                            cwd=master_path,
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                        )
-                        current_branch = branch_result.stdout.strip()
-                        # Bug #469 Fix A: default_branch lives in golden_repos_metadata,
-                        # NOT in global_repos.  repo_info comes from global_repos which
-                        # has no default_branch column, so .get() always returned "main".
-                        # Read the real value from GoldenRepoMetadataSqliteBackend.
-                        default_branch = repo_info.get("default_branch")  # None if absent; later layers fill in
+                    backup_cfg = None
+                    if is_meta_repo and alias_name == "cidx-meta-global":
                         try:
-                            db_path = str(
-                                self.golden_repos_dir.parent / "cidx_server.db"
+                            backup_cfg = (
+                                get_config_service()
+                                .get_config()
+                                .cidx_meta_backup_config
                             )
-                            _meta_backend = GoldenRepoMetadataSqliteBackend(db_path)
-                            # golden_repos_metadata uses base alias (no -global suffix)
-                            base_alias = alias_name.removesuffix("-global")
-                            meta = _meta_backend.get_repo(base_alias)
-                            if meta and meta.get("default_branch"):
-                                default_branch = meta["default_branch"]
-                        except Exception as e:
-                            logger.debug(
-                                "Could not read default_branch from golden_repos_metadata"
-                                " for %s: %s",
+                        except Exception:
+                            backup_cfg = None
+
+                    if (
+                        is_meta_repo
+                        and alias_name == "cidx-meta-global"
+                        and backup_cfg is not None
+                        and backup_cfg.enabled
+                    ):
+                        # MED-3: Run MetaDirectoryUpdater before sync so description
+                        # files are created/removed on disk before CidxMetaBackupSync
+                        # runs `git add -A`.  git add -A is a superset of
+                        # MetaDirectoryUpdater's filesystem writes once it has run.
+                        # Wrapped in try/except so a MetaDirectoryUpdater failure
+                        # does not block backup sync (matching the defensive pattern
+                        # used for backup_cfg fetch and bootstrap errors in this block).
+                        try:
+                            MetaDirectoryUpdater(master_path, self.registry).update()
+                        except Exception as meta_err:
+                            logger.warning(
+                                "MetaDirectoryUpdater failed for %s before backup sync: %s",
                                 alias_name,
-                                e,
+                                meta_err,
                             )
 
-                        # Third fallback: if neither repo_info nor golden_repos_metadata
-                        # had a default_branch (e.g., orphan global_repos row with no
-                        # golden_repos_metadata partner), read the authoritative answer
-                        # from the clone itself via git symbolic-ref.  This eliminates
-                        # the pre-fix hard-coded "main" that caused `git checkout main`
-                        # to fail on master-default repos like dotnet-playground-global.
-                        if not default_branch:
+                        # MED-2: Idempotent bootstrap call ensures URL changes applied
+                        # via DB-only paths (not through the Save route) are applied
+                        # on the next refresh cycle.  CidxMetaBackupBootstrap.bootstrap()
+                        # is cheap when the remote URL has not changed (reads
+                        # `git remote get-url origin` and returns immediately on match).
+                        if backup_cfg.remote_url:
                             try:
-                                symref_result = subprocess.run(
-                                    [
-                                        "git",
-                                        "symbolic-ref",
-                                        "--short",
-                                        "refs/remotes/origin/HEAD",
-                                    ],
-                                    cwd=master_path,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=10,
+                                CidxMetaBackupBootstrap().bootstrap(
+                                    master_path, backup_cfg.remote_url
                                 )
-                                if symref_result.returncode == 0:
-                                    ref = symref_result.stdout.strip()
-                                    if ref.startswith("origin/"):
-                                        default_branch = ref[len("origin/"):]
+                            except Exception as bootstrap_err:
+                                logger.warning(
+                                    "cidx-meta backup bootstrap failed for %s: %s",
+                                    alias_name,
+                                    bootstrap_err,
+                                )
+                        branch = detect_default_branch(master_path) or "master"
+                        sync_result = CidxMetaBackupSync(
+                            master_path,
+                            branch,
+                            ClaudeConflictResolver(),
+                        ).sync()
+                        if sync_result.skipped and not force_reset:
+                            logger.info(
+                                "No cidx-meta backup changes detected for %s, skipping refresh",
+                                alias_name,
+                            )
+                            return {
+                                "success": True,
+                                "alias": alias_name,
+                                "message": "No changes detected",
+                            }
+                        sync_failure = sync_result.sync_failure
+                        source_path = master_path
+                    else:
+                        # Meta-directories (repo_url=None) use MetaDirectoryUpdater instead of
+                        # GitPullUpdater — they sync description files, not git history.
+                        updater: UpdateStrategy
+                        if is_meta_repo:
+                            updater = MetaDirectoryUpdater(master_path, self.registry)
+                        else:
+                            # Story #236 Fix 2: Always git pull into the master golden repo, never into
+                            # a versioned snapshot. current_target may be a .versioned/ path after first
+                            # refresh, but git pull must always operate on the canonical master.
+                            updater = GitPullUpdater(master_path)
+
+                        # Bug #469 Fix 1: Verify base clone is on expected default_branch before
+                        # pulling.  If the clone was switched to a wrong branch by any previous
+                        # operation, reset it now so we don't perpetuate the contamination.
+                        try:
+                            branch_result = subprocess.run(
+                                ["git", "branch", "--show-current"],
+                                cwd=master_path,
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                            )
+                            current_branch = branch_result.stdout.strip()
+                            default_branch = repo_info.get("default_branch")
+                            try:
+                                db_path = str(
+                                    self.golden_repos_dir.parent / "cidx_server.db"
+                                )
+                                _meta_backend = GoldenRepoMetadataSqliteBackend(db_path)
+                                base_alias = alias_name.removesuffix("-global")
+                                meta = _meta_backend.get_repo(base_alias)
+                                if meta and meta.get("default_branch"):
+                                    default_branch = meta["default_branch"]
                             except Exception as e:
                                 logger.debug(
-                                    "git symbolic-ref fallback failed for %s: %s",
+                                    "Could not read default_branch from golden_repos_metadata"
+                                    " for %s: %s",
                                     alias_name,
                                     e,
                                 )
 
-                        if default_branch and current_branch and current_branch != default_branch:
+                            if not default_branch:
+                                try:
+                                    symref_result = subprocess.run(
+                                        [
+                                            "git",
+                                            "symbolic-ref",
+                                            "--short",
+                                            "refs/remotes/origin/HEAD",
+                                        ],
+                                        cwd=master_path,
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=10,
+                                    )
+                                    if symref_result.returncode == 0:
+                                        ref = symref_result.stdout.strip()
+                                        if ref.startswith("origin/"):
+                                            default_branch = ref[len("origin/") :]
+                                except Exception as e:
+                                    logger.debug(
+                                        "git symbolic-ref fallback failed for %s: %s",
+                                        alias_name,
+                                        e,
+                                    )
+
+                            if (
+                                default_branch
+                                and current_branch
+                                and current_branch != default_branch
+                            ):
+                                logger.warning(
+                                    f"Base clone for {alias_name} on '{current_branch}' instead of "
+                                    f"'{default_branch}', resetting to default branch"
+                                )
+                                checkout_result = subprocess.run(
+                                    ["git", "checkout", default_branch],
+                                    cwd=master_path,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30,
+                                )
+                                if checkout_result.returncode != 0:
+                                    logger.error(
+                                        f"Failed to reset {alias_name} to {default_branch}: "
+                                        f"{checkout_result.stderr}"
+                                    )
+                        except Exception as e:
                             logger.warning(
-                                f"Base clone for {alias_name} on '{current_branch}' instead of "
-                                f"'{default_branch}', resetting to default branch"
+                                f"Branch verification failed for {alias_name}: {e}"
                             )
-                            checkout_result = subprocess.run(
-                                ["git", "checkout", default_branch],
-                                cwd=master_path,
-                                capture_output=True,
-                                text=True,
-                                timeout=30,
-                            )
-                            if checkout_result.returncode != 0:
-                                logger.error(
-                                    f"Failed to reset {alias_name} to {default_branch}: "
-                                    f"{checkout_result.stderr}"
-                                )
-                    except Exception as e:
-                        logger.warning(
-                            f"Branch verification failed for {alias_name}: {e}"
-                        )
 
-                    if force_reset:
-                        # AC4 (Story #272): Force reset — skip change detection and force-reset
-                        # the master clone to the remote branch before indexing.
-                        logger.info(
-                            f"Force reset requested for {alias_name}, "
-                            "skipping change detection and resetting to remote branch"
-                        )
-                        updater.update(force_reset=True)
-                    else:
-                        try:
-                            has_changes = updater.has_changes()
-                            # Story #295: Successful fetch proves healthy repo —
-                            # reset failure counter regardless of whether changes exist.
-                            self._reset_fetch_failures(alias_name)
-
-                            if not has_changes:
-                                logger.info(
-                                    f"No changes detected for {alias_name}, skipping refresh"
-                                )
-                                return {
-                                    "success": True,
-                                    "alias": alias_name,
-                                    "message": "No changes detected",
-                                }
-
-                            # Pull latest changes into master
+                        if force_reset:
                             logger.info(
-                                f"Pulling latest changes for {alias_name} into master: {master_path}"
+                                f"Force reset requested for {alias_name}, "
+                                "skipping change detection and resetting to remote branch"
                             )
-                            updater.update()
-                        except GitFetchError as e:
-                            # _handle_fetch_error is typed NoReturn: always raises
-                            # RuntimeError, so execution never continues past this call.
-                            self._handle_fetch_error(
-                                alias_name, repo_url, master_path, e
-                            )
-                            raise  # Unreachable; satisfies static analysis
+                            updater.update(force_reset=True)
+                        else:
+                            try:
+                                has_changes = updater.has_changes()
+                                self._reset_fetch_failures(alias_name)
 
-                    # Story #236 Fix 3: Always create snapshot from master, not from current_target.
-                    source_path = master_path
+                                if not has_changes:
+                                    logger.info(
+                                        f"No changes detected for {alias_name}, skipping refresh"
+                                    )
+                                    return {
+                                        "success": True,
+                                        "alias": alias_name,
+                                        "message": "No changes detected",
+                                    }
+
+                                logger.info(
+                                    f"Pulling latest changes for {alias_name} into master: {master_path}"
+                                )
+                                updater.update()
+                            except GitFetchError as e:
+                                self._handle_fetch_error(
+                                    alias_name, repo_url, master_path, e
+                                )
+                                raise
+
+                        source_path = master_path
 
                 # Story #223 AC7: Sync file extensions from server config before indexing
                 try:
-                    from code_indexer.server.services.config_service import (
-                        get_config_service,
-                    )
-
                     config_service = get_config_service()
                     config_service.sync_repo_extensions_if_drifted(source_path)
                 except Exception as e:
@@ -1364,6 +1501,12 @@ class RefreshScheduler:
                 logger.info(
                     f"Reconciled registry with filesystem at END for {alias_name}: {detected_indexes}"
                 )
+
+                if sync_failure:
+                    raise RuntimeError(
+                        "refresh complete, indexing succeeded, but backup "
+                        + sync_failure
+                    )
 
                 logger.info(f"Refresh complete for {alias_name}")
                 return {

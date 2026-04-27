@@ -14,16 +14,65 @@ Tests verify:
 5. Input/output schema correctness
 """
 
+import contextlib
 import pytest
 import tempfile
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
+from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
 from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 from code_indexer.server.auth.user_manager import User, UserRole
+
+# ---------------------------------------------------------------------------
+# Elevation helpers (Story #925 AC2 — gated group handlers)
+# ---------------------------------------------------------------------------
+
+_ELEVATION_ENFORCEMENT_PATH = (
+    "code_indexer.server.mcp.auth.elevation_decorator._is_elevation_enforcement_enabled"
+)
+_ELEVATION_ESM_PATH = (
+    "code_indexer.server.mcp.auth.elevation_decorator.elevated_session_manager"
+)
+_ELEVATION_TOTP_PATH = (
+    "code_indexer.server.mcp.auth.elevation_decorator.get_totp_service"
+)
+_TEST_SESSION_KEY = "test-elevation-session-key"
+_TEST_ELEVATION_IDLE_TIMEOUT_SECONDS = 300
+_TEST_ELEVATION_MAX_AGE_SECONDS = 1800
+
+
+@contextlib.contextmanager
+def _with_elevation(username: str, tmp_path_str: str):
+    """Patch elevation decorator deps to provide an active full-scope window.
+
+    Patches enforcement=True, a real ElevatedSessionManager with an active
+    session, and a mock TOTP service with MFA enabled (all three are required
+    by require_mcp_elevation).  Yields the session_key so tests can pass it
+    to gated handlers via session_key kwarg.
+    """
+    esm = ElevatedSessionManager(
+        idle_timeout_seconds=_TEST_ELEVATION_IDLE_TIMEOUT_SECONDS,
+        max_age_seconds=_TEST_ELEVATION_MAX_AGE_SECONDS,
+        db_path=str(Path(tmp_path_str) / "elev.db"),
+    )
+    esm.create(
+        session_key=_TEST_SESSION_KEY,
+        username=username,
+        elevated_from_ip=None,
+        scope="full",
+    )
+    totp_svc = MagicMock()
+    totp_svc.is_mfa_enabled.return_value = True
+    with (
+        patch(_ELEVATION_ENFORCEMENT_PATH, return_value=True),
+        patch(_ELEVATION_ESM_PATH, esm),
+        patch(_ELEVATION_TOTP_PATH, return_value=totp_svc),
+    ):
+        yield _TEST_SESSION_KEY
 
 
 # =============================================================================
@@ -553,15 +602,22 @@ class TestCreateGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_create_group_returns_success(self, admin_user, mock_group_manager):
+    def test_create_group_returns_success(
+        self, admin_user, mock_group_manager, tmp_path
+    ):
         """create_group handler returns success on valid creation."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             handler = HANDLER_REGISTRY["create_group"]
             result = handler(
-                {"name": "test_group", "description": "Test description"}, admin_user
+                {"name": "test_group", "description": "Test description"},
+                admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])
@@ -569,17 +625,24 @@ class TestCreateGroupHandler:
             assert "group_id" in content
             assert content["name"] == "test_group"
 
-    def test_create_group_duplicate_fails(self, admin_user, mock_group_manager):
+    def test_create_group_duplicate_fails(
+        self, admin_user, mock_group_manager, tmp_path
+    ):
         """create_group handler fails for duplicate group name."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             handler = HANDLER_REGISTRY["create_group"]
             # First creation should succeed
-            handler({"name": "unique_group"}, admin_user)
+            handler({"name": "unique_group"}, admin_user, session_key=session_key)
             # Second creation should fail
-            result = handler({"name": "unique_group"}, admin_user)
+            result = handler(
+                {"name": "unique_group"}, admin_user, session_key=session_key
+            )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is False
@@ -679,11 +742,16 @@ class TestDeleteGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_delete_group_custom_succeeds(self, admin_user, mock_group_manager):
+    def test_delete_group_custom_succeeds(
+        self, admin_user, mock_group_manager, tmp_path
+    ):
         """delete_group handler succeeds for custom groups."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Create a custom group first
             custom_group = mock_group_manager.create_group(
@@ -691,22 +759,29 @@ class TestDeleteGroupHandler:
             )
 
             handler = HANDLER_REGISTRY["delete_group"]
-            result = handler({"group_id": str(custom_group.id)}, admin_user)
+            result = handler(
+                {"group_id": str(custom_group.id)}, admin_user, session_key=session_key
+            )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_delete_group_default_fails(self, admin_user, mock_group_manager):
+    def test_delete_group_default_fails(self, admin_user, mock_group_manager, tmp_path):
         """delete_group handler fails for default groups."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Get the admins default group
             admins = mock_group_manager.get_group_by_name("admins")
 
             handler = HANDLER_REGISTRY["delete_group"]
-            result = handler({"group_id": str(admins.id)}, admin_user)
+            result = handler(
+                {"group_id": str(admins.id)}, admin_user, session_key=session_key
+            )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is False
@@ -724,11 +799,16 @@ class TestAddMemberToGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_add_member_to_group_succeeds(self, admin_user, mock_group_manager):
+    def test_add_member_to_group_succeeds(
+        self, admin_user, mock_group_manager, tmp_path
+    ):
         """add_member_to_group handler succeeds for valid inputs."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Get a valid group
             groups = mock_group_manager.get_all_groups()
@@ -736,7 +816,9 @@ class TestAddMemberToGroupHandler:
 
             handler = HANDLER_REGISTRY["add_member_to_group"]
             result = handler(
-                {"group_id": str(group_id), "user_id": "test_user"}, admin_user
+                {"group_id": str(group_id), "user_id": "test_user"},
+                admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])
@@ -754,11 +836,16 @@ class TestRemoveMemberFromGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_remove_member_from_group_succeeds(self, admin_user, mock_group_manager):
+    def test_remove_member_from_group_succeeds(
+        self, admin_user, mock_group_manager, tmp_path
+    ):
         """remove_member_from_group handler succeeds for valid inputs."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Get a valid group and add a member first
             groups = mock_group_manager.get_all_groups()
@@ -767,19 +854,24 @@ class TestRemoveMemberFromGroupHandler:
 
             handler = HANDLER_REGISTRY["remove_member_from_group"]
             result = handler(
-                {"group_id": str(group_id), "user_id": "test_user"}, admin_user
+                {"group_id": str(group_id), "user_id": "test_user"},
+                admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
     def test_remove_member_from_group_user_not_in_group(
-        self, admin_user, mock_group_manager
+        self, admin_user, mock_group_manager, tmp_path
     ):
         """remove_member_from_group handler returns success even if user not in that specific group."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Get a valid group
             groups = mock_group_manager.get_all_groups()
@@ -787,7 +879,9 @@ class TestRemoveMemberFromGroupHandler:
 
             handler = HANDLER_REGISTRY["remove_member_from_group"]
             result = handler(
-                {"group_id": str(group_id), "user_id": "nonexistent_user"}, admin_user
+                {"group_id": str(group_id), "user_id": "nonexistent_user"},
+                admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])

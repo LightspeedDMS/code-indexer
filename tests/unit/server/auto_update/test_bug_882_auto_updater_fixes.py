@@ -89,14 +89,21 @@ def drain_executor():
 @contextlib.contextmanager
 def _patched_drain(executor, auth="fake-token", drain_timeout=60):
     """Patch the three collaborators the drain loop calls; yield the requests.get mock."""
-    auth_kwargs = (
-        {"side_effect": auth} if isinstance(auth, list) else {"return_value": auth}
-    )
-    with (
-        patch.object(executor, "_get_drain_timeout", return_value=drain_timeout),
-        patch.object(executor, "_get_auth_token", **auth_kwargs),
-        patch("requests.get") as mock_get,
-    ):
+    # Use explicit keyword args rather than **auth_kwargs dict-unpacking so that
+    # mypy can resolve the patch.object overload unambiguously.
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            patch.object(executor, "_get_drain_timeout", return_value=drain_timeout)
+        )
+        if isinstance(auth, list):
+            stack.enter_context(
+                patch.object(executor, "_get_auth_token", side_effect=auth)
+            )
+        else:
+            stack.enter_context(
+                patch.object(executor, "_get_auth_token", return_value=auth)
+            )
+        mock_get = stack.enter_context(patch("requests.get"))
         yield mock_get
 
 

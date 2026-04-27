@@ -4,6 +4,21 @@
 
 ---
 
+## Notice — MCPB removed (epic #756)
+
+The MCP Bridge subsystem (`cidx-bridge`, `cidx-token-refresh`, the MCPB Python module, the NSIS Windows installer, and the dedicated `release-mcpb.yml` CI workflow) has been **removed** in a single hard-removal pass per epic #756. There is no deprecation window: any installation that depended on MCPB binaries will see `command not found` after upgrade.
+
+**Migration**: any MCP-aware client can connect directly to the CIDX server's native MCP endpoints:
+
+- `/mcp` — authenticated MCP endpoint, send a JWT Bearer token in the `Authorization` header (obtain via `POST /auth/login` with `{"username": "...", "password": "..."}`).
+- `/mcp-public` — unauthenticated MCP endpoint for public/anonymous tools.
+
+The previous `cidx-bridge` stdio-to-HTTP shim is no longer needed because every modern MCP client supports streaming HTTP/SSE transports natively. Existing client configurations should be updated to point at the server URL directly with appropriate auth headers.
+
+Past GitHub Release artifacts that bundle `install-mcpb.sh` remain downloadable per the repository's tag-immutability policy, but no new MCPB installer will be built going forward.
+
+---
+
 ## Recent Releases (v7.0.0+)
 
 For release notes on versions 7.0.0 and later, please see **[CHANGELOG.md](CHANGELOG.md)**, which contains comprehensive documentation of all features, fixes, and breaking changes.
@@ -1228,13 +1243,13 @@ Core fixes across 4 critical files:
 
 #### Externalized Language Mappings
 - **YAML Configuration**: Language mappings externalized to `.code-indexer/language-mappings.yaml` for user customization
-- **Dual Creation Strategy**: 
-  - **Proactive**: Automatically created during `cidx init`  
+- **Dual Creation Strategy**:
+  - **Proactive**: Automatically created during `cidx init`
   - **Reactive**: Auto-generated on first use when missing
 - **Custom Language Support**: Users can add their own languages or modify existing mappings
 - **Hot Reload**: Changes take effect immediately on next query execution
 
-#### Intelligent OR-Based Filtering  
+#### Intelligent OR-Based Filtering
 - **Multiple Extension Support**: `--language python` now matches ALL Python files (`.py`, `.pyw`, `.pyi`) using Qdrant OR filters
 - **Comprehensive Coverage**: Language filters now capture all relevant files instead of arbitrary single extensions
 - **Backward Compatible**: Direct extension usage (`--language py`) and unknown languages still work as before
@@ -1329,7 +1344,7 @@ Core fixes across 4 critical files:
 ### 🔧 Technical Implementation
 
 - **VoyageAI Token Counting**: Native token counting integration for accurate batch sizing
-- **YAML Model Configuration**: Externalized VoyageAI model limits and specifications  
+- **YAML Model Configuration**: Externalized VoyageAI model limits and specifications
 - **Dynamic Batching Algorithm**: Per-chunk token counting with automatic batch submission at 90% safety threshold
 - **Resource Management**: Proper slot acquire/release patterns with visual feedback preservation
 
@@ -1349,7 +1364,7 @@ Core fixes across 4 critical files:
 ### 🚀 Major Architecture Enhancement
 
 - **Slot-based file processing**: Replaced sequential file chunking with parallel slot-based worker allocation
-- **Real-time state visibility**: Individual file status progression (starting → chunking → vectorizing → finalizing → complete) 
+- **Real-time state visibility**: Individual file status progression (starting → chunking → vectorizing → finalizing → complete)
 - **Dual thread pool design**: Frontend file processing (threadcount+2 workers) feeds backend vectorization (threadcount workers)
 - **Natural slot reuse**: Completed files remain visible until display slots are reused by new files
 - **Thread-agnostic design**: Pure integer slot operations eliminate thread ID tracking complexity

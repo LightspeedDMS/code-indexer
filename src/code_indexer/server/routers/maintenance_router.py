@@ -11,7 +11,10 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends
 
-from code_indexer.server.auth.dependencies import get_current_admin_user
+from code_indexer.server.auth.dependencies import (
+    get_current_admin_user,
+    require_localhost,
+)
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.maintenance_service import get_maintenance_state
 
@@ -23,6 +26,7 @@ router = APIRouter(prefix="/api/admin/maintenance", tags=["maintenance"])
 @router.post("/enter")
 def enter_maintenance_mode(
     current_user: User = Depends(get_current_admin_user),
+    _: None = Depends(require_localhost),
 ) -> Dict[str, Any]:
     """Enter maintenance mode.
 
@@ -41,6 +45,7 @@ def enter_maintenance_mode(
 @router.post("/exit")
 def exit_maintenance_mode(
     current_user: User = Depends(get_current_admin_user),
+    _: None = Depends(require_localhost),
 ) -> Dict[str, Any]:
     """Exit maintenance mode.
 

@@ -66,9 +66,7 @@ class TestDatabaseBackend:
         # Use "Calculator#add()." which exists as a reference in the fixture
         # exact=False because the fixture symbols lack a package path prefix
         # required by the exact=True FTS/LIKE pattern (e.g. .../ClassName#method)
-        results = backend.find_references(
-            "Calculator#add().", limit=10, exact=False
-        )
+        results = backend.find_references("Calculator#add().", limit=10, exact=False)
 
         assert len(results) > 0
         assert all(isinstance(r, QueryResult) for r in results)

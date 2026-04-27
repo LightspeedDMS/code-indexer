@@ -28,7 +28,7 @@ Tests (one concern each):
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pytest
 
@@ -62,7 +62,7 @@ _CI_SECTION: Dict[str, Any] = {
 }
 
 
-def _make_raw(lifecycle_extra: Dict[str, Any] = None) -> str:
+def _make_raw(lifecycle_extra: Optional[Dict[str, Any]] = None) -> str:
     """Build a minimal valid unified JSON response string."""
     lifecycle: Dict[str, Any] = dict(_V2_LIFECYCLE)
     if lifecycle_extra:
@@ -108,7 +108,9 @@ def test_branch_environment_map_accepted_when_valid() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_branch_environment_map_empty_dict_and_omitted_are_semantically_identical() -> None:
+def test_branch_environment_map_empty_dict_and_omitted_are_semantically_identical() -> (
+    None
+):
     """
     AC-V4-3+V4-4 — empty {} and omitted branch_environment_map are semantically
     identical. The parser must return the same normalized representation for both.
@@ -183,7 +185,9 @@ def test_hard_reject_env_not_in_ci_environments() -> None:
     raw = _make_raw(
         {
             "ci": {**_CI_SECTION, "environments": ["staging"]},
-            "branch_environment_map": {"main": "production"},  # "production" not declared
+            "branch_environment_map": {
+                "main": "production"
+            },  # "production" not declared
         }
     )
     with pytest.raises(SchemaValidationError):

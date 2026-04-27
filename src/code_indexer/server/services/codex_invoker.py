@@ -20,7 +20,7 @@ import logging
 import os
 import signal
 import subprocess
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 _CLI_USED = "codex"
 _STDERR_SNIPPET_LEN = 200  # max chars of stderr included in error messages
 _JSONL_LOG_SNIPPET_LEN = 80  # max chars of a malformed JSONL line in caller logs
+# v9.23.10: renamed from CIDX_MCP_BEARER_TOKEN. Value is the literal Authorization
+# header value (e.g. 'Basic abc'). Codex reads it via config.toml entry:
+# env_http_headers = { Authorization = "CIDX_MCP_AUTH_HEADER" }
+_MCP_AUTH_HEADER_ENV_VAR = "CIDX_MCP_AUTH_HEADER"
 
 # Stderr substrings that indicate permanent credential/config problems.
 # All are mapped to RETRYABLE_ON_OTHER (failover to alternate CLI).
@@ -72,12 +76,28 @@ class CodexInvoker:
     Resource cleanup: proc.communicate(timeout=...) is used on both the normal
     and timeout paths to drain stdout/stderr pipes and reap the subprocess,
     preventing zombie processes and leaked file descriptors.
+
+    auth_header_provider: Optional callable that returns the literal Authorization
+    header value (e.g. 'Basic abc') before each subprocess invocation. When
+    provided, the value is injected as CIDX_MCP_AUTH_HEADER so codex can
+    authenticate against the cidx-local MCP server via env_http_headers in
+    config.toml. When None, no header is injected (backward-compatible default).
+    When the provider raises, a WARNING is logged and the subprocess spawns
+    without the header (codex MCP calls will fail over to the dispatcher, but
+    the invocation itself is not blocked).
     """
 
-    def __init__(self, codex_home: str) -> None:
+    def __init__(
+        self,
+        codex_home: str,
+        auth_header_provider: Optional[Callable[[], str]] = None,
+    ) -> None:
         """
         Args:
             codex_home: Value to inject as CODEX_HOME. Must be non-empty string.
+            auth_header_provider: Optional callable returning the literal
+                Authorization header value. Called once per invoke() to inject
+                CIDX_MCP_AUTH_HEADER into the subprocess environment.
 
         Raises:
             ValueError: if codex_home is empty or not a string.
@@ -87,6 +107,7 @@ class CodexInvoker:
                 f"CodexInvoker: codex_home must be a non-empty string, got {codex_home!r}"
             )
         self._codex_home = codex_home
+        self._auth_header_provider = auth_header_provider
 
     def invoke(
         self, flow: str, cwd: str, prompt: str, timeout: int
@@ -151,7 +172,13 @@ class CodexInvoker:
     def _start_process(
         self, prompt: str, cwd: str
     ) -> "Union[subprocess.Popen[str], InvocationResult]":
-        """Start the Codex subprocess. Returns Popen on success, InvocationResult on error."""
+        """Start the Codex subprocess. Returns Popen on success, InvocationResult on error.
+
+        When auth_header_provider is set, calls it once to obtain the Authorization
+        header value and injects it as CIDX_MCP_AUTH_HEADER so codex reads it via
+        env_http_headers in config.toml. If the provider raises, a WARNING is logged
+        and the subprocess is still spawned without the header.
+        """
         cmd = [
             "codex",
             "exec",
@@ -161,6 +188,16 @@ class CodexInvoker:
             prompt,
         ]
         env = {**os.environ, "CODEX_HOME": self._codex_home}
+        if self._auth_header_provider is not None:
+            try:
+                header_value = self._auth_header_provider()
+                env[_MCP_AUTH_HEADER_ENV_VAR] = header_value
+            except Exception as exc:
+                logger.warning(
+                    "CodexInvoker: auth_header_provider raised — spawning without %s: %s",
+                    _MCP_AUTH_HEADER_ENV_VAR,
+                    exc,
+                )
         try:
             return subprocess.Popen(
                 cmd,

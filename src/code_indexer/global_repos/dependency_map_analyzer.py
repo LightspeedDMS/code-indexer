@@ -41,13 +41,20 @@ try:
     from code_indexer.server.services.cli_dispatcher import CliDispatcher
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
     from code_indexer.server.services.codex_invoker import CodexInvoker
+    from code_indexer.server.services.codex_mcp_auth_header_provider import (
+        build_codex_mcp_auth_header_provider,
+    )
 except ImportError:  # pragma: no cover — server package absent in pure CLI context
+    # Caller guards against None before any of these are used; CLI paths never reach
+    # the Codex/server integration code below.
     get_config_service = None  # type: ignore[assignment]
     CliDispatcher = None  # type: ignore[assignment]
     ClaudeInvoker = None  # type: ignore[assignment]
     CodexInvoker = None  # type: ignore[assignment]
+    build_codex_mcp_auth_header_provider = None  # type: ignore[assignment]  # Callable[[], str] | None; CLI paths never call this
 
 logger = logging.getLogger(__name__)
+
 
 # Bug #838: journal hook constants.
 # Maximum characters for the tool-input preview appended to **claude-tool** entries.
@@ -1163,6 +1170,10 @@ Rules:
         weight from config.  Otherwise codex=None and the effective weight
         collapses to 0.0 inside CliDispatcher.
 
+        Wires auth_header_provider for cidx-local MCP authentication via
+        persistent Basic auth header from MCPCredentialManager (no expiration;
+        same credentials Claude uses — no JWT TTL issue).
+
         Returns:
             A fully initialised CliDispatcher.
         """
@@ -1174,7 +1185,10 @@ Rules:
         if codex_cfg and codex_cfg.enabled:
             codex_home = os.environ.get("CODEX_HOME", "")
             if codex_home:
-                codex_invoker = CodexInvoker(codex_home=codex_home)
+                codex_invoker = CodexInvoker(
+                    codex_home=codex_home,
+                    auth_header_provider=build_codex_mcp_auth_header_provider(),
+                )
                 codex_weight = codex_cfg.codex_weight
         return CliDispatcher(
             claude=claude_invoker,
@@ -1230,7 +1244,7 @@ Rules:
                 result.cli_used,
             )
 
-        return result.output
+        return str(result.output)
 
     def run_pass_2_per_domain(
         self,
@@ -1290,12 +1304,6 @@ Rules:
             "Be concise — no code snippets, no schema dumps, no full file listings. "
             "Your output MUST begin with # Domain Analysis heading."
         )
-
-        # Iteration 13: Use earlier hook thresholds for large domains
-        if is_large_domain:
-            hook_thresh = (max(3, int(max_turns * 0.15)), max(8, int(max_turns * 0.35)))
-        else:
-            hook_thresh = None
 
         # Story #715: File-based output — Claude writes body to temp file
         safe_name = self._sanitize_domain_name_for_path(domain_name)

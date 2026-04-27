@@ -21,6 +21,7 @@ from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
 # correct. The probe is registered once per named site so parametrize IDs
 # clearly identify which emitter is under test.
 
+
 def _list_block_probe(aliases: List[str]) -> str:
     """Shared probe mirroring the list-entry pattern used by all five emitter sites.
 
@@ -48,6 +49,7 @@ EMITTER_SITES: List[tuple] = [
 
 
 # --- AC-V4-9: scoped npm package round-trip ------------------------------
+
 
 class TestAC_V4_9_ScopedPackageRoundTrip:
     """AC-V4-9 — scoped npm package round-trips through write+read."""
@@ -81,7 +83,9 @@ class TestAC_V4_10_ReservedIndicatorMatrix:
         "indicator", RESERVED_INDICATORS, ids=lambda c: f"char={c!r}"
     )
     @pytest.mark.parametrize(
-        "site_name,emitter", EMITTER_SITES, ids=lambda s: s[0] if isinstance(s, tuple) else s
+        "site_name,emitter",
+        EMITTER_SITES,
+        ids=lambda s: s[0] if isinstance(s, tuple) else s,
     )
     def test_reserved_indicator_round_trips_via_site(
         self, indicator, site_name, emitter
@@ -99,6 +103,7 @@ class TestAC_V4_10_ReservedIndicatorMatrix:
 
 # --- AC-V4-11: log severity upgrade --------------------------------------
 
+
 class TestAC_V4_11_LogSeverityUpgrade:
     """AC-V4-11 — split_frontmatter_and_body logs YAMLError at ERROR."""
 
@@ -115,7 +120,9 @@ class TestAC_V4_11_LogSeverityUpgrade:
             "# body content\n"
         )
 
-        caplog.set_level(logging.ERROR, logger="code_indexer.global_repos.repo_analyzer")
+        caplog.set_level(
+            logging.ERROR, logger="code_indexer.global_repos.repo_analyzer"
+        )
         frontmatter, body = split_frontmatter_and_body(broken_frontmatter)
 
         # Behavior preserved: returns ({}, content) on parse failure
@@ -124,7 +131,8 @@ class TestAC_V4_11_LogSeverityUpgrade:
 
         # Severity upgraded: ERROR, not WARNING
         error_records = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.levelno == logging.ERROR
             and "split_frontmatter_and_body" in r.getMessage()
         ]
