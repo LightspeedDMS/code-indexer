@@ -24,6 +24,7 @@ Module-level helpers (exhaustive list):
 """
 
 import subprocess
+from pathlib import Path
 from typing import Dict, Tuple
 
 from code_indexer.server.services.dep_map_repair_bidirectional import (
@@ -105,7 +106,7 @@ def _make_resolver(mapping: Dict[str, str]):
 def _make_two_repo_dirs(
     tmp_path,
     src_symbol_present: bool,
-) -> Tuple[object, object, list, object]:
+) -> Tuple[Path, Path, list, object]:
     """Create tgt-repo and src-repo under tmp_path.
 
     tgt-repo always contains PaymentClient in src/charge.py.

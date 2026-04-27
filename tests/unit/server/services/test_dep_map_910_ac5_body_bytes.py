@@ -13,7 +13,7 @@ TestAC5BodyBytesPreserved (2 methods):
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -54,7 +54,8 @@ def _write_raw_file(output_dir: Path, stem: str, body_bytes: bytes) -> Path:
 @pytest.fixture()
 def ac5_base(tmp_path) -> Path:
     """Return output_dir with _domains.json set up for domain-q."""
-    output_dir = tmp_path / "dependency-map"
+    # cast: tmp_path is Any in older pytest stubs; narrow to Path before composition.
+    output_dir = cast(Path, tmp_path) / "dependency-map"
     output_dir.mkdir(parents=True, exist_ok=True)
     make_domains_json(output_dir, [_DOMAIN_INFO])
     return output_dir

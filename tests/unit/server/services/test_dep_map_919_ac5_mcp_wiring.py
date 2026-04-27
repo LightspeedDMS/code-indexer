@@ -24,7 +24,7 @@ Module-level helpers (exhaustive list):
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, cast
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.mcp.handlers.admin import handle_trigger_dependency_analysis
@@ -92,7 +92,8 @@ def _unwrap_payload(result: Any) -> Dict[str, Any]:
     assert isinstance(first, dict) and "text" in first, (
         f"MCP content item missing 'text' key: {first!r}"
     )
-    return json.loads(first["text"])
+    # cast: json.loads returns Any by design; dict shape asserted by isinstance check above.
+    return cast(Dict[str, Any], json.loads(first["text"]))
 
 
 def _assert_success_payload(payload: Dict[str, Any]) -> None:
@@ -115,7 +116,10 @@ def _call_handler(args: Dict[str, Any]) -> Dict[str, Any]:
             dependency_map_service=stub_service,
         ),
     ):
-        return handle_trigger_dependency_analysis(args, _make_user())
+        # cast: handler is typed Dict[str, Any] but MagicMock context makes return Any.
+        return cast(
+            Dict[str, Any], handle_trigger_dependency_analysis(args, _make_user())
+        )
 
 
 # ---------------------------------------------------------------------------

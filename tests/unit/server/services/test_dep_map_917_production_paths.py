@@ -42,8 +42,8 @@ def test_self_loop_production_path_acquires_lock(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(phase37_mod, "atomic_write_text", observer)
 
-    fixed = []
-    errors = []
+    fixed: list[str] = []
+    errors: list[str] = []
     _repair_one_self_loop(output_dir, anomaly, fixed, errors, journal=None)
 
     assert not errors, f"Unexpected errors: {errors}"
@@ -95,8 +95,8 @@ def test_malformed_yaml_production_path_acquires_lock(tmp_path, monkeypatch):
                 return (0, i)
         return None
 
-    fixed = []
-    errors = []
+    fixed: list[str] = []
+    errors: list[str] = []
     repair_single_malformed_yaml_anomaly(
         output_dir,
         anomaly,
@@ -184,8 +184,8 @@ def test_garbage_domain_production_path_acquires_lock(tmp_path, monkeypatch):
     ):
         _append(jnl, stem, tgt, Action.garbage_domain_remapped, [], errors=errors)
 
-    fixed = []
-    errors = []
+    fixed: list[str] = []
+    errors: list[str] = []
     repair_one_garbage_domain_anomaly(
         output_dir,
         anomaly,

@@ -1879,7 +1879,7 @@ def handle_trigger_dependency_analysis(
         # AC5 (Story #919): dry-run graph-repair mode — synchronous, no background job
         dry_run_raw = args.get("dry_run_graph_only", False)
         if dry_run_raw is not False and not isinstance(dry_run_raw, bool):
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "dry_run_graph_only must be a boolean",
@@ -1889,7 +1889,7 @@ def handle_trigger_dependency_analysis(
         dry_run_graph_only: bool = bool(dry_run_raw)
         if dry_run_graph_only:
             dry_run_report = dependency_map_service.run_graph_repair_dry_run()
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": True,
                     "job_id": None,

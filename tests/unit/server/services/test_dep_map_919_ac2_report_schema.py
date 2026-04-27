@@ -20,6 +20,8 @@ Tests (exhaustive list):
 
 import json
 from dataclasses import asdict
+from pathlib import Path
+from typing import List, Tuple
 
 from code_indexer.server.services.dep_map_repair_executor import DryRunReport
 
@@ -205,8 +207,9 @@ def test_would_be_writes_operation_label_is_remapped_outgoing_row(
         enable_graph_channel_repair=True,
         invoke_claude_fn=None,
     )
-    fixed, errors = [], []
-    would_be_writes = []
+    fixed: List[str] = []
+    errors: List[str] = []
+    would_be_writes: List[Tuple[Path, str]] = []
     executor._run_phase37_repairs(
         output_dir, fixed, errors, dry_run=True, would_be_writes=would_be_writes
     )

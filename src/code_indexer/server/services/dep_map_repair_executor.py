@@ -31,7 +31,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
 if TYPE_CHECKING:
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
@@ -1071,8 +1071,12 @@ class DepMapRepairExecutor:
         if message.startswith(prefix):
             raw = message[len(prefix) :].strip()
             try:
-                return ast.literal_eval(raw)
+                return str(ast.literal_eval(raw))
             except (ValueError, SyntaxError):
+                logger.debug(
+                    "ast.literal_eval failed for prose-fragment; falling back to quote-strip: %r",
+                    raw,
+                )
                 return raw.strip("'\"")
         return message
 
@@ -1216,7 +1220,7 @@ class DepMapRepairExecutor:
     @staticmethod
     def _body_byte_offset(raw_bytes: bytes, close_idx: int) -> int:
         """Delegate to phase37.body_byte_offset (extracted per Finding #3 / Story #910)."""
-        return body_byte_offset(raw_bytes, close_idx)
+        return int(body_byte_offset(raw_bytes, close_idx))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 4: Regenerate _index.md
@@ -1433,7 +1437,8 @@ class DepMapRepairExecutor:
     @staticmethod
     def _emit_repos_lines(json_repos: List[str]) -> List[str]:
         """Delegate to phase37.emit_repos_lines (extracted per Finding #3 / Story #910)."""
-        return emit_repos_lines(json_repos)
+        # cast: emit_repos_lines is typed -> List[str] but mypy infers Any at this call site.
+        return cast(List[str], emit_repos_lines(json_repos))
 
     @staticmethod
     def _reemit_frontmatter_from_domain_info(
@@ -1442,7 +1447,10 @@ class DepMapRepairExecutor:
         domain_info: Dict[str, Any],
     ) -> str:
         """Delegate to phase37.reemit_frontmatter_from_domain_info (Finding #3 / Story #910)."""
-        return reemit_frontmatter_from_domain_info(content, bounds, domain_info)
+        # cast: reemit_frontmatter_from_domain_info is typed -> str but mypy infers Any here.
+        return cast(
+            str, reemit_frontmatter_from_domain_info(content, bounds, domain_info)
+        )
 
     def _extract_description_from_md(self, md_file: Path) -> str:
         """
