@@ -19,6 +19,7 @@ Run as part of e2e-automation.sh --phase 4 (cli_remote tests).
 from __future__ import annotations
 
 import json
+from typing import Any
 import warnings
 from pathlib import Path
 
@@ -28,13 +29,11 @@ import pytest
 from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import (
     CONFLICT_RESOLUTION_TIMEOUT,
-    JOB_POLL_INTERVAL,
+    MCP_CALL_TIMEOUT,
     login,
     patch_json_field,
-    rest_call,
     run_git,
     toggle_cidx_meta_backup,
-    wait_for_job,
 )
 
 _META_ALIAS = "cidx-meta-global"  # RefreshScheduler._execute_refresh contract
@@ -48,23 +47,102 @@ _REMOTE_VALUE = "REMOTE-AC8: remote side injected by E2E harness"
 _LOCAL_VALUE = "LOCAL-AC8: local side injected by E2E harness"
 
 
-def _run_refresh_and_assert_succeeded(
-    client: httpx.Client, token: str, *, label: str
-) -> None:
-    """POST refresh for _META_ALIAS, poll to completion, assert succeeded."""
-    resp = rest_call(
-        client, "POST", f"/api/admin/golden-repos/{_META_ALIAS}/refresh", token
+def _call_mcp_tool(
+    client: httpx.Client,
+    token: str,
+    tool_name: str,
+    arguments: dict,
+    *,
+    timeout: float = MCP_CALL_TIMEOUT,
+) -> dict:
+    """POST a tools/call MCP JSON-RPC request and return the inner result dict.
+
+    The MCP endpoint wraps handler responses in:
+      {"content": [{"type": "text", "text": "<JSON>"}]}
+
+    This helper unwraps that envelope and returns the parsed inner dict.
+
+    Args:
+        client: httpx.Client bound to the server base URL.
+        token: JWT access token.
+        tool_name: MCP tool name (e.g. "enter_write_mode").
+        arguments: Tool argument dict.
+        timeout: HTTP request timeout in seconds (use CONFLICT_RESOLUTION_TIMEOUT
+                 for exit_write_mode calls that invoke Claude CLI conflict resolution).
+
+    Raises:
+        httpx.HTTPStatusError: On HTTP-level errors.
+        AssertionError: If the JSON-RPC response contains an error field.
+        KeyError: If the MCP content envelope is missing expected fields.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }
+    resp = client.post(
+        "/mcp",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=timeout,
     )
     resp.raise_for_status()
-    job = wait_for_job(
-        client,
-        resp.json()["job_id"],
-        token,
-        timeout=CONFLICT_RESOLUTION_TIMEOUT,
-        poll_interval=JOB_POLL_INTERVAL,
+    body = resp.json()
+    assert "error" not in body, (
+        f"MCP JSON-RPC error calling {tool_name}: {body['error']}"
     )
-    assert job.get("status") == "succeeded", (
-        f"{label} refresh failed: {job.get('error') or job.get('message')}"
+    result = body.get("result", {})
+    content = result.get("content", [])
+    assert content, f"MCP result for {tool_name} has empty content: {result}"
+    parsed: dict[str, Any] = json.loads(content[0]["text"])
+    return parsed
+
+
+def _run_refresh_via_write_mode(
+    client: httpx.Client, token: str, *, label: str
+) -> None:
+    """Trigger cidx-meta-global refresh via the write-mode lifecycle.
+
+    cidx-meta-global is a write-exception repo whose refresh is NOT triggerable
+    via the standard /api/admin/golden-repos/{alias}/refresh REST endpoint.
+    The canonical external trigger is the MCP write-mode lifecycle:
+      enter_write_mode -> exit_write_mode
+    exit_write_mode calls _execute_refresh() synchronously and blocks until
+    complete, so no job polling is required.
+
+    Uses CONFLICT_RESOLUTION_TIMEOUT for the exit_write_mode call because
+    conflict resolution invokes the real Claude CLI subprocess, which can
+    take several minutes.
+
+    Args:
+        client: httpx.Client bound to the server base URL.
+        token: JWT access token.
+        label: Human-readable label for assertion error messages.
+
+    Raises:
+        AssertionError: If enter_write_mode or exit_write_mode reports failure.
+    """
+    enter_result = _call_mcp_tool(
+        client,
+        token,
+        "enter_write_mode",
+        {"repo_alias": _META_ALIAS},
+    )
+    assert enter_result.get("success"), (
+        f"{label} enter_write_mode failed: {enter_result.get('error') or enter_result}"
+    )
+
+    exit_result = _call_mcp_tool(
+        client,
+        token,
+        "exit_write_mode",
+        {"repo_alias": _META_ALIAS},
+        timeout=CONFLICT_RESOLUTION_TIMEOUT,
+    )
+    assert exit_result.get("success"), (
+        f"{label} exit_write_mode (refresh) failed: "
+        f"{exit_result.get('error') or exit_result.get('message') or exit_result}"
     )
 
 
@@ -128,7 +206,7 @@ def test_cidx_meta_backup_ac8_rebase_conflict_resolved_by_claude(
                 enabled=True,
                 remote_url=remote_url,
             )
-            _run_refresh_and_assert_succeeded(client, token, label="bootstrap")
+            _run_refresh_via_write_mode(client, token, label="bootstrap")
 
             divergent = tmp_path / "divergent"
             run_git(["clone", remote_url, str(divergent)], cwd=tmp_path)
@@ -157,7 +235,7 @@ def test_cidx_meta_backup_ac8_rebase_conflict_resolved_by_claude(
                 _LOCAL_VALUE,
             )
 
-            _run_refresh_and_assert_succeeded(client, token, label="conflict-resolve")
+            _run_refresh_via_write_mode(client, token, label="conflict-resolve")
             _assert_billing_conflict_resolved(remote_url, tmp_path)
 
         except BaseException as exc:
