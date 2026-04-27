@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -27,6 +28,39 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CSRF extraction (used by toggle_cidx_meta_backup and unit-testable on its own)
+# ---------------------------------------------------------------------------
+
+_CSRF_TOKEN_PATTERN = re.compile(
+    r'<input[^>]*name=["\']csrf_token["\'][^>]*value=["\']([^"\']+)["\']'
+    r"|"
+    r'<input[^>]*value=["\']([^"\']+)["\'][^>]*name=["\']csrf_token["\']'
+)
+
+
+def _extract_csrf_token_from_html(html: str) -> str:
+    """Extract csrf_token form field value from rendered HTML.
+
+    Matches <input> elements with name="csrf_token" regardless of attribute
+    order or quote style (single or double).
+
+    Args:
+        html: Raw HTML string from a server response.
+
+    Returns:
+        The csrf_token value string.
+
+    Raises:
+        ValueError: If no csrf_token input element is found in the HTML.
+    """
+    match = _CSRF_TOKEN_PATTERN.search(html)
+    if not match:
+        raise ValueError("CSRF token not found in HTML form")
+    # Either group 1 (name-before-value) or group 2 (value-before-name) matched
+    return match.group(1) or match.group(2)
+
 
 # ---------------------------------------------------------------------------
 # Named timeout constants (seconds) -- centralised so callers can override
@@ -534,43 +568,121 @@ def wait_for_server(
 # ---------------------------------------------------------------------------
 
 
+def _fetch_csrf_from_page(client: "httpx.Client", path: str) -> str:
+    """GET *path* and return the csrf_token value from the rendered HTML form.
+
+    Private helper: caller (toggle_cidx_meta_backup) has already validated inputs.
+
+    Raises:
+        httpx.HTTPStatusError: On non-2xx response.
+        ValueError: If no csrf_token input is found in the page HTML.
+    """
+    page = client.get(path, timeout=LOGIN_TIMEOUT)
+    page.raise_for_status()
+    return _extract_csrf_token_from_html(page.text)
+
+
+def _post_and_assert_status(
+    client: "httpx.Client",
+    path: str,
+    data: dict,
+    expected_status: int,
+) -> None:
+    """POST form *data* to *path* and assert the response has *expected_status*.
+
+    Private helper: caller (toggle_cidx_meta_backup) has already validated inputs.
+    Raises on 4xx/5xx immediately; raises AssertionError when status is otherwise
+    unexpected (e.g. login re-renders 200 instead of 303 redirect on success).
+
+    Raises:
+        httpx.HTTPStatusError: On 4xx/5xx response.
+        AssertionError: If the response status does not equal *expected_status*.
+    """
+    resp = client.post(path, data=data, timeout=LOGIN_TIMEOUT, follow_redirects=False)
+    if resp.status_code >= httpx.codes.BAD_REQUEST:
+        resp.raise_for_status()
+    assert resp.status_code == expected_status, (
+        f"POST {path}: expected {expected_status}, got {resp.status_code}"
+    )
+
+
+def _web_login(
+    client: "httpx.Client",
+    admin_user: str,
+    admin_pass: str,
+    login_csrf: str,
+) -> None:
+    """POST /login form and assert 303 redirect (successful authentication).
+
+    Private helper: caller (toggle_cidx_meta_backup) has already validated inputs.
+
+    Raises:
+        AssertionError: If the server does not redirect (login failed or CSRF rejected).
+        httpx.HTTPStatusError: On 4xx/5xx response.
+    """
+    _post_and_assert_status(
+        client,
+        "/login",
+        {"username": admin_user, "password": admin_pass, "csrf_token": login_csrf},
+        expected_status=httpx.codes.SEE_OTHER,
+    )
+
+
+def _post_cidx_meta_backup_form(
+    client: "httpx.Client", enabled: bool, remote_url: str, form_csrf: str
+) -> None:
+    """POST /admin/config/cidx_meta_backup and assert 200 success response.
+
+    Private helper: caller (toggle_cidx_meta_backup) has already validated inputs.
+
+    Raises:
+        AssertionError: If the server does not return 200 (config not saved).
+        httpx.HTTPStatusError: On 4xx/5xx response.
+    """
+    _post_and_assert_status(
+        client,
+        "/admin/config/cidx_meta_backup",
+        {
+            "enabled": "true" if enabled else "false",
+            "remote_url": remote_url,
+            "csrf_token": form_csrf,
+        },
+        expected_status=httpx.codes.OK,
+    )
+
+
 def toggle_cidx_meta_backup(
     client: "httpx.Client",
-    token: str,
     *,
+    admin_user: str,
+    admin_pass: str,
     enabled: bool,
     remote_url: str,
 ) -> None:
-    """Enable or disable cidx-meta backup via the admin config endpoint.
+    """Enable/disable cidx-meta backup via the admin web form.
 
-    Args:
-        client: Shared httpx.Client bound to the server base URL.
-        token: JWT access token (must not be None or empty).
-        enabled: True to enable backup, False to disable.
-        remote_url: Remote git URL for backup; may be empty when disabling
-                    (must not be None).
+    Performs the real admin login flow (GET /login -> POST /login ->
+    GET /admin/config -> POST /admin/config/cidx_meta_backup) so session
+    cookie and CSRF token are carried correctly. The same httpx.Client is
+    used end-to-end so cookies persist across requests automatically.
+
+    Story #926 AC1: configure backup via Web UI Config Screen.
 
     Raises:
-        ValueError: If client, token, or remote_url is None, or token is empty.
-        httpx.HTTPStatusError: If the server returns a non-2xx response.
+        ValueError: If client is None, admin_user/admin_pass is empty, or
+                    remote_url is None.
+        httpx.HTTPStatusError: If any step returns a 4xx/5xx response.
     """
     if client is None:
         raise ValueError("toggle_cidx_meta_backup: client must not be None")
-    if token is None:
-        raise ValueError("toggle_cidx_meta_backup: token must not be None")
-    if not token:
-        raise ValueError("toggle_cidx_meta_backup: token must not be empty")
+    if not admin_user:
+        raise ValueError("toggle_cidx_meta_backup: admin_user must be non-empty")
+    if not admin_pass:
+        raise ValueError("toggle_cidx_meta_backup: admin_pass must be non-empty")
     if remote_url is None:
         raise ValueError("toggle_cidx_meta_backup: remote_url must not be None")
 
-    resp = rest_call(
-        client,
-        "POST",
-        "/admin/config/cidx_meta_backup",
-        token,
-        data={
-            "enabled": "true" if enabled else "false",
-            "remote_url": remote_url,
-        },
-    )
-    resp.raise_for_status()
+    login_csrf = _fetch_csrf_from_page(client, "/login")
+    _web_login(client, admin_user, admin_pass, login_csrf)
+    form_csrf = _fetch_csrf_from_page(client, "/admin/config")
+    _post_cidx_meta_backup_form(client, enabled, remote_url, form_csrf)

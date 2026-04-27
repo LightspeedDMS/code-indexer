@@ -121,7 +121,13 @@ def test_cidx_meta_backup_ac8_rebase_conflict_resolved_by_claude(
 
     with httpx.Client(base_url=e2e_config.server_url) as client:
         try:
-            toggle_cidx_meta_backup(client, token, enabled=True, remote_url=remote_url)
+            toggle_cidx_meta_backup(
+                client,
+                admin_user=e2e_config.admin_user,
+                admin_pass=e2e_config.admin_pass,
+                enabled=True,
+                remote_url=remote_url,
+            )
             _run_refresh_and_assert_succeeded(client, token, label="bootstrap")
 
             divergent = tmp_path / "divergent"
@@ -160,7 +166,13 @@ def test_cidx_meta_backup_ac8_rebase_conflict_resolved_by_claude(
 
         finally:
             try:
-                toggle_cidx_meta_backup(client, token, enabled=False, remote_url="")
+                toggle_cidx_meta_backup(
+                    client,
+                    admin_user=e2e_config.admin_user,
+                    admin_pass=e2e_config.admin_pass,
+                    enabled=False,
+                    remote_url="",
+                )
             except Exception as cleanup_exc:
                 msg = f"AC8 cleanup: failed to disable backup ({cleanup_exc})"
                 if original_exc is None:
