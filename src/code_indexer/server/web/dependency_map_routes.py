@@ -1181,11 +1181,12 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
     from ..services.dep_map_health_detector import DepMapHealthDetector
     from ..services.dep_map_index_regenerator import IndexRegenerator
     from ..services.dep_map_repair_executor import DepMapRepairExecutor
+    from .routes import _get_golden_repo_manager
+    from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
 
-    # Read bootstrap flag from ServerConfig (bootstrap-only, never DB).
-    enable_graph_channel_repair: bool = bool(
-        get_config_service().get_config().enable_graph_channel_repair
-    )
+    # Read bootstrap flags from ServerConfig (bootstrap-only, never DB).
+    _cfg = get_config_service().get_config()
+    enable_graph_channel_repair: bool = bool(_cfg.enable_graph_channel_repair)
 
     detector = DepMapHealthDetector()
     regenerator = IndexRegenerator()
@@ -1210,6 +1211,8 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
         except Exception as e:
             logger.debug("progress_cb failed to update job tracker: %s", e)
 
+    golden_repo_manager = _get_golden_repo_manager()
+
     return DepMapRepairExecutor(
         health_detector=detector,
         index_regenerator=regenerator,
@@ -1217,6 +1220,12 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
         journal_callback=journal_cb,
         progress_callback=_progress_cb,
         enable_graph_channel_repair=enable_graph_channel_repair,
+        invoke_claude_fn=invoke_claude_cli,
+        repo_path_resolver=golden_repo_manager.get_actual_repo_path,
+        graph_repair_self_loop=_cfg.graph_repair_self_loop,
+        graph_repair_malformed_yaml=_cfg.graph_repair_malformed_yaml,
+        graph_repair_garbage_domain=_cfg.graph_repair_garbage_domain,
+        graph_repair_bidirectional_mismatch=_cfg.graph_repair_bidirectional_mismatch,
     )
 
 

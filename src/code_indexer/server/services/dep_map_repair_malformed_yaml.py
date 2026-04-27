@@ -40,6 +40,10 @@ def repair_single_malformed_yaml_anomaly(
     log_fn: Callable[[str], None],
     locate_frontmatter_bounds_fn: Callable[[str], Optional[Tuple[int, int]]],
     is_safe_domain_name_fn: Callable[[str], bool],
+    dry_run: bool = False,
+    journal_disabled: bool = False,
+    effective_mode: str = "enabled",
+    would_be_writes: Optional[List] = None,
 ) -> None:
     """Handle one MALFORMED_YAML anomaly (AnomalyEntry or AnomalyAggregate).
 
@@ -49,6 +53,11 @@ def repair_single_malformed_yaml_anomaly(
 
     domain_list must be loaded once by the caller and passed in to preserve
     the original load-once-per-repair-run semantics.
+    dry_run=True: passes dry_run and would_be_writes through to
+    rewrite_malformed_yaml_file, and suppresses apply_malformed_yaml_fallback
+    (fallback triggers real Claude analysis which must not run in dry-run mode).
+    journal_disabled=True: suppresses all journaling (invocation-level dry_run).
+    effective_mode: label written to journal entries ('enabled' or 'dry_run').
     """
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
 
@@ -75,8 +84,12 @@ def repair_single_malformed_yaml_anomaly(
             errors,
             log_fn=log_fn,
             locate_frontmatter_bounds_fn=locate_frontmatter_bounds_fn,
+            dry_run=dry_run,
+            journal_disabled=journal_disabled,
+            effective_mode=effective_mode,
+            would_be_writes=would_be_writes,
         )
-        if not bounds_found:
+        if not bounds_found and not dry_run:
             apply_malformed_yaml_fallback(
                 output_dir,
                 ex.file,
@@ -98,11 +111,18 @@ def run_malformed_yaml_repairs(
     log_fn: Callable[[str], None],
     locate_frontmatter_bounds_fn: Callable[[str], Optional[Tuple[int, int]]],
     is_safe_domain_name_fn: Callable[[str], bool],
+    dry_run: bool = False,
+    journal_disabled: bool = False,
+    effective_mode: str = "enabled",
+    would_be_writes: Optional[List] = None,
 ) -> None:
     """Load MALFORMED_YAML anomalies and repair each.
 
     Called by DepMapRepairExecutor._run_phase37 after the SELF_LOOP pass.
     Dependency-injected to avoid importing executor state.
+    dry_run=True: passed through to repair_single_malformed_yaml_anomaly.
+    journal_disabled=True: suppresses all journaling (invocation-level dry_run).
+    effective_mode: label written to journal entries ('enabled' or 'dry_run').
     """
     from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyType
@@ -124,7 +144,51 @@ def run_malformed_yaml_repairs(
             log_fn=log_fn,
             locate_frontmatter_bounds_fn=locate_frontmatter_bounds_fn,
             is_safe_domain_name_fn=is_safe_domain_name_fn,
+            dry_run=dry_run,
+            journal_disabled=journal_disabled,
+            effective_mode=effective_mode,
+            would_be_writes=would_be_writes,
         )
+
+
+def _read_and_decode_bytes(
+    file_path: Path,
+    raw_file: str,
+    errors: List[str],
+) -> Optional[Tuple[bytes, str]]:
+    """Read file bytes and decode as UTF-8. Returns (raw_bytes, content) or None on error."""
+    try:
+        raw_bytes = file_path.read_bytes()
+    except OSError as e:
+        errors.append(f"Phase 3.7: cannot read {raw_file}: {e}")
+        return None
+    try:
+        content = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as e:
+        errors.append(f"Phase 3.7: cannot decode {raw_file} as UTF-8: {e}")
+        return None
+    return raw_bytes, content
+
+
+def _record_reemit_result(
+    file_path: Path,
+    stem: str,
+    raw_file: str,
+    fixed: List[str],
+    log_fn: Callable[[str], None],
+    dry_run: bool,
+    would_be_writes: Optional[List],
+) -> None:
+    """Append to fixed and call log_fn for both normal and dry-run success paths.
+
+    When dry_run=True, also records the would-be write in would_be_writes.
+    Extracted from rewrite_malformed_yaml_file to keep it under the 50-line limit.
+    """
+    if would_be_writes is not None and dry_run:
+        would_be_writes.append((str(file_path), "frontmatter_reemitted"))
+    fixed.append(f"Phase 3.7: re-emitted frontmatter for {stem}")
+    suffix = " (dry-run)" if dry_run else ""
+    log_fn(f"Phase 3.7 frontmatter re-emitted{suffix}: {raw_file}")
 
 
 def resolve_malformed_yaml_target(
@@ -171,22 +235,23 @@ def rewrite_malformed_yaml_file(
     *,
     log_fn: Callable[[str], None],
     locate_frontmatter_bounds_fn: Callable[[str], Optional[Tuple[int, int]]],
+    dry_run: bool = False,
+    journal_disabled: bool = False,
+    effective_mode: str = "enabled",
+    would_be_writes: Optional[List] = None,
 ) -> bool:
     """Read, locate bounds, re-emit frontmatter, write. Returns False if bounds missing.
 
     Uses bytes-level I/O to preserve mixed line endings in the body (AC5).
     False signals the caller to route to Phase 1 fallback (AC2).
+    dry_run=True: skips file write but journals when journal_disabled=False.
+    journal_disabled=True: suppresses journaling entirely (invocation-level dry_run).
+    effective_mode: label written to journal entry ('enabled' or 'dry_run').
     """
-    try:
-        raw_bytes = file_path.read_bytes()
-    except OSError as e:
-        errors.append(f"Phase 3.7: cannot read {raw_file}: {e}")
+    decoded = _read_and_decode_bytes(file_path, raw_file, errors)
+    if decoded is None:
         return True
-    try:
-        content = raw_bytes.decode("utf-8")
-    except UnicodeDecodeError as e:
-        errors.append(f"Phase 3.7: cannot decode {raw_file} as UTF-8: {e}")
-        return True
+    raw_bytes, content = decoded
     bounds = locate_frontmatter_bounds_fn(content)
     if bounds is None:
         return False
@@ -200,17 +265,31 @@ def rewrite_malformed_yaml_file(
         return True
     _, new_close_idx = new_bounds
     new_fm_text = "\n".join(new_content.split("\n")[: new_close_idx + 1])
-    body_start = body_byte_offset(raw_bytes, close_idx)
-    new_bytes = new_fm_text.encode("utf-8") + b"\n" + raw_bytes[body_start:]
+    new_bytes = (
+        new_fm_text.encode("utf-8")
+        + b"\n"
+        + raw_bytes[body_byte_offset(raw_bytes, close_idx) :]
+    )
     if new_bytes == raw_bytes:
         log_fn(f"Phase 3.7: malformed-yaml repair no-op for {raw_file}")
+        return True
+    if dry_run:
+        _record_reemit_result(
+            file_path, stem, raw_file, fixed, log_fn, True, would_be_writes
+        )
+        if not journal_disabled:
+            build_and_append_malformed_yaml_journal_entry(
+                file_path, stem, errors, effective_mode=effective_mode
+            )
         return True
     try:
         with acquire_domain_lock(file_path.stem):
             file_path.write_bytes(new_bytes)
-            fixed.append(f"Phase 3.7: re-emitted frontmatter for {stem}")
-            log_fn(f"Phase 3.7 frontmatter re-emitted: {raw_file}")
-            build_and_append_malformed_yaml_journal_entry(file_path, stem, errors)
+            _record_reemit_result(file_path, stem, raw_file, fixed, log_fn, False, None)
+            if not journal_disabled:
+                build_and_append_malformed_yaml_journal_entry(
+                    file_path, stem, errors, effective_mode=effective_mode
+                )
     except TimeoutError as exc:
         errors.append(
             f"Phase 3.7 MALFORMED_YAML: domain lock timeout for {file_path.stem}: {exc}"

@@ -45,6 +45,7 @@ def make_executor(
         enable_graph_channel_repair=enable_graph_channel_repair,
         progress_callback=progress_callback,
         journal_callback=journal_callback,
+        graph_repair_self_loop="enabled",  # Story #920: override default dry_run for mutation tests
     )
 
 

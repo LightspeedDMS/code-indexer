@@ -126,12 +126,15 @@ def _execute_unique_rewrite(
     prose_fragment: str,
     target_domain: str,
     errors: List[str],
+    dry_run: bool = False,
+    would_be_writes: Optional[List] = None,
 ) -> Tuple[List[str], bool]:
     """Read source, prepare rewrite, check target exists, write source atomically.
 
     Returns (outgoing_cells, success). Detects already-remapped rows for idempotence:
     if a prior call already replaced the prose fragment, skips the source write and
     returns the existing row's cells so the backfill guard can still run.
+    dry_run=True: skips _atomic_write; appends to would_be_writes instead.
     """
     from code_indexer.server.services.dep_map_repair_phase37 import (
         acquire_domain_lock,
@@ -164,6 +167,11 @@ def _execute_unique_rewrite(
     if new_content is None:
         return [], False
 
+    if dry_run:
+        if would_be_writes is not None:
+            would_be_writes.append((str(source_path), "outgoing_cell_rewritten"))
+        return outgoing_cells, True
+
     try:
         with acquire_domain_lock(source_path.stem):
             if not _atomic_write(source_path, new_content, errors):
@@ -188,6 +196,10 @@ def repair_one_garbage_domain_anomaly(
     journal_and_backfill_fn: Any,
     extract_prose_fn: Any,
     log_fn: Any = None,
+    dry_run: bool = False,
+    journal_disabled: bool = False,
+    effective_mode: str = "enabled",
+    would_be_writes: Optional[List] = None,
 ) -> None:
     """Process one AnomalyEntry for GARBAGE_DOMAIN_REJECTED repair.
 
@@ -195,6 +207,11 @@ def repair_one_garbage_domain_anomaly(
     unsafe target). Delegates I/O to _resolve_source_path, _extract_candidates,
     and _execute_unique_rewrite. log_fn (optional) receives sorted candidate
     domain names for both the ambiguous and no-match paths.
+    dry_run=True: passes through to _execute_unique_rewrite and
+    journal_and_backfill_fn; skips file writes but does NOT suppress journaling.
+    journal_disabled=True: suppresses all journaling (invocation-level dry_run).
+    Per-type dry_run: dry_run=True, journal_disabled=False => no file writes, journal IS written.
+    effective_mode: label written to journal entries ('enabled' or 'dry_run').
     """
     from code_indexer.server.services.dep_map_repair_phase37 import Action
 
@@ -216,14 +233,16 @@ def repair_one_garbage_domain_anomaly(
                 f"Phase 3.7: {label} garbage-domain mapping in {example.file}: "
                 f"candidates = {sorted(candidates)}"
             )
-        append_journal_fn(
-            journal,
-            stem,
-            "",
-            Action.garbage_domain_ambiguous_review,
-            [example.message],
-            errors=errors,
-        )
+        if not journal_disabled:
+            append_journal_fn(
+                journal,
+                stem,
+                "",
+                Action.garbage_domain_ambiguous_review,
+                [example.message],
+                errors=errors,
+                effective_mode=effective_mode,
+            )
         return
 
     target_domain = next(iter(candidates))
@@ -231,14 +250,16 @@ def repair_one_garbage_domain_anomaly(
         errors.append(
             f"Phase 3.7: rejected unsafe target domain name: {target_domain!r}"
         )
-        append_journal_fn(
-            journal,
-            stem,
-            "",
-            Action.garbage_domain_ambiguous_review,
-            [example.message],
-            errors=errors,
-        )
+        if not journal_disabled:
+            append_journal_fn(
+                journal,
+                stem,
+                "",
+                Action.garbage_domain_ambiguous_review,
+                [example.message],
+                errors=errors,
+                effective_mode=effective_mode,
+            )
         return
 
     target_path = output_dir / f"{target_domain}.md"
@@ -248,6 +269,8 @@ def repair_one_garbage_domain_anomaly(
         extract_prose_fn(example.message),
         target_domain,
         errors,
+        dry_run=dry_run,
+        would_be_writes=would_be_writes,
     )
     if not ok:
         return
@@ -261,11 +284,14 @@ def repair_one_garbage_domain_anomaly(
         outgoing_cells,
         fixed,
         errors,
+        dry_run=dry_run,
+        journal_disabled=journal_disabled,
+        effective_mode=effective_mode,
+        would_be_writes=would_be_writes,
     )
 
 
-def _validate_journal_backfill_args(
-    journal: Any,
+def _validate_non_journal_args(
     stem: str,
     target_domain: str,
     source_path: Path,
@@ -273,11 +299,12 @@ def _validate_journal_backfill_args(
     outgoing_cells: List[str],
     fixed: List[str],
     errors: List[str],
-    append_journal_fn: Any,
 ) -> None:
-    """Raise TypeError for any invalid argument to journal_and_backfill_garbage_domain."""
-    if journal is None or not hasattr(journal, "append"):
-        raise TypeError("journal must have an append() method")
+    """Raise TypeError for any invalid non-journal argument.
+
+    Called on both the dry-run and normal code paths so argument integrity is
+    enforced regardless of whether journal validation is applicable.
+    """
     if not isinstance(stem, str) or not stem:
         raise TypeError("stem must be a non-empty str")
     if not isinstance(target_domain, str) or not target_domain:
@@ -292,6 +319,25 @@ def _validate_journal_backfill_args(
         raise TypeError("fixed must be a list")
     if not isinstance(errors, list):
         raise TypeError("errors must be a list")
+
+
+def _validate_journal_backfill_args(
+    journal: Any,
+    stem: str,
+    target_domain: str,
+    source_path: Path,
+    target_path: Path,
+    outgoing_cells: List[str],
+    fixed: List[str],
+    errors: List[str],
+    append_journal_fn: Any,
+) -> None:
+    """Raise TypeError for any invalid argument to journal_and_backfill_garbage_domain."""
+    _validate_non_journal_args(
+        stem, target_domain, source_path, target_path, outgoing_cells, fixed, errors
+    )
+    if journal is None or not hasattr(journal, "append"):
+        raise TypeError("journal must have an append() method")
     if not callable(append_journal_fn):
         raise TypeError("append_journal_fn must be callable")
 
@@ -305,8 +351,18 @@ def _write_target_backfill(
     errors: List[str],
     journal: Any,
     append_journal_fn: Any,
+    dry_run: bool = False,
+    journal_disabled: bool = False,
+    effective_mode: str = "enabled",
+    would_be_writes: Optional[List] = None,
 ) -> None:
-    """Read target, detect duplicate row, insert+write if new, journal the backfill."""
+    """Read target, detect duplicate row, insert+write if new, journal the backfill.
+
+    dry_run=True: skips atomic_write_text; records would-be write in would_be_writes.
+    journal_disabled=True: suppresses append_journal_fn call (invocation-level dry_run).
+    Per-type dry_run: dry_run=True, journal_disabled=False => no file write, journal IS written.
+    effective_mode: label written to journal entry ('enabled' or 'dry_run').
+    """
     from code_indexer.server.services.dep_map_repair_phase37 import (
         Action,
         acquire_domain_lock,
@@ -334,6 +390,27 @@ def _write_target_backfill(
         errors.append(f"Phase 3.7: backfill failed for {target_path.name}: {exc}")
         return
 
+    if dry_run:
+        if would_be_writes is not None:
+            would_be_writes.append((str(target_path), "mirror_row_backfilled"))
+        if not journal_disabled:
+            append_journal_fn(
+                journal,
+                stem,
+                target_domain,
+                Action.garbage_domain_remapped,
+                [],
+                [
+                    {
+                        "path": str(target_path),
+                        "change": "mirror row backfilled (dry-run)",
+                    }
+                ],
+                errors=errors,
+                effective_mode=effective_mode,
+            )
+        return
+
     try:
         with acquire_domain_lock(target_domain):
             if atomic_write_text(target_path, new_target, errors):
@@ -345,6 +422,7 @@ def _write_target_backfill(
                     [],
                     [{"path": str(target_path), "change": "mirror row backfilled"}],
                     errors=errors,
+                    effective_mode=effective_mode,
                 )
     except TimeoutError as exc:
         errors.append(
@@ -363,39 +441,59 @@ def journal_and_backfill_garbage_domain(
     errors: List[str],
     *,
     append_journal_fn: Any,
+    dry_run: bool = False,
+    journal_disabled: bool = False,
+    effective_mode: str = "enabled",
+    would_be_writes: Optional[List] = None,
 ) -> None:
     """Journal source rewrite, backfill mirror row in target, journal backfill.
 
-    Validates all required args. Delegates per-step logic to private helpers.
-    append_journal_fn is dependency-injected to keep this a pure function.
+    dry_run=True: skips file writes; records would-be writes; does NOT suppress journaling.
+    journal_disabled=True: suppresses ALL journaling (invocation-level dry_run, Story #919).
+    Per-type dry_run: dry_run=True, journal_disabled=False => no file writes, journal IS written.
+    journal=None is valid only when journal_disabled=True.
+    effective_mode: must be 'enabled' or 'dry_run'; written to journal entries.
     """
+    if effective_mode not in ("enabled", "dry_run"):
+        raise ValueError(
+            f"effective_mode must be 'enabled' or 'dry_run', got {effective_mode!r}"
+        )
     from code_indexer.server.services.dep_map_repair_phase37 import Action
 
-    _validate_journal_backfill_args(
-        journal,
-        stem,
-        target_domain,
-        source_path,
-        target_path,
-        outgoing_cells,
-        fixed,
-        errors,
-        append_journal_fn,
+    _validate_non_journal_args(
+        stem, target_domain, source_path, target_path, outgoing_cells, fixed, errors
     )
+    if not journal_disabled:
+        _validate_journal_backfill_args(
+            journal,
+            stem,
+            target_domain,
+            source_path,
+            target_path,
+            outgoing_cells,
+            fixed,
+            errors,
+            append_journal_fn,
+        )
+        append_journal_fn(
+            journal,
+            stem,
+            target_domain,
+            Action.garbage_domain_remapped,
+            [],
+            [{"path": str(source_path), "change": "outgoing cell rewritten"}],
+            errors=errors,
+            effective_mode=effective_mode,
+        )
 
     rescue_msg = (
         f"Phase 3.7: rescued garbage-domain cell in {stem}.md -> {target_domain}"
     )
-
-    append_journal_fn(
-        journal,
-        stem,
-        target_domain,
-        Action.garbage_domain_remapped,
-        [],
-        [{"path": str(source_path), "change": "outgoing cell rewritten"}],
-        errors=errors,
-    )
+    if dry_run:
+        if would_be_writes is not None:
+            would_be_writes.append((str(source_path), "remapped_outgoing_row"))
+        fixed.append(rescue_msg)
+        return
 
     _write_target_backfill(
         target_path,
@@ -406,8 +504,11 @@ def journal_and_backfill_garbage_domain(
         errors,
         journal,
         append_journal_fn,
+        dry_run=False,
+        journal_disabled=journal_disabled,
+        effective_mode=effective_mode,
+        would_be_writes=would_be_writes,
     )
-
     fixed.append(rescue_msg)
 
 

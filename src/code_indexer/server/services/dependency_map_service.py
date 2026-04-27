@@ -176,6 +176,60 @@ class DependencyMapService:
             # Lock is held by another operation
             return False
 
+    def run_graph_repair_dry_run(self) -> Dict[str, Any]:
+        """Run Phase 3.7 graph-channel repair in dry-run mode (Story #919 AC5).
+
+        Builds a DepMapRepairExecutor against the live dep-map output directory,
+        calls _run_phase37(dry_run=True), and returns the DryRunReport as a plain
+        dict so MCP handlers can JSON-serialize it directly.
+
+        Returns an empty-safe dict when the dep-map output directory does not exist.
+        """
+        from dataclasses import asdict
+        from datetime import datetime, timezone
+
+        from typing import cast
+
+        from .dep_map_health_detector import DepMapHealthDetector
+        from .dep_map_index_regenerator import IndexRegenerator
+        from .dep_map_repair_executor import DepMapRepairExecutor, DryRunReport
+
+        dep_map_dir = (
+            Path(self._golden_repos_manager.golden_repos_dir)
+            / "cidx-meta"
+            / "dependency-map"
+        )
+        if not dep_map_dir.exists():
+            return {
+                "mode": "dry_run",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "total_anomalies": 0,
+                "per_type_counts": {},
+                "per_verdict_counts": {},
+                "per_action_counts": {},
+                "would_be_writes": [],
+                "skipped": [],
+                "errors": [
+                    f"dependency-map output directory does not exist: {dep_map_dir}"
+                ],
+            }
+
+        from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
+
+        executor = DepMapRepairExecutor(
+            health_detector=DepMapHealthDetector(),
+            index_regenerator=IndexRegenerator(),
+            enable_graph_channel_repair=True,
+            invoke_claude_fn=invoke_claude_cli,
+        )
+        fixed: List[str] = []
+        errors: List[str] = []
+        report = executor._run_phase37(dep_map_dir, fixed, errors, dry_run=True)
+        # _run_phase37(dry_run=True) with enable_graph_channel_repair=True always returns
+        # DryRunReport — the Optional[DryRunReport] return type covers the False/None path
+        # (enable_graph_channel_repair=False).  cast narrows the type for mypy only.
+        return asdict(cast(DryRunReport, report))
+
     def run_full_analysis(self, job_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Orchestrate full dependency map analysis pipeline.

@@ -31,7 +31,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple
 
 if TYPE_CHECKING:
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
@@ -52,6 +52,11 @@ from code_indexer.server.services.dep_map_repair_phase37 import (
 )
 from code_indexer.server.services.dep_map_repair_malformed_yaml import (
     run_malformed_yaml_repairs,
+)
+from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
+from code_indexer.server.services.dep_map_parser_hygiene import AnomalyType
+from code_indexer.server.services.dep_map_repair_bidirectional import (
+    audit_one_bidirectional_mismatch,
 )
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
@@ -75,6 +80,10 @@ logger = logging.getLogger(__name__)
 # (Story #876 Phase B-2 D2).
 _BRANCH_PROGRESS_SENTINEL: int = -1
 
+# Valid values for per-anomaly-type enablement config flags (Story #920).
+# NO helper function for validation — inline only (MESSI Rule 3 KISS, gemini C6).
+_VALID_PER_TYPE_VALUES: frozenset = frozenset({"disabled", "dry_run", "enabled"})
+
 
 @dataclass
 class RepairResult:
@@ -97,6 +106,35 @@ class RepairResult:
             "anomalies_before": self.anomalies_before,
             "anomalies_after": self.anomalies_after,
         }
+
+
+@dataclass(frozen=True)
+class DryRunReport:
+    """Verdict-only summary returned by _run_phase37(dry_run=True).
+
+    All fields are plain Python types so json.dumps(asdict(report), default=str)
+    round-trips without error (AC2/AC6).
+    errors: non-empty when the dry-run could not proceed (e.g., missing output dir).
+    """
+
+    mode: str  # always "dry_run"
+    timestamp: str
+    total_anomalies: int
+    per_type_counts: Dict[str, int]
+    per_verdict_counts: Dict[str, int]
+    per_action_counts: Dict[str, int]
+    would_be_writes: List[Tuple[str, str]]  # (file_path, operation)
+    skipped: List[Tuple[str, str]]  # (anomaly_type, reason)
+    errors: List[str]  # visible error messages; non-empty on failure
+
+
+def is_effective_dry_run(invocation_dry_run: bool, per_type_flag: str) -> bool:
+    """Composition rule: invocation-level dry_run OR per-type flag == 'dry_run'.
+
+    invocation_dry_run=True takes precedence over any per-type flag (incl. 'enabled').
+    Used by both Story 7 (#919) and Story 8 (#920).
+    """
+    return invocation_dry_run or (per_type_flag == "dry_run")
 
 
 class DepMapRepairExecutor:
@@ -128,6 +166,12 @@ class DepMapRepairExecutor:
         lifecycle_invoker: Optional[Callable] = None,
         golden_repos_dir: Optional[Path] = None,
         enable_graph_channel_repair: bool = True,
+        repo_path_resolver: Optional[Callable[[str], str]] = None,
+        invoke_claude_fn: Optional[Callable] = None,
+        graph_repair_self_loop: Optional[str] = None,
+        graph_repair_malformed_yaml: Optional[str] = None,
+        graph_repair_garbage_domain: Optional[str] = None,
+        graph_repair_bidirectional_mismatch: Optional[str] = None,
     ) -> None:
         self._health_detector = health_detector
         self._index_regenerator = index_regenerator
@@ -138,9 +182,48 @@ class DepMapRepairExecutor:
         self._lifecycle_invoker = lifecycle_invoker
         self._golden_repos_dir = golden_repos_dir
         self._enable_graph_channel_repair: bool = enable_graph_channel_repair
+        self._repo_path_resolver: Optional[Callable[[str], str]] = repo_path_resolver
+        self._invoke_claude_fn: Optional[Callable] = invoke_claude_fn
         logger.debug(
             "[RepairExecutor] enable_graph_channel_repair=%s",
             self._enable_graph_channel_repair,
+        )
+        # Per-anomaly-type enablement flags (Story #920).
+        # Step 1: declare typed attributes with default "dry_run" (mypy-visible).
+        self._graph_repair_self_loop: str = "dry_run"
+        self._graph_repair_malformed_yaml: str = "dry_run"
+        self._graph_repair_garbage_domain: str = "dry_run"
+        self._graph_repair_bidirectional_mismatch: str = "dry_run"
+        # Step 2: validate all inputs before any assignment (fail-fast, no partial state).
+        for _param_name, _raw_value in (
+            ("graph_repair_self_loop", graph_repair_self_loop),
+            ("graph_repair_malformed_yaml", graph_repair_malformed_yaml),
+            ("graph_repair_garbage_domain", graph_repair_garbage_domain),
+            (
+                "graph_repair_bidirectional_mismatch",
+                graph_repair_bidirectional_mismatch,
+            ),
+        ):
+            if _raw_value is not None and _raw_value not in _VALID_PER_TYPE_VALUES:
+                raise ValueError(
+                    f"{_param_name}: {_raw_value!r} not in {sorted(_VALID_PER_TYPE_VALUES)}"
+                )
+        # Step 3: direct assignment — None inputs keep the "dry_run" default.
+        if graph_repair_self_loop is not None:
+            self._graph_repair_self_loop = graph_repair_self_loop
+        if graph_repair_malformed_yaml is not None:
+            self._graph_repair_malformed_yaml = graph_repair_malformed_yaml
+        if graph_repair_garbage_domain is not None:
+            self._graph_repair_garbage_domain = graph_repair_garbage_domain
+        if graph_repair_bidirectional_mismatch is not None:
+            self._graph_repair_bidirectional_mismatch = (
+                graph_repair_bidirectional_mismatch
+            )
+        self._log(
+            f"Phase 3.7 per-type flags: self_loop={self._graph_repair_self_loop}, "
+            f"malformed_yaml={self._graph_repair_malformed_yaml}, "
+            f"garbage_domain={self._graph_repair_garbage_domain}, "
+            f"bidirectional_mismatch={self._graph_repair_bidirectional_mismatch}"
         )
 
     def execute(
@@ -568,33 +651,327 @@ class DepMapRepairExecutor:
         output_dir: Path,
         fixed: List[str],
         errors: List[str],
-    ) -> None:
-        """Phase 3.7 shim: check enable flag then delegate to phase37, malformed_yaml, and garbage_domain modules.
+        dry_run: bool = False,
+    ) -> Optional["DryRunReport"]:
+        """Phase 3.7 shim: check enable flag then delegate to repair sub-modules.
 
-        No-op when enable_graph_channel_repair is False (AC2).
+        No-op when enable_graph_channel_repair is False.
+        dry_run=True: per-handler gating via is_effective_dry_run — no disk writes
+        or journal appends. Returns DryRunReport (AC1/AC3).
+        dry_run=False: existing mutation behavior, return None (AC4).
         """
+        from datetime import datetime, timezone
+
         if not self._enable_graph_channel_repair:
-            return
-        run_phase37(output_dir, fixed, errors)
-        run_malformed_yaml_repairs(
+            return None
+
+        # Determine if any type-level dry-run is in effect (Story #920).
+        # any_type_dry is True when at least one per-type flag is "dry_run" OR
+        # the invocation-level dry_run is True.  This governs DryRunReport return.
+        any_type_dry = dry_run or any(
+            f == "dry_run"
+            for f in (
+                self._graph_repair_self_loop,
+                self._graph_repair_malformed_yaml,
+                self._graph_repair_garbage_domain,
+                self._graph_repair_bidirectional_mismatch,
+            )
+        )
+        would_be_writes: List[Tuple[str, str]] = []
+        per_type: Dict[str, int] = {}
+        skipped: List[Tuple[str, str]] = []
+        extra_verdict_counts: Dict[str, int] = {}
+        extra_action_counts: Dict[str, int] = {}
+        if any_type_dry:
+            per_type, skipped = self._collect_phase37_anomaly_scan(output_dir)
+
+        self._run_phase37_repairs(
             output_dir,
             fixed,
             errors,
-            domain_analyzer=self._domain_analyzer,
-            load_domains_json_fn=self._load_domains_json,
-            log_fn=self._log,
-            locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
-            is_safe_domain_name_fn=self._is_safe_domain_name,
+            dry_run=dry_run,
+            would_be_writes=would_be_writes,
+            extra_verdict_counts=extra_verdict_counts,
+            extra_action_counts=extra_action_counts,
+            skipped=skipped,
         )
-        # GARBAGE_DOMAIN_REJECTED pass — Story #911
-        from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
-        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyType
 
-        parser = DepMapMCPParser(dep_map_path=output_dir.parent)
+        if not any_type_dry:
+            return None
+
+        per_action, per_verdict = self._tally_dry_run_actions(
+            fixed, extra_verdict_counts, extra_action_counts
+        )
+        return DryRunReport(
+            mode="dry_run",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            total_anomalies=sum(per_type.values()),
+            per_type_counts=per_type,
+            per_verdict_counts=per_verdict,
+            per_action_counts=per_action,
+            would_be_writes=would_be_writes,
+            skipped=skipped,
+            errors=list(errors),
+        )
+
+    def _dispatch_per_type(
+        self,
+        type_label: str,
+        per_type_flag: str,
+        handler: Callable,
+        invocation_dry_run: bool,
+        skipped: Optional[List[Tuple[str, str]]],
+        disabled_recorded: Set[str],
+    ) -> None:
+        """Gate and invoke one Phase 3.7 handler based on per-type flag (Story #920).
+
+        disabled: log observed-only, record in skipped once (disabled_recorded guards dupes).
+        dry_run / enabled: compute effective dry_run and invoke handler with:
+          - dry_run: True when either invocation_dry_run or per_type_flag=='dry_run' (skip writes)
+          - journal_disabled: True ONLY when invocation_dry_run=True (Story #919 suppresses journal)
+          - effective_mode: the per_type_flag itself ('enabled' or 'dry_run') for journal labeling
+
+        Composition table:
+          invocation_dry_run=False, per_type='enabled'  => dry_run=False, journal_disabled=False, effective_mode='enabled'
+          invocation_dry_run=False, per_type='dry_run'  => dry_run=True,  journal_disabled=False, effective_mode='dry_run'
+          invocation_dry_run=True,  per_type='enabled'  => dry_run=True,  journal_disabled=True,  effective_mode='enabled'
+          invocation_dry_run=True,  per_type='dry_run'  => dry_run=True,  journal_disabled=True,  effective_mode='dry_run'
+        """
+        if per_type_flag == "disabled":
+            self._log(f"Phase 3.7: {type_label} disabled by config; observed only")
+            if skipped is not None and type_label not in disabled_recorded:
+                skipped.append((type_label.lower(), "type_disabled_by_config"))
+                disabled_recorded.add(type_label)
+            return
+        effective_dry_run = is_effective_dry_run(invocation_dry_run, per_type_flag)
+        journal_disabled = invocation_dry_run
+        handler(
+            dry_run=effective_dry_run,
+            journal_disabled=journal_disabled,
+            effective_mode=per_type_flag,
+        )
+
+    def _run_phase37_repairs(
+        self,
+        target_dir: Path,
+        fixed: List[str],
+        errors: List[str],
+        dry_run: bool = False,
+        would_be_writes: Optional[List] = None,
+        extra_verdict_counts: Optional[Dict[str, int]] = None,
+        extra_action_counts: Optional[Dict[str, int]] = None,
+        skipped: Optional[List[Tuple[str, str]]] = None,
+    ) -> None:
+        """Coordinator: run all Phase 3.7 repairs with per-type flag gating (Story #920).
+
+        Each handler gated by _dispatch_per_type using the per-type flag.
+        disabled_recorded set prevents duplicate skipped entries in the anomaly loop.
+        """
+        disabled_recorded: Set[str] = set()
+        self._dispatch_per_type(
+            "SELF_LOOP",
+            self._graph_repair_self_loop,
+            lambda dry_run, journal_disabled, effective_mode: run_phase37(
+                target_dir,
+                fixed,
+                errors,
+                dry_run=dry_run,
+                would_be_writes=would_be_writes,
+                journal_disabled=journal_disabled,
+                effective_mode=effective_mode,
+            ),
+            dry_run,
+            skipped,
+            disabled_recorded,
+        )
+        self._dispatch_per_type(
+            "MALFORMED_YAML",
+            self._graph_repair_malformed_yaml,
+            lambda dry_run,
+            journal_disabled,
+            effective_mode: run_malformed_yaml_repairs(
+                target_dir,
+                fixed,
+                errors,
+                domain_analyzer=self._domain_analyzer,
+                load_domains_json_fn=self._load_domains_json,
+                log_fn=self._log,
+                locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
+                is_safe_domain_name_fn=self._is_safe_domain_name,
+                dry_run=dry_run,
+                journal_disabled=journal_disabled,
+                effective_mode=effective_mode,
+                would_be_writes=would_be_writes,
+            ),
+            dry_run,
+            skipped,
+            disabled_recorded,
+        )
+        parser = DepMapMCPParser(dep_map_path=target_dir.parent)
         _, all_anomalies, _p, _d = parser.get_cross_domain_graph_with_channels()
+        domains_json = self._load_domains_json(target_dir)
         for _a in all_anomalies:
             if _a.type == AnomalyType.GARBAGE_DOMAIN_REJECTED:
-                self._repair_garbage_domain_rejected(output_dir, _a, fixed, errors)
+                self._dispatch_per_type(
+                    "GARBAGE_DOMAIN_REJECTED",
+                    self._graph_repair_garbage_domain,
+                    lambda dry_run,
+                    journal_disabled,
+                    effective_mode: self._repair_garbage_domain_rejected(
+                        target_dir,
+                        _a,
+                        fixed,
+                        errors,
+                        dry_run=dry_run,
+                        journal_disabled=journal_disabled,
+                        effective_mode=effective_mode,
+                        would_be_writes=would_be_writes,
+                    ),
+                    dry_run,
+                    skipped,
+                    disabled_recorded,
+                )
+            elif (
+                _a.type == AnomalyType.BIDIRECTIONAL_MISMATCH
+                and self._invoke_claude_fn is not None
+            ):
+                self._dispatch_per_type(
+                    "BIDIRECTIONAL_MISMATCH",
+                    self._graph_repair_bidirectional_mismatch,
+                    lambda dry_run,
+                    journal_disabled,
+                    effective_mode: self._audit_bidirectional_mismatch(
+                        target_dir,
+                        _a,
+                        domains_json,
+                        fixed,
+                        errors,
+                        dry_run=dry_run,
+                        journal_disabled=journal_disabled,
+                        effective_mode=effective_mode,
+                        would_be_writes=would_be_writes,
+                        extra_verdict_counts=extra_verdict_counts,
+                        extra_action_counts=extra_action_counts,
+                    ),
+                    dry_run,
+                    skipped,
+                    disabled_recorded,
+                )
+
+    def _collect_phase37_anomaly_scan(
+        self,
+        output_dir: Path,
+    ) -> Tuple[Dict[str, int], List[Tuple[str, str]]]:
+        """Scan anomalies for DryRunReport pre-scan (called only during dry-run).
+
+        Returns (per_type, skipped). BIDIRECTIONAL_MISMATCH is recorded as skipped
+        only when invoke_claude_fn is None — when wired, the Claude+ripgrep audit
+        runs during dry-run (backfill write is the only gated operation).
+        """
+        from collections import defaultdict
+
+        per_type: Dict[str, int] = defaultdict(int)
+        skipped: List[Tuple[str, str]] = []
+        parser = DepMapMCPParser(dep_map_path=output_dir.parent)
+        _, all_anom, _p, _d = parser.get_cross_domain_graph_with_channels()
+        for _a in all_anom:
+            atype = str(_a.type.value if hasattr(_a.type, "value") else _a.type)
+            per_type[atype] += 1
+            if (
+                _a.type == AnomalyType.BIDIRECTIONAL_MISMATCH
+                and self._invoke_claude_fn is None
+            ):
+                skipped.append((atype, "no_invoke_claude_fn"))
+        return dict(per_type), skipped
+
+    @staticmethod
+    def _tally_dry_run_actions(
+        fixed_entries: List[str],
+        extra_verdict_counts: Optional[Dict[str, int]] = None,
+        extra_action_counts: Optional[Dict[str, int]] = None,
+    ) -> Tuple[Dict[str, int], Dict[str, int]]:
+        """Derive per_action and per_verdict dicts from fixed[] entry strings.
+
+        extra_verdict_counts / extra_action_counts: optional injected tallies for
+        bidirectional verdicts (INCONCLUSIVE, REFUTED) that never produce fixed[]
+        entries, passed from _run_phase37_repairs via _audit_bidirectional_mismatch.
+        """
+        from collections import defaultdict
+
+        per_action: Dict[str, int] = defaultdict(int)
+        per_verdict: Dict[str, int] = defaultdict(int)
+        for entry in fixed_entries:
+            if "self-loop" in entry:
+                per_action["self_loop_deleted"] += 1
+                per_verdict["NA"] += 1
+            elif "malformed" in entry or "reemitted" in entry:
+                per_action["malformed_yaml_reemitted"] += 1
+                per_verdict["NA"] += 1
+            elif "garbage" in entry or "rescued" in entry:
+                per_action["garbage_domain_remapped"] += 1
+                per_verdict["NA"] += 1
+            # NOTE: BIDIRECTIONAL_MISMATCH outcomes are NOT tallied from fixed[] strings.
+            # extra_verdict_counts / extra_action_counts are the authoritative source for
+            # bidirectional verdicts (set in _audit_one_impl). Tallying from fixed[] would
+            # double-count CONFIRMED outcomes (fixed[] entry + extra_* both present).
+        if extra_verdict_counts:
+            for k, v in extra_verdict_counts.items():
+                per_verdict[k] += v
+        if extra_action_counts:
+            for k, v in extra_action_counts.items():
+                per_action[k] += v
+        return dict(per_action), dict(per_verdict)
+
+    def _audit_bidirectional_mismatch(
+        self,
+        output_dir: "Path",
+        anomaly: Any,
+        domains_json: List[Dict[str, Any]],
+        fixed: List[str],
+        errors: List[str],
+        dry_run: bool = False,
+        journal_disabled: bool = False,
+        effective_mode: str = "enabled",
+        would_be_writes: Optional[List] = None,
+        extra_verdict_counts: Optional[Dict[str, int]] = None,
+        extra_action_counts: Optional[Dict[str, int]] = None,
+    ) -> None:
+        """AC12 shim: load prompt template and delegate to audit_one_bidirectional_mismatch.
+
+        Encapsulates journal creation and template path resolution so _run_phase37
+        stays focused on anomaly routing.
+        dry_run=True: Claude+ripgrep verification still runs; only the backfill write
+        is skipped (gated inside dep_map_repair_bidirectional_backfill.py).
+        journal_disabled=True: suppresses journaling entirely (invocation-level dry_run).
+        effective_mode: label written to journal entries ('enabled' or 'dry_run').
+        extra_verdict_counts / extra_action_counts: mutated in-place to surface
+        INCONCLUSIVE/REFUTED verdicts that never produce fixed[] entries.
+        """
+        from pathlib import Path as _Path
+
+        prompt_template_path = (
+            _Path(__file__).parent.parent
+            / "mcp"
+            / "prompts"
+            / "bidirectional_mismatch_audit.md"
+        )
+        journal = None if journal_disabled else RepairJournal()
+        audit_one_bidirectional_mismatch(
+            output_dir=output_dir,
+            anomaly=anomaly,
+            domains_json=domains_json,
+            invoke_claude_fn=self._invoke_claude_fn,
+            repo_path_resolver=self._repo_path_resolver,
+            journal=journal,
+            fixed=fixed,
+            errors=errors,
+            prompt_template_path=prompt_template_path,
+            dry_run=dry_run,
+            effective_mode=effective_mode,
+            would_be_writes=would_be_writes,
+            extra_verdict_counts=extra_verdict_counts,
+            extra_action_counts=extra_action_counts,
+        )
 
     def _repair_self_loop(
         self,
@@ -708,11 +1085,13 @@ class DepMapRepairExecutor:
         citations: List[str],
         file_writes: Optional[List[Dict[str, str]]] = None,
         errors: Optional[List[str]] = None,
+        effective_mode: str = "enabled",
     ) -> None:
         """Centralized GARBAGE_DOMAIN_REJECTED journal entry creation and append.
 
         Validates journal has append() and action has .value before creating entry.
         On failure, appends to errors when provided; otherwise logs a warning.
+        effective_mode: label written to journal entry ('enabled' or 'dry_run').
         """
         if journal is None or not hasattr(journal, "append"):
             raise TypeError("journal must have an append() method")
@@ -730,7 +1109,7 @@ class DepMapRepairExecutor:
                 citations=citations,
                 file_writes=file_writes or [],
                 claude_response_raw="",
-                effective_mode="deterministic",
+                effective_mode=effective_mode,
             )
             journal.append(entry)
         except (ValueError, TypeError, RuntimeError, OSError) as exc:
@@ -750,11 +1129,18 @@ class DepMapRepairExecutor:
         outgoing_cells: List[str],
         fixed: List[str],
         errors: List[str],
+        dry_run: bool = False,
+        journal_disabled: bool = False,
+        effective_mode: str = "enabled",
+        would_be_writes: Optional[List] = None,
     ) -> None:
         """Thin shim delegating to journal_and_backfill_garbage_domain.
 
         Domain locks are acquired inside _execute_unique_rewrite (source) and
         _write_target_backfill (target) within the production helpers (Story #917).
+        dry_run=True: passed through to journal_and_backfill_garbage_domain.
+        journal_disabled=True: passed through; suppresses all journaling.
+        effective_mode: label written to journal entries ('enabled' or 'dry_run').
         """
         from code_indexer.server.services.dep_map_repair_garbage_domain import (
             journal_and_backfill_garbage_domain,
@@ -770,6 +1156,10 @@ class DepMapRepairExecutor:
             fixed,
             errors,
             append_journal_fn=self._append_garbage_journal,
+            dry_run=dry_run,
+            journal_disabled=journal_disabled,
+            effective_mode=effective_mode,
+            would_be_writes=would_be_writes,
         )
 
     def _repair_garbage_domain_rejected(
@@ -778,12 +1168,19 @@ class DepMapRepairExecutor:
         anomaly: Any,
         fixed: List[str],
         errors: List[str],
+        dry_run: bool = False,
+        journal_disabled: bool = False,
+        effective_mode: str = "enabled",
+        would_be_writes: Optional[List] = None,
     ) -> None:
         """Repair GARBAGE_DOMAIN_REJECTED anomalies via _domains.json inverted-index lookup.
 
         Unique mapping -> source outgoing cell rewrite + mirror incoming backfill.
         Ambiguous or no match -> journal for manual operator review.
         Handles both AnomalyEntry and AnomalyAggregate (Story #911 AC6).
+        dry_run=True: skips file writes but may still journal (per-type dry_run observation mode).
+        journal_disabled=True: suppresses all journaling (invocation-level dry_run, Story #919).
+        effective_mode: label written to journal entries ('enabled' or 'dry_run').
         """
         from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
         from code_indexer.server.services.dep_map_repair_garbage_domain import (
@@ -796,7 +1193,7 @@ class DepMapRepairExecutor:
         )
         domain_list = self._load_domains_json(output_dir)
         repo_to_domains = build_inverted_repo_index(domain_list)
-        journal = RepairJournal()
+        journal = None if journal_disabled else RepairJournal()
         for example in examples:
             repair_one_garbage_domain_anomaly(
                 output_dir,
@@ -810,6 +1207,10 @@ class DepMapRepairExecutor:
                 journal_and_backfill_fn=self._journal_and_backfill_garbage,
                 extract_prose_fn=self._extract_prose_fragment,
                 log_fn=self._log,
+                dry_run=dry_run,
+                journal_disabled=journal_disabled,
+                effective_mode=effective_mode,
+                would_be_writes=would_be_writes,
             )
 
     @staticmethod

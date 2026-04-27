@@ -91,6 +91,11 @@ def test_factory_wires_enable_graph_channel_repair_from_config(tmp_path):
 
     fake_config = MagicMock()
     fake_config.enable_graph_channel_repair = False
+    # Story #920: set per-type flags to None so executor defaults to "dry_run"
+    fake_config.graph_repair_self_loop = None
+    fake_config.graph_repair_malformed_yaml = None
+    fake_config.graph_repair_garbage_domain = None
+    fake_config.graph_repair_bidirectional_mismatch = None
     fake_config_service = MagicMock()
     fake_config_service.get_config.return_value = fake_config
 
@@ -98,9 +103,20 @@ def test_factory_wires_enable_graph_channel_repair_from_config(tmp_path):
     fake_dep_map_service._job_tracker = None
     fake_activity_journal = MagicMock()
 
-    with patch(
-        "code_indexer.server.services.config_service.get_config_service",
-        return_value=fake_config_service,
+    fake_golden_repo_manager = MagicMock()
+    fake_golden_repo_manager.get_actual_repo_path.side_effect = (
+        lambda alias: f"/mock/{alias}"
+    )
+
+    with (
+        patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=fake_config_service,
+        ),
+        patch(
+            "code_indexer.server.web.routes._get_golden_repo_manager",
+            return_value=fake_golden_repo_manager,
+        ),
     ):
         executor = _build_repair_executor(
             fake_dep_map_service, tmp_path, fake_activity_journal

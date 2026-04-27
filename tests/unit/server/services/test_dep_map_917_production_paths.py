@@ -168,7 +168,20 @@ def test_garbage_domain_production_path_acquires_lock(tmp_path, monkeypatch):
         )
         jnl.append(entry)
 
-    def _backfill(jnl, stem, tgt, src_path, tgt_path, cells, fixed, errors):
+    def _backfill(
+        jnl,
+        stem,
+        tgt,
+        src_path,
+        tgt_path,
+        cells,
+        fixed,
+        errors,
+        dry_run=False,
+        journal_disabled=False,
+        effective_mode="enabled",
+        would_be_writes=None,
+    ):
         _append(jnl, stem, tgt, Action.garbage_domain_remapped, [], errors=errors)
 
     fixed = []

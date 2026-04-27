@@ -36,6 +36,10 @@ class Action(str, Enum):
     Story #908: self_loop_deleted.
     Story #910: malformed_yaml_reemitted.
     Story #911: garbage_domain_remapped, garbage_domain_ambiguous_review.
+    Story #912: auto_backfilled, claude_refuted_pending_operator_approval,
+                inconclusive_manual_review, claude_output_unparseable,
+                claude_cited_but_unverifiable, pleaser_effect_caught,
+                verification_timeout, repo_not_in_domain.
     """
 
     self_loop_deleted = "self_loop_deleted"
@@ -43,6 +47,16 @@ class Action(str, Enum):
     garbage_domain_remapped = "garbage_domain_remapped"
     garbage_domain_ambiguous_review = "garbage_domain_ambiguous_review"
     domain_lock_timeout = "domain_lock_timeout"
+    auto_backfilled = "auto_backfilled"
+    claude_refuted_pending_operator_approval = (
+        "claude_refuted_pending_operator_approval"
+    )
+    inconclusive_manual_review = "inconclusive_manual_review"
+    claude_output_unparseable = "claude_output_unparseable"
+    claude_cited_but_unverifiable = "claude_cited_but_unverifiable"
+    pleaser_effect_caught = "pleaser_effect_caught"
+    verification_timeout = "verification_timeout"
+    repo_not_in_domain = "repo_not_in_domain"
 
 
 _VALID_VERDICTS: frozenset = frozenset({"CONFIRMED", "REFUTED", "INCONCLUSIVE", "N_A"})
@@ -62,7 +76,7 @@ class JournalEntry:
     citations: List[str]
     file_writes: List[Dict[str, str]]
     claude_response_raw: str
-    effective_mode: str
+    effective_mode: str = "enabled"
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -302,8 +316,13 @@ def build_and_append_journal_entry(
     journal_path: Optional[Path],
     journal: Optional[RepairJournal],
     errors: Optional[List[str]] = None,
+    effective_mode: str = "enabled",
 ) -> None:
-    """Build SELF_LOOP JournalEntry and append. Catches write/format exceptions (AC8)."""
+    """Build SELF_LOOP JournalEntry and append. Catches write/format exceptions (AC8).
+
+    effective_mode: label for the journal entry — 'enabled' for full repair,
+    'dry_run' for per-type observation mode (Story #920 composition rule).
+    """
     try:
         jnl = resolve_repair_journal(journal_path, journal)
         entry = JournalEntry(
@@ -317,7 +336,7 @@ def build_and_append_journal_entry(
             citations=[],
             file_writes=[{"path": str(md_path), "operation": "row_deleted"}],
             claude_response_raw="",
-            effective_mode="deterministic",
+            effective_mode=effective_mode,
         )
         jnl.append(entry)
     except (ValueError, TypeError, RuntimeError, OSError) as exc:
@@ -441,10 +460,12 @@ def build_and_append_malformed_yaml_journal_entry(
     file_path: Path,
     domain_name: str,
     errors: Optional[List[str]] = None,
+    effective_mode: str = "enabled",
 ) -> None:
     """Build MALFORMED_YAML JournalEntry and append. Catches write/format exceptions (AC8).
 
     Called after a successful surgical frontmatter re-emit (Story #910).
+    effective_mode: label written to journal entry ('enabled' or 'dry_run').
     """
     try:
         jnl = RepairJournal()
@@ -461,7 +482,7 @@ def build_and_append_malformed_yaml_journal_entry(
                 {"path": str(file_path), "operation": "frontmatter_reemitted"}
             ],
             claude_response_raw="",
-            effective_mode="deterministic",
+            effective_mode=effective_mode,
         )
         jnl.append(entry)
     except (ValueError, TypeError, RuntimeError, OSError) as exc:
@@ -478,8 +499,19 @@ def _repair_one_self_loop(
     fixed: List[str],
     errors: List[str],
     journal: Optional[RepairJournal],
+    dry_run: bool = False,
+    would_be_writes: Optional[List[Any]] = None,
+    effective_mode: str = "enabled",
 ) -> None:
-    """Remove one SELF_LOOP row and journal the repair. Never raises (AC8)."""
+    """Remove one SELF_LOOP row and journal the repair. Never raises (AC8).
+
+    dry_run=True: skips disk writes, records (path, operation) in would_be_writes,
+    but still appends to the journal when journal is not None (per-type dry_run
+    observation mode — audit trail for operators building confidence).
+    journal is None only when invocation_dry_run=True (Story #919 suppresses journaling
+    entirely; caller sets journal=None via journal_disabled flag).
+    effective_mode: label written to journal entry ('enabled' or 'dry_run').
+    """
     raw_file = anomaly.file
     if ".." in raw_file:
         errors.append(f"Phase 3.7: unsafe path rejected (traversal): {raw_file!r}")
@@ -500,12 +532,35 @@ def _repair_one_self_loop(
     new_lines = remove_self_loop_rows(domain_name, original_lines)
     if new_lines == original_lines:
         return
+    if dry_run:
+        if would_be_writes is not None:
+            would_be_writes.append((str(md_path), "row_deleted"))
+        fixed.append(f"Phase 3.7: removed self-loop from {domain_name}.md")
+        # Per-type dry_run: journal IS appended (audit trail); journal is None only
+        # when invocation_dry_run=True (Story #919 composition rule).
+        if journal is not None:
+            build_and_append_journal_entry(
+                md_path,
+                domain_name,
+                None,
+                journal,
+                errors,
+                effective_mode=effective_mode,
+            )
+        return
     try:
         with acquire_domain_lock(domain_name):
             if not atomic_write_text(md_path, "".join(new_lines), errors):
                 return
             fixed.append(f"Phase 3.7: removed self-loop from {domain_name}.md")
-            build_and_append_journal_entry(md_path, domain_name, None, journal, errors)
+            build_and_append_journal_entry(
+                md_path,
+                domain_name,
+                None,
+                journal,
+                errors,
+                effective_mode=effective_mode,
+            )
     except TimeoutError as exc:
         errors.append(f"Phase 3.7: {exc}")
         return
@@ -515,11 +570,21 @@ def run_phase37(
     output_dir: Path,
     fixed: List[str],
     errors: List[str],
+    dry_run: bool = False,
+    would_be_writes: Optional[List[Any]] = None,
+    journal_disabled: bool = False,
+    effective_mode: str = "enabled",
 ) -> None:
     """Repair SELF_LOOP graph-channel anomalies (Phase 3.7 SELF_LOOP orchestrator).
 
     Called by DepMapRepairExecutor._run_phase37 shim after enable flag check.
     Creates one RepairJournal so CIDX_DATA_DIR env var is honoured (Bug #879).
+
+    journal_disabled=True: skips RepairJournal construction entirely — set when
+    invocation_dry_run=True (Story #919 no-journal-during-invocation-dry-run rule).
+    journal_disabled=False + dry_run=True: per-type dry_run — journal IS appended
+    with effective_mode='dry_run' so operators have the audit trail.
+    dry_run=False: full repair — writes happen, journal appended with effective_mode.
 
     MALFORMED_YAML repairs are handled separately by run_malformed_yaml_repairs
     in dep_map_repair_malformed_yaml.py (Story #910 extraction).
@@ -535,6 +600,17 @@ def run_phase37(
     # SELF_LOOP repairs (Story #908)
     self_loop_anomalies = [a for a in data_anomalies if a.type == AnomalyType.SELF_LOOP]
     if self_loop_anomalies:
-        journal = RepairJournal()
+        # journal_disabled=True (invocation_dry_run): skip construction (mkdir side-effect).
+        # journal_disabled=False + dry_run=True (per-type dry_run): journal IS appended.
+        journal = None if journal_disabled else RepairJournal()
         for anomaly in self_loop_anomalies:
-            _repair_one_self_loop(output_dir, anomaly, fixed, errors, journal)
+            _repair_one_self_loop(
+                output_dir,
+                anomaly,
+                fixed,
+                errors,
+                journal,
+                dry_run=dry_run,
+                would_be_writes=would_be_writes,
+                effective_mode=effective_mode,
+            )

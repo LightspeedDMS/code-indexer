@@ -1105,6 +1105,14 @@ class ServerConfig:
     # Set enable_graph_channel_repair=false in config.json to disable.
     enable_graph_channel_repair: bool = True
 
+    # Story #920 - Per-anomaly-type enablement flags (bootstrap-only, never DB).
+    # Each accepts "disabled" | "dry_run" | "enabled". Default None => executor uses "dry_run".
+    # Set in config.json: e.g. {"graph_repair_self_loop": "enabled"}
+    graph_repair_self_loop: Optional[str] = None
+    graph_repair_malformed_yaml: Optional[str] = None
+    graph_repair_garbage_domain: Optional[str] = None
+    graph_repair_bidirectional_mismatch: Optional[str] = None
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

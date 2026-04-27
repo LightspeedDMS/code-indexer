@@ -1865,6 +1865,30 @@ def handle_trigger_dependency_analysis(
                 }
             )
 
+        # AC5 (Story #919): dry-run graph-repair mode — synchronous, no background job
+        dry_run_raw = args.get("dry_run_graph_only", False)
+        if dry_run_raw is not False and not isinstance(dry_run_raw, bool):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "dry_run_graph_only must be a boolean",
+                    "job_id": None,
+                }
+            )
+        dry_run_graph_only: bool = bool(dry_run_raw)
+        if dry_run_graph_only:
+            dry_run_report = dependency_map_service.run_graph_repair_dry_run()
+            return _mcp_response(
+                {
+                    "success": True,
+                    "job_id": None,
+                    "mode": mode,
+                    "status": "completed",
+                    "message": "Dry-run graph-channel repair report",
+                    "graph_repair_dry_run_report": dry_run_report,
+                }
+            )
+
         # Generate job ID
         job_id = f"dep-map-{mode}-{uuid.uuid4().hex[:8]}-{int(datetime.now(timezone.utc).timestamp())}"
 
