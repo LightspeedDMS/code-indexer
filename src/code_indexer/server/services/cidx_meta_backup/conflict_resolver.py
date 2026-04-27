@@ -23,12 +23,28 @@ class ResolverResult:
     error: Optional[str]
 
 
+def _strip_yaml_frontmatter(text: str) -> str:
+    """Strip leading ``---\\n...\\n---\\n`` YAML frontmatter from a prompt.
+
+    Claude CLI 2.1.119 echoes the prompt back without invoking tools when the
+    prompt starts with YAML frontmatter (it appears to interpret the `---`
+    markers as session metadata). The frontmatter exists for prompt-loader
+    documentation only; it is not meant to be sent to the model.
+    """
+    if not text.startswith("---\n"):
+        return text
+    closing = text.find("\n---\n", 4)
+    if closing == -1:
+        return text
+    return text[closing + len("\n---\n") :].lstrip("\n")
+
+
 def _load_prompt() -> str:
     if not _PROMPT_PATH.exists():
         raise FileNotFoundError(
             f"cidx_meta_conflict_resolution.md prompt not found at {_PROMPT_PATH}"
         )
-    return _PROMPT_PATH.read_text(encoding="utf-8")
+    return _strip_yaml_frontmatter(_PROMPT_PATH.read_text(encoding="utf-8"))
 
 
 class ClaudeConflictResolver:

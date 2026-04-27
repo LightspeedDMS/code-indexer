@@ -166,3 +166,33 @@ def test_resolve_uses_externalized_prompt():
     assert "{conflict_files}" in content
     assert "{branch}" in content
     assert "{repo_path}" in content
+
+
+def test_strip_yaml_frontmatter_removes_leading_block():
+    """# Story #926 AC8: YAML frontmatter must be stripped before sending the
+    prompt to Claude CLI. Claude CLI 2.1.119 echoes the prompt back without
+    invoking tools when the input starts with `---` markers."""
+    from code_indexer.server.services.cidx_meta_backup.conflict_resolver import (
+        _strip_yaml_frontmatter,
+    )
+
+    prompt_with_frontmatter = (
+        "---\n"
+        "name: test prompt\n"
+        "purpose: unit-test the stripper\n"
+        "---\n"
+        "This is the actual prompt body.\n"
+    )
+    result = _strip_yaml_frontmatter(prompt_with_frontmatter)
+    assert result == "This is the actual prompt body.\n"
+    assert not result.startswith("---"), "Frontmatter must be fully stripped"
+
+
+def test_strip_yaml_frontmatter_no_frontmatter_unchanged():
+    """# Story #926 AC8: prompts without YAML frontmatter pass through unchanged."""
+    from code_indexer.server.services.cidx_meta_backup.conflict_resolver import (
+        _strip_yaml_frontmatter,
+    )
+
+    plain_prompt = "Resolve the conflict in {repo_path}.\nUse Read and Edit tools.\n"
+    assert _strip_yaml_frontmatter(plain_prompt) == plain_prompt

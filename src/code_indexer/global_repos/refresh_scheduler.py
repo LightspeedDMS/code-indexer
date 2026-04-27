@@ -1115,22 +1115,102 @@ class RefreshScheduler:
                             "message": "Skipped, write lock held",
                         }
 
-                    # C2: Use mtime-based change detection for local repos
-                    has_changes = self._has_local_changes(source_path, alias_name)
+                    # Story #926: After migrate_legacy_cidx_meta() runs at server startup,
+                    # cidx-meta-global gets repo_url="local://cidx-meta", making is_local_repo=True
+                    # and is_meta_repo=False.  The backup gate must fire here (before mtime-based
+                    # change detection) so that remote drift and idempotent bootstrap are always
+                    # handled regardless of whether local files have changed.
+                    # _handled_by_backup=True means the backup path ran; the mtime block below
+                    # is skipped so that the existing single mtime path is not duplicated.
+                    _handled_by_backup = False
+                    if alias_name == "cidx-meta-global":
+                        _backup_cfg_local = None
+                        try:
+                            _backup_cfg_local = (
+                                get_config_service()
+                                .get_config()
+                                .cidx_meta_backup_config
+                            )
+                        except Exception as _cfg_err:
+                            logger.warning(
+                                "Could not load cidx_meta_backup_config for %s, "
+                                "falling back to mtime-based detection: %s",
+                                alias_name,
+                                _cfg_err,
+                            )
 
-                    if not has_changes:
+                        if _backup_cfg_local is not None and _backup_cfg_local.enabled:
+                            _handled_by_backup = True
+
+                            # MED-3: MetaDirectoryUpdater first so description files are
+                            # in place before CidxMetaBackupSync runs `git add -A`.
+                            try:
+                                MetaDirectoryUpdater(
+                                    master_path, self.registry
+                                ).update()
+                            except Exception as _meta_err:
+                                logger.warning(
+                                    "MetaDirectoryUpdater failed for %s before backup sync: %s",
+                                    alias_name,
+                                    _meta_err,
+                                )
+
+                            # MED-2: Idempotent bootstrap — cheap when remote URL unchanged.
+                            if _backup_cfg_local.remote_url:
+                                try:
+                                    CidxMetaBackupBootstrap().bootstrap(
+                                        master_path, _backup_cfg_local.remote_url
+                                    )
+                                except Exception as _bootstrap_err:
+                                    logger.warning(
+                                        "cidx-meta backup bootstrap failed for %s: %s",
+                                        alias_name,
+                                        _bootstrap_err,
+                                    )
+
+                            _branch = detect_default_branch(master_path) or "master"
+                            _sync_result = CidxMetaBackupSync(
+                                master_path,
+                                _branch,
+                                ClaudeConflictResolver(),
+                            ).sync()
+
+                            if _sync_result.skipped and not force_reset:
+                                logger.info(
+                                    "No cidx-meta backup changes detected for %s, "
+                                    "skipping refresh",
+                                    alias_name,
+                                )
+                                return {
+                                    "success": True,
+                                    "alias": alias_name,
+                                    "message": "No changes detected",
+                                }
+
+                            sync_failure = _sync_result.sync_failure
+                            logger.info(
+                                f"Changes detected in local repo {alias_name}, creating new index"
+                            )
+                            # Fall through to the shared indexing pipeline below.
+
+                    # C2: Use mtime-based change detection for local repos.
+                    # Skipped when the backup-aware path already handled cidx-meta-global.
+                    if not _handled_by_backup:
+                        has_changes = self._has_local_changes(source_path, alias_name)
+
+                        if not has_changes:
+                            logger.info(
+                                f"No changes detected for local repo {alias_name}, skipping refresh"
+                            )
+                            return {
+                                "success": True,
+                                "alias": alias_name,
+                                "message": "No changes detected",
+                            }
+
                         logger.info(
-                            f"No changes detected for local repo {alias_name}, skipping refresh"
+                            f"Changes detected in local repo {alias_name}, creating new index"
                         )
-                        return {
-                            "success": True,
-                            "alias": alias_name,
-                            "message": "No changes detected",
-                        }
-
-                    logger.info(
-                        f"Changes detected in local repo {alias_name}, creating new index"
-                    )
                 else:
                     # Bug #239: Check write lock for git repos too. Protects against
                     # reconciliation restoring a master while refresh tries to snapshot it.
