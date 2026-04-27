@@ -1088,6 +1088,13 @@ class ServerConfig:
     clone_backend: str = "local"  # Story #510: "local", "ontap", or "cow-daemon"
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
 
+    # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
+    # Kill switch: False = elevation enforcement disabled (503 returned on protected routes).
+    # Idle timeout and max age mirror ElevatedSessionManager defaults.
+    elevation_enforcement_enabled: bool = False
+    elevation_idle_timeout_seconds: int = 300  # 5 minutes idle
+    elevation_max_age_seconds: int = 1800  # 30 minutes absolute
+
     # Story #746 - Fault injection harness (bootstrap-only, never DB)
     # Stays False in production. Both must be True together to enable harness.
     fault_injection_enabled: bool = False

@@ -12,9 +12,19 @@ from functools import wraps
 from datetime import datetime, timezone
 import base64
 
+import logging
+
 from .jwt_manager import JWTManager, TokenExpiredError, InvalidTokenError
 from .user_manager import UserManager, User
 from code_indexer.server.logging_utils import format_error_log
+
+# Module-level singleton for TOTP step-up elevation (Story #923 AC5).
+# Imported here so tests can swap the module attribute for fixture isolation.
+from code_indexer.server.auth.elevated_session_manager import (
+    elevated_session_manager,
+)
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .oauth.oauth_manager import OAuthManager
@@ -715,3 +725,194 @@ def get_current_admin_user_hybrid(
         HTTPException: If not authenticated or not admin
     """
     return _hybrid_auth_impl(request, credentials, require_admin=True)
+
+
+# Three canonical error codes per Story #923 AC5 and Codex review.
+# _ERROR_ELEVATION_FAILED is reserved for the /auth/elevate endpoint (not used here).
+_ERROR_TOTP_SETUP_REQUIRED = "totp_setup_required"
+_ERROR_ELEVATION_REQUIRED = "elevation_required"
+_ERROR_ELEVATION_FAILED = "elevation_failed"  # reserved; used by /auth/elevate
+
+# Stable internal FastAPI route path for MFA setup — not environment-specific;
+# the router registers this path unconditionally in all deployments.
+_TOTP_SETUP_URL = "/admin/mfa/setup"
+
+# Scope hierarchy: rank 0 = broadest ("full"), rank 1 = narrower ("totp_repair").
+# A session satisfies required_scope R when session_rank <= required_rank.
+# Scopes absent from this dict receive len(_SCOPE_RANK) = least-privileged rank.
+_SCOPE_RANK: Dict[str, int] = {"full": 0, "totp_repair": 1}
+
+# Shared payload — extracted to eliminate duplicate HTTPException construction.
+_ELEVATION_DISABLED_DETAIL: Dict[str, Any] = {
+    "error": "elevation_enforcement_disabled",
+    "message": "Step-up elevation is currently disabled by the operator.",
+}
+
+
+# ---------------------------------------------------------------------------
+# Exception builder helpers — one per error kind, no inline construction.
+# ---------------------------------------------------------------------------
+
+
+def _elevation_disabled_exc() -> HTTPException:
+    """503 — kill-switch active or manager not initialized."""
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=_ELEVATION_DISABLED_DETAIL,
+    )
+
+
+def _elevation_required_exc(message: Optional[str] = None) -> HTTPException:
+    """403 — no active elevation window, or scope insufficient."""
+    detail: Dict[str, Any] = {"error": _ERROR_ELEVATION_REQUIRED}
+    if message:
+        detail["message"] = message
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def _totp_setup_required_exc() -> HTTPException:
+    """403 — admin has TOTP not yet set up; directs to setup_url."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"error": _ERROR_TOTP_SETUP_REQUIRED, "setup_url": _TOTP_SETUP_URL},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Focused single-responsibility helpers called from _check.
+# ---------------------------------------------------------------------------
+
+
+def _is_elevation_enforcement_enabled() -> bool:
+    """Read kill switch from runtime config (Story #923 AC5, Codex M12).
+
+    Returns False (fails closed) when config service raises, so the 503
+    kill-switch path is taken rather than silently bypassing enforcement.
+    """
+    try:
+        from code_indexer.server.services.config_service import get_config_service
+
+        config = get_config_service().get_config()
+        return bool(getattr(config, "elevation_enforcement_enabled", False))
+    except Exception:
+        logger.warning(
+            "require_elevation: could not read config; treating elevation as disabled",
+            exc_info=True,
+        )
+        return False
+
+
+def _check_totp_setup(user: User) -> None:
+    """Raise 403 totp_setup_required when admin has no TOTP MFA enabled.
+
+    Design: fail-open on non-HTTP exceptions (e.g. TOTPService DB unavailable).
+    TOTPService availability must not block admin access entirely — the elevation
+    window check that follows is the authoritative gate (Story #923 AC5 spec).
+    Logs a warning so operators can detect persistent TOTPService failures.
+    """
+    try:
+        from code_indexer.server.web.mfa_routes import get_totp_service
+
+        totp_service = get_totp_service()
+        if totp_service is None:
+            # Lifespan didn't wire totp service (test/dev). Fail-open per AC5
+            # design: TOTPService availability must not block admin access.
+            return
+        if not totp_service.is_mfa_enabled(user.username):
+            raise _totp_setup_required_exc()
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning(
+            "require_elevation: TOTP setup check failed for %s; skipping setup gate",
+            user.username,
+            exc_info=True,
+        )
+
+
+def _resolve_session_key(request: Request) -> Optional[str]:
+    """Return JTI from request state (Bearer) or cidx_session cookie (Web UI)."""
+    jti = getattr(getattr(request, "state", None), "user_jti", None)
+    if jti:
+        return str(jti)
+    cookie = request.cookies.get("cidx_session")
+    return str(cookie) if cookie is not None else None
+
+
+def _check_scope(session_scope: Optional[str], required_scope: str) -> None:
+    """Raise 403 elevation_required when session scope is insufficient.
+
+    Unknown/missing session scopes receive least-privileged rank — no fallback
+    to "full" to avoid incorrectly granting broad access on missing metadata.
+    """
+    session_rank = _SCOPE_RANK.get(session_scope or "", len(_SCOPE_RANK))
+    required_rank = _SCOPE_RANK[required_scope]
+    if session_rank > required_rank:
+        raise _elevation_required_exc(
+            f"Scope {required_scope!r} required; current window is scope={session_scope!r}."
+        )
+
+
+def _check_session_window(
+    request: Request,
+    required_scope: str,
+    manager: Any,
+) -> None:
+    """Resolve session key, validate elevation window, and check scope.
+
+    Raises 403 elevation_required when: no session key, window absent/expired,
+    or session scope is insufficient for required_scope.
+    """
+    session_key = _resolve_session_key(request)
+    if not session_key:
+        raise _elevation_required_exc()
+
+    session = manager.touch_atomic(session_key)
+    if session is None:
+        raise _elevation_required_exc()
+
+    _check_scope(getattr(session, "scope", None), required_scope)
+
+
+def require_elevation(required_scope: str = "full"):
+    """Build a FastAPI dependency that enforces an active TOTP elevation window.
+
+    Story #923 AC5. Chains after get_current_admin_user_hybrid (admin gate
+    already enforced). Returns a callable dependency so callers can specify
+    required_scope: 'full' (default) for sensitive admin ops; 'totp_repair' for
+    TOTP-fix endpoints accessible via recovery codes.
+
+    Scope hierarchy (broadest first): full (rank 0) > totp_repair (rank 1).
+    A session with scope S satisfies required_scope R when rank(S) <= rank(R).
+    Unknown/missing session scopes receive the highest rank (least privileged).
+
+    Three canonical error codes:
+      - totp_setup_required (403): admin has no TOTP MFA enabled -> setup_url body
+      - elevation_required  (403): no active elevation window or scope insufficient
+      - elevation_failed    (401): reserved for /auth/elevate endpoint (not raised here)
+
+    Kill switch: returns 503 (per Codex M4/M12) when elevation_enforcement_enabled
+    is False or config service is unavailable.
+
+    Args:
+        required_scope: One of "full" or "totp_repair". ValueError on unknown value
+            (programmer error at call site — not a runtime auth failure).
+    """
+    if required_scope not in _SCOPE_RANK:
+        raise ValueError(
+            f"required_scope must be one of {sorted(_SCOPE_RANK)}, got {required_scope!r}"
+        )
+
+    def _check(
+        request: Request,
+        user: User = Depends(get_current_admin_user_hybrid),
+    ) -> User:
+        if not _is_elevation_enforcement_enabled():
+            raise _elevation_disabled_exc()
+        if elevated_session_manager is None:
+            raise _elevation_disabled_exc()
+        _check_totp_setup(user)
+        _check_session_window(request, required_scope, elevated_session_manager)
+        return user
+
+    return _check

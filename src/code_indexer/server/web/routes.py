@@ -326,6 +326,22 @@ def logout(request: Request):
 
     Redirects to unified login page after clearing session.
     """
+    # Story #923 AC8: revoke any elevation window for this session
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+
+    session_key = request.cookies.get("cidx_session")
+    if session_key:
+        try:
+            elevated_session_manager.revoke(session_key)
+        except Exception:
+            logger.warning(
+                "Failed to revoke elevation window on logout for session=%.8s",
+                session_key,
+                exc_info=True,
+            )
+
     session_manager = get_session_manager()
     response = RedirectResponse(
         url="/login",
@@ -8551,6 +8567,22 @@ def user_logout(request: Request):
 
     Redirects to unified login page after clearing session.
     """
+    # Story #923 AC8: revoke any elevation window for this session
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+
+    session_key = request.cookies.get("cidx_session")
+    if session_key:
+        try:
+            elevated_session_manager.revoke(session_key)
+        except Exception:
+            logger.warning(
+                "Failed to revoke elevation window on user logout for session=%.8s",
+                session_key,
+                exc_info=True,
+            )
+
     session_manager = get_session_manager()
     response = RedirectResponse(
         url="/login",

@@ -1784,6 +1784,12 @@ def make_lifespan(
                         )
 
                     mfa_challenge_manager.set_connection_pool(_cluster_pool)
+                    # Story #923: wire ElevatedSessionManager cluster pool
+                    from code_indexer.server.auth.elevated_session_manager import (
+                        elevated_session_manager,
+                    )
+
+                    elevated_session_manager.set_connection_pool(_cluster_pool)
                     _login_rate_limiter_singleton.set_connection_pool(_cluster_pool)
 
                     # Bug #573: Wire cluster pools for password change
