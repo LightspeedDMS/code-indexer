@@ -2190,6 +2190,13 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.claude_cli.fact_check_timeout_seconds }}</td>
                         <td class="config-note"><small>Per-invocation timeout for the verification Claude CLI call. Retries once after 30s delay; falls back to original on double timeout. Default: 600.</small></td>
                     </tr>
+                    <!-- Auto-repair Settings (Story #927) -->
+                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Scheduled Auto-repair</strong></td></tr>
+                    <tr>
+                        <td class="config-label">Auto-repair after scheduled jobs</td>
+                        <td class="config-value">{{ 'Yes' if config.claude_cli.dep_map_auto_repair_enabled else 'No' }}</td>
+                        <td class="config-note"><small>When enabled, scheduled delta and refinement jobs automatically run a repair pass once if anomalies are detected. Anomalies that don't resolve will be retried on the next scheduled cycle. Default: off.</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -2292,6 +2299,14 @@ function saveLlmCredsConfig() {
                     Verification timeout (seconds, 60-3600)
                     <input type="number" id="fact-check-timeout" name="fact_check_timeout_seconds" value="{{ config.claude_cli.fact_check_timeout_seconds }}" min="60" max="3600">
                     <small>Per-invocation timeout for the verification Claude CLI call. Retries once after a 30s delay; falls back to original content on double timeout. Default: 600.</small>
+                </label>
+                <label for="dep-map-auto-repair-enabled">
+                    Auto-repair after scheduled jobs
+                    <select id="dep-map-auto-repair-enabled" name="dep_map_auto_repair_enabled">
+                        <option value="true" {% if config.claude_cli.dep_map_auto_repair_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.claude_cli.dep_map_auto_repair_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>When enabled, scheduled delta and refinement jobs automatically run a repair pass once if anomalies are detected. Anomalies that don't resolve will be retried on the next scheduled cycle.</small>
                 </label>
             </div>
             <div class="form-actions">

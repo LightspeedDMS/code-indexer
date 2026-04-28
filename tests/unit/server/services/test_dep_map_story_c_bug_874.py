@@ -243,6 +243,7 @@ def _refinement_fixture(tmp_path: Path, domain_count: int, batch_size: int):
     cfg.dependency_map_enabled = True
     cfg.refinement_enabled = True
     cfg.refinement_domains_per_run = batch_size
+    cfg.refinement_interval_hours = 24  # Bug #931: run_refinement_cycle now reads this
     cfg.dependency_map_interval_hours = 24
     cfg.dependency_map_pass_timeout_seconds = 300
     cfg.dependency_map_delta_max_turns = 5
@@ -283,7 +284,7 @@ class TestFullRunRunTypeAndPhaseTimings:
         assert call_kwargs.get("run_type") == "full", (
             f"Expected run_type='full', got {call_kwargs.get('run_type')!r}"
         )
-        _assert_phase_timings_keys(call_kwargs, "synth_s", "per_domain_s", "finalize_s")
+        _assert_phase_timings_keys(call_kwargs, "synth_s", "per_domain_s")
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +308,7 @@ class TestDeltaRunRunTypeAndPhaseTimings:
         assert call_kwargs.get("run_type") == "delta", (
             f"Expected run_type='delta', got {call_kwargs.get('run_type')!r}"
         )
-        _assert_phase_timings_keys(call_kwargs, "detect_s", "merge_s", "finalize_s")
+        _assert_phase_timings_keys(call_kwargs, "detect_s", "merge_s")
 
 
 # ---------------------------------------------------------------------------
@@ -390,34 +391,46 @@ class TestDeltaReposSkippedHonestInt:
 
 
 # ---------------------------------------------------------------------------
-# Test 6: Full run finalize_s present and non-negative in phase_timings_json
+# Test 7 (Bug #930): finalize_s must NOT appear in delta or full phase_timings_json
 # ---------------------------------------------------------------------------
 
 
-class TestFullRunFinalizeTimingPresent:
-    """Story C FR4: finalize_s key must appear in full-run phase_timings_json."""
+class TestFinalizeSRemovedBug930:
+    """Regression: finalize_s must NOT appear in phase_timings_json for delta or full runs.
 
-    def test_full_run_phase_timings_finalize_s_present_and_non_negative(
-        self, full_svc_and_tracking
-    ):
-        """
-        phase_timings_json for full run must contain finalize_s >= 0.0.
-        Confirms time.time() wrap around _finalize_analysis is wired (Story C FR4).
-        """
+    Bug #930 — finalize_s wrapped only trailing DB writes for delta and was
+    semantically nonsensical (always rounded to 0.0s in the dashboard).
+    Option A resolution: remove finalize_s emission from both paths.
+    """
+
+    def test_delta_phase_timings_does_not_emit_finalize_s(self, delta_svc_and_tracking):
+        """Delta phase_timings_json must NOT contain finalize_s (bug #930)."""
+        svc, tracking = delta_svc_and_tracking
+        svc.run_delta_analysis()
+
+        assert tracking.record_run_metrics.called, (
+            "record_run_metrics must be called by run_delta_analysis"
+        )
+        call_kwargs = tracking.record_run_metrics.call_args.kwargs
+        ptj = call_kwargs.get("phase_timings_json")
+        assert ptj is not None, "phase_timings_json must not be None for delta run"
+        timings = json.loads(ptj)
+        assert "finalize_s" not in timings, (
+            f"finalize_s must NOT appear in delta phase_timings_json (bug #930): {timings}"
+        )
+
+    def test_full_phase_timings_does_not_emit_finalize_s(self, full_svc_and_tracking):
+        """Full phase_timings_json must NOT contain finalize_s (bug #930)."""
         svc, tracking = full_svc_and_tracking
         svc.run_full_analysis()
 
-        assert tracking.record_run_metrics.called
+        assert tracking.record_run_metrics.called, (
+            "record_run_metrics must be called by run_full_analysis"
+        )
         call_kwargs = tracking.record_run_metrics.call_args.kwargs
         ptj = call_kwargs.get("phase_timings_json")
         assert ptj is not None, "phase_timings_json must not be None for full run"
         timings = json.loads(ptj)
-        assert "finalize_s" in timings, (
-            f"finalize_s missing — time.time() wrap around _finalize_analysis not added: {timings}"
-        )
-        assert isinstance(timings["finalize_s"], float), (
-            f"finalize_s must be float, got {type(timings['finalize_s']).__name__}"
-        )
-        assert timings["finalize_s"] >= 0.0, (
-            f"finalize_s must be >= 0.0, got {timings['finalize_s']}"
+        assert "finalize_s" not in timings, (
+            f"finalize_s must NOT appear in full phase_timings_json (bug #930): {timings}"
         )

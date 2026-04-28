@@ -16,6 +16,58 @@ from code_indexer.server.storage.database_manager import DatabaseConnectionManag
 logger = logging.getLogger(__name__)
 
 
+def _make_dep_map_repair_invoker_fn(
+    dep_map_dir: Path,
+    tracking_backend: Any,
+    job_tracker: Any,
+    dep_map_service: Any,
+) -> Callable[[str], None]:
+    """Build the repair invoker closure for DependencyMapService (Story #927).
+
+    Extracted as a module-level factory so the wiring can be tested directly
+    (Codex Pass 3 regression guard).
+
+    Story #927 Codex Pass 4-5: the lifespan startup must construct
+    DependencyMapService FIRST, then call this factory with the constructed
+    service instance, then bind the returned closure via
+    ``dependency_map_service.set_repair_invoker_fn(...)`` BEFORE
+    ``start_scheduler()``. The full ordering is:
+        1. dependency_map_service = DependencyMapService(...)
+        2. _dep_map_repair_invoker_fn = _make_dep_map_repair_invoker_fn(...)
+        3. dependency_map_service.set_repair_invoker_fn(_dep_map_repair_invoker_fn)
+        4. dependency_map_service.start_scheduler()
+
+    This late-binding pattern is required because the closure captures
+    ``dep_map_service`` by parameter binding (Python by-value), so the service
+    must exist at factory call time.
+
+    Args:
+        dep_map_dir: Path to the dependency-map directory (captured by closure).
+        tracking_backend: DependencyMapTrackingBackend for job status updates.
+        job_tracker: JobTracker for unified job tracking.
+        dep_map_service: DependencyMapService instance (provides repo metadata + analyzer).
+
+    Returns:
+        A callable(job_id: str) -> None that delegates to _execute_repair_body.
+    """
+
+    def _invoker(job_id: str) -> None:
+        from code_indexer.server.web.dependency_map_routes import (
+            _execute_repair_body,
+        )
+
+        _execute_repair_body(
+            job_id=job_id,
+            output_dir=dep_map_dir,
+            tracking_backend=tracking_backend,
+            job_tracker=job_tracker,
+            activity_journal=None,
+            dep_map_service=dep_map_service,  # Story #927 Pass 2: executor needs repo metadata + analyzer
+        )
+
+    return _invoker
+
+
 def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
     """Wire fault injection state on app.state for both normal and degraded startup.
 
@@ -1063,7 +1115,28 @@ def make_lifespan(
                 ),
             )
 
-            # Create service
+            # Story #927: cluster dedup pool (None = solo mode)
+            _dep_map_pg_pool = (
+                (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if storage_mode == "postgres" and backend_registry is not None
+                else None
+            )
+
+            # Story #927: closures capture dep_map_dir, tracking_backend, job_tracker
+            _dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
+
+            def _dep_map_health_check_fn():
+                from code_indexer.server.services.dep_map_health_detector import (
+                    DepMapHealthDetector,
+                )
+
+                return DepMapHealthDetector().detect(_dep_map_dir)
+
+            # Story #927 Codex Pass 4: construct service FIRST so the closure can
+            # capture the real instance, not the pre-construction None placeholder.
             dependency_map_service = DependencyMapService(
                 golden_repos_manager=golden_repos_manager,
                 config_manager=config_service,
@@ -1076,9 +1149,24 @@ def make_lifespan(
                 ),
                 job_tracker=job_tracker,  # Story #312: Unified job tracking (Epic #261)
                 description_refresh_tracking_backend=description_refresh_tracking_backend,  # Epic #725
+                pg_pool=_dep_map_pg_pool,  # Story #927: cluster dedup lock
+                health_check_fn=_dep_map_health_check_fn,  # Story #927: anomaly gate
+                repair_invoker_fn=None,  # late-bound below via set_repair_invoker_fn
+                storage_mode=storage_mode,  # Story #927 Pass 2: anti-fallback guard
             )
 
-            # Start scheduler (internally checks if enabled)
+            # Build the closure with the real constructed service instance
+            _dep_map_repair_invoker_fn = _make_dep_map_repair_invoker_fn(
+                dep_map_dir=_dep_map_dir,
+                tracking_backend=tracking_backend,
+                job_tracker=job_tracker,
+                dep_map_service=dependency_map_service,  # Story #927 Pass 4: now the real instance
+            )
+
+            # Late-bind the closure into the service
+            dependency_map_service.set_repair_invoker_fn(_dep_map_repair_invoker_fn)
+
+            # Start scheduler — invoker is bound, safe to start
             dependency_map_service.start_scheduler()
             app.state.dependency_map_service = dependency_map_service
 

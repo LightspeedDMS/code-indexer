@@ -350,6 +350,8 @@ class ConfigService:
                     else None
                 ),
                 "llm_creds_provider_consumer_id": config.claude_integration_config.llm_creds_provider_consumer_id,
+                "dep_map_fact_check_enabled": config.claude_integration_config.dep_map_fact_check_enabled,
+                "dep_map_auto_repair_enabled": config.claude_integration_config.dep_map_auto_repair_enabled,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -994,6 +996,8 @@ class ConfigService:
             claude_config.llm_creds_provider_consumer_id = str(value) if value else ""
         elif key == "dep_map_fact_check_enabled":
             claude_config.dep_map_fact_check_enabled = _parse_bool(value)
+        elif key == "dep_map_auto_repair_enabled":
+            claude_config.dep_map_auto_repair_enabled = _parse_bool(value)
         elif key == "fact_check_timeout_seconds":
             claude_config.fact_check_timeout_seconds = max(
                 _MIN_FACT_CHECK_TIMEOUT_SECONDS, int(value)

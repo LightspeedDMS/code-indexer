@@ -44,7 +44,7 @@ def _make_scheduler() -> MagicMock:
     scheduler = MagicMock()
     scheduler.acquire_write_lock = MagicMock(return_value=True)
     scheduler.release_write_lock = MagicMock(return_value=True)
-    scheduler.is_write_lock_held = MagicMock(return_value=False)
+    scheduler.is_write_locked = MagicMock(return_value=False)
     scheduler.trigger_refresh_for_repo = MagicMock()
     return scheduler
 
