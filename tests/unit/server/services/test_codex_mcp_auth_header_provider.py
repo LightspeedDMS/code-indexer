@@ -59,11 +59,21 @@ def _make_mock_mcp_service(creds, cached_header=None):
         creds: Return value for get_or_create_credentials().
         cached_header: Return value for get_cached_auth_header_value(). When None,
             the service has not yet completed Claude registration (cache miss path).
+
+    Configures all three provider fallback paths (v9.23.10 + bug #937 fix):
+      1. get_cached_auth_header_value() — fast path (Claude already registered)
+      2. build_auth_header_from_creds()  — ensure_registered() path
+      3. build_header_from_stored_credentials() — direct stored creds path (bug #937)
+    When creds is None, all three return None so RuntimeError is raised.
     """
     mock_service = MagicMock()
     mock_service.get_or_create_credentials.return_value = creds
     mock_service.get_cached_auth_header_value.return_value = cached_header
     mock_service.build_auth_header_from_creds.return_value = (
+        _FAKE_BASIC_HEADER if creds else None
+    )
+    # Third fallback (bug #937): must also return None when no creds available.
+    mock_service.build_header_from_stored_credentials.return_value = (
         _FAKE_BASIC_HEADER if creds else None
     )
     return mock_service

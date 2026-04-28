@@ -74,10 +74,28 @@ def build_codex_mcp_auth_header_provider() -> Callable[[], str]:
         if header is not None:
             return str(header)
 
-        # Both paths exhausted — credential state is broken, fail fast.
+        # Third fallback (bug #937): read stored credentials directly from config
+        # without requiring Claude CLI. Works when Claude registration never ran
+        # in this process (e.g. Claude CLI absent on staging server).
+        header = service.build_header_from_stored_credentials()
+        if header is not None:
+            return str(header)
+
+        # All three paths exhausted — credential state is broken.
+        # Log ERROR before raising so the root cause is identifiable in monitoring
+        # dashboards (MESSI Rule 13: Anti-Silent-Failure). The WARNING at the
+        # CodexInvoker call site is insufficient — operators need ERROR here.
+        logger.error(
+            "build_codex_mcp_auth_header_provider: cidx-local MCP credentials missing "
+            "from credential store — MCPSelfRegistrationService has no cached header, "
+            "ensure_registered() returned None, and no stored credentials found in "
+            "config.mcp_self_registration. Codex cannot authenticate with cidx-local MCP."
+        )
         raise RuntimeError(
             "build_codex_mcp_auth_header_provider: unable to obtain Authorization header "
-            "for Codex MCP — both cached header and credentials returned None"
+            "for Codex MCP — all three paths exhausted: cached header is None, "
+            "build_auth_header_from_creds() returned None, and "
+            "build_header_from_stored_credentials() returned None"
         )
 
     return _provider

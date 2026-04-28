@@ -72,14 +72,6 @@ class TestContentLimitsConfigDataclass:
         assert hasattr(config, "cache_ttl_seconds")
         assert config.cache_ttl_seconds == 3600  # Default value (1 hour)
 
-    def test_content_limits_config_has_cache_max_entries(self):
-        """Test ContentLimitsConfig has cache_max_entries field."""
-        from code_indexer.server.utils.config_manager import ContentLimitsConfig
-
-        config = ContentLimitsConfig()
-        assert hasattr(config, "cache_max_entries")
-        assert config.cache_max_entries == 10000  # Default value
-
     def test_content_limits_config_custom_values(self):
         """Test ContentLimitsConfig accepts custom values."""
         from code_indexer.server.utils.config_manager import ContentLimitsConfig
@@ -91,7 +83,6 @@ class TestContentLimitsConfigDataclass:
             git_log_max_tokens=20000,
             search_result_max_tokens=25000,
             cache_ttl_seconds=7200,
-            cache_max_entries=5000,
         )
 
         assert config.chars_per_token == 5
@@ -100,7 +91,6 @@ class TestContentLimitsConfigDataclass:
         assert config.git_log_max_tokens == 20000
         assert config.search_result_max_tokens == 25000
         assert config.cache_ttl_seconds == 7200
-        assert config.cache_max_entries == 5000
 
 
 class TestServerConfigHasContentLimitsConfig:
@@ -372,21 +362,6 @@ class TestContentLimitsConfigValidation:
         with pytest.raises(ValueError, match="cache_ttl_seconds must be"):
             manager.validate_config(config)
 
-    def test_cache_max_entries_validation_range(self, tmp_path):
-        """Test cache_max_entries validation (100-100000 range)."""
-        from code_indexer.server.utils.config_manager import (
-            ContentLimitsConfig,
-            ServerConfig,
-            ServerConfigManager,
-        )
-
-        config = ServerConfig(server_dir=str(tmp_path))
-        config.content_limits_config = ContentLimitsConfig(cache_max_entries=50)
-
-        manager = ServerConfigManager(str(tmp_path))
-        with pytest.raises(ValueError, match="cache_max_entries must be between"):
-            manager.validate_config(config)
-
 
 class TestContentLimitsConfigPersistence:
     """Tests for ContentLimitsConfig JSON serialization/deserialization."""
@@ -438,7 +413,6 @@ class TestContentLimitsConfigPersistence:
                 "git_log_max_tokens": 15000,
                 "search_result_max_tokens": 45000,
                 "cache_ttl_seconds": 5400,
-                "cache_max_entries": 8000,
             },
         }
         config_file.write_text(json.dumps(config_data))
@@ -454,4 +428,3 @@ class TestContentLimitsConfigPersistence:
         assert config.content_limits_config.git_log_max_tokens == 15000
         assert config.content_limits_config.search_result_max_tokens == 45000
         assert config.content_limits_config.cache_ttl_seconds == 5400
-        assert config.content_limits_config.cache_max_entries == 8000

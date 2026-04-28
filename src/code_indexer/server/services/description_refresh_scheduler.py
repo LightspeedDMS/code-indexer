@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
-from code_indexer.server.services.codex_mcp_auth_header_provider import (
-    build_codex_mcp_auth_header_provider,
+from code_indexer.server.services.dep_map_dispatcher_factory import (
+    build_dep_map_dispatcher,
 )
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
@@ -36,33 +36,6 @@ logger = logging.getLogger(__name__)
 # required for Claude CLI in non-interactive environments.
 _CLAUDE_CLI_SOFT_TIMEOUT_SECONDS = 90  # inner shell ``timeout`` budget
 _CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 120  # Python subprocess.run cap
-
-
-def _build_claude_command(prompt: str, analysis_model: str) -> list:
-    """
-    Build the shell command list for invoking Claude CLI via ``script``.
-
-    Wraps the Claude CLI in ``script -q -c ... <null-device>`` to provide a
-    pseudo-TTY.  Uses ``os.devnull`` for the null device path so the call
-    is portable across Unix-like platforms.
-
-    Args:
-        prompt: Prompt string to pass to Claude.
-        analysis_model: Model name (e.g. "opus", "sonnet").
-
-    Returns:
-        Command list suitable for ``subprocess.run``.
-    """
-    import os
-    import shlex
-
-    claude_cmd = (
-        f"timeout {_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS}"
-        f" claude --model {shlex.quote(analysis_model)}"
-        f" -p {shlex.quote(prompt)}"
-        f" --print --dangerously-skip-permissions"
-    )
-    return ["script", "-q", "-c", claude_cmd, os.devnull]
 
 
 def _build_claude_env() -> dict:
@@ -121,78 +94,6 @@ def _normalize_claude_output(raw: str) -> str:
     if frontmatter_match and frontmatter_match.start() > 0:
         output = output[frontmatter_match.start() :]
     return output
-
-
-def invoke_claude_cli(
-    repo_path: str,
-    prompt: str,
-    cli_manager=None,
-    analysis_model: str = "opus",
-) -> tuple:
-    """
-    Module-level Claude CLI invocation, patchable by unit tests.
-
-    Validates inputs, optionally syncs the API key via *cli_manager*, builds
-    the subprocess command via :func:`_build_claude_command`, runs it, and
-    normalises the output via :func:`_normalize_claude_output`.
-
-    Args:
-        repo_path: Absolute path to the repository (subprocess cwd).
-        prompt: Prompt string sent to Claude CLI.
-        cli_manager: Optional ClaudeCliManager for API-key sync before call.
-        analysis_model: Claude model name (default "opus").
-
-    Returns:
-        Tuple of (success: bool, output: str).
-    """
-    import subprocess
-
-    if not repo_path:
-        error_msg = "invoke_claude_cli: repo_path must not be empty"
-        logger.error(error_msg)
-        return False, error_msg
-    if not prompt:
-        error_msg = "invoke_claude_cli: prompt must not be empty"
-        logger.error(error_msg)
-        return False, error_msg
-    if not analysis_model:
-        error_msg = "invoke_claude_cli: analysis_model must not be empty"
-        logger.error(error_msg)
-        return False, error_msg
-
-    if cli_manager is not None:
-        try:
-            cli_manager.sync_api_key()
-        except Exception as sync_exc:
-            logger.warning("invoke_claude_cli: API key sync failed: %s", sync_exc)
-
-    try:
-        result = subprocess.run(
-            _build_claude_command(prompt, analysis_model),
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS,
-            env=_build_claude_env(),
-        )
-    except subprocess.TimeoutExpired:
-        error_msg = f"Claude CLI timed out after {_CLAUDE_CLI_HARD_TIMEOUT_SECONDS}s"
-        logger.warning(error_msg)
-        return False, error_msg
-    except Exception as exc:
-        error_msg = f"Unexpected error during Claude CLI execution: {exc}"
-        logger.error(error_msg, exc_info=True)
-        return False, error_msg
-
-    if result.returncode != 0:
-        error_msg = (
-            f"Claude CLI returned non-zero: {result.returncode},"
-            f" stderr: {result.stderr}"
-        )
-        logger.warning(error_msg)
-        return False, error_msg
-
-    return True, _normalize_claude_output(result.stdout)
 
 
 class DescriptionRefreshScheduler:
@@ -1113,15 +1014,9 @@ class DescriptionRefreshScheduler:
         """
         Build a CliDispatcher from *config* (Story #847).
 
-        Constructs a ClaudeInvoker unconditionally.  When
-        config.codex_integration_config.enabled is True and CODEX_HOME is set
-        in os.environ, also constructs a CodexInvoker and wires it in with the
-        weight from config.  Otherwise codex=None and the effective weight
-        collapses to 0.0 inside CliDispatcher.
-
-        Wires auth_header_provider for cidx-local MCP authentication via
-        persistent Basic auth header from MCPCredentialManager (no expiration;
-        same credentials Claude uses — no JWT TTL issue).
+        Delegates to build_dep_map_dispatcher (the single source of truth for
+        CliDispatcher construction — Bug #936 consolidation), forwarding
+        analysis_model and the per-scheduler soft-timeout constant.
 
         Args:
             config: ServerConfig returned by config_manager.load_config().
@@ -1129,33 +1024,10 @@ class DescriptionRefreshScheduler:
         Returns:
             A fully initialised CliDispatcher.
         """
-        import os
-
-        from code_indexer.server.services.cli_dispatcher import CliDispatcher
-        from code_indexer.server.services.claude_invoker import ClaudeInvoker
-        from code_indexer.server.services.codex_invoker import CodexInvoker
-
-        claude_invoker = ClaudeInvoker(
+        return build_dep_map_dispatcher(
+            config,
             analysis_model=self._analysis_model,
-            soft_timeout_seconds=_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS,
-        )
-
-        codex_invoker = None
-        codex_weight = 0.0
-        codex_cfg = config.codex_integration_config if config else None
-        if codex_cfg and codex_cfg.enabled:
-            codex_home = os.environ.get("CODEX_HOME", "")
-            if codex_home:
-                codex_invoker = CodexInvoker(
-                    codex_home=codex_home,
-                    auth_header_provider=build_codex_mcp_auth_header_provider(),
-                )
-                codex_weight = codex_cfg.codex_weight
-
-        return CliDispatcher(
-            claude=claude_invoker,
-            codex=codex_invoker,
-            codex_weight=codex_weight,
+            claude_soft_timeout_seconds=_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS,
         )
 
     def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:

@@ -79,7 +79,7 @@ def test_report_json_round_trips() -> None:
             ("domain-a.md", "row_deleted"),
             ("domain-b.md", "frontmatter_reemitted"),
         ],
-        skipped=[("BIDIRECTIONAL_MISMATCH", "no_invoke_claude_fn")],
+        skipped=[("BIDIRECTIONAL_MISMATCH", "no_invoke_llm_fn")],
         errors=[],
     )
     serialized = json.dumps(asdict(report), default=str)
@@ -120,7 +120,7 @@ def test_skipped_is_list_of_str_tuples() -> None:
         per_verdict_counts={},
         per_action_counts={},
         would_be_writes=[],
-        skipped=[("BIDIRECTIONAL_MISMATCH", "no_invoke_claude_fn")],
+        skipped=[("BIDIRECTIONAL_MISMATCH", "no_invoke_llm_fn")],
         errors=[],
     )
     assert isinstance(report.skipped, list)
@@ -205,7 +205,7 @@ def test_would_be_writes_operation_label_is_remapped_outgoing_row(
         health_detector=DepMapHealthDetector(),
         index_regenerator=IndexRegenerator(),
         enable_graph_channel_repair=True,
-        invoke_claude_fn=None,
+        invoke_llm_fn=None,
     )
     fixed: List[str] = []
     errors: List[str] = []

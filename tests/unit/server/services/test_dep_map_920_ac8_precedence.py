@@ -270,7 +270,7 @@ def test_bidirectional_invocation_dry_run_suppresses_journal_even_when_per_type_
         index_regenerator=IndexRegenerator(),
         enable_graph_channel_repair=True,
         graph_repair_bidirectional_mismatch="enabled",
-        invoke_claude_fn=lambda repo_path, prompt, shell_timeout, outer_timeout: (
+        invoke_llm_fn=lambda repo_path, prompt, shell_timeout, outer_timeout: (
             True,
             "VERDICT: INCONCLUSIVE\nEVIDENCE_TYPE: none\nCITATIONS:\nREASONING: stub.\n",
         ),

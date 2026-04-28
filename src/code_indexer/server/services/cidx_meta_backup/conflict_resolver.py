@@ -1,4 +1,4 @@
-"""Claude-assisted git conflict resolution for Story #926."""
+"""LLM-assisted git conflict resolution for Story #926 (Bug #936 dispatcher migration)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
+from code_indexer.global_repos.repo_analyzer import invoke_claude_cli  # noqa: F401 — kept for backward-compat test patching
+from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.dep_map_dispatcher_factory import (
+    build_dep_map_dispatcher,
+)
 
 _PROMPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -15,6 +19,10 @@ _PROMPT_PATH = (
     / "prompts"
     / "cidx_meta_conflict_resolution.md"
 )
+
+# Default outer timeout for conflict resolution dispatches.
+# Used when CidxMetaBackupConfig does not expose conflict_resolution_timeout_seconds.
+_DEFAULT_CONFLICT_TIMEOUT = 600
 
 
 @dataclass
@@ -26,7 +34,7 @@ class ResolverResult:
 def _strip_yaml_frontmatter(text: str) -> str:
     """Strip leading ``---\\n...\\n---\\n`` YAML frontmatter from a prompt.
 
-    Claude CLI 2.1.119 echoes the prompt back without invoking tools when the
+    CLI 2.1.119 echoes the prompt back without invoking tools when the
     prompt starts with YAML frontmatter (it appears to interpret the `---`
     markers as session metadata). The frontmatter exists for prompt-loader
     documentation only; it is not meant to be sent to the model.
@@ -48,7 +56,7 @@ def _load_prompt() -> str:
 
 
 class ClaudeConflictResolver:
-    """Resolve git rebase conflicts inside cidx-meta using Claude CLI."""
+    """Resolve git rebase conflicts inside cidx-meta using an LLM via CliDispatcher."""
 
     def __init__(self) -> None:
         self._prompt_template = _load_prompt()
@@ -61,14 +69,23 @@ class ClaudeConflictResolver:
             branch=branch,
             repo_path=cidx_meta_path,
         )
-        success, output = invoke_claude_cli(
-            repo_path=cidx_meta_path,
-            prompt=prompt,
-            shell_timeout_seconds=540,
-            outer_timeout_seconds=600,
+        # Bug #936: route through dispatcher (Claude or Codex) instead of
+        # calling invoke_claude_cli directly.
+        config = get_config_service().get_config()
+        timeout: int = getattr(
+            getattr(config, "cidx_meta_backup_config", None),
+            "conflict_resolution_timeout_seconds",
+            _DEFAULT_CONFLICT_TIMEOUT,
         )
-        if not success:
-            return ResolverResult(success=False, error=output)
+        dispatcher = build_dep_map_dispatcher(config)
+        result = dispatcher.dispatch(
+            flow="cidx_meta_conflict",
+            cwd=cidx_meta_path,
+            prompt=prompt,
+            timeout=timeout,
+        )
+        if not result.success:
+            return ResolverResult(success=False, error=result.error or result.output)
 
         unmerged = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=U"],
@@ -79,6 +96,7 @@ class ClaudeConflictResolver:
         )
         if unmerged.stdout.strip():
             return ResolverResult(
-                success=False, error="Claude did not resolve all conflicts"
+                success=False,
+                error="Conflict resolver did not resolve all conflicts",
             )
         return ResolverResult(success=True, error=None)

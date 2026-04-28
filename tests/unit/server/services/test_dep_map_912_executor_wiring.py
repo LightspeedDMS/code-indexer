@@ -3,7 +3,7 @@ Story #912 executor wiring tests.
 
 Verifies that DepMapRepairExecutor:
   - accepts repo_path_resolver constructor parameter
-  - routes BIDIRECTIONAL_MISMATCH anomalies through invoke_claude_fn (one call per anomaly)
+  - routes BIDIRECTIONAL_MISMATCH anomalies through invoke_llm_fn (one call per anomaly)
   - skips bidirectional pass when enable_graph_channel_repair=False
 
 Tests (exhaustive list):
@@ -66,7 +66,7 @@ def _make_minimal_executor(
         index_regenerator=_FakeIndexRegenerator(),
         enable_graph_channel_repair=enable,
         repo_path_resolver=resolver,
-        invoke_claude_fn=invoke_fn,
+        invoke_llm_fn=invoke_fn,
     )
 
 
@@ -95,7 +95,7 @@ def test_executor_accepts_repo_path_resolver_param(tmp_path):
 
 
 def test_bidirectional_mismatch_anomalies_trigger_audit(tmp_path):
-    """One invoke_claude_fn call is made per BIDIRECTIONAL_MISMATCH anomaly in parser output."""
+    """One invoke_llm_fn call is made per BIDIRECTIONAL_MISMATCH anomaly in parser output."""
     call_count = [0]
 
     def counting_invoke(repo_path, prompt, shell_timeout, outer_timeout):
@@ -153,8 +153,18 @@ def test_bidirectional_mismatch_anomalies_trigger_audit(tmp_path):
     assert call_count[0] == 1
 
 
-def test_build_repair_executor_wires_invoke_claude_fn(tmp_path):
-    """_build_repair_executor produces an executor with non-None _invoke_claude_fn and _repo_path_resolver (C2)."""
+def test_build_repair_executor_wires_invoke_llm_fn(tmp_path):
+    """_build_repair_executor wires _invoke_llm_fn through CliDispatcher.dispatch (C2).
+
+    Proves dispatcher routing by:
+    1. Patching CliDispatcher.dispatch with a MagicMock that returns a valid InvocationResult.
+    2. Building the executor under the patch.
+    3. Calling executor._invoke_llm_fn(...) directly inside the patch context.
+    4. Using assert_called_once_with to verify dispatch() was called with the expected
+       keyword arguments (flow=, cwd=, prompt=, timeout=).
+    """
+    from code_indexer.server.services.cli_dispatcher import CliDispatcher
+    from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
     from code_indexer.server.web.dependency_map_routes import _build_repair_executor
 
     fake_manager = MagicMock()
@@ -171,12 +181,25 @@ def test_build_repair_executor_wires_invoke_claude_fn(tmp_path):
     fake_config.graph_repair_malformed_yaml = None
     fake_config.graph_repair_garbage_domain = None
     fake_config.graph_repair_bidirectional_mismatch = None
+    # codex disabled so CliDispatcher routes exclusively to claude
+    fake_config.codex_integration_config = MagicMock()
+    fake_config.codex_integration_config.enabled = False
 
     fake_config_service = MagicMock()
     fake_config_service.get_config.return_value = fake_config
 
-    def fake_invoke_claude_cli(repo_path, prompt, shell_timeout, outer_timeout):
-        return True, "VERDICT: REFUTED\nEVIDENCE_TYPE: none\nCITATIONS:\nREASONING: x\n"
+    fake_result = InvocationResult(
+        success=True,
+        output="VERDICT: REFUTED\nEVIDENCE_TYPE: none\nCITATIONS:\nREASONING: x\n",
+        cli_used="claude",
+        was_failover=False,
+        error="",
+    )
+
+    test_repo = str(tmp_path / "test-repo")
+    test_prompt = "test prompt text"
+
+    mock_dispatch = MagicMock(return_value=fake_result)
 
     with (
         patch(
@@ -187,10 +210,7 @@ def test_build_repair_executor_wires_invoke_claude_fn(tmp_path):
             "code_indexer.server.services.config_service.get_config_service",
             return_value=fake_config_service,
         ),
-        patch(
-            "code_indexer.global_repos.repo_analyzer.invoke_claude_cli",
-            side_effect=fake_invoke_claude_cli,
-        ),
+        patch.object(CliDispatcher, "dispatch", mock_dispatch),
     ):
         executor = _build_repair_executor(
             fake_dep_map_service,
@@ -198,16 +218,28 @@ def test_build_repair_executor_wires_invoke_claude_fn(tmp_path):
             fake_activity_journal,
         )
 
-    assert executor._invoke_claude_fn is not None, (
-        "_build_repair_executor must wire invoke_claude_fn (C2)"
-    )
-    assert executor._repo_path_resolver is not None, (
-        "_build_repair_executor must wire repo_path_resolver (C2)"
+        assert executor._invoke_llm_fn is not None, (
+            "_build_repair_executor must wire invoke_llm_fn (C2)"
+        )
+        assert executor._repo_path_resolver is not None, (
+            "_build_repair_executor must wire repo_path_resolver (C2)"
+        )
+
+        # Actually invoke the captured callable — this is the proof of routing.
+        ok, out = executor._invoke_llm_fn(test_repo, test_prompt, 60, 120)
+
+    assert ok is True, "_invoke_llm_fn must return success=True from fake dispatch"
+    # Verify dispatch() was called with the exact keyword args the call site uses.
+    mock_dispatch.assert_called_once_with(
+        flow="dep_map_repair",
+        cwd=test_repo,
+        prompt=test_prompt,
+        timeout=120,
     )
 
 
 def test_bidirectional_pass_skipped_when_flag_false(tmp_path):
-    """When enable_graph_channel_repair=False, invoke_claude_fn is never called."""
+    """When enable_graph_channel_repair=False, invoke_llm_fn is never called."""
     call_count = [0]
 
     def counting_invoke(repo_path, prompt, shell_timeout, outer_timeout):
@@ -313,7 +345,7 @@ def test_run_phase37_routes_through_shim(tmp_path):
         index_regenerator=_FakeIndexRegenerator(),
         enable_graph_channel_repair=True,
         repo_path_resolver=lambda a: "",
-        invoke_claude_fn=lambda *a: (
+        invoke_llm_fn=lambda *a: (
             True,
             "VERDICT: REFUTED\nEVIDENCE_TYPE: none\nCITATIONS:\nREASONING: x\n",
         ),

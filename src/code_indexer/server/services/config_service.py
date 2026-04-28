@@ -243,7 +243,6 @@ class ConfigService:
         assert config.telemetry_config is not None
         # Story #3 - Configuration Consolidation: Assert new config objects
         assert config.search_limits_config is not None
-        assert config.file_content_limits_config is not None
         assert config.golden_repos_config is not None
         # Story #3 - Phase 2: Assert P0/P1 config objects
         assert config.mcp_session_config is not None
@@ -381,10 +380,8 @@ class ConfigService:
                 "service_name": config.telemetry_config.service_name,
                 "export_traces": config.telemetry_config.export_traces,
                 "export_metrics": config.telemetry_config.export_metrics,
-                "export_logs": config.telemetry_config.export_logs,
                 "machine_metrics_enabled": config.telemetry_config.machine_metrics_enabled,
                 "machine_metrics_interval_seconds": config.telemetry_config.machine_metrics_interval_seconds,
-                "trace_sample_rate": config.telemetry_config.trace_sample_rate,
                 "deployment_environment": config.telemetry_config.deployment_environment,
             },
             # Langfuse configuration (Story #136, Story #164)
@@ -447,10 +444,6 @@ class ConfigService:
                 "max_result_size_mb": config.search_limits_config.max_result_size_mb,
                 "timeout_seconds": config.search_limits_config.timeout_seconds,
             },
-            "file_content_limits": {
-                "max_tokens_per_request": config.file_content_limits_config.max_tokens_per_request,
-                "chars_per_token": config.file_content_limits_config.chars_per_token,
-            },
             "golden_repos": {
                 "refresh_interval_seconds": config.golden_repos_config.refresh_interval_seconds,
                 "analysis_model": config.golden_repos_config.analysis_model,
@@ -466,8 +459,6 @@ class ConfigService:
                 "disk_warning_threshold_percent": config.health_config.disk_warning_threshold_percent,
                 "disk_critical_threshold_percent": config.health_config.disk_critical_threshold_percent,
                 "cpu_sustained_threshold_percent": config.health_config.cpu_sustained_threshold_percent,
-                # P3 settings (AC37)
-                "system_metrics_cache_ttl_seconds": config.health_config.system_metrics_cache_ttl_seconds,
             },
             "scip": {
                 "indexing_timeout_seconds": config.scip_config.indexing_timeout_seconds,
@@ -523,7 +514,6 @@ class ConfigService:
                 "omni_max_limit": config.multi_search_limits_config.omni_max_limit,
                 "omni_default_aggregation_mode": config.multi_search_limits_config.omni_default_aggregation_mode,
                 "omni_max_results_per_repo": config.multi_search_limits_config.omni_max_results_per_repo,
-                "omni_max_total_results_before_aggregation": config.multi_search_limits_config.omni_max_total_results_before_aggregation,
                 "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
                 # Bug #881 Phase 3: wildcard fan-out cap
                 "omni_wildcard_expansion_cap": config.multi_search_limits_config.omni_wildcard_expansion_cap,
@@ -689,8 +679,6 @@ class ConfigService:
         # Story #3 - Configuration Consolidation: New categories
         elif category == "search_limits":
             self._update_search_limits_setting(config, key, value)
-        elif category == "file_content_limits":
-            self._update_file_content_limits_setting(config, key, value)
         elif category == "golden_repos":
             self._update_golden_repos_setting(config, key, value)
         # Story #3 - Phase 2: P0/P1 categories
@@ -1100,14 +1088,10 @@ class ConfigService:
             telemetry.export_traces = value in ["true", True, "True", "1"]
         elif key == "export_metrics":
             telemetry.export_metrics = value in ["true", True, "True", "1"]
-        elif key == "export_logs":
-            telemetry.export_logs = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_enabled":
             telemetry.machine_metrics_enabled = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_interval_seconds":
             telemetry.machine_metrics_interval_seconds = int(value)
-        elif key == "trace_sample_rate":
-            telemetry.trace_sample_rate = float(value)
         elif key == "deployment_environment":
             telemetry.deployment_environment = str(value)
         else:
@@ -1305,21 +1289,6 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown search limits setting: {key}")
 
-    def _update_file_content_limits_setting(
-        self, config: ServerConfig, key: str, value: Any
-    ) -> None:
-        """Update a file content limits setting (Story #3 - Configuration Consolidation)."""
-        file_content_limits = config.file_content_limits_config
-        assert (
-            file_content_limits is not None
-        )  # Guaranteed by ServerConfig.__post_init__
-        if key == "max_tokens_per_request":
-            file_content_limits.max_tokens_per_request = int(value)
-        elif key == "chars_per_token":
-            file_content_limits.chars_per_token = int(value)
-        else:
-            raise ValueError(f"Unknown file content limits setting: {key}")
-
     def _update_golden_repos_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -1364,9 +1333,6 @@ class ConfigService:
             health.disk_critical_threshold_percent = float(value)
         elif key == "cpu_sustained_threshold_percent":
             health.cpu_sustained_threshold_percent = float(value)
-        # P3 settings (AC37)
-        elif key == "system_metrics_cache_ttl_seconds":
-            health.system_metrics_cache_ttl_seconds = int(value)
         else:
             raise ValueError(f"Unknown health setting: {key}")
 
@@ -1497,8 +1463,6 @@ class ConfigService:
             multi_search.omni_default_aggregation_mode = str(value)
         elif key == "omni_max_results_per_repo":
             multi_search.omni_max_results_per_repo = int(value)
-        elif key == "omni_max_total_results_before_aggregation":
-            multi_search.omni_max_total_results_before_aggregation = int(value)
         elif key == "omni_pattern_metacharacters":
             multi_search.omni_pattern_metacharacters = str(value)
         # Bug #881 Phase 3: wildcard fan-out cap

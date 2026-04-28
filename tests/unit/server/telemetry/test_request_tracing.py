@@ -279,52 +279,6 @@ class TestCorrelationBridgeMiddleware:
 # =============================================================================
 
 
-class TestTraceSampling:
-    """Tests for trace sampling configuration."""
-
-    def setup_method(self):
-        """Reset singletons before each test."""
-        reset_all_singletons()
-
-    def teardown_method(self):
-        """Reset singletons after each test."""
-        reset_all_singletons()
-
-    def test_trace_sample_rate_respected_in_config(self):
-        """
-        Trace sample rate from config is passed to tracer provider.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            trace_sample_rate=0.5,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-
-        # Verify config was stored
-        assert telemetry_manager._config.trace_sample_rate == 0.5
-
-    def test_full_sampling_when_rate_is_one(self):
-        """
-        All requests traced when trace_sample_rate=1.0.
-        """
-        from src.code_indexer.server.telemetry import get_telemetry_manager
-
-        config = TelemetryConfig(
-            enabled=True,
-            export_traces=True,
-            trace_sample_rate=1.0,
-            collector_endpoint="http://localhost:4317",
-        )
-        telemetry_manager = get_telemetry_manager(config)
-
-        # With rate 1.0, all traces should be sampled
-        assert telemetry_manager._config.trace_sample_rate == 1.0
-
-
 # =============================================================================
 # Excluded Endpoints Tests
 # =============================================================================

@@ -59,7 +59,7 @@ def _make_executor() -> DepMapRepairExecutor:
         health_detector=DepMapHealthDetector(),
         index_regenerator=IndexRegenerator(),
         enable_graph_channel_repair=True,
-        invoke_claude_fn=None,
+        invoke_llm_fn=None,
         graph_repair_self_loop="enabled",
     )
 
@@ -407,7 +407,7 @@ def _make_executor_with_real_bidi_stubs(
         health_detector=DepMapHealthDetector(),
         index_regenerator=IndexRegenerator(),
         enable_graph_channel_repair=True,
-        invoke_claude_fn=stub_invoke_claude,
+        invoke_llm_fn=stub_invoke_claude,
         repo_path_resolver=stub_repo_path_resolver,
     )
 
@@ -535,7 +535,7 @@ def test_bidi_dry_run_invokes_claude_fn(tmp_path: Path) -> None:
         health_detector=DepMapHealthDetector(),
         index_regenerator=IndexRegenerator(),
         enable_graph_channel_repair=True,
-        invoke_claude_fn=stub_invoke_claude,
+        invoke_llm_fn=stub_invoke_claude,
     )
     fixed: List[str] = []
     errors: List[str] = []

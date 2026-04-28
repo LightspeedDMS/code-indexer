@@ -18,7 +18,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, Tuple
 from urllib.parse import quote
 
 from code_indexer import __version__ as _cidx_version
@@ -1191,11 +1191,11 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
         Configured DepMapRepairExecutor instance.
     """
     from ..services.config_service import get_config_service
+    from ..services.dep_map_dispatcher_factory import build_dep_map_dispatcher
     from ..services.dep_map_health_detector import DepMapHealthDetector
     from ..services.dep_map_index_regenerator import IndexRegenerator
     from ..services.dep_map_repair_executor import DepMapRepairExecutor
     from .routes import _get_golden_repo_manager
-    from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
 
     # Read bootstrap flags from ServerConfig (bootstrap-only, never DB).
     _cfg = get_config_service().get_config()
@@ -1226,6 +1226,19 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
 
     golden_repo_manager = _get_golden_repo_manager()
 
+    _dispatcher = build_dep_map_dispatcher(_cfg)
+
+    def _invoke_llm_fn(
+        repo_path: str, prompt: str, shell_timeout: int, outer_timeout: int
+    ) -> Tuple[bool, str]:
+        result = _dispatcher.dispatch(
+            flow="dep_map_repair",
+            cwd=repo_path,
+            prompt=prompt,
+            timeout=outer_timeout,
+        )
+        return result.success, result.output
+
     return DepMapRepairExecutor(
         health_detector=detector,
         index_regenerator=regenerator,
@@ -1233,7 +1246,7 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
         journal_callback=journal_cb,
         progress_callback=_progress_cb,
         enable_graph_channel_repair=enable_graph_channel_repair,
-        invoke_claude_fn=invoke_claude_cli,
+        invoke_llm_fn=_invoke_llm_fn,
         repo_path_resolver=golden_repo_manager.get_actual_repo_path,
         graph_repair_self_loop=_cfg.graph_repair_self_loop,
         graph_repair_malformed_yaml=_cfg.graph_repair_malformed_yaml,

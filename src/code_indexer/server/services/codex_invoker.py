@@ -193,11 +193,17 @@ class CodexInvoker:
                 header_value = self._auth_header_provider()
                 env[_MCP_AUTH_HEADER_ENV_VAR] = header_value
             except Exception as exc:
-                logger.warning(
-                    "CodexInvoker: auth_header_provider raised — spawning without %s: %s",
-                    _MCP_AUTH_HEADER_ENV_VAR,
-                    exc,
+                # Fail fast: missing MCP auth is a configuration failure, not a
+                # transient condition. Log ERROR (MESSI Rule 13: Anti-Silent-Failure)
+                # and return RETRYABLE_ON_OTHER so the dispatcher can failover to
+                # Claude rather than spawning a degraded Codex process whose MCP
+                # calls will fail with 401 (bug #937 fix).
+                error_msg = (
+                    f"CodexInvoker: auth_header_provider raised — "
+                    f"refusing to spawn without {_MCP_AUTH_HEADER_ENV_VAR}: {exc}"
                 )
+                logger.error(error_msg)
+                return _make_failure_result(error_msg, FailureClass.RETRYABLE_ON_OTHER)
         try:
             return subprocess.Popen(
                 cmd,
