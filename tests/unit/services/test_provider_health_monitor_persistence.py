@@ -229,7 +229,9 @@ class TestCorruptedPersistenceFile:
     ) -> None:
         path = tmp_path / "state.json"
         path.write_text("{", encoding="utf-8")
-        with caplog.at_level(logging.WARNING):
+        logger_name = "code_indexer.services.provider_health_monitor"
+        caplog.set_level(logging.WARNING, logger=logger_name)
+        with caplog.at_level(logging.WARNING, logger=logger_name):
             _fresh_monitor(path)
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert any(str(path) in r.message for r in warnings), (

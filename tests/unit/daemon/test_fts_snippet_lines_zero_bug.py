@@ -68,11 +68,12 @@ class TestDaemonFTSSnippetLinesZero:
             )
 
             # Verify _execute_fts_search was called with snippet_lines=0
+            # Note: limit is extracted by exposed_query_fts and applied via post-search
+            # truncation in _apply_rerank_or_truncate, not forwarded to _execute_fts_search.
             mock_execute.assert_called_once_with(
                 str(test_project),
                 "voyage",
                 snippet_lines=0,  # Should be passed through correctly
-                limit=2,
                 case_sensitive=False,
                 edit_distance=0,
                 use_regex=False,
