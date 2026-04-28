@@ -15,6 +15,7 @@ from typing import Optional, Union, Callable, Dict, Any, List, Literal, cast
 
 import click
 from rich.console import Console
+from rich.logging import RichHandler
 from rich.table import Table
 
 # Rich progress imports removed - using MultiThreadedProgressManager instead
@@ -48,6 +49,21 @@ from .remote.credential_manager import ProjectCredentialManager  # noqa: F401
 # Daemon delegation imports (lazy loaded when daemon enabled)
 from . import cli_daemon_delegation  # noqa: F401
 from . import cli_daemon_lifecycle  # noqa: F401
+
+
+def setup_logging() -> None:
+    """Configure root logger to use RichHandler for Rich Live compatibility.
+
+    Installs RichHandler instead of the default stdlib StreamHandler so that
+    WARNING/ERROR output is coordinated with the Rich Live progress widget:
+    RichHandler pauses the Live region during emission, preventing the cursor
+    collision that caused truncated log lines (issue #942).
+    """
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(message)s",  # RichHandler renders level/name itself
+        handlers=[RichHandler(rich_tracebacks=False, show_time=False, show_path=False)],
+    )
 
 
 def run_async(coro):
@@ -1881,19 +1897,17 @@ def cli(
     exception_logger = ExceptionLogger.initialize(project_root=Path.cwd(), mode="cli")
     exception_logger.install_thread_exception_hook()
 
-    # Configure logging at WARNING level for clean CLI output
-    logging.basicConfig(
-        level=logging.WARNING, format="%(levelname)s:%(name)s:%(message)s"
-    )
+    # Configure logging with RichHandler for Rich Live compatibility (issue #942).
+    # setup_logging() installs RichHandler so WARNING/ERROR output coordinates
+    # with the Live progress widget and appears complete above the progress bar.
+    setup_logging()
 
     # Configure logging to suppress noisy third-party messages
     if not verbose:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("root").setLevel(logging.WARNING)
-        # Suppress provider health warnings during CLI — they break Rich's live display
-        logging.getLogger("code_indexer.services.provider_health_monitor").setLevel(
-            logging.ERROR
-        )
+        # Note: the per-logger mute for provider_health_monitor is no longer needed
+        # because the systemic RichHandler fix above coordinates all loggers with Rich.
 
     # Handle --use-cidx-prompt flag (early return)
     if use_cidx_prompt:

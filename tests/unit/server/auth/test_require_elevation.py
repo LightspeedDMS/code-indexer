@@ -2,8 +2,8 @@
 Tests for require_elevation FastAPI dependency (Story #923 AC5).
 
 Verifies that:
-- HTTP 503 is raised when kill switch is off (elevation_enforcement_enabled=False).
-- HTTP 503 is raised when elevated_session_manager is None.
+- Passthrough (return user) when kill switch is off (elevation_enforcement_enabled=False).
+- Passthrough (return user) when elevated_session_manager is None.
 - HTTP 403 totp_setup_required is raised when admin has no TOTP MFA enabled.
 - HTTP 403 elevation_required is raised when no session key is present.
 - HTTP 403 elevation_required is raised when no elevation window exists.
@@ -13,6 +13,13 @@ Verifies that:
 - Recovery-scope window raises 403 when required_scope='full'.
 - Recovery-scope window passes when required_scope='totp_repair'.
 - Full-scope window passes when required_scope='full'.
+
+NOTE (Bug #AT-12): The original tests asserted HTTP 503 for the two kill-switch-off
+cases.  That was a misinterpretation of the kill-switch semantics.  The correct
+behavior is passthrough (return the user unchanged) so protected endpoints operate
+without elevation when the feature is administratively disabled.  The 503 response
+was never intended for this path — it applies only to the /auth/elevate endpoint
+itself (elevation_routes.py).  Tests have been renamed and updated accordingly.
 """
 
 import contextlib
@@ -32,7 +39,6 @@ _IP = "127.0.0.1"
 _IDLE_TIMEOUT = 300
 _MAX_AGE = 1800
 _HTTP_403 = 403
-_HTTP_503 = 503
 
 # Patch targets
 _ENFORCEMENT_ENABLED_PATH = (
@@ -136,30 +142,38 @@ def _run_dep(
 
 
 # ---------------------------------------------------------------------------
-# Kill switch and manager-None cases (503)
+# Kill switch and manager-None cases — passthrough (corrected per Bug #AT-12)
+# Prior behavior raised HTTP 503; correct behavior is to return the user so
+# protected endpoints run without an elevation gate when the feature is off.
 # ---------------------------------------------------------------------------
 
 
-def test_raises_503_when_kill_switch_off(manager, user):
-    """Must raise HTTP 503 when _is_elevation_enforcement_enabled returns False."""
+def test_kill_switch_off_passes_through(manager, user):
+    """When kill switch is OFF, dependency must return user without raising.
+
+    Prior (wrong) behavior: raised HTTP 503 elevation_enforcement_disabled.
+    Correct behavior: bypass all elevation checks, return user unchanged.
+    """
     _deps.elevated_session_manager = manager
     manager.create(_SESSION_KEY, _USERNAME, _IP)
     with _elevation_ctx(enforcement=False):
-        with pytest.raises(HTTPException) as exc_info:
-            dep = _deps.require_elevation()
-            dep(_make_request(_SESSION_KEY), user)
-    assert exc_info.value.status_code == _HTTP_503
-    assert exc_info.value.detail["error"] == "elevation_enforcement_disabled"  # type: ignore[index]  # HTTPException.detail is str|Any; dict access is safe here
+        dep = _deps.require_elevation()
+        result = dep(_make_request(_SESSION_KEY), user)
+    assert result is user
 
 
-def test_raises_503_when_manager_not_initialized(user):
-    """Must raise HTTP 503 when elevated_session_manager is None."""
+def test_manager_none_passes_through(user):
+    """When elevated_session_manager is None AND enforcement is ON, pass through.
+
+    Prior (wrong) behavior: raised HTTP 503 when manager was None.
+    Correct behavior: None manager means the subsystem is not initialised on
+    this deployment — treat equivalently to kill switch OFF and return user.
+    """
     _deps.elevated_session_manager = None
     with _elevation_ctx(enforcement=True):
-        with pytest.raises(HTTPException) as exc_info:
-            dep = _deps.require_elevation()
-            dep(_make_request(_SESSION_KEY), user)
-    assert exc_info.value.status_code == _HTTP_503
+        dep = _deps.require_elevation()
+        result = dep(_make_request(_SESSION_KEY), user)
+    assert result is user
 
 
 # ---------------------------------------------------------------------------

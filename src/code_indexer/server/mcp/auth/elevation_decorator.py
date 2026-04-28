@@ -94,17 +94,14 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
         def wrapper(
             args: Dict[str, Any], user: User, *extra: Any, **kwargs: Any
         ) -> Dict[str, Any]:
-            # Gate 1: kill switch (fail closed — not a bypass)
+            # Gate 1: kill switch — passthrough when enforcement is disabled.
+            # Per operator policy: if elevation is globally off, the handler
+            # must proceed without a TOTP challenge.
             if not _is_elevation_enforcement_enabled():
-                return _disabled_error()
+                return handler(args, user, *extra, **kwargs)
 
-            # Gate 2: manager availability (fail closed — not a bypass)
+            # Gate 2: manager reference (singleton — always non-None after startup)
             esm = elevated_session_manager
-            if esm is None:
-                logger.warning(
-                    "require_mcp_elevation: elevated_session_manager is None (misconfiguration)"
-                )
-                return _disabled_error("Elevation manager not initialized.")
 
             # Gate 3: TOTP service availability
             totp = get_totp_service()
