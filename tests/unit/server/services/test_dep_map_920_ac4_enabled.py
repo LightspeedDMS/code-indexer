@@ -369,7 +369,7 @@ def test_bidirectional_per_type_enabled_journal_entry_has_effective_mode_enabled
 
     ex = _make_per_type_executor(
         graph_repair_bidirectional_mismatch="enabled",
-        invoke_claude_fn=lambda repo_path, prompt, shell_timeout, outer_timeout: (
+        invoke_llm_fn=lambda repo_path, prompt, shell_timeout, outer_timeout: (
             True,
             "VERDICT: INCONCLUSIVE\nEVIDENCE_TYPE: none\nCITATIONS:\nREASONING: stub.\n",
         ),

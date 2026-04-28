@@ -130,14 +130,19 @@ class TestAuthHeaderProviderInjection:
             f"got {envs[0].get(_AUTH_HEADER_ENV_VAR)!r}"
         )
 
-    def test_provider_raises_subprocess_still_spawns_without_header(self, caplog):
+    def test_provider_raises_subprocess_not_spawned_error_logged(self, caplog):
         """
-        When auth_header_provider raises an exception, Popen must still be
-        called (subprocess spawns) and CIDX_MCP_AUTH_HEADER must NOT be in env
-        (graceful degradation: MCP calls may fail but the invocation proceeds).
+        When auth_header_provider raises an exception, Popen must NOT be called
+        (bug #937 fix: fail fast rather than spawn a degraded Codex process),
+        an ERROR must be logged (MESSI Rule 13: Anti-Silent-Failure), and the
+        result must be failure with RETRYABLE_ON_OTHER so the dispatcher can
+        failover to Claude.
 
-        Foundation 13 (Anti-Silent-Failure): provider failures MUST log WARNING.
+        Previously this test verified "subprocess still spawns" (old graceful-
+        degradation behavior). The new behavior is fail-fast: refuse to spawn
+        without MCP auth and return RETRYABLE_ON_OTHER for dispatcher failover.
         """
+        from code_indexer.server.services.intelligence_cli_invoker import FailureClass
 
         def _raising_provider() -> str:
             raise RuntimeError("Credential fetch failed")
@@ -146,29 +151,31 @@ class TestAuthHeaderProviderInjection:
             codex_home=_FAKE_CODEX_HOME,
             auth_header_provider=_raising_provider,
         )
-        proc = _make_success_proc()
 
-        with caplog.at_level(logging.WARNING):
-            with patch("subprocess.Popen", return_value=proc) as mock_popen:
-                invoker.invoke(flow=_FLOW, cwd=_CWD, prompt=_PROMPT, timeout=_TIMEOUT)
+        with caplog.at_level(logging.DEBUG):
+            with patch("subprocess.Popen") as mock_popen:
+                result = invoker.invoke(
+                    flow=_FLOW, cwd=_CWD, prompt=_PROMPT, timeout=_TIMEOUT
+                )
 
-        assert mock_popen.called, "subprocess must still spawn when provider raises"
+        assert not mock_popen.called, (
+            "subprocess must NOT be spawned when auth_header_provider raises "
+            "(bug #937 fix: fail fast, don't degrade silently)"
+        )
 
-        envs = _capture_popen_envs(mock_popen.call_args_list)
-        for env in envs:
-            assert _AUTH_HEADER_ENV_VAR not in env, (
-                f"CIDX_MCP_AUTH_HEADER must NOT be in env when provider raises; "
-                f"got {list(env.keys())}"
-            )
+        # Foundation 13: failure must be at ERROR level, not WARNING
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_records, (
+            "An ERROR must be logged when auth_header_provider raises "
+            "(MESSI Rule 13: Anti-Silent-Failure)"
+        )
 
-        # Foundation 13: graceful degradation must produce an observable WARNING
-        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any(
-            "auth_header" in r.message.lower() or "provider" in r.message.lower()
-            for r in warning_records
-        ), (
-            f"Expected WARNING about auth_header provider failure; "
-            f"got: {[r.message for r in warning_records]}"
+        assert not result.success, (
+            "Invocation must fail when auth_header_provider raises"
+        )
+        assert result.failure_class == FailureClass.RETRYABLE_ON_OTHER, (
+            f"failure_class must be RETRYABLE_ON_OTHER for dispatcher failover; "
+            f"got {result.failure_class!r}"
         )
 
 

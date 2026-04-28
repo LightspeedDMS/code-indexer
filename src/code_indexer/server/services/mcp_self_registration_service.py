@@ -283,3 +283,29 @@ class MCPSelfRegistrationService:
         """
         self.ensure_registered()
         return self._cached_auth_header
+
+    def build_header_from_stored_credentials(self) -> Optional[str]:
+        """
+        Return the cached Basic auth header, populating it from stored credentials
+        if needed — without requiring Claude CLI to be available.
+
+        Calls get_or_create_credentials() to obtain stored client_id/client_secret,
+        then calls register_in_claude_code() which sets self._cached_auth_header
+        before attempting the subprocess (so the cache is populated regardless of
+        whether the `claude mcp add` subprocess succeeds). Returns the cached value.
+
+        This is the third fallback in build_codex_mcp_auth_header_provider(), enabling
+        Codex MCP auth when Claude CLI is absent (bug #937 fix): credentials exist in
+        the store even when Claude registration never ran in this process.
+
+        Returns:
+            'Basic <b64(client_id:client_secret)>' header value string, or None if
+            no credentials can be obtained from get_or_create_credentials().
+        """
+        creds = self.get_or_create_credentials()
+        if creds is None:
+            return None
+        # register_in_claude_code sets _cached_auth_header before the subprocess runs.
+        # The subprocess result is not checked here — we only need the cache side-effect.
+        self.register_in_claude_code(creds)
+        return self._cached_auth_header

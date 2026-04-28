@@ -172,14 +172,10 @@ class TelemetryConfig:
     # Export settings
     export_traces: bool = True
     export_metrics: bool = True
-    export_logs: bool = False
 
     # Machine metrics settings
     machine_metrics_enabled: bool = True
     machine_metrics_interval_seconds: int = 60
-
-    # Trace sampling
-    trace_sample_rate: float = 1.0  # 0.0 to 1.0
 
     # Deployment environment (development, staging, production)
     deployment_environment: str = "development"
@@ -203,26 +199,6 @@ class SearchLimitsConfig:
     def max_size_bytes(self) -> int:
         """Return max result size in bytes."""
         return self.max_result_size_mb * 1024 * 1024
-
-
-@dataclass
-class FileContentLimitsConfig:
-    """
-    File content limits configuration (Story #3 - Configuration Consolidation).
-
-    Migrated from SQLite-based FileContentLimitsConfigManager to main config.json.
-    Controls token budgets for file content operations.
-    """
-
-    # AC-M3: Maximum tokens per request (default 5000, range 1000-50000)
-    max_tokens_per_request: int = 5000
-    # AC-M4: Characters per token ratio (default 4, range 1-10)
-    chars_per_token: int = 4
-
-    @property
-    def max_chars_per_request(self) -> int:
-        """Return max characters per request based on token budget."""
-        return self.max_tokens_per_request * self.chars_per_token
 
 
 @dataclass
@@ -274,8 +250,6 @@ class HealthConfig:
     disk_critical_threshold_percent: float = 90.0
     # AC8: CPU sustained threshold (default 95%, range 70-100%)
     cpu_sustained_threshold_percent: float = 95.0
-    # AC37: System metrics cache TTL in seconds (default 5s, range 1-60s)
-    system_metrics_cache_ttl_seconds: int = 5
 
 
 @dataclass
@@ -669,7 +643,6 @@ class MultiSearchLimitsConfig:
     omni_max_limit: int = 1000
     omni_default_aggregation_mode: str = "global"
     omni_max_results_per_repo: int = 100
-    omni_max_total_results_before_aggregation: int = 10000
     omni_pattern_metacharacters: str = "*?[]^$+|"
     # Bug #881 Phase 3: cap on wildcard expansion to prevent unbounded fan-out
     # and HNSW cache memory exhaustion. Default 50; operator-tunable via Web UI.
@@ -773,8 +746,6 @@ class ContentLimitsConfig:
     # Cache settings
     # Time-to-live for cached content in seconds (default: 1 hour)
     cache_ttl_seconds: int = 3600
-    # Maximum cache entries before cleanup (default: 10000)
-    cache_max_entries: int = 10000
 
 
 @dataclass
@@ -1037,7 +1008,6 @@ class ServerConfig:
 
     # Story #3 - Configuration Consolidation: Migrated settings
     search_limits_config: Optional[SearchLimitsConfig] = None
-    file_content_limits_config: Optional[FileContentLimitsConfig] = None
     golden_repos_config: Optional[GoldenReposConfig] = None
 
     # Story #3 - Phase 2: P0/P1 settings
@@ -1160,8 +1130,8 @@ class ServerConfig:
         # Story #3 - Configuration Consolidation: Initialize migrated configs
         if self.search_limits_config is None:
             self.search_limits_config = SearchLimitsConfig()
-        if self.file_content_limits_config is None:
-            self.file_content_limits_config = FileContentLimitsConfig()
+        # Bug #939: file_content_limits_config is a legacy field — do NOT auto-initialize.
+        # It stays None for all new and migrated configs (ContentLimitsConfig replaces it).
         if self.golden_repos_config is None:
             self.golden_repos_config = GoldenReposConfig()
         # Story #3 - Phase 2: Initialize P0/P1 configs
@@ -1438,9 +1408,12 @@ class ServerConfigManager:
         if "telemetry_config" in config_dict and isinstance(
             config_dict["telemetry_config"], dict
         ):
-            config_dict["telemetry_config"] = TelemetryConfig(
-                **config_dict["telemetry_config"]
-            )
+            # Bug #938: strip dead fields removed from TelemetryConfig so old
+            # config.json files load cleanly without TypeError.
+            _tel = config_dict["telemetry_config"]
+            _tel.pop("export_logs", None)
+            _tel.pop("trace_sample_rate", None)
+            config_dict["telemetry_config"] = TelemetryConfig(**_tel)
 
         # Story #3 - Configuration Consolidation: Convert migrated config dicts
         # Convert nested search_limits_config dict to SearchLimitsConfig
@@ -1451,13 +1424,11 @@ class ServerConfigManager:
                 **config_dict["search_limits_config"]
             )
 
-        # Convert nested file_content_limits_config dict to FileContentLimitsConfig
-        if "file_content_limits_config" in config_dict and isinstance(
-            config_dict["file_content_limits_config"], dict
-        ):
-            config_dict["file_content_limits_config"] = FileContentLimitsConfig(
-                **config_dict["file_content_limits_config"]
-            )
+        # Bug #939: file_content_limits_config is a legacy key that has been replaced
+        # by ContentLimitsConfig.file_content_max_tokens. Strip it silently so that
+        # old config.json files load cleanly. The migration block above already
+        # extracted useful values into content_limits_config before this point.
+        config_dict.pop("file_content_limits_config", None)
 
         # Convert nested golden_repos_config dict to GoldenReposConfig
         if "golden_repos_config" in config_dict and isinstance(
@@ -1480,6 +1451,9 @@ class ServerConfigManager:
         if "health_config" in config_dict and isinstance(
             config_dict["health_config"], dict
         ):
+            # Bug #938: strip dead field removed from HealthConfig so old
+            # config.json files load cleanly without TypeError.
+            config_dict["health_config"].pop("system_metrics_cache_ttl_seconds", None)
             config_dict["health_config"] = HealthConfig(**config_dict["health_config"])
 
         # Convert nested scip_config dict to ScipConfig
@@ -1634,6 +1608,11 @@ class ServerConfigManager:
         if "multi_search_limits_config" in config_dict and isinstance(
             config_dict["multi_search_limits_config"], dict
         ):
+            # Bug #938: strip dead field removed from MultiSearchLimitsConfig so old
+            # config.json files load cleanly without TypeError.
+            config_dict["multi_search_limits_config"].pop(
+                "omni_max_total_results_before_aggregation", None
+            )
             config_dict["multi_search_limits_config"] = MultiSearchLimitsConfig(
                 **config_dict["multi_search_limits_config"]
             )
@@ -1671,6 +1650,9 @@ class ServerConfigManager:
         if "content_limits_config" in config_dict and isinstance(
             config_dict["content_limits_config"], dict
         ):
+            # Bug #938: strip dead field removed from ContentLimitsConfig so old
+            # config.json files load cleanly without TypeError.
+            config_dict["content_limits_config"].pop("cache_max_entries", None)
             config_dict["content_limits_config"] = ContentLimitsConfig(
                 **config_dict["content_limits_config"]
             )
@@ -1906,14 +1888,6 @@ class ServerConfigManager:
         if service_name_env := os.environ.get("CIDX_OTEL_SERVICE_NAME"):
             config.telemetry_config.service_name = service_name_env
 
-        if trace_sample_rate_env := os.environ.get("CIDX_OTEL_TRACE_SAMPLE_RATE"):
-            try:
-                config.telemetry_config.trace_sample_rate = float(trace_sample_rate_env)
-            except ValueError:
-                logging.warning(
-                    f"Invalid CIDX_OTEL_TRACE_SAMPLE_RATE environment variable value '{trace_sample_rate_env}'. Using default {config.telemetry_config.trace_sample_rate}"
-                )
-
         if deployment_env := os.environ.get("CIDX_DEPLOYMENT_ENVIRONMENT"):
             config.telemetry_config.deployment_environment = deployment_env
 
@@ -1995,12 +1969,6 @@ class ServerConfigManager:
 
         # Validate telemetry configuration (Story #695)
         if config.telemetry_config:
-            # Validate trace_sample_rate (0.0 to 1.0)
-            if not (0.0 <= config.telemetry_config.trace_sample_rate <= 1.0):
-                raise ValueError(
-                    f"trace_sample_rate must be between 0.0 and 1.0, got {config.telemetry_config.trace_sample_rate}"
-                )
-
             # Validate collector_protocol
             valid_protocols = {"grpc", "http"}
             if (
@@ -2030,37 +1998,12 @@ class ServerConfigManager:
                     f"timeout_seconds must be between 5 and 300, got {config.search_limits_config.timeout_seconds}"
                 )
 
-        # Validate file_content_limits_config (Story #3 - Phase 1, AC-M3, AC-M4)
-        if config.file_content_limits_config:
-            # Validate max_tokens_per_request (1000-50000 tokens range)
-            if not (
-                1000
-                <= config.file_content_limits_config.max_tokens_per_request
-                <= 50000
-            ):
-                raise ValueError(
-                    f"max_tokens_per_request must be between 1000 and 50000, got {config.file_content_limits_config.max_tokens_per_request}"
-                )
-            # Validate chars_per_token (1-10 range)
-            if not (1 <= config.file_content_limits_config.chars_per_token <= 10):
-                raise ValueError(
-                    f"chars_per_token must be between 1 and 10, got {config.file_content_limits_config.chars_per_token}"
-                )
-
         # Validate golden_repos_config (Story #3 - Phase 1, AC-M5)
         if config.golden_repos_config:
             # Validate refresh_interval_seconds (minimum 60 seconds)
             if config.golden_repos_config.refresh_interval_seconds < 60:
                 raise ValueError(
                     f"refresh_interval_seconds must be >= 60, got {config.golden_repos_config.refresh_interval_seconds}"
-                )
-
-        # Validate health_config (Story #3 - Phase 2, AC37)
-        if config.health_config:
-            # AC37: system_metrics_cache_ttl_seconds range 1-60
-            if not (1 <= config.health_config.system_metrics_cache_ttl_seconds <= 60):
-                raise ValueError(
-                    f"system_metrics_cache_ttl_seconds must be between 1 and 60, got {config.health_config.system_metrics_cache_ttl_seconds}"
                 )
 
         # Validate scip_config (Story #3 - Phase 2, AC31-AC34)
@@ -2280,16 +2223,6 @@ class ServerConfigManager:
                 raise ValueError(
                     f"omni_max_results_per_repo must be between 1 and 10000, got {config.multi_search_limits_config.omni_max_results_per_repo}"
                 )
-            # omni_max_total_results_before_aggregation range 1-100000
-            if not (
-                1
-                <= config.multi_search_limits_config.omni_max_total_results_before_aggregation
-                <= 100000
-            ):
-                raise ValueError(
-                    f"omni_max_total_results_before_aggregation must be between 1 and 100000, got {config.multi_search_limits_config.omni_max_total_results_before_aggregation}"
-                )
-
         # Validate background_jobs_config (Story #26, Story #27)
         if config.background_jobs_config:
             # max_concurrent_background_jobs range 1-100
@@ -2364,12 +2297,6 @@ class ServerConfigManager:
                 raise ValueError(
                     f"cache_ttl_seconds must be >= 60, got {config.content_limits_config.cache_ttl_seconds}"
                 )
-            # cache_max_entries range 100-100000
-            if not (100 <= config.content_limits_config.cache_max_entries <= 100000):
-                raise ValueError(
-                    f"cache_max_entries must be between 100 and 100000, got {config.content_limits_config.cache_max_entries}"
-                )
-
         # Validate langfuse_config (Story #136, Story #174)
         if config.langfuse_config:
             # Validate host URL format (Story #136)

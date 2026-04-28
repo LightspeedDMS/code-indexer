@@ -140,7 +140,7 @@ def _make_per_type_executor(**per_type_flags) -> DepMapRepairExecutor:
 
     Accepted flags: graph_repair_self_loop, graph_repair_malformed_yaml,
     graph_repair_garbage_domain, graph_repair_bidirectional_mismatch,
-    invoke_claude_fn, repo_path_resolver.
+    invoke_llm_fn, repo_path_resolver.
     """
     return DepMapRepairExecutor(
         health_detector=DepMapHealthDetector(),
@@ -396,7 +396,7 @@ def test_bidirectional_per_type_dry_run_journals_with_effective_mode_dry_run(
 
     ex = _make_per_type_executor(
         graph_repair_bidirectional_mismatch="dry_run",
-        invoke_claude_fn=lambda repo_path, prompt, shell_timeout, outer_timeout: (
+        invoke_llm_fn=lambda repo_path, prompt, shell_timeout, outer_timeout: (
             True,
             "VERDICT: INCONCLUSIVE\nEVIDENCE_TYPE: none\nCITATIONS:\nREASONING: stub.\n",
         ),

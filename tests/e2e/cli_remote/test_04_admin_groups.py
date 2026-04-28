@@ -40,7 +40,6 @@ import json
 import uuid
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import Generator
 
 import pytest
 

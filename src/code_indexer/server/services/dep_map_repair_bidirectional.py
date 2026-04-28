@@ -364,7 +364,7 @@ def _audit_one_impl(
     output_dir: Path,
     anomaly: Any,
     domains_json: List[Dict[str, Any]],
-    invoke_claude_fn: Callable[[str, str, int, int], Tuple[bool, str]],
+    invoke_llm_fn: Callable[[str, str, int, int], Tuple[bool, str]],
     repo_path_resolver: Callable[[str], str],
     journal: RepairJournal,
     fixed: List[str],
@@ -415,7 +415,7 @@ def _audit_one_impl(
         return
     shell_timeout, outer_timeout = _resolved_claude_timeouts()
     success, raw_response = _invoke_claude_audit(
-        str(output_dir), prompt, shell_timeout, outer_timeout, invoke_claude_fn
+        str(output_dir), prompt, shell_timeout, outer_timeout, invoke_llm_fn
     )
     if not success:
         _handle_claude_failure(
@@ -474,7 +474,7 @@ def audit_one_bidirectional_mismatch(
     output_dir: Path,
     anomaly: Any,
     domains_json: List[Dict[str, Any]],
-    invoke_claude_fn: Callable[[str, str, int, int], Tuple[bool, str]],
+    invoke_llm_fn: Callable[[str, str, int, int], Tuple[bool, str]],
     repo_path_resolver: Callable[[str], str],
     journal: RepairJournal,
     fixed: List[str],
@@ -488,7 +488,7 @@ def audit_one_bidirectional_mismatch(
 ) -> None:
     """Audit one BIDIRECTIONAL_MISMATCH anomaly. Never raises.
 
-    AC2: single Claude invocation per anomaly via injected invoke_claude_fn.
+    AC2: single Claude invocation per anomaly via injected invoke_llm_fn.
     AC6: citation file existence verified by run_verification_gate.
     AC7: source-side reverse check by run_verification_gate.
     AC8: REFUTED -> journal only, no file write.
@@ -506,7 +506,7 @@ def audit_one_bidirectional_mismatch(
             output_dir,
             anomaly,
             domains_json,
-            invoke_claude_fn,
+            invoke_llm_fn,
             repo_path_resolver,
             journal,
             fixed,

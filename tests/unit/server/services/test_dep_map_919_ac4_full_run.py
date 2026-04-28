@@ -41,7 +41,7 @@ def _make_executor(enable: bool = True) -> DepMapRepairExecutor:
         health_detector=DepMapHealthDetector(),
         index_regenerator=IndexRegenerator(),
         enable_graph_channel_repair=enable,
-        invoke_claude_fn=None,
+        invoke_llm_fn=None,
         graph_repair_self_loop="enabled",
     )
 

@@ -149,7 +149,6 @@ _VALID_CONFIG_SECTIONS = (
     "telemetry",
     "langfuse",
     "search_limits",
-    "file_content_limits",
     "golden_repos",
     "mcp_session",
     "health",
@@ -5511,7 +5510,6 @@ def _get_current_config() -> dict:
         TelemetryConfig,
         LangfuseConfig,
         SearchLimitsConfig,
-        FileContentLimitsConfig,
         GoldenReposConfig,
         # Story #3 - Phase 2: P0/P1 settings (AC2-AC11)
         McpSessionConfig,
@@ -5567,10 +5565,6 @@ def _get_current_config() -> dict:
     search_limits_config = settings.get("search_limits")
     if not search_limits_config:
         search_limits_config = asdict(SearchLimitsConfig())
-
-    file_content_limits_config = settings.get("file_content_limits")
-    if not file_content_limits_config:
-        file_content_limits_config = asdict(FileContentLimitsConfig())
 
     golden_repos_config = settings.get("golden_repos")
     if not golden_repos_config:
@@ -5697,7 +5691,6 @@ def _get_current_config() -> dict:
         "langfuse": langfuse_config,
         "claude_delegation": claude_delegation_config,
         "search_limits": search_limits_config,
-        "file_content_limits": file_content_limits_config,
         "golden_repos": golden_repos_config,
         # Story #3 - Phase 2: P0/P1 settings
         "mcp_session": mcp_session_config,
@@ -5951,16 +5944,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return f"{field_name} must be a valid number"
 
     elif section == "telemetry":
-        # Validate trace_sample_rate (0.0 to 1.0)
-        trace_sample_rate = data.get("trace_sample_rate")
-        if trace_sample_rate is not None:
-            try:
-                rate_float = float(trace_sample_rate)
-                if rate_float < 0 or rate_float > 1:
-                    return "Trace sample rate must be between 0.0 and 1.0"
-            except (ValueError, TypeError):
-                return "Trace sample rate must be a valid number"
-
         # Validate collector_protocol
         collector_protocol = data.get("collector_protocol")
         if collector_protocol is not None:
@@ -6007,27 +5990,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Timeout must be between 5 and 300 seconds"
             except (ValueError, TypeError):
                 return "Timeout must be a valid number"
-
-    elif section == "file_content_limits":
-        # Validate max_tokens_per_request (1000-50000 tokens)
-        max_tokens = data.get("max_tokens_per_request")
-        if max_tokens is not None:
-            try:
-                max_tokens_int = int(max_tokens)
-                if max_tokens_int < 1000 or max_tokens_int > 50000:
-                    return "Max Tokens per Request must be between 1000 and 50000"
-            except (ValueError, TypeError):
-                return "Max Tokens per Request must be a valid number"
-
-        # Validate chars_per_token (1-10 characters)
-        chars_per_token = data.get("chars_per_token")
-        if chars_per_token is not None:
-            try:
-                chars_int = int(chars_per_token)
-                if chars_int < 1 or chars_int > 10:
-                    return "Characters per Token must be between 1 and 10"
-            except (ValueError, TypeError):
-                return "Characters per Token must be a valid number"
 
     elif section == "golden_repos":
         # Validate refresh_interval_seconds (minimum 60 seconds)
@@ -6085,24 +6047,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 except (ValueError, TypeError):
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
-
-        # AC37: System Metrics Cache TTL
-        from ..services.constants import (
-            MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS,
-            MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS,
-        )
-
-        cache_ttl = data.get("metrics_cache_ttl_seconds")
-        if cache_ttl is not None:
-            try:
-                ttl_float = float(cache_ttl)
-                if (
-                    ttl_float < MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS
-                    or ttl_float > MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS
-                ):
-                    return f"System Metrics Cache TTL must be between {MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS} and {MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS} seconds"
-            except (ValueError, TypeError):
-                return "System Metrics Cache TTL must be a valid number"
 
     elif section == "scip":
         # Story #3 Phase 2 AC9-AC11: SCIP configuration
@@ -6651,15 +6595,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Cache TTL must be at least 60 seconds"
             except (ValueError, TypeError):
                 return "Cache TTL must be a valid number"
-
-        cache_max_entries = data.get("cache_max_entries")
-        if cache_max_entries is not None:
-            try:
-                val_int = int(cache_max_entries)
-                if val_int < 100 or val_int > 100000:
-                    return "Cache Max Entries must be between 100 and 100000"
-            except (ValueError, TypeError):
-                return "Cache Max Entries must be a valid number"
 
     elif section == "rerank":
         # Story #652: Reranking configuration validation
@@ -8067,164 +8002,6 @@ def git_settings_page(request: Request):
     # Set CSRF cookie
     set_csrf_cookie(response, csrf_token)
 
-    return response
-
-
-# =============================================================================
-# File Content Limits Settings
-# =============================================================================
-
-
-@web_router.get("/settings/file-content-limits", response_class=HTMLResponse)
-def file_content_limits_page(request: Request):
-    """
-    File content limits settings page - view and edit token limits configuration.
-
-    Admin-only page for configuring file content token limits.
-    """
-    session = _require_admin_session(request)
-    if not session:
-        return _create_login_redirect(request)
-
-    from ..services.config_service import get_config_service
-
-    # Get current configuration from ConfigService (Story #3 - Configuration Consolidation)
-    config_service = get_config_service()
-    config = config_service.get_config().file_content_limits_config
-
-    # Generate CSRF token
-    csrf_token = generate_csrf_token()
-
-    # Calculate derived values
-    max_chars = config.max_chars_per_request  # type: ignore[union-attr]
-    estimated_lines = max_chars // 80  # Typical code line length
-
-    response = templates.TemplateResponse(
-        "file_content_limits.html",
-        {
-            "request": request,
-            "username": session.username,
-            "current_page": "file-content-limits",
-            "show_nav": True,
-            "csrf_token": csrf_token,
-            "config": config,
-            "max_chars": max_chars,
-            "estimated_lines": estimated_lines,
-            "success_message": None,
-            "error_message": None,
-        },
-    )
-
-    set_csrf_cookie(response, csrf_token)
-    return response
-
-
-@web_router.post("/settings/file-content-limits", response_class=HTMLResponse)
-def update_file_content_limits(
-    request: Request,
-    max_tokens_per_request: int = Form(...),
-    chars_per_token: int = Form(...),
-    csrf_token: Optional[str] = Form(None),
-):
-    """
-    Update file content limits configuration.
-
-    Validates input and persists changes to database.
-    """
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    # Validate CSRF token
-    if not validate_login_csrf_token(request, csrf_token):
-        return _create_file_content_limits_response(
-            request, session, error_message="Invalid CSRF token"
-        )
-
-    # Validate max_tokens_per_request range (Story #3 AC-M3: 1000-50000)
-    if max_tokens_per_request < 1000 or max_tokens_per_request > 50000:
-        return _create_file_content_limits_response(
-            request,
-            session,
-            error_message="Max tokens per request must be between 1000 and 50000",
-        )
-
-    # Validate chars_per_token range (Story #3 AC-M4: 1-10)
-    if chars_per_token < 1 or chars_per_token > 10:
-        return _create_file_content_limits_response(
-            request,
-            session,
-            error_message="Chars per token must be between 1 and 10",
-        )
-
-    # Update configuration using ConfigService (Story #3 - Configuration Consolidation)
-    try:
-        from ..services.config_service import get_config_service
-
-        config_service = get_config_service()
-        # Update settings individually with validation
-        config_service.update_setting(
-            "file_content_limits", "max_tokens_per_request", max_tokens_per_request
-        )
-        config_service.update_setting(
-            "file_content_limits", "chars_per_token", chars_per_token
-        )
-
-        return _create_file_content_limits_response(
-            request,
-            session,
-            success_message="File content limits updated successfully",
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "SVC-GENERAL-016", f"Failed to update file content limits: {e}"
-            ),
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _create_file_content_limits_response(
-            request,
-            session,
-            error_message=f"Failed to update configuration: {str(e)}",
-        )
-
-
-def _create_file_content_limits_response(
-    request: Request,
-    session: SessionData,
-    success_message: Optional[str] = None,
-    error_message: Optional[str] = None,
-) -> HTMLResponse:
-    """Create file content limits page response with messages."""
-    from ..services.config_service import get_config_service
-
-    # Get configuration from ConfigService (Story #3 - Configuration Consolidation)
-    config_service = get_config_service()
-    config = config_service.get_config().file_content_limits_config
-
-    csrf_token = generate_csrf_token()
-
-    # Calculate derived values
-    max_chars = config.max_chars_per_request  # type: ignore[union-attr]
-    estimated_lines = max_chars // 80
-
-    response = templates.TemplateResponse(
-        "file_content_limits.html",
-        {
-            "request": request,
-            "username": session.username,
-            "current_page": "file-content-limits",
-            "show_nav": True,
-            "csrf_token": csrf_token,
-            "config": config,
-            "max_chars": max_chars,
-            "estimated_lines": estimated_lines,
-            "success_message": success_message,
-            "error_message": error_message,
-        },
-    )
-
-    set_csrf_cookie(response, csrf_token)
     return response
 
 

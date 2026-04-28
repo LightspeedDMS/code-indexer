@@ -167,7 +167,7 @@ class DepMapRepairExecutor:
         golden_repos_dir: Optional[Path] = None,
         enable_graph_channel_repair: bool = True,
         repo_path_resolver: Optional[Callable[[str], str]] = None,
-        invoke_claude_fn: Optional[Callable] = None,
+        invoke_llm_fn: Optional[Callable] = None,
         graph_repair_self_loop: Optional[str] = None,
         graph_repair_malformed_yaml: Optional[str] = None,
         graph_repair_garbage_domain: Optional[str] = None,
@@ -183,7 +183,7 @@ class DepMapRepairExecutor:
         self._golden_repos_dir = golden_repos_dir
         self._enable_graph_channel_repair: bool = enable_graph_channel_repair
         self._repo_path_resolver: Optional[Callable[[str], str]] = repo_path_resolver
-        self._invoke_claude_fn: Optional[Callable] = invoke_claude_fn
+        self._invoke_llm_fn: Optional[Callable] = invoke_llm_fn
         logger.debug(
             "[RepairExecutor] enable_graph_channel_repair=%s",
             self._enable_graph_channel_repair,
@@ -833,7 +833,7 @@ class DepMapRepairExecutor:
                 )
             elif (
                 _a.type == AnomalyType.BIDIRECTIONAL_MISMATCH
-                and self._invoke_claude_fn is not None
+                and self._invoke_llm_fn is not None
             ):
                 self._dispatch_per_type(
                     "BIDIRECTIONAL_MISMATCH",
@@ -865,7 +865,7 @@ class DepMapRepairExecutor:
         """Scan anomalies for DryRunReport pre-scan (called only during dry-run).
 
         Returns (per_type, skipped). BIDIRECTIONAL_MISMATCH is recorded as skipped
-        only when invoke_claude_fn is None — when wired, the Claude+ripgrep audit
+        only when invoke_llm_fn is None — when wired, the Claude+ripgrep audit
         runs during dry-run (backfill write is the only gated operation).
         """
         from collections import defaultdict
@@ -879,9 +879,9 @@ class DepMapRepairExecutor:
             per_type[atype] += 1
             if (
                 _a.type == AnomalyType.BIDIRECTIONAL_MISMATCH
-                and self._invoke_claude_fn is None
+                and self._invoke_llm_fn is None
             ):
-                skipped.append((atype, "no_invoke_claude_fn"))
+                skipped.append((atype, "no_invoke_llm_fn"))
         return dict(per_type), skipped
 
     @staticmethod
@@ -960,7 +960,7 @@ class DepMapRepairExecutor:
             output_dir=output_dir,
             anomaly=anomaly,
             domains_json=domains_json,
-            invoke_claude_fn=self._invoke_claude_fn,
+            invoke_llm_fn=self._invoke_llm_fn,
             repo_path_resolver=self._repo_path_resolver,
             journal=journal,
             fixed=fixed,

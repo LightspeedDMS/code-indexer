@@ -32,6 +32,30 @@ from code_indexer.global_repos.unified_response_parser import (
 _ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def _merge_frontmatter(
+    existing: Dict[str, Any], new_lifecycle: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Merge existing frontmatter with new lifecycle keys.
+
+    Contract:
+      - All keys from existing are preserved in the result.
+      - All keys from new_lifecycle are present in the result.
+      - On key collision, new_lifecycle wins (lifecycle data is the source of truth).
+      - Result is a superset of both input dicts — no key is silently dropped.
+
+    Args:
+        existing: The pre-existing frontmatter dict (may be empty for new files).
+        new_lifecycle: The new lifecycle keys to write (e.g. {'lifecycle': ...,
+                       'lifecycle_schema_version': 4}).
+
+    Returns:
+        Merged dict with existing keys preserved and new_lifecycle keys overwriting
+        on collision.
+    """
+    return {**existing, **new_lifecycle}
+
+
 # ---------------------------------------------------------------------------
 # Public exceptions
 # ---------------------------------------------------------------------------
@@ -561,9 +585,13 @@ class LifecycleBatchRunner:
         _run_sub_batch which logs it at ERROR level (fail-closed per file,
         Messi Rule #13).
         """
+        from code_indexer.global_repos.repo_analyzer import split_frontmatter_and_body
+
         repo_path = self._golden_repos_dir / alias
         result = self._claude_cli_invoker(alias, repo_path)
 
+        # Bug #940: acquire the per-alias write lock BEFORE reading the existing
+        # frontmatter so the entire read-merge-write sequence is atomic.
         per_alias_lock_key = f"lifecycle:{alias}"
         acquired = self._refresh_scheduler.acquire_write_lock(
             per_alias_lock_key, owner_name=_BATCH_RUNNER_LOCK_OWNER
@@ -574,17 +602,47 @@ class LifecycleBatchRunner:
                 "lifecycle write aborted"
             )
         try:
+            new_lifecycle_fm: Dict[str, Any] = {
+                "lifecycle": result.lifecycle,
+                "lifecycle_schema_version": CURRENT_LIFECYCLE_SCHEMA_VERSION,
+            }
+            meta_md_path = Path(self._golden_repos_dir) / "cidx-meta" / f"{alias}.md"
+            if meta_md_path.exists():
+                raw_content = meta_md_path.read_text(encoding="utf-8")
+                existing_fm, _ = split_frontmatter_and_body(raw_content)
+                # Detect corrupt frontmatter: file starts with '---' but parsing
+                # returned empty dict (split_frontmatter_and_body swallows YAMLError
+                # silently). Per Messi Rule #13 (Anti-Silent-Failure), raise here
+                # rather than silently overwriting — the caller logs and skips.
+                if not existing_fm and raw_content.startswith("---"):
+                    raise ValueError(
+                        f"Corrupt frontmatter in {meta_md_path}: file starts with "
+                        "'---' but YAML could not be parsed. Manual inspection required."
+                    )
+                merged_fm = _merge_frontmatter(existing_fm, new_lifecycle_fm)
+            else:
+                # First write: no prior frontmatter to merge.
+                merged_fm = new_lifecycle_fm
+
             write_meta_md(
                 alias=alias,
                 description_body=result.description,
-                lifecycle_frontmatter={
-                    "lifecycle": result.lifecycle,
-                    "lifecycle_schema_version": CURRENT_LIFECYCLE_SCHEMA_VERSION,
-                },
+                lifecycle_frontmatter=merged_fm,
                 already_locked=True,
                 refresh_scheduler=self._refresh_scheduler,
                 golden_repos_dir=self._golden_repos_dir,
             )
+            # MESSI Rule 15 defensive invariant: post-write frontmatter must be a
+            # superset of merged_fm (no key loss). Both re-read and assert are
+            # skipped under python -O via the __debug__ guard.
+            if __debug__:
+                post_fm, _ = split_frontmatter_and_body(
+                    meta_md_path.read_text(encoding="utf-8")
+                )
+                assert post_fm.keys() >= merged_fm.keys(), (
+                    f"Frontmatter key loss after write_meta_md: "
+                    f"pre={list(merged_fm.keys())}, post={list(post_fm.keys())}"
+                )
         finally:
             self._refresh_scheduler.release_write_lock(
                 per_alias_lock_key, owner_name=_BATCH_RUNNER_LOCK_OWNER

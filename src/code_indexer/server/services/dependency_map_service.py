@@ -259,13 +259,29 @@ class DependencyMapService:
                 ],
             }
 
-        from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
+        from code_indexer.server.services.config_service import get_config_service
+        from code_indexer.server.services.dep_map_dispatcher_factory import (
+            build_dep_map_dispatcher,
+        )
+
+        _dispatcher = build_dep_map_dispatcher(get_config_service().get_config())
+
+        def _invoke_llm_fn(
+            repo_path: str, prompt: str, shell_timeout: int, outer_timeout: int
+        ) -> Tuple[bool, str]:
+            result = _dispatcher.dispatch(
+                flow="dep_map_repair",
+                cwd=repo_path,
+                prompt=prompt,
+                timeout=outer_timeout,
+            )
+            return result.success, result.output
 
         executor = DepMapRepairExecutor(
             health_detector=DepMapHealthDetector(),
             index_regenerator=IndexRegenerator(),
             enable_graph_channel_repair=True,
-            invoke_claude_fn=invoke_claude_cli,
+            invoke_llm_fn=_invoke_llm_fn,
         )
         fixed: List[str] = []
         errors: List[str] = []
