@@ -1454,7 +1454,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
                 # Batch update all points at once instead of individual updates
                 if all_points_to_update:
-                    self.vector_store_client._batch_update_points(
+                    self.vector_store_client._batch_update_payload_only(
                         all_points_to_update, collection_name
                     )
                     logger.info(

@@ -746,24 +746,9 @@ _TOTP_SETUP_URL = "/admin/mfa/setup"
 # Scopes absent from this dict receive len(_SCOPE_RANK) = least-privileged rank.
 _SCOPE_RANK: Dict[str, int] = {"full": 0, "totp_repair": 1}
 
-# Shared payload — extracted to eliminate duplicate HTTPException construction.
-_ELEVATION_DISABLED_DETAIL: Dict[str, Any] = {
-    "error": "elevation_enforcement_disabled",
-    "message": "Step-up elevation is currently disabled by the operator.",
-}
-
-
 # ---------------------------------------------------------------------------
 # Exception builder helpers — one per error kind, no inline construction.
 # ---------------------------------------------------------------------------
-
-
-def _elevation_disabled_exc() -> HTTPException:
-    """503 — kill-switch active or manager not initialized."""
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=_ELEVATION_DISABLED_DETAIL,
-    )
 
 
 def _elevation_required_exc(message: Optional[str] = None) -> HTTPException:
@@ -911,10 +896,15 @@ def require_elevation(required_scope: str = "full"):
         request: Request,
         user: User = Depends(get_current_admin_user_hybrid),
     ) -> User:
-        if not _is_elevation_enforcement_enabled():
-            raise _elevation_disabled_exc()
-        if elevated_session_manager is None:
-            raise _elevation_disabled_exc()
+        # Kill switch: when elevation enforcement is administratively disabled OR
+        # the elevated_session_manager singleton was never initialised (optional
+        # subsystem on this deployment), bypass all elevation checks and let the
+        # request proceed.  The protected endpoint runs as if no elevation gate
+        # existed.  See test_require_elevation_kill_switch_passthrough.py for the
+        # corrected contract.  When enforcement is ON and the manager is present,
+        # normal TOTP-setup + session-window checks apply.
+        if not _is_elevation_enforcement_enabled() or elevated_session_manager is None:
+            return user
         _check_totp_setup(user)
         _check_session_window(request, required_scope, elevated_session_manager)
         return user
