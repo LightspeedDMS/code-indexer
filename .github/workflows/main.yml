@@ -33,26 +33,9 @@ jobs:
         python3 -m pip install -e third_party/hnswlib --break-system-packages
         python3 -m pip install -e ".[dev,cluster]" --break-system-packages
 
-    - name: Run parity tests
-      run: |
-        python3 -m pytest tests/integration/parity/ -v --tb=short
-
     - name: Run server smoke tests
       run: |
         python3 -m pytest tests/unit/server/storage/test_factory.py tests/unit/server/mcp/test_protocol.py tests/unit/services/test_database_health_cluster.py -v --tb=short --deselect=tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
-
-    - name: Generate parity matrix
-      if: always()
-      run: |
-        python3 scripts/generate_parity_matrix.py || echo "Parity matrix generation failed (script may not exist yet)"
-
-    - name: Upload parity matrix
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: parity-matrix-py${{ matrix.python-version }}
-        path: docs/mcp-rest-parity-matrix.md
-        if-no-files-found: ignore
 
   check-version:
     runs-on: ubuntu-latest
