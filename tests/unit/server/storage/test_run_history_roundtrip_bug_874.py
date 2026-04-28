@@ -13,7 +13,7 @@ No mocks — real SQLite via DependencyMapTrackingBackend.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 
 def _base_metrics() -> dict[str, object]:
@@ -53,7 +53,8 @@ def _round_trip(
         )
         rows = backend.get_run_history(limit=1)
         assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
-        return rows[0]
+        # cast needed: get_run_history returns list[Any] (SQLite rows are untyped)
+        return cast(dict[str, object], rows[0])
     finally:
         backend.close()
 

@@ -10,6 +10,7 @@ Bug #679 Part 2.
 
 import re
 from pathlib import Path
+from typing import Optional
 
 import pytest
 from jinja2 import Environment, FileSystemLoader
@@ -61,7 +62,7 @@ def _make_job(
     job_type: str = "full_index",
     completion_time: str = "2024-01-15T10:30:00Z",
     status: str = "completed",
-    result: dict = None,
+    result: Optional[dict] = None,
 ) -> dict:
     """Build a minimal job dict for template rendering."""
     return {
@@ -108,7 +109,9 @@ def _make_provider_results() -> dict:
     }
 
 
-def _make_jobs_list_job(status: str = "completed", result: dict = None) -> dict:
+def _make_jobs_list_job(
+    status: str = "completed", result: Optional[dict] = None
+) -> dict:
     """Build a full job dict compatible with jobs_list.html partial."""
     return {
         "job_id": "abc123",

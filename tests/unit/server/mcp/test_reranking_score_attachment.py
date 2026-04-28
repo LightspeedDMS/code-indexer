@@ -26,7 +26,7 @@ def _make_results(n: int) -> List[dict]:
 
 
 def _content_extractor(r: dict) -> str:
-    return r.get("content", "")
+    return str(r.get("content", ""))
 
 
 def _make_rerank_result(index: int, score: float):

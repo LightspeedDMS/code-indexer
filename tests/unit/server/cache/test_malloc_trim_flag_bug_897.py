@@ -6,6 +6,7 @@ enable_malloc_trim is True (via bootstrap config), and correctly skips it in
 all other cases: flag off, non-Linux platform, libc load failure, missing symbol.
 """
 
+import contextlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -70,20 +71,21 @@ def _run_cleanup(cache, *, platform, enable_malloc_trim, cdll_side_effect=None):
     """
     fake_config = _make_server_config(enable_malloc_trim)
 
-    if isinstance(cdll_side_effect, Exception):
-        cdll_kw = {"side_effect": cdll_side_effect}
-        fake_libc = None
-    else:
-        fake_libc = cdll_side_effect if cdll_side_effect is not None else MagicMock()
-        cdll_kw = {"return_value": fake_libc}
-
-    with (
-        patch("sys.platform", platform),
-        patch("ctypes.CDLL", **cdll_kw),
-        patch(
-            "code_indexer.server.utils.config_manager.ServerConfigManager"
-        ) as mock_mgr_cls,
-    ):
+    # Build the ctypes.CDLL patch with explicit keyword args so mypy can resolve
+    # the patch() overload unambiguously (dict-unpacking **cdll_kw confuses it).
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("sys.platform", platform))
+        if isinstance(cdll_side_effect, Exception):
+            stack.enter_context(patch("ctypes.CDLL", side_effect=cdll_side_effect))
+            fake_libc = None
+        else:
+            fake_libc = (
+                cdll_side_effect if cdll_side_effect is not None else MagicMock()
+            )
+            stack.enter_context(patch("ctypes.CDLL", return_value=fake_libc))
+        mock_mgr_cls = stack.enter_context(
+            patch("code_indexer.server.utils.config_manager.ServerConfigManager")
+        )
         mock_mgr_cls.return_value.load_config.return_value = fake_config
         cache._cleanup_expired_entries()
 

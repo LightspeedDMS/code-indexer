@@ -633,11 +633,13 @@ class DescriptionRefreshScheduler:
                 LifecycleFleetScanner,
             )
 
-            scanner = LifecycleFleetScanner(
+            scanner: LifecycleFleetScanner = LifecycleFleetScanner(
                 golden_repos_dir=self._golden_repos_dir,
                 repo_aliases=aliases,
             )
-            return scanner.find_broken_or_missing()
+            # cast needed: LifecycleFleetScanner is imported inside try block so mypy
+            # infers scanner as Any; find_broken_or_missing() is declared -> List[str].
+            return cast(List[str], scanner.find_broken_or_missing())
         except Exception:
             logger.error(
                 "Lifecycle backfill: fleet scan failed — skipping startup sweep",
@@ -1107,7 +1109,7 @@ class DescriptionRefreshScheduler:
             repo_path_obj,
         )
 
-    def _build_cli_dispatcher(self, config) -> "CliDispatcher":
+    def _build_cli_dispatcher(self, config) -> "CliDispatcher":  # noqa: F821
         """
         Build a CliDispatcher from *config* (Story #847).
 

@@ -47,12 +47,104 @@ import os
 import time
 import uuid
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Dict, Iterator, Optional
 
 import jwt
+import pyotp
 from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import _auth_headers
+
+# ---------------------------------------------------------------------------
+# Elevation setup constants
+# ---------------------------------------------------------------------------
+
+# FastAPI TestClient connects from loopback. Named constant so the reason is clear.
+_E2E_LOOPBACK_IP: str = "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# Elevation setup helpers  (each under 20 lines, single responsibility)
+# ---------------------------------------------------------------------------
+
+
+def _activate_admin_totp(admin_username: str) -> str:
+    """Generate and immediately activate a TOTP secret for *admin_username*.
+
+    Returns the plaintext base32 secret that was generated.
+    Raises AssertionError if activation fails (code rolled over mid-call).
+    """
+    from code_indexer.server.web.mfa_routes import get_totp_service
+
+    totp_service = get_totp_service()
+    secret = totp_service.generate_secret(admin_username)
+    totp = pyotp.TOTP(secret)
+    code = totp.now()
+    activated = totp_service.activate_mfa(admin_username, code)
+    assert activated, (
+        "Failed to activate TOTP for admin during elevation setup. "
+        "Code may have rolled over mid-call; re-run the test."
+    )
+    return str(secret)
+
+
+def _enable_elevation_enforcement() -> bool:
+    """Enable elevation enforcement in the live config and return the prior value."""
+    from code_indexer.server.services.config_service import get_config_service
+
+    config = get_config_service().get_config()
+    prior = bool(config.elevation_enforcement_enabled)
+    config.elevation_enforcement_enabled = True
+    return prior
+
+
+def _restore_elevation_enforcement(prior: bool) -> None:
+    """Restore *prior* elevation enforcement value in the live config."""
+    from code_indexer.server.services.config_service import get_config_service
+
+    config = get_config_service().get_config()
+    config.elevation_enforcement_enabled = prior
+
+
+def _create_elevation_window(admin_username: str) -> str:
+    """Create an elevation window and return the unique session key used."""
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+
+    session_key = str(uuid.uuid4())
+    elevated_session_manager.create(
+        session_key=session_key,
+        username=admin_username,
+        elevated_from_ip=_E2E_LOOPBACK_IP,
+        scope="full",
+    )
+    return session_key
+
+
+@contextmanager
+def _setup_admin_elevation(admin_username: str) -> Iterator[Dict[str, str]]:
+    """Orchestrate elevation setup and yield a cidx_session cookie dict.
+
+    Sets up TOTP, enables enforcement, creates an elevation window, then
+    yields ``{"cidx_session": session_key}``.  Tears down in reverse order:
+    revoke the window, restore prior enforcement state, disable TOTP.
+    """
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+    from code_indexer.server.web.mfa_routes import get_totp_service
+
+    _activate_admin_totp(admin_username)
+    prior_enforcement = _enable_elevation_enforcement()
+    session_key = _create_elevation_window(admin_username)
+    try:
+        yield {"cidx_session": session_key}
+    finally:
+        elevated_session_manager.revoke(session_key)
+        _restore_elevation_enforcement(prior_enforcement)
+        get_totp_service().disable_mfa(admin_username)
+
 
 logger = logging.getLogger(__name__)
 
@@ -185,13 +277,14 @@ def _get_server_jwt_secret() -> str:
             "server_app.jwt_manager is None — create_app() has not been called. "
             "Ensure the test_client fixture runs before this helper."
         )
-    return server_app.jwt_manager.secret_key
+    return str(server_app.jwt_manager.secret_key)
 
 
 @contextmanager
 def _provision_normal_user(
     client: TestClient,
     admin_headers: dict[str, str],
+    extra_cookies: Optional[Dict[str, str]] = None,
 ) -> Iterator[dict[str, str]]:
     """Create a normal_user account, yield its auth headers, then delete it.
 
@@ -205,6 +298,9 @@ def _provision_normal_user(
     Args:
         client: Session-scoped TestClient.
         admin_headers: Authorization headers for the admin account.
+        extra_cookies: Optional cookies to add to admin requests (e.g. the
+            ``cidx_session`` cookie carrying an active elevation window key
+            when elevation enforcement is enabled).
 
     Yields:
         Authorization headers dict for the newly created normal user.
@@ -219,6 +315,7 @@ def _provision_normal_user(
             "role": _ROLE_NORMAL_USER,
         },
         headers=admin_headers,
+        cookies=extra_cookies or {},
     )
     assert create_resp.status_code == HTTP_CREATED, (
         f"User creation failed: {create_resp.status_code}: "
@@ -237,7 +334,9 @@ def _provision_normal_user(
         yield _auth_headers(user_login.json()["access_token"])
     finally:
         delete_resp = client.delete(
-            f"/api/admin/users/{username}", headers=admin_headers
+            f"/api/admin/users/{username}",
+            headers=admin_headers,
+            cookies=extra_cookies or {},
         )
         if delete_resp.status_code not in (HTTP_OK, HTTP_NO_CONTENT):
             logger.warning(
@@ -420,16 +519,27 @@ def test_admin_endpoint_requires_auth(test_client: TestClient) -> None:
 
 
 def test_regular_user_cannot_access_admin_endpoint(test_client: TestClient) -> None:
-    """A normal_user token is rejected by /api/admin/users with 403."""
-    admin_headers = _login_as_admin(test_client)
+    """A normal_user token is rejected by /api/admin/users with 403.
 
-    with _provision_normal_user(test_client, admin_headers) as user_headers:
-        resp = test_client.get("/api/admin/users", headers=user_headers)
-        _assert_auth_failure(
-            resp,
-            expected=(HTTP_FORBIDDEN,),
-            context="normal_user accessing admin-only endpoint",
-        )
+    POST /api/admin/users requires elevation (Epic #922).  The test enables
+    elevation enforcement and supplies a valid elevation window via
+    _setup_admin_elevation() so user provisioning succeeds.  The assertion
+    target — that a normal_user JWT is rejected by the admin endpoint — is
+    unchanged.
+    """
+    admin_headers = _login_as_admin(test_client)
+    admin_username = _admin_login_payload()["username"]
+
+    with _setup_admin_elevation(admin_username) as elev_cookies:
+        with _provision_normal_user(
+            test_client, admin_headers, extra_cookies=elev_cookies
+        ) as user_headers:
+            resp = test_client.get("/api/admin/users", headers=user_headers)
+            _assert_auth_failure(
+                resp,
+                expected=(HTTP_FORBIDDEN,),
+                context="normal_user accessing admin-only endpoint",
+            )
 
 
 def test_forged_admin_token_rejected_on_admin_endpoint(test_client: TestClient) -> None:

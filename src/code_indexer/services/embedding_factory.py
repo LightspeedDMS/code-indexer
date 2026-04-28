@@ -145,6 +145,7 @@ class EmbeddingProviderFactory:
         config: Config,
         console: Optional[Console] = None,
         provider_name: Optional[str] = None,
+        http_client_factory: Optional[Any] = None,
     ) -> EmbeddingProvider:
         """Create an embedding provider based on configuration.
 
@@ -152,6 +153,10 @@ class EmbeddingProviderFactory:
             config: Main configuration object
             console: Optional console for output
             provider_name: Optional override for provider selection
+            http_client_factory: Optional factory for outbound HTTP clients.
+                When provided (server context), enables fault injection transport
+                interception for query-time embedding calls (Bug #899 fix).
+                When None, providers normalize to NullFaultFactory internally.
 
         Returns:
             Configured embedding provider
@@ -167,7 +172,7 @@ class EmbeddingProviderFactory:
                 if hasattr(config, "voyage_ai") and config.voyage_ai
                 else VoyageAIConfig()
             )
-            return VoyageAIClient(voyage_cfg, console)
+            return VoyageAIClient(voyage_cfg, console, http_client_factory)
         elif effective_provider == "cohere":
             from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
 
@@ -176,7 +181,9 @@ class EmbeddingProviderFactory:
                 if hasattr(config, "cohere") and config.cohere
                 else CohereConfig()
             )
-            provider: EmbeddingProvider = CohereEmbeddingProvider(cohere_cfg, console)
+            provider: EmbeddingProvider = CohereEmbeddingProvider(
+                cohere_cfg, console, http_client_factory
+            )
             return provider
         else:
             raise ValueError(f"Unknown embedding provider: {effective_provider}")

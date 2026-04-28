@@ -1,0 +1,6 @@
+<div class="details-error" data-error-kind="{{ error_kind }}">
+  <p class="details-error-message">{{ message }}</p>
+  {% if show_retry %}
+  <button type="button" class="details-error-retry" data-alias="{{ alias }}">Retry</button>
+  {% endif %}
+</div>

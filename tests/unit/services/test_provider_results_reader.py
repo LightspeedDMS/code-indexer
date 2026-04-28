@@ -55,7 +55,7 @@ class TestReadProviderResults:
     def _write_results(self, data: dict) -> float:
         """Write provider_results.json and return its mtime."""
         self.results_file.write_text(json.dumps(data))
-        return self.results_file.stat().st_mtime
+        return float(self.results_file.stat().st_mtime)
 
     def test_read_returns_none_when_file_absent(self):
         """When provider_results.json does not exist, returns None."""

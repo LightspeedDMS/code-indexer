@@ -77,7 +77,6 @@ CLI_EXPECTED_PARAMETERS = ALL_PARAMETERS - {
     "include_removed",  # API-only: not exposed in CLI
     "show_evolution",  # API-only: not exposed in CLI
     "evolution_limit",  # API-only: not exposed in CLI
-    "file_extensions",  # API-only: REST/MCP use this, CLI doesn't have --file-extensions
     "aggregation_mode",  # API-only: omni-search aggregation mode
     "exclude_patterns",  # API-only: omni-search repository exclusion
 }
@@ -181,10 +180,10 @@ class TestQueryParameterParity:
             f"Expected 26 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
         )
 
-        # CLI should have 19 parameters (subset of all parameters)
-        # Unchanged - omni-search parameters are API-only
-        assert len(CLI_EXPECTED_PARAMETERS) == 19, (
-            f"Expected 19 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
+        # CLI should have 20 parameters (subset of all parameters)
+        # Updated from 19 to 20: file_extensions now exposed in CLI (Story #653)
+        assert len(CLI_EXPECTED_PARAMETERS) == 20, (
+            f"Expected 20 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
         )
 
         # REST/MCP should have all 26 parameters
@@ -252,6 +251,11 @@ class TestQueryParameterParity:
         normalized_expected.add(
             "repos"
         )  # Story #676: Multi-repo query via --repos flag
+        normalized_expected.add("file_extensions")  # Story #653: file extension filter
+        normalized_expected.add("rerank_query")  # Story #653: reranker query override
+        normalized_expected.add(
+            "rerank_instruction"
+        )  # Story #653: reranker instruction
 
         extra = cli_params - normalized_expected
 
@@ -282,6 +286,13 @@ class TestQueryParameterParity:
         # MCP-only parameters (not in REST, but intentionally MCP-only)
         # response_format: Story #582 - omni-search result grouping (flat vs grouped)
         normalized_expected.add("response_format")
+        # Story #653: reranker parameters exposed in MCP (REST parity pending)
+        normalized_expected.add("rerank_query")
+        normalized_expected.add("rerank_instruction")
+        # Story #653: provider selection and fusion strategy (MCP-only for now)
+        normalized_expected.add("preferred_provider")
+        normalized_expected.add("query_strategy")
+        normalized_expected.add("score_fusion")
 
         extra = mcp_params - normalized_expected
 
@@ -294,7 +305,16 @@ class TestQueryParameterParity:
 
         # MCP-only parameters that are intentionally not in REST
         # response_format: Story #582 - omni-search result grouping
-        mcp_only_params = {"response_format"}
+        # rerank_query, rerank_instruction: Story #653 - reranker (REST parity pending)
+        # preferred_provider, query_strategy, score_fusion: Story #653 - provider/fusion (MCP-only)
+        mcp_only_params = {
+            "response_format",
+            "rerank_query",
+            "rerank_instruction",
+            "preferred_provider",
+            "query_strategy",
+            "score_fusion",
+        }
 
         # REST and MCP should have identical parameter names
         # (except for documented MCP-only parameters)

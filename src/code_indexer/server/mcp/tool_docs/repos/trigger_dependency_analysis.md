@@ -13,6 +13,10 @@ inputSchema:
       - full
       - delta
       default: delta
+    dry_run_graph_only:
+      type: boolean
+      description: 'When true, run Phase 3.7 graph-channel repair in dry-run mode only. Returns a verdict report without mutating any files. Default: false'
+      default: false
   additionalProperties: false
 outputSchema:
   type: object
@@ -37,6 +41,11 @@ outputSchema:
     error:
       type: string
       description: Error message if failed
+    graph_repair_dry_run_report:
+      type:
+      - object
+      - 'null'
+      description: Dry-run verdict report from Phase 3.7 graph-channel repair. Only present when dry_run_graph_only=true.
   required:
   - success
 ---
@@ -68,3 +77,13 @@ REQUIREMENTS:
 
 EXAMPLE:
 {"mode": "delta"} Returns: {"success": true, "job_id": "abc123", "mode": "delta", "status": "queued", "message": "Dependency map delta analysis started"}
+
+DRY-RUN EXAMPLES (pipe MCP response text to jq):
+# View per-action repair counts
+jq '.graph_repair_dry_run_report.per_action_counts'
+# View all bidirectional mirror-row backfills
+jq '.graph_repair_dry_run_report.would_be_writes[] | select(.[1] == "bidirectional_mirror_backfilled")'
+# View all SELF_LOOP row deletions
+jq '.graph_repair_dry_run_report.would_be_writes[] | select(.[1] == "row_deleted")'
+# View REFUTED verdict count
+jq '.graph_repair_dry_run_report.per_verdict_counts.REFUTED'

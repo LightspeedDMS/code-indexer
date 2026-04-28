@@ -58,7 +58,19 @@ class TestPrecomputedVectorBypass:
 
     @pytest.fixture(autouse=True)
     def _patch_config_manager(self, tmp_path):
-        """Patch ConfigManager so no real filesystem config is needed."""
+        """Patch ConfigManager and set app.state.http_client_factory.
+
+        Bug #899 fix: _perform_semantic_search now reads app.state.http_client_factory
+        via _get_http_client_factory(). Set a NullFaultFactory on the real app state
+        so the call succeeds without requiring a full server startup.
+        """
+        from code_indexer.server.fault_injection.null_factory import NullFaultFactory
+        import code_indexer.server.app as app_module
+
+        had_factory = hasattr(app_module.app.state, "http_client_factory")
+        original_factory = getattr(app_module.app.state, "http_client_factory", None)
+        app_module.app.state.http_client_factory = NullFaultFactory()
+
         mock_cfg = _make_mock_config()
         with patch(
             "code_indexer.server.services.search_service.ConfigManager"
@@ -68,6 +80,11 @@ class TestPrecomputedVectorBypass:
             mock_cm.get_config.return_value = mock_cfg
             mock_cm_cls.return_value = mock_cm
             yield
+
+        if had_factory:
+            app_module.app.state.http_client_factory = original_factory
+        elif hasattr(app_module.app.state, "http_client_factory"):
+            del app_module.app.state.http_client_factory
 
     def test_precomputed_vector_bypasses_embedding_api_call(self, tmp_path):
         """When precomputed_query_vector is supplied, get_embedding must NOT be called.

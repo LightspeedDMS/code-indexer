@@ -644,5 +644,28 @@ class TestRegisterProbe(unittest.TestCase):
         assert health["voyage-ai"].successful_requests > 0
 
 
+class TestGetSinbinConfigEmbedderKeys:
+    """Story #691 BLOCKER 2 (codex): embedder key variants must map to the same
+    sinbin config branch as their canonical provider names."""
+
+    def test_get_sinbin_config_voyage_embedder_key(self) -> None:
+        """voyage-embedder must map to voyage_ai_sinbin, same as voyage-ai."""
+        monitor = ProviderHealthMonitor()
+        cfg_ai = monitor._get_sinbin_config("voyage-ai")
+        cfg_embedder = monitor._get_sinbin_config("voyage-embedder")
+        assert cfg_ai == cfg_embedder, (
+            "voyage-embedder must map to the same sinbin config as voyage-ai (codex BLOCKER 2)"
+        )
+
+    def test_get_sinbin_config_cohere_embedder_key(self) -> None:
+        """cohere-embedder must map to cohere_sinbin, same as cohere."""
+        monitor = ProviderHealthMonitor()
+        cfg_cohere = monitor._get_sinbin_config("cohere")
+        cfg_embedder = monitor._get_sinbin_config("cohere-embedder")
+        assert cfg_cohere == cfg_embedder, (
+            "cohere-embedder must map to the same sinbin config as cohere (codex BLOCKER 2)"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

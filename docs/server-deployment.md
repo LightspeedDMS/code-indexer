@@ -33,7 +33,7 @@ CIDX server provides:
 
 ```bash
 # Install code-indexer
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.0
 
 # Verify installation
 cidx --version
@@ -47,7 +47,7 @@ python3 -m venv cidx-venv
 source cidx-venv/bin/activate
 
 # Install code-indexer
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.0
 
 # Verify installation
 cidx --version
@@ -594,8 +594,93 @@ both with and without verification to confirm the corrections justify the cost.
   deployed code; the feature only corrects the generated markdown artifacts.
   Code-level bugs are filed as GitHub issues per the existing bug-report flow.
 
+## cidx-meta backup to remote git (Story #926)
+
+The cidx-meta directory holds description files and metadata for every registered
+golden repository.  You can configure the server to keep a continuous git backup
+of this directory in a remote repository so that the metadata can be recovered
+after data loss.
+
+### Configuration
+
+1. Navigate to the Web UI Config Screen: `/admin/config`.
+2. Open the "cidx-meta backup" section.
+3. Set "Enabled" to `true`.
+4. Enter the remote URL in the "Remote URL" field (see URL formats below).
+5. Click Save.
+
+URL formats accepted:
+
+- `git@github.com:org/repo.git` — SSH (requires SSH key, see below)
+- `https://github.com/org/repo.git` — HTTPS
+- `file:///path/to/bare.git` — local bare repository (useful for testing)
+
+### SSH key prerequisite
+
+For `git@host:` URLs, the server must have an SSH key registered for that
+hostname before saving the configuration.  To add a key:
+
+1. Go to the SSH Keys page in the admin UI.
+2. Create or import a key and assign it to the target hostname.
+3. Return to the Config Screen and save the cidx-meta backup settings.
+
+`file://` and `https://` URLs skip the SSH key check.
+
+### Bootstrap behavior
+
+The first time a remote URL is saved (or when the URL changes), the server
+runs `CidxMetaBackupBootstrap.bootstrap()`:
+
+- If `.git/` does not exist in the cidx-meta directory, git is initialized,
+  all current files are committed, and a force-push is made to the remote.
+- If `.git/` exists and the remote URL is unchanged, the call is a no-op.
+- If the URL changed, `git remote set-url` is issued and a force-push is made.
+
+Bootstrap is idempotent: running it multiple times with the same URL is safe.
+
+### Sync on refresh
+
+Every time the cidx-meta refresh job runs and backup is enabled:
+
+1. `MetaDirectoryUpdater` creates or removes description files on disk.
+2. `CidxMetaBackupSync` stages all changes (`git add -A`), commits, fetches
+   from origin, rebases local commits on top of remote changes, and pushes.
+3. If the rebase produces conflicts, Claude CLI is invoked to resolve them
+   (600 s timeout; SIGTERM then SIGKILL after 30 s if exceeded).
+4. If conflict resolution fails, `git rebase --abort` reverts the repo and
+   the refresh job is marked FAILED with the resolution error as the reason.
+5. If the push itself fails (e.g. network error), the job is also marked FAILED
+   but indexing still runs (deferred-failure pattern).
+
+### Recovery procedure
+
+To recover cidx-meta from the remote backup:
+
+1. Stop the `cidx-server` service.
+2. Remove or rename the existing cidx-meta directory:
+   `mv ~/.cidx-server/data/golden-repos/cidx-meta ~/.cidx-server/data/golden-repos/cidx-meta.bak`
+3. Clone the remote backup into that location:
+   `git clone <remote-url> ~/.cidx-server/data/golden-repos/cidx-meta`
+4. Restart `cidx-server`.
+5. Trigger a manual refresh for `cidx-meta-global` from the admin UI to
+   re-index the recovered metadata.
+
+### Operational notes
+
+- URL change idempotency: changing the URL in the Web UI triggers
+  `CidxMetaBackupBootstrap.bootstrap()` at Save time.  The next scheduled
+  refresh cycle also runs bootstrap at the start so URL changes applied via
+  direct DB edits are picked up automatically.
+- Deferred-failure pattern: indexing always runs after sync regardless of
+  whether push succeeded.  A failed push surfaces as a FAILED job with the
+  push error included in the failure reason.
+- Claude conflict resolver timeout: 600 s per invocation.  On timeout,
+  SIGTERM is sent first; SIGKILL follows after a 30 s grace period.
+- The mutable base path for cidx-meta is always
+  `<server_data_dir>/data/golden-repos/cidx-meta/`.  Git operations NEVER
+  run inside `.versioned/` snapshot directories.
+
 ## Additional Resources
 
 - [Main README](../README.md) - Project overview and features
-- [MCP Bridge Documentation](mcpb/) - Claude Desktop integration
 - [GitHub Repository](https://github.com/LightspeedDMS/code-indexer) - Source code and issues

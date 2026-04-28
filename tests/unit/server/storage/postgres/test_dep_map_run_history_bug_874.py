@@ -25,6 +25,7 @@ Coverage:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock
 
 from code_indexer.server.storage.postgres.dependency_map_tracking_backend import (
@@ -52,7 +53,8 @@ def _make_pool() -> MagicMock:
 
 
 def _get_conn(pool: MagicMock) -> MagicMock:
-    return pool.connection.return_value.__enter__.return_value
+    # cast needed: MagicMock attribute chains return Any; value is the mock conn
+    return cast(MagicMock, pool.connection.return_value.__enter__.return_value)
 
 
 def _make_backend() -> tuple[MagicMock, DependencyMapTrackingPostgresBackend]:

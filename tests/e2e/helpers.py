@@ -17,14 +17,50 @@ No mocking -- all helpers exercise real subprocess, real HTTP, real CLI.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CSRF extraction (used by toggle_cidx_meta_backup and unit-testable on its own)
+# ---------------------------------------------------------------------------
+
+_CSRF_TOKEN_PATTERN = re.compile(
+    r'<input[^>]*name=["\']csrf_token["\'][^>]*value=["\']([^"\']+)["\']'
+    r"|"
+    r'<input[^>]*value=["\']([^"\']+)["\'][^>]*name=["\']csrf_token["\']'
+)
+
+
+def _extract_csrf_token_from_html(html: str) -> str:
+    """Extract csrf_token form field value from rendered HTML.
+
+    Matches <input> elements with name="csrf_token" regardless of attribute
+    order or quote style (single or double).
+
+    Args:
+        html: Raw HTML string from a server response.
+
+    Returns:
+        The csrf_token value string.
+
+    Raises:
+        ValueError: If no csrf_token input element is found in the HTML.
+    """
+    match = _CSRF_TOKEN_PATTERN.search(html)
+    if not match:
+        raise ValueError("CSRF token not found in HTML form")
+    # Either group 1 (name-before-value) or group 2 (value-before-name) matched
+    return match.group(1) or match.group(2)
+
 
 # ---------------------------------------------------------------------------
 # Named timeout constants (seconds) -- centralised so callers can override
@@ -63,6 +99,119 @@ SERVER_HEALTH_HTTP_TIMEOUT: float = 5.0
 GIT_SUBPROCESS_TIMEOUT: float = 5.0
 """Maximum seconds to wait for a git subprocess call (e.g., git config, git init)."""
 
+CONFLICT_RESOLUTION_TIMEOUT: float = 600.0
+"""Maximum seconds to wait for a Claude-assisted conflict resolution refresh job (Story #926 AC8).
+
+Conflict resolution invokes the Claude CLI subprocess which may take several minutes.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Git subprocess helper
+# ---------------------------------------------------------------------------
+
+
+def run_git(args: list[str], cwd: "Path") -> str:
+    """Run a git command in ``cwd`` and return stdout; raise on invalid input or failure.
+
+    Uses GIT_SUBPROCESS_TIMEOUT as the process deadline.
+
+    Args:
+        args: git sub-command and arguments (must not be None and must be non-empty).
+        cwd: Working directory (must not be None and must exist on disk).
+
+    Returns:
+        Stripped stdout from the git process.
+
+    Raises:
+        ValueError: If args is None, args is empty, cwd is None, or cwd does not exist.
+        RuntimeError: If the git process exits with a non-zero code.
+    """
+    if args is None:
+        raise ValueError("run_git: args must not be None")
+    if not args:
+        raise ValueError("run_git: args must be a non-empty list")
+    if cwd is None:
+        raise ValueError("run_git: cwd must not be None")
+    cwd_path = Path(cwd)
+    if not cwd_path.exists():
+        raise ValueError(f"run_git: cwd does not exist: {cwd_path}")
+    result = subprocess.run(
+        ["git"] + args,
+        cwd=str(cwd_path),
+        capture_output=True,
+        text=True,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed in {cwd_path}:\n{result.stdout}\n{result.stderr}"
+        )
+    return result.stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# JSON section field patcher
+# ---------------------------------------------------------------------------
+
+
+def patch_json_field(
+    base_dir: "Path",
+    json_file: "Path",
+    section: str,
+    field: str,
+    value: str,
+) -> None:
+    """Read a JSON file, merge one field into a named section dict, and write back.
+
+    Validates that ``json_file`` is located within ``base_dir`` (using
+    ``Path.resolve()`` + ``relative_to``) to prevent accidental writes outside
+    the intended directory.
+
+    Args:
+        base_dir: Trusted root directory (must not be None).
+        json_file: Path to the JSON file (created as empty dict if absent);
+                   must not be None and must be inside ``base_dir``.
+        section: Top-level key in the JSON object (must not be None or empty).
+        field: Key inside ``section`` to set (must not be None or empty).
+        value: String value to assign to ``field`` (must not be None).
+
+    Raises:
+        ValueError: If any required parameter is None or empty, or if
+                    json_file resolves outside base_dir.
+    """
+    if base_dir is None:
+        raise ValueError("patch_json_field: base_dir must not be None")
+    if json_file is None:
+        raise ValueError("patch_json_field: json_file must not be None")
+    if section is None:
+        raise ValueError("patch_json_field: section must not be None")
+    if not section:
+        raise ValueError("patch_json_field: section must be a non-empty string")
+    if field is None:
+        raise ValueError("patch_json_field: field must not be None")
+    if not field:
+        raise ValueError("patch_json_field: field must be a non-empty string")
+    if value is None:
+        raise ValueError("patch_json_field: value must not be None")
+
+    resolved_base = Path(base_dir).resolve()
+    resolved_file = Path(json_file).resolve()
+    try:
+        resolved_file.relative_to(resolved_base)
+    except ValueError:
+        raise ValueError(
+            f"patch_json_field: json_file {json_file} is not inside base_dir {base_dir}"
+        )
+
+    data: dict = json.loads(resolved_file.read_text()) if resolved_file.exists() else {}
+    section_data: dict = data.get(section, {})
+    if not isinstance(section_data, dict):
+        section_data = {}
+    section_data[field] = value
+    data[section] = section_data
+    resolved_file.write_text(json.dumps(data, indent=2))
+
 
 # ---------------------------------------------------------------------------
 # Authorization header construction (RFC 6750 Bearer scheme)
@@ -93,7 +242,7 @@ def _auth_headers(token: str | None) -> dict[str, str]:
 
 def run_cidx(
     *args: str,
-    cwd: str | None = None,
+    cwd: str | Path | None = None,
     env: dict[str, str] | None = None,
     stdin_input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -164,7 +313,11 @@ def login(base_url: str, username: str, password: str) -> str:
         timeout=LOGIN_TIMEOUT,
     )
     response.raise_for_status()
-    return response.json()["access_token"]
+    token = response.json()["access_token"]
+    assert isinstance(token, str), (
+        f"access_token must be str, got {type(token).__name__}"
+    )
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -408,4 +561,128 @@ def wait_for_server(
             # Expected during server startup (connection refused, etc.)
             logger.debug("wait_for_server: transport error polling %s: %s", url, exc)
         time.sleep(poll_interval)
-    raise TimeoutError(f"Server at {url!r} did not become ready within {timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# cidx-meta backup config toggle (Story #926)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_csrf_from_page(client: "httpx.Client", path: str) -> str:
+    """GET *path* and return the csrf_token value from the rendered HTML form.
+
+    Private helper: caller (toggle_cidx_meta_backup) has already validated inputs.
+
+    Raises:
+        httpx.HTTPStatusError: On non-2xx response.
+        ValueError: If no csrf_token input is found in the page HTML.
+    """
+    page = client.get(path, timeout=LOGIN_TIMEOUT)
+    page.raise_for_status()
+    return _extract_csrf_token_from_html(page.text)
+
+
+def _post_and_assert_status(
+    client: "httpx.Client",
+    path: str,
+    data: dict,
+    expected_status: int,
+) -> None:
+    """POST form *data* to *path* and assert the response has *expected_status*.
+
+    Private helper: caller (toggle_cidx_meta_backup) has already validated inputs.
+    Raises on 4xx/5xx immediately; raises AssertionError when status is otherwise
+    unexpected (e.g. login re-renders 200 instead of 303 redirect on success).
+
+    Raises:
+        httpx.HTTPStatusError: On 4xx/5xx response.
+        AssertionError: If the response status does not equal *expected_status*.
+    """
+    resp = client.post(path, data=data, timeout=LOGIN_TIMEOUT, follow_redirects=False)
+    if resp.status_code >= httpx.codes.BAD_REQUEST:
+        resp.raise_for_status()
+    assert resp.status_code == expected_status, (
+        f"POST {path}: expected {expected_status}, got {resp.status_code}"
+    )
+
+
+def _web_login(
+    client: "httpx.Client",
+    admin_user: str,
+    admin_pass: str,
+    login_csrf: str,
+) -> None:
+    """POST /login form and assert 303 redirect (successful authentication).
+
+    Private helper: caller (toggle_cidx_meta_backup) has already validated inputs.
+
+    Raises:
+        AssertionError: If the server does not redirect (login failed or CSRF rejected).
+        httpx.HTTPStatusError: On 4xx/5xx response.
+    """
+    _post_and_assert_status(
+        client,
+        "/login",
+        {"username": admin_user, "password": admin_pass, "csrf_token": login_csrf},
+        expected_status=httpx.codes.SEE_OTHER,
+    )
+
+
+def _post_cidx_meta_backup_form(
+    client: "httpx.Client", enabled: bool, remote_url: str, form_csrf: str
+) -> None:
+    """POST /admin/config/cidx_meta_backup and assert 200 success response.
+
+    Private helper: caller (toggle_cidx_meta_backup) has already validated inputs.
+
+    Raises:
+        AssertionError: If the server does not return 200 (config not saved).
+        httpx.HTTPStatusError: On 4xx/5xx response.
+    """
+    _post_and_assert_status(
+        client,
+        "/admin/config/cidx_meta_backup",
+        {
+            "enabled": "true" if enabled else "false",
+            "remote_url": remote_url,
+            "csrf_token": form_csrf,
+        },
+        expected_status=httpx.codes.OK,
+    )
+
+
+def toggle_cidx_meta_backup(
+    client: "httpx.Client",
+    *,
+    admin_user: str,
+    admin_pass: str,
+    enabled: bool,
+    remote_url: str,
+) -> None:
+    """Enable/disable cidx-meta backup via the admin web form.
+
+    Performs the real admin login flow (GET /login -> POST /login ->
+    GET /admin/config -> POST /admin/config/cidx_meta_backup) so session
+    cookie and CSRF token are carried correctly. The same httpx.Client is
+    used end-to-end so cookies persist across requests automatically.
+
+    Story #926 AC1: configure backup via Web UI Config Screen.
+
+    Raises:
+        ValueError: If client is None, admin_user/admin_pass is empty, or
+                    remote_url is None.
+        httpx.HTTPStatusError: If any step returns a 4xx/5xx response.
+    """
+    if client is None:
+        raise ValueError("toggle_cidx_meta_backup: client must not be None")
+    if not admin_user:
+        raise ValueError("toggle_cidx_meta_backup: admin_user must be non-empty")
+    if not admin_pass:
+        raise ValueError("toggle_cidx_meta_backup: admin_pass must be non-empty")
+    if remote_url is None:
+        raise ValueError("toggle_cidx_meta_backup: remote_url must not be None")
+
+    login_csrf = _fetch_csrf_from_page(client, "/login")
+    _web_login(client, admin_user, admin_pass, login_csrf)
+    form_csrf = _fetch_csrf_from_page(client, "/admin/config")
+    _post_cidx_meta_backup_form(client, enabled, remote_url, form_csrf)

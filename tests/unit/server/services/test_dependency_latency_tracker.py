@@ -125,9 +125,11 @@ def _wait_for_rows(backend, timeout_s: float = WRITER_FLUSH_TIMEOUT_S) -> List:
             WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
         )
         if rows:
-            return rows
-    return backend.select_samples_for_window(
-        WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
+            return list(rows)
+    return list(
+        backend.select_samples_for_window(
+            WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
+        )
     )
 
 
@@ -169,8 +171,8 @@ class TestDependencyLatencyTrackerRecordSample:
     def test_record_sample_never_raises_on_bad_dep_name(self, tracker) -> None:
         """record_sample() swallows all exceptions, including bad dep names."""
         tracker.record_sample(EMPTY_DEP_NAME, DEFAULT_LATENCY_MS, DEFAULT_STATUS_CODE)
-        # type: ignore[arg-type] justified: deliberately testing runtime invalid
-        # input that typed signatures cannot express; verifies no exception raised.
+        # Deliberately testing runtime invalid input (None dep_name) that typed
+        # signatures cannot express; verifies no exception is raised.
         tracker.record_sample(None, DEFAULT_LATENCY_MS, DEFAULT_STATUS_CODE)  # type: ignore[arg-type]
 
     def test_record_sample_never_raises_on_bad_latency(self, tracker) -> None:
@@ -178,8 +180,8 @@ class TestDependencyLatencyTrackerRecordSample:
         tracker.record_sample(
             DEFAULT_DEP_NAME, INVALID_NEGATIVE_LATENCY_MS, DEFAULT_STATUS_CODE
         )
-        # type: ignore[arg-type] justified: deliberately testing runtime invalid
-        # input that typed signatures cannot express; verifies no exception raised.
+        # Deliberately testing runtime invalid input (None latency) that typed
+        # signatures cannot express; verifies no exception is raised.
         tracker.record_sample(DEFAULT_DEP_NAME, None, DEFAULT_STATUS_CODE)  # type: ignore[arg-type]
 
     def test_record_sample_buffer_overflow_drops_oldest(self, tracker) -> None:

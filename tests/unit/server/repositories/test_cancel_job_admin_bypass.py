@@ -22,6 +22,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from src.code_indexer.server.repositories.background_jobs import (
     BackgroundJob,
@@ -42,7 +43,7 @@ _TEST_JOB_PREFIX = "test-job-"
 _DB_ONLY_MSG = "Test requires job to be DB-only (not in manager.jobs)"
 
 
-def _make_manager(use_sqlite: bool = False, db_path: str = None):
+def _make_manager(use_sqlite: bool = False, db_path: Optional[str] = None):
     """Create a BackgroundJobManager, optionally backed by SQLite."""
     return BackgroundJobManager(
         use_sqlite=use_sqlite,

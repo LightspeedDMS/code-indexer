@@ -96,7 +96,7 @@ def _stub_invoker(results: list) -> MagicMock:
     return stub
 
 
-def _dispatch(dispatcher: "CliDispatcher") -> InvocationResult:
+def _dispatch(dispatcher: "CliDispatcher") -> InvocationResult:  # noqa: F821
     """Call dispatcher.dispatch with shared test constants."""
     return dispatcher.dispatch(flow=_FLOW, cwd=_CWD, prompt=_PROMPT, timeout=_TIMEOUT_S)
 

@@ -220,6 +220,18 @@ The leader election service is stored in `app.state.leader_election` so other pa
 
 On graceful shutdown, `stop_monitoring()` calls `release_leadership()`, which closes the dedicated connection and triggers PostgreSQL to release the advisory lock. The next node to attempt `pg_try_advisory_lock` will succeed.
 
+### Auto-Repair Decision Lock (Story #927)
+
+Separate from leader-election, the auto-repair feature uses **transaction-level** PostgreSQL advisory locks for short-lived atomic claim windows on each scheduler tick. Function: `pg_try_advisory_xact_lock(stable_int_hash("dep_map_scheduler_<key>"))`.
+
+Three lock keys are used: `"delta"`, `"refinement"`, `"auto_repair"`. Each scheduler tick site acquires the relevant lock, performs the in-flight guard check, registers the JobTracker entry, then releases the lock BEFORE running the long-running analysis or repair work. The JobTracker entry then serves as the cross-node in-flight signal for the duration of the work.
+
+The transaction-level scope is intentional: PostgreSQL auto-releases the lock when the transaction terminates (commit, rollback, or connection drop). A node that crashes mid-decision releases its claim immediately, allowing the next scheduler tick on any node to proceed. No stale-lock cleanup is required.
+
+Solo mode (`storage_mode=sqlite`, `_pg_pool=None`) uses an in-process `threading.Lock` per `(key)` for the same atomic claim window -- process-local but sufficient for single-node deployments. The cluster-aware code path is dormant.
+
+**Anti-fallback guard**: if `storage_mode=postgres` but `_pg_pool=None` (operator misconfiguration), the auto-repair helper logs ERROR `scheduled_auto_repair_misconfigured_cluster_no_pg_pool` and refuses to fire rather than silently degrading to per-node solo locks (which would allow duplicate auto-repair jobs across nodes).
+
 ### Node Heartbeat Service
 
 `src/code_indexer/server/services/node_heartbeat_service.py`

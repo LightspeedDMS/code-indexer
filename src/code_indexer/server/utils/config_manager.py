@@ -540,6 +540,16 @@ class ClaudeIntegrationConfig:
     # Story #359: Refinement job configuration
     # Enable/disable continuous dependency document refinement
     refinement_enabled: bool = False
+    dep_map_auto_repair_enabled: bool = False
+    """Story #927: when True, scheduled delta and refinement jobs automatically
+    trigger a single repair pass once if anomalies are detected via health-check.
+
+    Default False (operator opts in via Web UI Config Screen). Auto-repair fires
+    only after SCHEDULER-triggered jobs (manual operator-triggered runs do NOT
+    auto-repair). Re-entrance guard skips if any dep-map job is in-flight.
+    Anti-fallback: health-check failure -> skip auto-repair (never repair against
+    unknown anomaly state).
+    """
     # Refinement interval in hours (default: 24 = once per day)
     refinement_interval_hours: int = 24
     # Number of domains to refine per scheduled run (default: 3)
@@ -553,6 +563,12 @@ class ClaudeIntegrationConfig:
     llm_creds_provider_api_key: str = ""
     # Consumer ID sent to the provider on checkout (default: "cidx-server")
     llm_creds_provider_consumer_id: str = "cidx-server"
+    # Story #929 Item #2b: operator-configured CIDR allowlist for the cidx-curl.sh wrapper.
+    # Loopback (127.0.0.0/8 and ::1/128) is always appended by the wrapper at runtime.
+    # Default empty = only loopback is reachable (fail-closed posture).
+    # Example: ["10.5.0.0/24", "192.168.100.0/24"] for a cluster spanning two subnets.
+    # Bootstrap-only: lives in config.json (not runtime DB). Restart required after change.
+    ra_curl_allowed_cidrs: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -589,6 +605,14 @@ class CodexIntegrationConfig:
             raise ValueError(
                 f"Invalid codex_weight {self.codex_weight}: must be in [0.0, 1.0]"
             )
+
+
+@dataclass
+class CidxMetaBackupConfig:
+    """Runtime backup configuration for mutable cidx-meta."""
+
+    enabled: bool = False
+    remote_url: str = ""
 
 
 @dataclass
@@ -1072,6 +1096,7 @@ class ServerConfig:
 
     # Story #844 - Codex CLI integration configuration (runtime, not bootstrap)
     codex_integration_config: Optional[CodexIntegrationConfig] = None
+    cidx_meta_backup_config: Optional[CidxMetaBackupConfig] = None
 
     # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
     voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
@@ -1088,6 +1113,13 @@ class ServerConfig:
     clone_backend: str = "local"  # Story #510: "local", "ontap", or "cow-daemon"
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
 
+    # Story #923 - Admin TOTP step-up elevation enforcement (runtime, never bootstrap)
+    # Kill switch: False = elevation enforcement disabled (503 returned on protected routes).
+    # Idle timeout and max age mirror ElevatedSessionManager defaults.
+    elevation_enforcement_enabled: bool = False
+    elevation_idle_timeout_seconds: int = 300  # 5 minutes idle
+    elevation_max_age_seconds: int = 1800  # 30 minutes absolute
+
     # Story #746 - Fault injection harness (bootstrap-only, never DB)
     # Stays False in production. Both must be True together to enable harness.
     fault_injection_enabled: bool = False
@@ -1099,6 +1131,19 @@ class ServerConfig:
     # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
     enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
     enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
+
+    # Story #908 / Epic #907 - Graph-channel anomaly repair (bootstrap-only, never DB).
+    # Default True so fresh installs automatically run Phase 3.7 SELF_LOOP repair.
+    # Set enable_graph_channel_repair=false in config.json to disable.
+    enable_graph_channel_repair: bool = True
+
+    # Story #920 - Per-anomaly-type enablement flags (bootstrap-only, never DB).
+    # Each accepts "disabled" | "dry_run" | "enabled". Default None => executor uses "dry_run".
+    # Set in config.json: e.g. {"graph_repair_self_loop": "enabled"}
+    graph_repair_self_loop: Optional[str] = None
+    graph_repair_malformed_yaml: Optional[str] = None
+    graph_repair_garbage_domain: Optional[str] = None
+    graph_repair_bidirectional_mismatch: Optional[str] = None
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -1187,6 +1232,8 @@ class ServerConfig:
         # Story #844 - Initialize Codex integration config
         if self.codex_integration_config is None:
             self.codex_integration_config = CodexIntegrationConfig()
+        if self.cidx_meta_backup_config is None:
+            self.cidx_meta_backup_config = CidxMetaBackupConfig()
 
 
 class ServerConfigManager:
@@ -1702,6 +1749,15 @@ class ServerConfigManager:
             _cx_allowed = {f.name for f in fields(CodexIntegrationConfig)}
             config_dict["codex_integration_config"] = CodexIntegrationConfig(
                 **{k: v for k, v in _cx_dict.items() if k in _cx_allowed}
+            )
+
+        if "cidx_meta_backup_config" in config_dict and isinstance(
+            config_dict["cidx_meta_backup_config"], dict
+        ):
+            _backup_dict = config_dict["cidx_meta_backup_config"]
+            _backup_allowed = {f.name for f in fields(CidxMetaBackupConfig)}
+            config_dict["cidx_meta_backup_config"] = CidxMetaBackupConfig(
+                **{k: v for k, v in _backup_dict.items() if k in _backup_allowed}
             )
 
         # Bug #678: Convert sinbin dicts to ProviderSinBinConfig

@@ -45,7 +45,9 @@ from __future__ import annotations
 import json as _json
 import secrets
 import string
+from typing import cast
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.e2e.server.mcp_helpers import (
@@ -147,8 +149,10 @@ def _mcp_result(resp) -> dict:
         if isinstance(content, list) and content:
             first = content[0]
             if isinstance(first, dict) and "text" in first:
-                return _json.loads(first["text"])
-    return result
+                return cast(
+                    dict, _json.loads(first["text"])
+                )  # json.loads returns Any; payload is always a dict
+    return cast(dict, result)  # resp.json() returns Any; result is always a dict
 
 
 def _sweep_by_description(
@@ -199,6 +203,11 @@ def _sweep_by_description(
 # feature is not enabled in the server instance.
 _GROUP_MANAGER_NOT_CONFIGURED: str = "not configured"
 
+# Error code returned by MCP tools decorated with @require_mcp_elevation when
+# elevation enforcement is disabled (kill switch off — the default in
+# in-process TestClient tests without a full TOTP/elevation setup).
+_ELEVATION_ENFORCEMENT_DISABLED: str = "elevation_enforcement_disabled"
+
 
 def test_zzz_mcp_create_and_remove_group(
     test_client: TestClient,
@@ -224,12 +233,21 @@ def test_zzz_mcp_create_and_remove_group(
     payload = _mcp_result(create_resp)
     success = payload.get("success")
 
-    if success is False:
-        # Narrow guard: only the known "not configured" condition is acceptable.
+    if success is not True:
+        # Narrow guard: only known infrastructure skip conditions are acceptable.
         # Any other failure (auth, validation, unexpected) falls through to
         # the assert below and fails the test.
-        error_msg = payload.get("error", "")
-        assert _GROUP_MANAGER_NOT_CONFIGURED in error_msg, (
+        #
+        # success is False  — group manager "not configured" (existing known case).
+        # success is None   — payload has only an "error" key (e.g. elevation_enforcement_disabled)
+        error_code = payload.get("error", "")
+        if error_code == _ELEVATION_ENFORCEMENT_DISABLED:
+            pytest.skip(
+                "create_group requires TOTP elevation (Epic #922 / Story #925); "
+                "elevation_enforcement_enabled=False in this test environment — "
+                "no group was created."
+            )
+        assert _GROUP_MANAGER_NOT_CONFIGURED in error_code, (
             f"create_group failed for unexpected reason: {payload}"
         )
         return  # Group manager not available; nothing was created, nothing to clean up.
@@ -348,7 +366,21 @@ def test_zzz_mcp_create_and_verify_user(
         auth_headers,
     )
     _assert_resp(create_resp, label="create_user E2E_DESTROY_user")
-    assert _mcp_result(create_resp).get("success"), "create_user success=false"
+    create_payload = _mcp_result(create_resp)
+
+    # create_user is decorated with @require_mcp_elevation (Epic #922 / Story #925).
+    # When elevation enforcement is disabled (kill switch off — the default in
+    # in-process TestClient tests that do not configure TOTP elevation), the
+    # handler returns elevation_enforcement_disabled instead of executing.
+    # Skip visibly so the test output records why the operation was not exercised.
+    if create_payload.get("error") == _ELEVATION_ENFORCEMENT_DISABLED:
+        pytest.skip(
+            "create_user requires TOTP elevation (Epic #922); "
+            "elevation_enforcement_enabled=False in this test environment — "
+            "no user was created."
+        )
+
+    assert create_payload.get("success"), "create_user success=false"
 
     list_resp = call_mcp_tool(test_client, "list_users", {}, auth_headers)
     _assert_resp(list_resp, label="list_users after create E2E_DESTROY_user")
@@ -366,22 +398,22 @@ def test_zzz_mcp_check_maintenance_cycle(
 ) -> None:
     """Enter maintenance mode, verify in_maintenance=True, then exit.
 
-    Maintenance mode is entered and immediately exited so no state lingers.
+    Story #924: The MCP ``enter_maintenance_mode`` and ``exit_maintenance_mode``
+    tools were removed.  Enter/exit maintenance is now restricted to localhost-only
+    REST endpoints (``POST /api/admin/maintenance/enter`` and
+    ``POST /api/admin/maintenance/exit``) so that only the auto-updater (a local
+    system process) can toggle maintenance, not network clients.
+
+    FastAPI TestClient presents ``request.client.host == "testclient"`` which is
+    not a valid loopback IP address, so it fails ``require_localhost`` with 403.
+    The maintenance cycle therefore cannot be exercised in the Phase 3 in-process
+    TestClient environment.  This scenario is covered by Phase 4 or Phase 5 tests
+    where a real subprocess server listens on localhost.
     """
-    _assert_resp(
-        call_mcp_tool(test_client, "enter_maintenance_mode", {}, auth_headers),
-        label="enter_maintenance_mode",
-    )
-
-    status_resp = call_mcp_tool(test_client, "get_maintenance_status", {}, auth_headers)
-    _assert_resp(status_resp, label="get_maintenance_status")
-    assert _mcp_result(status_resp).get("in_maintenance") is True, (
-        f"in_maintenance not True after enter: {_mcp_result(status_resp)}"
-    )
-
-    _assert_resp(
-        call_mcp_tool(test_client, "exit_maintenance_mode", {}, auth_headers),
-        label="exit_maintenance_mode",
+    pytest.skip(
+        "Maintenance enter/exit removed from MCP (Story #924) and restricted to "
+        "localhost-only REST endpoints; TestClient host='testclient' fails the "
+        "loopback check — not testable in the Phase 3 in-process environment."
     )
 
 

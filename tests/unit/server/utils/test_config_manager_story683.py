@@ -183,7 +183,7 @@ class TestAC5:
         from unittest.mock import MagicMock, patch
         from code_indexer.server.web.routes import _get_current_config
 
-        minimal_settings = {
+        minimal_settings: dict[str, dict[str, object]] = {
             "server": {},
             "cache": {},
             "timeouts": {},

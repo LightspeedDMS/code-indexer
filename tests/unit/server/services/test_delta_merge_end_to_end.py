@@ -70,7 +70,7 @@ def tmp_domain_file(tmp_path) -> Path:
     """Create a domain file with frontmatter on disk."""
     domain_file = tmp_path / "cloud-infrastructure-platform.md"
     domain_file.write_text(_EXISTING_FULL_CONTENT)
-    return domain_file
+    return Path(domain_file)
 
 
 @pytest.fixture

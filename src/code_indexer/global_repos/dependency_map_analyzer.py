@@ -41,7 +41,9 @@ try:
     from code_indexer.server.services.cli_dispatcher import CliDispatcher
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
     from code_indexer.server.services.codex_invoker import CodexInvoker
-    from code_indexer.server.services.codex_mcp_auth_header_provider import build_codex_mcp_auth_header_provider
+    from code_indexer.server.services.codex_mcp_auth_header_provider import (
+        build_codex_mcp_auth_header_provider,
+    )
 except ImportError:  # pragma: no cover — server package absent in pure CLI context
     # Caller guards against None before any of these are used; CLI paths never reach
     # the Codex/server integration code below.
@@ -1242,7 +1244,7 @@ Rules:
                 result.cli_used,
             )
 
-        return result.output
+        return str(result.output)
 
     def run_pass_2_per_domain(
         self,

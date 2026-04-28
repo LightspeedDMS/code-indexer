@@ -139,7 +139,12 @@ def e2e_config() -> E2EConfig:
         work_dir=Path(_require_env("E2E_WORK_DIR")),
         voyage_api_key=_optional_env("E2E_VOYAGE_API_KEY"),
         golden_repo_job_timeout=float(
-            os.environ.get("E2E_GOLDEN_REPO_JOB_TIMEOUT", "180.0")
+            # Default 300s: golden-repo registration runs index (~60s) + Claude CLI
+            # description analyze (~58s) + versioned snapshot (~7s) + post-clone hooks,
+            # observed at ~193s in Phase 4 e2e. The prior 180s default was insufficient
+            # and produced fixture-timeout errors despite server-side success. Matches
+            # the Phase 5 E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT:=300 convention.
+            os.environ.get("E2E_GOLDEN_REPO_JOB_TIMEOUT", "300.0")
         ),
         golden_repo_job_poll_interval=float(
             os.environ.get("E2E_GOLDEN_REPO_JOB_POLL_INTERVAL", "2.0")

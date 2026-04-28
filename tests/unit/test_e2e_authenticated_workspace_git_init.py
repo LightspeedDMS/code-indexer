@@ -41,12 +41,34 @@ def workspace_with_seed_url(tmp_path: Path) -> Tuple[Path, str]:
     seed_dir.mkdir(parents=True)
 
     # Create a minimal git repo with one commit so git clone works
-    subprocess.run(["git", "init", "-b", "main"], cwd=str(seed_dir), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(seed_dir), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=str(seed_dir),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=str(seed_dir),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=str(seed_dir),
+        check=True,
+        capture_output=True,
+    )
     (seed_dir / "README.md").write_text("seed repo")
-    subprocess.run(["git", "add", "."], cwd=str(seed_dir), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "."], cwd=str(seed_dir), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=str(seed_dir),
+        check=True,
+        capture_output=True,
+    )
 
     seed_url = str(seed_dir)
     return workspace, seed_url

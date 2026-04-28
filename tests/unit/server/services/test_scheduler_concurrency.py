@@ -12,6 +12,7 @@ unbounded threading.Thread spawning in DescriptionRefreshScheduler.
 import sys
 import concurrent.futures
 from pathlib import Path
+from typing import Any, Callable, List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -99,14 +100,18 @@ def _count_submit_calls_for_single_pass(scheduler) -> int:
     Only the executor's submit method is patched — the rest of the scheduler
     (prompt generation, phase tasks, etc.) runs normally.
     """
-    calls = []
+    calls: List[Callable[..., Any]] = []
     mock_future = MagicMock()
     mock_future.add_done_callback = lambda fn: None
+
+    def _capture_submit(fn: Callable[..., Any], *a: Any, **kw: Any) -> MagicMock:
+        calls.append(fn)
+        return mock_future
 
     with patch.object(
         scheduler._executor,
         "submit",
-        side_effect=lambda fn, *a, **kw: calls.append(fn) or mock_future,
+        side_effect=_capture_submit,
     ):
         scheduler._run_loop_single_pass()
     return len(calls)

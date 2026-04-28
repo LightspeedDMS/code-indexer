@@ -19,6 +19,31 @@ from datetime import datetime, timezone
 from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 from code_indexer.server.auth.user_manager import User, UserRole
 
+_ATTR_ERR_MSG = "has no attribute 'mcp_credential_manager'"
+
+
+def _assert_no_mcp_credential_manager_attribute_error(result: dict) -> None:
+    """Assert mcp_credential_manager AttributeError is absent from any response shape.
+
+    Accepts both MCP-wrapped content dicts and raw elevation-gate error dicts
+    (introduced in Story #925).  In either case the invariant is that the
+    mcp_credential_manager AttributeError message must not appear.
+    """
+    if "content" in result:
+        content = json.loads(result["content"][0]["text"])
+        if "error" in content:
+            assert _ATTR_ERR_MSG not in content["error"], (
+                f"MCP response must not contain AttributeError: {content['error']}"
+            )
+    else:
+        assert "error" in result, f"Unexpected response format: {result}"
+        assert _ATTR_ERR_MSG not in result.get("error", ""), (
+            f"Raw error response must not contain AttributeError: {result['error']}"
+        )
+        assert _ATTR_ERR_MSG not in result.get("message", ""), (
+            f"Raw error message must not contain AttributeError: {result.get('message')}"
+        )
+
 
 @pytest.fixture
 def normal_user():
@@ -201,63 +226,48 @@ class TestAdminCredentialHandlersNoAttributeError:
     def test_admin_list_user_mcp_credentials_no_attribute_error(self, admin_user):
         """Verify admin_list_user_mcp_credentials does NOT raise AttributeError."""
         handler = HANDLER_REGISTRY["admin_list_user_mcp_credentials"]
-
         try:
             result = handler({"username": "testuser"}, admin_user)
-            assert "content" in result, "Handler should return MCP-compliant response"
-            content = json.loads(result["content"][0]["text"])
-            if "error" in content:
-                assert (
-                    "has no attribute 'mcp_credential_manager'" not in content["error"]
-                ), "Should not have AttributeError for mcp_credential_manager"
+            _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
     def test_admin_create_user_mcp_credential_no_attribute_error(self, admin_user):
-        """Verify admin_create_user_mcp_credential does NOT raise AttributeError."""
-        handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
+        """Verify admin_create_user_mcp_credential does NOT raise AttributeError.
 
+        Since Story #925 this handler is elevation-gated and may return a raw
+        error dict (e.g. elevation_enforcement_disabled) when no elevation window
+        is active.  Either outcome is valid — the key invariant is no AttributeError.
+        """
+        handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
         try:
             result = handler(
                 {"username": "testuser", "description": "Test"}, admin_user
             )
-            assert "content" in result, "Handler should return MCP-compliant response"
-            content = json.loads(result["content"][0]["text"])
-            if "error" in content:
-                assert (
-                    "has no attribute 'mcp_credential_manager'" not in content["error"]
-                ), "Should not have AttributeError for mcp_credential_manager"
+            _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
     def test_admin_delete_user_mcp_credential_no_attribute_error(self, admin_user):
-        """Verify admin_delete_user_mcp_credential does NOT raise AttributeError."""
-        handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
+        """Verify admin_delete_user_mcp_credential does NOT raise AttributeError.
 
+        Since Story #925 this handler is elevation-gated and may return a raw
+        error dict when no elevation window is active.  Either outcome is valid.
+        """
+        handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
         try:
             result = handler(
                 {"username": "testuser", "credential_id": "cred-123"}, admin_user
             )
-            assert "content" in result, "Handler should return MCP-compliant response"
-            content = json.loads(result["content"][0]["text"])
-            if "error" in content:
-                assert (
-                    "has no attribute 'mcp_credential_manager'" not in content["error"]
-                ), "Should not have AttributeError for mcp_credential_manager"
+            _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
     def test_admin_list_all_mcp_credentials_no_attribute_error(self, admin_user):
         """Verify admin_list_all_mcp_credentials does NOT raise AttributeError."""
         handler = HANDLER_REGISTRY["admin_list_all_mcp_credentials"]
-
         try:
             result = handler({}, admin_user)
-            assert "content" in result, "Handler should return MCP-compliant response"
-            content = json.loads(result["content"][0]["text"])
-            if "error" in content:
-                assert (
-                    "has no attribute 'mcp_credential_manager'" not in content["error"]
-                ), "Should not have AttributeError for mcp_credential_manager"
+            _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")

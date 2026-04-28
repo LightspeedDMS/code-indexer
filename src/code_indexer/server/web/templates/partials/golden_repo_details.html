@@ -1,0 +1,363 @@
+<article class="repo-details">
+    <div class="details-grid">
+        <div class="detail-item">
+            <label>Name:</label>
+            <span>{{ repo.alias }}</span>
+        </div>
+        <div class="detail-item">
+            <label>Global Alias:</label>
+            <span>{% if repo.global_alias %}<code>{{ repo.global_alias }}</code> (queryable without activation){% else %}Not globally activated{% endif %}</span>
+        </div>
+        <div class="detail-item">
+            <label>Version:</label>
+            <span>{% if repo.version %}<code>{{ repo.version }}</code>{% else %}Not versioned{% endif %}</span>
+        </div>
+        <div class="detail-item">
+            <label>Last Refresh:</label>
+            <span>{{ repo.last_refresh or 'Never' }}</span>
+        </div>
+        <div class="detail-item">
+            <label>Path/URL:</label>
+            <span class="repo-description">{{ repo.repo_url }}</span>
+        </div>
+        <div class="detail-item">
+            <label>Branch:</label>
+            <select class="branch-select"
+                    id="branch-select-{{ repo.alias }}"
+                    data-repo-alias="{{ repo.alias }}"
+                    data-current="{{ repo.default_branch or 'main' }}"
+                    data-loaded="false"
+                    onchange="confirmBranchChange(this)"
+                    style="min-width: 120px; padding: 2px 4px;">
+                <option value="{{ repo.default_branch or 'main' }}" selected>
+                    {{ repo.default_branch or 'main' }}
+                </option>
+            </select>
+            <span class="branch-spinner" id="branch-spinner-{{ repo.alias }}" style="display:none;">&#8987;</span>
+            <span class="branch-status-msg" id="branch-status-{{ repo.alias }}" style="margin-left:6px;font-size:0.85em;"></span>
+        </div>
+        <div class="detail-item">
+            <label>Available Indexes:</label>
+            <span>
+                {% if repo.has_semantic %}Semantic{% endif %}
+                {% if repo.has_semantic and (repo.has_fts or repo.has_temporal or repo.has_scip) %}, {% endif %}
+                {% if repo.has_fts %}FTS{% endif %}
+                {% if repo.has_fts and (repo.has_temporal or repo.has_scip) %}, {% endif %}
+                {% if repo.has_temporal %}Temporal{% endif %}
+                {% if repo.has_temporal and repo.has_scip %}, {% endif %}
+                {% if repo.has_scip %}SCIP{% endif %}
+                {% if not repo.has_semantic and not repo.has_fts and not repo.has_temporal and not repo.has_scip %}None{% endif %}
+            </span>
+        </div>
+        <div class="detail-item">
+            <label>Status:</label>
+            <span>{{ repo.status or 'ready' }}</span>
+        </div>
+        <div class="detail-item">
+            <label>Created:</label>
+            <span>{{ repo.created_at or 'N/A' }}</span>
+        </div>
+        {% if repo.file_count is defined %}
+        <div class="detail-item">
+            <label>Files Indexed:</label>
+            <span>{{ repo.file_count }}</span>
+        </div>
+        {% endif %}
+        {% if repo.chunk_count is defined %}
+        <div class="detail-item">
+            <label>Chunks Indexed:</label>
+            <span>{{ repo.chunk_count }}</span>
+        </div>
+        {% endif %}
+        {% if repo.error_message %}
+        <div class="detail-item error-details">
+            <label>Error:</label>
+            <span class="error-text">{{ repo.error_message }}</span>
+        </div>
+        {% endif %}
+        <div class="detail-item">
+            <label>Wiki:</label>
+            <span>
+                <div style="display:inline-flex; align-items:center; gap:0.3rem;" class="wiki-toggle">
+                    <form method="post" action="/admin/golden-repos/{{ repo.alias }}/wiki-toggle" style="display:inline">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="hidden" name="wiki_enabled" value="{{ '0' if repo.wiki_enabled else '1' }}">
+                        <label style="display:inline-flex; align-items:center; gap:0.3rem; margin:0; cursor:pointer;">
+                            <input type="checkbox" {{ 'checked' if repo.wiki_enabled else '' }} onchange="this.form.submit()" style="margin:0;">
+                            Enabled
+                        </label>
+                    </form>
+                    {% if repo.wiki_enabled %}
+                    <form method="post" action="/admin/golden-repos/{{ repo.alias }}/wiki-refresh" style="display:inline">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button class="outline small" type="submit" style="font-size:0.7rem; padding:0.15rem 0.4rem; margin-left:0.5rem;">Clear Cache</button>
+                    </form>
+                    {% endif %}
+                </div>
+                {% if repo.wiki_enabled %}
+                <div style="margin-top:0.3rem;">
+                    <a href="/wiki/{{ repo.alias }}/" target="_blank" style="font-size:0.85rem;">/wiki/{{ repo.alias }}/</a>
+                </div>
+                {% endif %}
+            </span>
+        </div>
+    </div>
+
+    <!-- Repository Description Section (Story #218) -->
+    <div class="repo-description-section" style="margin: 16px 0;">
+        <h4>Repository Description</h4>
+        <div id="desc-{{ repo.alias }}" class="repo-description-box">
+            <em>Loading description...</em>
+        </div>
+    </div>
+
+    <!-- Indexes Management Section -->
+    <div class="indexes-management">
+        <h4>Indexes Management</h4>
+        <div class="indexes-status-grid">
+            <div class="index-status-item">
+                <label>Semantic:</label>
+                <span class="index-status" data-index-type="semantic" data-repo-alias="{{ repo.alias }}">
+                    {% if repo.has_semantic %}
+                    <span class="status-icon present">Present</span>
+                    {% else %}
+                    <span class="status-icon not-present">Not Present</span>
+                    {% endif %}
+                </span>
+            </div>
+            <div class="index-status-item">
+                <label>FTS (Full-Text Search):</label>
+                <span class="index-status" data-index-type="fts" data-repo-alias="{{ repo.alias }}">
+                    {% if repo.has_fts %}
+                    <span class="status-icon present">Present</span>
+                    {% else %}
+                    <span class="status-icon not-present">Not Present</span>
+                    {% endif %}
+                </span>
+            </div>
+            <div class="index-status-item">
+                <label>Temporal (Git History):</label>
+                <span class="index-status" data-index-type="temporal" data-repo-alias="{{ repo.alias }}">
+                    {% if repo.has_temporal %}
+                    <span class="status-icon present">Present</span>
+                    {% else %}
+                    <span class="status-icon not-present">Not Present</span>
+                    {% endif %}
+                </span>
+            </div>
+            <div class="index-status-item">
+                <label>SCIP (Code Intelligence):</label>
+                <span class="index-status" data-index-type="scip" data-repo-alias="{{ repo.alias }}">
+                    {% if repo.has_scip %}
+                    <span class="status-icon present">Present</span>
+                    {% else %}
+                    <span class="status-icon not-present">Not Present</span>
+                    {% endif %}
+                </span>
+            </div>
+        </div>
+
+        <!-- Add Index Button and Form -->
+        <div class="add-index-container" id="add-index-container-{{ repo.alias }}">
+            <button class="outline small" onclick="showAddIndexForm('{{ repo.alias }}')">Add/Rebuild Index</button>
+
+            <div id="add-index-form-{{ repo.alias }}" class="add-index-form" style="display: none;">
+                <label>Select Index Type(s):</label>
+                <div class="index-checkboxes" id="index-checkboxes-{{ repo.alias }}">
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-semantic-{{ repo.alias }}" value="semantic" onchange="toggleProviderCheckboxes('{{ repo.alias }}')">
+                        Semantic{% if repo.has_semantic %} <span class="rebuild-label">(rebuild)</span>{% endif %}
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-fts-{{ repo.alias }}" value="fts">
+                        FTS{% if repo.has_fts %} <span class="rebuild-label">(rebuild)</span>{% endif %}
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-temporal-{{ repo.alias }}" value="temporal" onchange="toggleProviderCheckboxes('{{ repo.alias }}')">
+                        Temporal{% if repo.has_temporal %} <span class="rebuild-label">(rebuild)</span>{% endif %}
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-scip-{{ repo.alias }}" value="scip">
+                        SCIP{% if repo.has_scip %} <span class="rebuild-label">(rebuild)</span>{% endif %}
+                    </label>
+                </div>
+
+                <!-- Provider Selection (Story #489, #641) -->
+                <div id="provider-checkboxes-{{ repo.alias }}" class="provider-checkboxes" style="display: none; margin-top: 0.5rem; padding-left: 1rem; border-left: 2px solid var(--pico-muted-border-color);">
+                    <label style="font-size: 0.9em; color: var(--pico-muted-color);">Embedding Provider(s):</label>
+                    <div id="provider-list-{{ repo.alias }}" class="provider-list">
+                        <span class="loading-providers" style="font-size: 0.85em; color: var(--pico-muted-color);">Loading providers...</span>
+                    </div>
+                </div>
+
+                <!-- Temporal Options (Story #478) -->
+                <details id="temporal-options-{{ repo.alias }}" style="margin-top: 0.5rem;">
+                    <summary style="cursor: pointer; font-size: 0.9em; color: var(--pico-muted-color);">Temporal indexing options</summary>
+                    <form method="post" action="/admin/golden-repos/{{ repo.alias }}/temporal-options" style="margin-top: 0.4rem;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <table style="border: none; margin: 0; padding: 0; font-size: 0.82em; border-collapse: collapse;">
+                            <tr>
+                                <td style="border: none; padding: 0.2rem 0.4rem 0.2rem 0; white-space: nowrap; vertical-align: middle;">Max commits</td>
+                                <td style="border: none; padding: 0.2rem 0; vertical-align: middle;">
+                                    <input type="number" name="max_commits" min="1"
+                                           value="{{ repo.temporal_options.max_commits if repo.temporal_options and repo.temporal_options.max_commits else '' }}"
+                                           placeholder="no limit" style="font-size: 0.9em; margin: 0; padding: 0.2rem 0.3rem; width: 120px;">
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="border: none; padding: 0.2rem 0.4rem 0.2rem 0; white-space: nowrap; vertical-align: middle;">Context lines</td>
+                                <td style="border: none; padding: 0.2rem 0; vertical-align: middle;">
+                                    <input type="number" name="diff_context" min="0" max="50"
+                                           value="{{ repo.temporal_options.diff_context if repo.temporal_options and repo.temporal_options.diff_context is not none else 5 }}"
+                                           placeholder="5" style="font-size: 0.9em; margin: 0; padding: 0.2rem 0.3rem; width: 80px;">
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="border: none; padding: 0.2rem 0.4rem 0.2rem 0; white-space: nowrap; vertical-align: middle;">Since date</td>
+                                <td style="border: none; padding: 0.2rem 0; vertical-align: middle;">
+                                    <input type="date" name="since_date"
+                                           value="{{ repo.temporal_options.since_date if repo.temporal_options and repo.temporal_options.since_date else '' }}"
+                                           style="font-size: 0.9em; margin: 0; padding: 0.2rem 0.3rem; width: 150px;">
+                                </td>
+                            </tr>
+                            <tr>
+                                <td colspan="2" style="border: none; padding: 0.2rem 0; vertical-align: middle;">
+                                    <label style="display: inline-flex; align-items: center; gap: 0.3rem; margin: 0; cursor: pointer;">
+                                        <input type="checkbox" name="all_branches" value="1"
+                                               style="margin: 0; width: auto; height: auto;"
+                                               {% if repo.temporal_options and repo.temporal_options.all_branches %}checked{% endif %}>
+                                        All branches
+                                    </label>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td colspan="2" style="border: none; padding: 0.3rem 0 0 0;">
+                                    <button type="submit" class="small outline" style="padding: 0.2rem 0.6rem; font-size: 0.85em; width: auto;">Save</button>
+                                </td>
+                            </tr>
+                        </table>
+                    </form>
+                </details>
+
+                <div class="form-actions">
+                    <button class="small" onclick="submitAddIndex('{{ repo.alias }}')">Submit</button>
+                    <button class="outline small" onclick="hideAddIndexForm('{{ repo.alias }}')">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Job Progress Container -->
+        <div id="job-progress-{{ repo.alias }}" class="job-progress-container" style="display: none;">
+            <div class="job-progress-header">
+                <span class="job-status-text">Job Status: <span id="job-status-text-{{ repo.alias }}">pending</span></span>
+                <span class="spinner" id="job-spinner-{{ repo.alias }}"></span>
+            </div>
+            <div class="job-progress-details" id="job-progress-details-{{ repo.alias }}"></div>
+        </div>
+    </div>
+
+    <!-- Health Status Section (Story #60) -->
+    <div class="health-status-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
+        <div class="health-header">
+            <h4>HNSW Index Health</h4>
+            <button
+                id="health-refresh-{{ repo.alias }}"
+                class="outline small"
+                onclick="refreshHealthData('{{ repo.alias }}')"
+                title="Refresh health data (bypass cache)"
+            >
+                Refresh
+            </button>
+        </div>
+
+        <div
+            id="health-indicator-{{ repo.alias }}"
+            class="health-indicator-container"
+            onclick="toggleHealthDetails('{{ repo.alias }}')"
+            style="cursor: pointer;"
+        >
+            <span class="health-status health-unknown">Deep health check</span>
+        </div>
+
+        <div
+            id="health-details-{{ repo.alias }}"
+            class="health-details-container"
+            style="display: none;"
+            data-loaded="false"
+        >
+        </div>
+    </div>
+
+    <!-- Global Activated Repository Section (Story #161) -->
+    {% if repo.global_alias %}
+    <div class="global-activated-section" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e0e0e0;">
+        <h4>Global Activated Repository</h4>
+        <p class="global-activated-info">
+            This golden repository has been globally activated as
+            <code class="global-alias">{{ repo.global_alias }}</code>.
+            Below are the metrics for the globally activated copy used for queries.
+        </p>
+
+        <div class="global-indexes-section" style="margin-top: 0.5rem;">
+            <h5>Indexes</h5>
+            <div class="indexes-status-grid">
+                <div class="index-status-item">
+                    <label>Semantic:</label>
+                    <span class="index-status" id="global-index-status-semantic-{{ repo.alias }}">
+                        <span class="status-icon not-present">Loading...</span>
+                    </span>
+                </div>
+                <div class="index-status-item">
+                    <label>FTS (Full-Text Search):</label>
+                    <span class="index-status" id="global-index-status-fts-{{ repo.alias }}">
+                        <span class="status-icon not-present">Loading...</span>
+                    </span>
+                </div>
+                <div class="index-status-item">
+                    <label>Temporal (Git History):</label>
+                    <span class="index-status" id="global-index-status-temporal-{{ repo.alias }}">
+                        <span class="status-icon not-present">Loading...</span>
+                    </span>
+                </div>
+                <div class="index-status-item">
+                    <label>SCIP (Code Intelligence):</label>
+                    <span class="index-status" id="global-index-status-scip-{{ repo.alias }}">
+                        <span class="status-icon not-present">Loading...</span>
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        <div class="global-health-section" style="margin-top: 1rem;">
+            <div class="health-header">
+                <h5>HNSW Index Health</h5>
+                <button
+                    id="global-health-refresh-{{ repo.alias }}"
+                    class="outline small"
+                    onclick="refreshGlobalHealthData('{{ repo.alias }}')"
+                    title="Refresh global activated health data (bypass cache)"
+                >
+                    Refresh
+                </button>
+            </div>
+
+            <div
+                id="global-health-indicator-{{ repo.alias }}"
+                class="health-indicator-container"
+                onclick="toggleGlobalHealthDetails('{{ repo.alias }}')"
+                style="cursor: pointer;"
+            >
+                <span class="health-status health-unknown">Deep health check</span>
+            </div>
+
+            <div
+                id="global-health-details-{{ repo.alias }}"
+                class="health-details-container"
+                style="display: none;"
+                data-loaded="false"
+            >
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</article>

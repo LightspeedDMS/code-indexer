@@ -10,7 +10,11 @@ import os
 import pytest
 
 
-# Single source of truth for all 122 expected HANDLER_REGISTRY keys (AC7)
+# Single source of truth for all 120 expected HANDLER_REGISTRY keys (AC7)
+# Note: enter_maintenance_mode and exit_maintenance_mode were removed per Story #924
+# (maintenance mode write endpoints are now localhost-only and auto-updater driven;
+# system processes cannot satisfy TOTP step-up, so MCP registrations were deleted).
+# get_maintenance_status (read-only) remains registered.
 EXPECTED_REGISTRY_KEYS = frozenset(
     {
         # Dict literal entries from original HANDLER_REGISTRY definition
@@ -62,6 +66,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "git_search_diffs",
         "directory_tree",
         "authenticate",
+        "elevate_session",
         "cidx_ssh_key_create",
         "cidx_ssh_key_list",
         "cidx_ssh_key_delete",
@@ -157,8 +162,6 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "admin_list_all_mcp_credentials",
         "admin_list_system_mcp_credentials",
         "query_audit_logs",
-        "enter_maintenance_mode",
-        "exit_maintenance_mode",
         "get_maintenance_status",
         "scip_pr_history",
         "scip_cleanup_history",

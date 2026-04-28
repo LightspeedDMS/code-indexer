@@ -19,6 +19,7 @@ from ..utils.config_manager import (
     ServerConfig,
     RerankConfig,
     LifecycleAnalysisConfig,
+    CidxMetaBackupConfig,
 )
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 
@@ -40,6 +41,11 @@ BOOTSTRAP_KEYS = frozenset(
         "cluster",
         "enable_malloc_arena_max",  # Bug #897
         "enable_malloc_trim",  # Bug #897
+        "enable_graph_channel_repair",  # Story #908 / Epic #907
+        "graph_repair_self_loop",  # Story #920
+        "graph_repair_malformed_yaml",  # Story #920
+        "graph_repair_garbage_domain",  # Story #920
+        "graph_repair_bidirectional_mismatch",  # Story #920
         "fault_injection_enabled",  # Story #746
         "fault_injection_nonprod_ack",  # Story #746
     }
@@ -344,6 +350,8 @@ class ConfigService:
                     else None
                 ),
                 "llm_creds_provider_consumer_id": config.claude_integration_config.llm_creds_provider_consumer_id,
+                "dep_map_fact_check_enabled": config.claude_integration_config.dep_map_fact_check_enabled,
+                "dep_map_auto_repair_enabled": config.claude_integration_config.dep_map_auto_repair_enabled,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -615,6 +623,11 @@ class ConfigService:
             "lcp_vendor": cx_cfg.lcp_vendor,
             "codex_weight": cx_cfg.codex_weight,
         }
+        backup_cfg = config.cidx_meta_backup_config or CidxMetaBackupConfig()
+        settings["cidx_meta_backup"] = {
+            "enabled": backup_cfg.enabled,
+            "remote_url": backup_cfg.remote_url,
+        }
 
         return settings
 
@@ -726,6 +739,8 @@ class ConfigService:
         # Story #844 - Codex CLI integration
         elif category == "codex_integration":
             self._update_codex_integration_setting(config, key, value)
+        elif category == "cidx_meta_backup":
+            self._update_cidx_meta_backup_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -981,6 +996,8 @@ class ConfigService:
             claude_config.llm_creds_provider_consumer_id = str(value) if value else ""
         elif key == "dep_map_fact_check_enabled":
             claude_config.dep_map_fact_check_enabled = _parse_bool(value)
+        elif key == "dep_map_auto_repair_enabled":
+            claude_config.dep_map_auto_repair_enabled = _parse_bool(value)
         elif key == "fact_check_timeout_seconds":
             claude_config.fact_check_timeout_seconds = max(
                 _MIN_FACT_CHECK_TIMEOUT_SECONDS, int(value)
@@ -1260,6 +1277,20 @@ class ConfigService:
             cx.codex_weight = weight
         else:
             raise ValueError(f"Unknown codex_integration setting: {key}")
+
+    def _update_cidx_meta_backup_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update cidx-meta backup runtime settings."""
+        if config.cidx_meta_backup_config is None:
+            config.cidx_meta_backup_config = CidxMetaBackupConfig()
+        backup = config.cidx_meta_backup_config
+        if key == "enabled":
+            backup.enabled = _parse_bool(value)
+        elif key == "remote_url":
+            backup.remote_url = str(value).strip()
+        else:
+            raise ValueError(f"Unknown cidx_meta_backup setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any

@@ -76,7 +76,12 @@ def _init_git_workspace(workspace: Path, remote_url: str) -> None:
     )
     if not branch_check.stdout.strip():
         remote_refs = subprocess.run(
-            ["git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/"],
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/remotes/origin/",
+            ],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -171,8 +176,7 @@ def registered_golden_repo(
     # so we must assert "completed" explicitly or downstream tests see a
     # phantom successful registration and fail in confusing ways.
     assert job_status["status"] == "completed", (
-        f"Golden repo registration job did not complete successfully:\n"
-        f"{job_status}"
+        f"Golden repo registration job did not complete successfully:\n{job_status}"
     )
 
     return alias

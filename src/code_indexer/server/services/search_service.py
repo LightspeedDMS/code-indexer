@@ -29,6 +29,23 @@ logger = logging.getLogger(__name__)
 _HNSW_CACHE_USE_SERVER_DEFAULT = object()
 
 
+def _get_http_client_factory() -> Any:
+    """Get http_client_factory from app.state for fault-injection-aware HTTP clients.
+
+    Bug #899 fix: returns the factory set by lifespan so FaultInjectingSyncTransport
+    is installed on query-time embedding clients when fault injection is active.
+    Extracted as a module-level function so unit tests can patch it without
+    needing to set up the full app.state (following _get_golden_repos_dir() pattern).
+
+    Raises:
+        AttributeError: If lifespan did not set app.state.http_client_factory
+            (should never happen in production; startup guarantees it is set).
+    """
+    from ..app import app as _app
+
+    return _app.state.http_client_factory
+
+
 def _get_golden_repos_dir() -> str:
     """Get golden repos directory from app.state configuration."""
     from typing import Optional, cast
@@ -343,10 +360,13 @@ class SemanticSearchService:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-            # Create embedding service — use provider_name_override when set (Story #593)
+            # Create embedding service — use provider_name_override when set (Story #593).
+            # Bug #899: pass http_client_factory so FaultInjectingSyncTransport intercepts
+            # query-time embedding HTTP calls when fault injection is active.
             embedding_service = EmbeddingProviderFactory.create(
                 config=config,
                 provider_name=provider_name_override,
+                http_client_factory=_get_http_client_factory(),
             )
 
             # Resolve correct collection name based on repository configuration

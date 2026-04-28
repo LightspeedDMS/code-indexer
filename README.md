@@ -2,7 +2,44 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 9.23.10** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 10.0.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
+
+## What's New in v10.0
+
+A major release focused on hardening server-side surfaces, expanding shared knowledge, and broadening AI assistant integration. See [CHANGELOG.md](CHANGELOG.md) for the full list and `docs/migration-to-v10.md` for upgrade guidance.
+
+### Breaking Changes
+
+- **MCPB removed** (Epic #756): `cidx-bridge` and `cidx-token-refresh` console scripts deleted; the MCPB documentation tree removed. Clients must now connect directly to the server's native `/mcp` (JWT Bearer) or `/mcp-public` endpoints. See `docs/migration-to-v10.md` for client reconfiguration steps.
+
+### Security and Hardening
+
+- **Research Assistant curl wrapper** (#929): replaces 36 hardcoded RFC1918 prefix allow rules with `scripts/cidx-curl.sh` -- closed-set whitelist of safe curl flags, environment scrub, DNS rebinding mitigation via `--resolve` pin, always-on loopback, and operator-configured CIDR allowlist via `ra_curl_allowed_cidrs`
+- **TOTP step-up elevation** (Epic #922): admin operations require an active TOTP elevation window (rolling 5-minute idle, 30-minute absolute max). Recovery codes provide narrow `totp_repair` scope for credential recovery
+- **Maintenance mode localhost-only** (#924): `enter`/`exit` write endpoints restricted to loopback callers (auto-updater driven, system-process operated)
+
+### Operations
+
+- **Auto-trigger dep-map repair** (#927): scheduled delta and refinement jobs auto-trigger a single repair pass when anomalies are detected. Default-off, opt-in via Web UI `dep_map_auto_repair_enabled`. Cluster-aware decision lock via PostgreSQL advisory lock; solo via `threading.Lock`
+- **Refinement scheduler bootstrap fix** (#931): `update_tracking(refinement_next_run=...)` moved into `run_refinement_cycle`; the scheduler now routes through `run_tracked_refinement` for full JobTracker visibility
+- **Dep-map dashboard polish** (#930): removed the meaningless `0.0s` `finalize_s` timing pill from delta runs
+
+### Knowledge and Memory
+
+- **Memory store CRUD** (#877): shared technical memory via the MCP `create_memory` / `edit_memory` / `delete_memory` tools
+- **Memory retrieval pipeline** (#883): semantic memory injection into `search_code` results, gated by the `memory_retrieval_enabled` Web UI toggle
+- **Memory CRUD AttributeError fix** (#932): Protocol/real-class drift cleanup across four methods (`is_write_lock_held` -> `is_write_locked`, `ttl_seconds=` kwarg removal)
+
+### Integrations
+
+- **Codex CLI integration** (Epic #843, 5 stories): Codex GPT-5 background agents register `cidx-local` MCP at server startup with persistent Basic-auth credentials
+- **Unified CLI rerank + Embedder Provider Chain** (Epic #689): unified CLI search funnel with VoyageAI + Cohere reranking
+- **cidx-meta backup to remote git** (#926): continuous git backup of the `cidx-meta` directory with auto-conflict-resolution via Claude
+
+### Stability
+
+- **Phase 5 fault-injection resiliency** (#864): four startup scenarios plus bootstrap-only flags (non-prod safety guards)
+- **Server memory invariants** (Bug #897): glibc `malloc_trim` sweep + `MALLOC_ARENA_MAX=2` mitigations addressing HNSW cache fragmentation
 
 ## Quick Navigation
 
@@ -30,7 +67,7 @@ CIDX combines semantic embeddings with traditional search to help you find code 
 ### pipx (Recommended)
 
 ```bash
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.0
 
 # Verify installation
 cidx --version
@@ -41,7 +78,7 @@ cidx --version
 ```bash
 python3 -m venv code-indexer-env
 source code-indexer-env/bin/activate
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.0
 ```
 
 **Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key (or Cohere API key)
@@ -173,17 +210,21 @@ See: [Operating Modes Guide](docs/operating-modes.md#daemon-mode)
 
 ### AI Integration
 
-Connect AI assistants to CIDX for semantic search directly in conversations. Supports local CLI integration (Claude Code, Gemini, Codex) and remote MCP server integration (Claude Desktop).
+Connect AI assistants to CIDX for semantic search directly in conversations. Supports local CLI integration (Claude Code, Gemini, Codex) and remote MCP server integration for any modern MCP-aware client (Claude.ai, Claude Desktop, Claude Code, Codex CLI).
 
 ```bash
 # Local CLI integration
 cidx teach-ai --claude --project    # Creates CLAUDE.md
 
-# Remote MCP server for Claude Desktop
-# See MCP Bridge guide for setup
+# Remote MCP for any MCP-aware client (no bridge required)
+# Connect directly to the CIDX server's native MCP endpoints:
+#   /mcp         — authenticated (JWT Bearer token via POST /auth/login)
+#   /mcp-public  — unauthenticated
 ```
 
-See: [AI Integration Guide](docs/ai-integration.md) | [MCP Bridge Guide](docs/mcpb/README.md)
+Since v10.0 the legacy `cidx-bridge` / MCPB packaging has been removed -- clients connect directly to the server's `/mcp` endpoint (see `docs/migration-to-v10.md`).
+
+See: [AI Integration Guide](docs/ai-integration.md)
 
 ### Langfuse Trace Sync (v8.10+)
 
@@ -345,9 +386,13 @@ cidx-server start       # Start multi-user server
 **Core Capabilities**:
 - **Multi-Repo Indexing**: Centralized golden repositories shared across team
 - **Multi-User Access**: OAuth 2.0/OIDC authentication with role-based permissions
+- **TOTP Step-Up Elevation** (v10.0): admin operations require an active TOTP elevation window with rolling 5-minute idle and 30-minute absolute max
 - **Advanced Caching**: HNSW cache with <1ms warm queries (100-1800x speedup)
 - **REST API**: Programmatic access with full query parameter support
-- **MCP Protocol**: Claude Desktop integration for AI-assisted code search
+- **MCP Protocol**: Direct `/mcp` (JWT) and `/mcp-public` endpoints for any MCP-aware client (Claude.ai, Claude Desktop, Claude Code, Codex CLI)
+- **Shared Memory Store** (v10.0): MCP `create_memory` / `edit_memory` / `delete_memory` tools with optional semantic injection into `search_code` results
+- **Research Assistant Hardening** (v10.0): closed-set curl wrapper with operator-configured CIDR allowlist and DNS rebinding mitigation
+- **Auto-Repair Dep-Map** (v10.0): scheduled delta and refinement jobs auto-trigger anomaly repair when enabled
 - **Web Administration**: Manage users, repositories, and configuration via browser
 - **Repository Management**: Add, refresh, remove golden repositories
 - **User Management**: Create users, assign roles (admin/power_user/normal_user)
@@ -500,7 +545,6 @@ For complete configuration reference including environment variables, daemon set
 
 ### AI Integration
 - [AI Integration Guide](docs/ai-integration.md) - Connect AI assistants to CIDX
-- [MCP Bridge Guide](docs/mcpb/README.md) - Claude Desktop integration via MCP
 - [Guardrails Repository Convention](docs/guardrails-repo-convention.md) - Custom safety guardrails for open delegation jobs
 
 ### Server Administration
