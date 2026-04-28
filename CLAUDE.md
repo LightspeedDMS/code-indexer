@@ -62,6 +62,18 @@ NEVER push to `master` without explicit user authorization in the **current conv
 
 **Default on work completion**: push to `development` (with version bump and tag), merge and push to `staging`, **STOP** and wait. When in doubt, ASK.
 
+### Security-Sensitive Commit Discipline (Item #18, Story #929)
+
+Security-sensitive changes MUST be isolated in their own commit — never bundled with unrelated features, refactors, or bug fixes. This applies to:
+
+- **Permission-model edits**: any change to `_bash_deny_rules`, `_allow_rules`, `_build_permission_settings`, or any analogous permission gate in any service.
+- **Prompt-template edits for capability-granted agents**: any change to `research_assistant_prompt.md` or any prompt template that defines the operational authority of a Claude subprocess (what it is allowed or forbidden to do).
+- **Auth-boundary changes**: any change to auth middleware, TOTP/MFA gates, elevation logic, role checks, or session validation.
+
+**Why**: Bundling security changes with unrelated commits makes code review harder, increases the risk of reviewers missing the security impact, and complicates post-incident forensics. A standalone commit with a clear security-focused message makes the change auditable and revertable without side effects.
+
+**Enforcement**: Raise this rule in code review whenever a PR or commit mixes permission/prompt/auth changes with other work. The reviewer must request the security portion be split into its own commit before approving.
+
 ---
 
 ## Testing

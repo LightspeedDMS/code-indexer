@@ -6,7 +6,7 @@ Executes semantic queries across repositories and analyzes score distributions
 to determine optimal min_score threshold recommendations.
 
 This script provides empirical data to validate the min_score=0.7 recommendation
-documented in docs/mcpb/query-guide.md for multi-repository AI agent queries.
+documented in docs/query-guide.md for multi-repository AI agent queries.
 
 Usage:
     # Analyze single repository (path to directory with .code-indexer/)

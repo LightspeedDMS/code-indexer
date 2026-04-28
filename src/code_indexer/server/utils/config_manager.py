@@ -540,6 +540,16 @@ class ClaudeIntegrationConfig:
     # Story #359: Refinement job configuration
     # Enable/disable continuous dependency document refinement
     refinement_enabled: bool = False
+    dep_map_auto_repair_enabled: bool = False
+    """Story #927: when True, scheduled delta and refinement jobs automatically
+    trigger a single repair pass once if anomalies are detected via health-check.
+
+    Default False (operator opts in via Web UI Config Screen). Auto-repair fires
+    only after SCHEDULER-triggered jobs (manual operator-triggered runs do NOT
+    auto-repair). Re-entrance guard skips if any dep-map job is in-flight.
+    Anti-fallback: health-check failure -> skip auto-repair (never repair against
+    unknown anomaly state).
+    """
     # Refinement interval in hours (default: 24 = once per day)
     refinement_interval_hours: int = 24
     # Number of domains to refine per scheduled run (default: 3)
@@ -553,6 +563,12 @@ class ClaudeIntegrationConfig:
     llm_creds_provider_api_key: str = ""
     # Consumer ID sent to the provider on checkout (default: "cidx-server")
     llm_creds_provider_consumer_id: str = "cidx-server"
+    # Story #929 Item #2b: operator-configured CIDR allowlist for the cidx-curl.sh wrapper.
+    # Loopback (127.0.0.0/8 and ::1/128) is always appended by the wrapper at runtime.
+    # Default empty = only loopback is reachable (fail-closed posture).
+    # Example: ["10.5.0.0/24", "192.168.100.0/24"] for a cluster spanning two subnets.
+    # Bootstrap-only: lives in config.json (not runtime DB). Restart required after change.
+    ra_curl_allowed_cidrs: List[str] = field(default_factory=list)
 
 
 @dataclass

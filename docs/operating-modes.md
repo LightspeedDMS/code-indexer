@@ -500,14 +500,53 @@ Optional observability integration for tracking MCP tool usage and research sess
 
 ### Research Assistant (v8.10+)
 
-Interactive AI-powered code investigation tool accessible via Admin Web UI.
+Interactive AI-powered investigation and remediation tool accessible via Admin Web UI.
+The RA has **elevated remediation authority** for environment and data issues — it is not
+a read-only investigation tool. Access is double-MFA gated (admin login + TOTP elevation).
+
+**Remediation authority and scope**:
+- Diagnose and remediate environment/data issues (corrupted indexes, orphaned metadata, stuck jobs)
+- Read and write the server database for approved fixes
+- Execute filesystem and service commands within defined scope boundaries
+- Write/Edit files inside the cidx-meta directory (repo descriptions, dependency maps)
+- Scope is restricted to `server_data_dir/`, `golden_repos_dir/`, and the current research session folder
+- Source code is read-only — code-level bugs must be reported as GitHub issues, not patched directly
 
 **Features**:
-- Chat-based interface for code exploration
-- Direct Claude CLI integration for deep analysis
+- Chat-based interface for investigation and remediation
+- Direct Claude CLI integration for deep analysis and repair
 - Message persistence across sessions
 - Background processing with status tracking
-- Full codebase context access
+- Full codebase read access via `code-indexer` symlink
+- HTTP fetches routed through `cidx-curl.sh` wrapper (operator-configured CIDR allowlist; loopback always on; no external network exfiltration)
+
+**Security model**:
+- Defense lives at the entry boundary (double-MFA) and audit trail (all sessions persisted)
+- Every RA chat session is recorded in `research_messages` for audit purposes
+- Permission model: deny-list enforced at Claude CLI level, not just prompt-level
+
+**HTTP Fetch Wrapper (cidx-curl.sh)**:
+
+The Research Assistant cannot invoke raw `curl` — a permission deny rule blocks it.
+All HTTP/HTTPS fetches must go through `scripts/cidx-curl.sh`, which enforces an
+operator-configured CIDR allowlist before exec'ing curl.
+
+Configuration field: `ra_curl_allowed_cidrs` inside `claude_integration_config` in
+`~/.cidx-server/config.json`. Server restart required after changes.
+
+| Example | Effect |
+|---------|--------|
+| `"ra_curl_allowed_cidrs": []` | Only loopback reachable (127.0.0.1, ::1) |
+| `"ra_curl_allowed_cidrs": ["10.5.0.0/24"]` | Loopback + that subnet |
+| `"ra_curl_allowed_cidrs": ["10.5.0.0/24", "192.168.100.0/24"]` | Loopback + both subnets |
+
+The loopback rule (`127.0.0.0/8`, `::1`) is always on and cannot be disabled by operators.
+
+Wrapper exit codes: 0 (success), 2 (validation rejected), 3 (DNS resolution failed),
+4 (CIDR check rejected), 5 (internal Python crash in wrapper).
+
+Wrapper errors appear in the cidx-server log store (stderr from wrapper invocations
+is captured and logged at WARNING level).
 
 **Access**: Admin Web UI > Research Assistant tab
 
