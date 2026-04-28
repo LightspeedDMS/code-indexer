@@ -33,7 +33,7 @@ CIDX server provides:
 
 ```bash
 # Install code-indexer
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.0
 
 # Verify installation
 cidx --version
@@ -47,7 +47,7 @@ python3 -m venv cidx-venv
 source cidx-venv/bin/activate
 
 # Install code-indexer
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.0
 
 # Verify installation
 cidx --version
