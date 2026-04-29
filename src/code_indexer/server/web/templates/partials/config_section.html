@@ -1991,6 +1991,83 @@ function saveLlmCredsConfig() {
 </details>
 
 
+<!-- TOTP Step-Up Elevation Settings Section -->
+<details class="config-section" id="section-totp_elevation">
+    <summary>
+        <h2>TOTP Step-Up Elevation</h2>
+    </summary>
+    <p class="section-description">
+        Controls TOTP step-up enforcement on protected admin operations. The kill switch globally
+        enables or disables elevation enforcement: OFF means protected operations pass through
+        without a TOTP prompt; ON requires operators to complete a TOTP challenge before executing
+        sensitive actions. The two timeout knobs control how long an active elevation window
+        remains valid — idle timeout expires the window after inactivity, absolute max age caps
+        the window regardless of activity.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-totp_elevation">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enforcement Enabled</td>
+                        <td class="config-value">{{ config.totp_elevation.elevation_enforcement_enabled }}</td>
+                        <td class="config-note"><small>OFF = passthru (no TOTP prompt). ON = require TOTP step-up on protected operations.</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Idle Timeout (seconds)</td>
+                        <td class="config-value">{{ config.totp_elevation.elevation_idle_timeout_seconds }}</td>
+                        <td class="config-note"><small>1-60 minutes — window expires after this much idle time.</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Max Age (seconds)</td>
+                        <td class="config-value">{{ config.totp_elevation.elevation_max_age_seconds }}</td>
+                        <td class="config-note"><small>5-120 minutes — absolute window cap regardless of activity.</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('totp_elevation')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-totp_elevation" method="post" action="/admin/config/totp_elevation" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="elevation_enforcement_enabled" value="false">
+            {% if validation_errors.totp_elevation %}
+            <div class="validation-error">{{ validation_errors.totp_elevation }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="totp-enforcement-enabled">
+                    Enforcement Enabled
+                    <input type="checkbox" id="totp-enforcement-enabled" name="elevation_enforcement_enabled" value="true"
+                        {% if config.totp_elevation.elevation_enforcement_enabled %}checked{% endif %}>
+                    <small>OFF = passthru (no TOTP prompt). ON = require TOTP step-up on protected operations.</small>
+                </label>
+                <label for="totp-idle-timeout">
+                    Idle Timeout (seconds)
+                    <input type="number" id="totp-idle-timeout" name="elevation_idle_timeout_seconds"
+                        value="{{ config.totp_elevation.elevation_idle_timeout_seconds }}"
+                        min="60" max="3600">
+                    <small>1-60 minutes — window expires after this much idle time.</small>
+                </label>
+                <label for="totp-max-age">
+                    Max Age (seconds)
+                    <input type="number" id="totp-max-age" name="elevation_max_age_seconds"
+                        value="{{ config.totp_elevation.elevation_max_age_seconds }}"
+                        min="300" max="7200">
+                    <small>5-120 minutes — absolute window cap regardless of activity.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('totp_elevation')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->

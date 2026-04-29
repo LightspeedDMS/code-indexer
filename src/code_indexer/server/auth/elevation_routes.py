@@ -1,7 +1,6 @@
 """Elevation endpoints for TOTP step-up authentication (Story #923 AC3+AC4)."""
 
 import logging
-import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -144,18 +143,16 @@ def elevate(
     request: Request,
     user: User = Depends(get_current_admin_user_hybrid),
 ):
-    """Submit a TOTP or recovery code to open an elevation window (AC3)."""
+    """Submit a TOTP or recovery code to open an elevation window (AC3).
+
+    When the kill switch is OFF, this endpoint has no meaning — the caller is
+    asking to satisfy a TOTP challenge that no protected route will issue.
+    Return 503 (`elevation_enforcement_disabled`) so divergent callers fail
+    loudly instead of being silently passed through (anti-fallback / Rule 2 +
+    anti-silent-failure / Rule 13).
+    """
     if not _is_elevation_enforcement_enabled():
-        # Non-enforcement passthrough: elevation is globally disabled by the operator.
-        # Return a real ElevateResponse using the session manager's configured timeouts
-        # so the caller can proceed without a TOTP challenge.
-        _now = time.time()
-        return ElevateResponse(
-            elevated=True,
-            elevated_until=_now + elevated_session_manager._idle_timeout,
-            max_until=_now + elevated_session_manager._max_age,
-            scope="full",
-        )
+        raise _kill_switch_exc()
     _validate_elevate_request(body)
 
     totp_service = _require_totp_service()
