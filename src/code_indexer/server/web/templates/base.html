@@ -9,9 +9,41 @@
     <link rel="stylesheet" href="/admin/static/admin.css?v={{ static_version }}">
     <script src="/admin/static/htmx.min.js?v={{ static_version }}"></script>
     <script>
-        // Bug #206: Redirect to login on session expiry instead of injecting 401 HTML into dashboard
+        // Bug #206: Redirect to login on session expiry instead of injecting 401 HTML into dashboard.
+        // Bug #955 (Story #923 AC7): Redirect to TOTP setup or elevation entry on 403 elevation errors
+        // so admins are driven into the elevation flow instead of seeing a silent failure in DevTools.
         document.addEventListener('htmx:beforeSwap', function(evt) {
             var xhr = evt.detail.xhr;
+
+            // 403 with elevation error envelope: drive the browser into the elevation flow.
+            if (xhr.status === 403) {
+                try {
+                    var body = JSON.parse(xhr.responseText);
+                    var err = body && body.detail && body.detail.error;
+                    if (err === 'totp_setup_required') {
+                        evt.detail.shouldSwap = false;
+                        if (!window._cidxRedirecting) {
+                            window._cidxRedirecting = true;
+                            window.location.href = (body.detail.setup_url) || '/admin/mfa/setup';
+                            setTimeout(function() { window._cidxRedirecting = false; }, 3000);
+                        }
+                        return;
+                    }
+                    if (err === 'elevation_required') {
+                        evt.detail.shouldSwap = false;
+                        if (!window._cidxRedirecting) {
+                            window._cidxRedirecting = true;
+                            window.location.href = '/admin/elevate?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+                            setTimeout(function() { window._cidxRedirecting = false; }, 3000);
+                        }
+                        return;
+                    }
+                } catch (e) {
+                    // Not a JSON body or no detail.error — fall through to default HTMX handling.
+                }
+            }
+
+            // 401 (session expiry) → /login
             if (xhr.status === 401 ||
                 (xhr.responseURL && xhr.responseURL.indexOf('/login') !== -1)) {
                 evt.detail.shouldSwap = false;
