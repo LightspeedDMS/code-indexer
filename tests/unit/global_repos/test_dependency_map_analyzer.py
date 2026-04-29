@@ -67,7 +67,7 @@ class TestClaudeMdGeneration:
 class TestPass1Synthesis:
     """Test Pass 1: Domain synthesis (AC1)."""
 
-    @patch("subprocess.run")
+    @patch("code_indexer.server.services.claude_invoker.subprocess.run")
     def test_run_pass_1_invokes_claude_cli(self, mock_subprocess, tmp_path):
         """Test that run_pass_1_synthesis invokes Claude CLI with correct parameters."""
         # Mock subprocess response
@@ -121,16 +121,20 @@ class TestPass1Synthesis:
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
 
-        # Check command structure (last element is the prompt)
-        # Pass 1 uses allowed_tools=None (no --allowedTools flag - built-in tools available)
+        # Check command structure.
+        # Pass 1 routes through CliDispatcher -> ClaudeInvoker which builds:
+        #   ['script', '-q', '-c', 'timeout <N> claude --model <m> -p <prompt> ...', '/dev/null']
+        # so 'claude' and the prompt appear inside cmd[3] (the shell command string).
         cmd = call_args[0][0]
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
-        assert "--model" in cmd
-        assert "--max-turns" in cmd
-        # Prompt is passed via stdin (input= kwarg), not as -p CLI arg (avoids E2BIG with large prompts)
-        assert "-p" not in cmd
-        assert "Identify domain clusters" in call_args[1]["input"]  # Prompt via stdin
+        assert any("claude" in arg for arg in cmd), (
+            f"Expected 'claude' somewhere in cmd: {cmd}"
+        )
+        assert any("--print" in arg for arg in cmd)
+        assert any("--model" in arg for arg in cmd)
+        # Prompt is embedded in cmd[3] (the -c argument to script) via -p flag.
+        # ClaudeInvoker does not add --max-turns; it uses a soft inner timeout instead.
+        assert any("-p" in arg for arg in cmd)
+        assert "Identify domain clusters" in cmd[3]
         assert call_args[1]["cwd"] == str(tmp_path)
         assert (
             call_args[1]["timeout"] == 600

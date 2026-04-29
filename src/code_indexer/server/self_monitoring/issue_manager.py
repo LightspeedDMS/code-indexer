@@ -249,7 +249,10 @@ class IssueManager:
         except httpx.TimeoutException as e:
             raise RuntimeError(f"GitHub API request timed out: {e}") from e
         except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"GitHub API error: {e.response.status_code}") from e
+            body_text = e.response.text or ""
+            raise RuntimeError(
+                f"GitHub API error: {e.response.status_code} {body_text[:self._ERROR_SEARCH_LIMIT]}"
+            ) from e
         except httpx.RequestError as e:
             raise RuntimeError(f"GitHub API request failed: {e}") from e
         except (KeyError, json.JSONDecodeError) as e:

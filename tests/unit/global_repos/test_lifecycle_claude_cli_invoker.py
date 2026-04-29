@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -198,11 +197,10 @@ def test_prompt_contains_always_emit_v3_guidance() -> None:
 
 def test_invoker_raises_on_cli_failure(tmp_path: Path) -> None:
     """
-    When invoke_claude_cli returns (False, error_msg), the adapter MUST
-    raise RuntimeError with a message that preserves the alias and the
-    subprocess error.  LifecycleBatchRunner._run_sub_batch logs the
-    exception at ERROR level and proceeds with other repos in the
-    sub-batch (per LifecycleBatchRunner contract).
+    When the dispatcher reports failure, the adapter MUST raise RuntimeError
+    with a message that preserves the alias and the error detail.
+    LifecycleBatchRunner._run_sub_batch logs the exception at ERROR level and
+    proceeds with other repos in the sub-batch (per LifecycleBatchRunner contract).
     """
     from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
         LifecycleClaudeCliInvoker,
@@ -211,16 +209,25 @@ def test_invoker_raises_on_cli_failure(tmp_path: Path) -> None:
     repo_path = tmp_path / "alias-b"
     repo_path.mkdir()
 
-    def _fail_invoke(
-        rp: str, prompt: str, shell_timeout: int, outer_timeout: int
-    ) -> Tuple[bool, str]:
-        return False, "Claude CLI timed out after 240s"
-
     invoker = LifecycleClaudeCliInvoker()
 
-    with patch(
-        "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
-        side_effect=_fail_invoke,
+    mock_dispatch_result = MagicMock()
+    mock_dispatch_result.success = False
+    mock_dispatch_result.error = "Claude CLI timed out after 240s"
+    mock_dispatch_result.output = ""
+
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.dispatch.return_value = mock_dispatch_result
+
+    with (
+        patch(
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.build_dep_map_dispatcher",
+            return_value=mock_dispatcher,
+        ),
+        patch(
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
+            return_value=_make_default_config_service_mock(),
+        ),
     ):
         with pytest.raises(RuntimeError) as exc_info:
             invoker("alias-b", repo_path)

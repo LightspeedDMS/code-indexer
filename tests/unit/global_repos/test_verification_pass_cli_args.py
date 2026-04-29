@@ -3,7 +3,7 @@ Unit tests for Story #724 v2 verification pass — CLI arguments contract.
 
 Verifies the subprocess cmd and prompt built by invoke_verification_pass:
   - contains --dangerously-skip-permissions
-  - contains --max-turns <dependency_map_delta_max_turns> (sentinel value)
+  - config.fact_check_timeout_seconds flows to subprocess timeout kwarg
   - does NOT contain --output-format json (v1 flag, nuked in v2)
   - prompt appends _build_file_based_instructions output:
       FILE_EDIT_COMPLETE sentinel string, temp file path, and repo alias
@@ -27,7 +27,6 @@ _SENTINEL = "FILE_EDIT_COMPLETE"
 _DEFAULT_TIMEOUT_SECONDS = 60
 _DEFAULT_MAX_CONCURRENT_CLI = 2
 _DEFAULT_MAX_TURNS = 30
-_SENTINEL_MAX_TURNS = 42  # distinctive value to prove config is read, not hardcoded
 _PROMPT_PREVIEW_CHARS = 300
 
 
@@ -66,11 +65,12 @@ def cfg():
 
 @pytest.fixture()
 def capture(analyzer, cfg, tmp_path):
-    """Factory fixture: call capture(cfg_override=None) -> (cmds, prompts, temp_file).
+    """Factory fixture: call capture(cfg_override=None) -> (cmds, prompts, temp_file, call_kwargs).
 
-    Patches subprocess.run to record every cmd and input prompt; both attempts
-    exhaust via TimeoutExpired causing VerificationFailed, which is expected here —
-    the fixture is a capture-only helper, not a success-path test harness.
+    Patches subprocess.run inside ClaudeInvoker to record every cmd, the embedded
+    prompt (from cmd[3]), and the kwargs; both attempts exhaust via TimeoutExpired
+    causing VerificationFailed, which is expected here — the fixture is a
+    capture-only helper, not a success-path test harness.
     """
 
     def _run(cfg_override=None) -> tuple:
@@ -79,14 +79,21 @@ def capture(analyzer, cfg, tmp_path):
         temp_file.write_text("# Content\n")
         cmds: list = []
         prompts: list = []
+        call_kwargs: list = []
 
         def fake_run(cmd, input=None, **kwargs):
             cmds.append(list(cmd))
-            prompts.append(input or "")
+            # ClaudeInvoker embeds the prompt inside cmd[3] (the shell command
+            # string passed to `script -q -c <cmd> /dev/null`), not via stdin.
+            prompts.append(cmd[3] if len(cmd) > 3 else "")
+            call_kwargs.append(dict(kwargs))
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=_DEFAULT_TIMEOUT_SECONDS)
 
         try:
-            with patch("subprocess.run", side_effect=fake_run):
+            with patch(
+                "code_indexer.server.services.claude_invoker.subprocess.run",
+                side_effect=fake_run,
+            ):
                 analyzer.invoke_verification_pass(
                     temp_file, [{"alias": "r1"}], active_cfg
                 )
@@ -94,7 +101,7 @@ def capture(analyzer, cfg, tmp_path):
             # Expected: capture helper exhausts both retry attempts intentionally
             pass
 
-        return cmds, prompts, temp_file
+        return cmds, prompts, temp_file, call_kwargs
 
     return _run
 
@@ -105,35 +112,43 @@ def capture(analyzer, cfg, tmp_path):
 
 
 class TestCmdFlags:
-    """--dangerously-skip-permissions, --max-turns, absence of --output-format json."""
+    """--dangerously-skip-permissions, config timeout propagation, absence of --output-format json."""
 
     def test_cmd_includes_dangerously_skip_permissions(self, capture):
         """Every cmd must include --dangerously-skip-permissions."""
-        cmds, _, _ = capture()
+        cmds, _, _, _ = capture()
         assert cmds, "No subprocess.run calls were captured"
         for cmd in cmds:
-            assert "--dangerously-skip-permissions" in cmd, (
+            assert any("--dangerously-skip-permissions" in arg for arg in cmd), (
                 f"--dangerously-skip-permissions missing from cmd: {cmd}"
             )
 
-    def test_cmd_max_turns_from_config(self, capture, cfg):
-        """--max-turns value must equal dependency_map_delta_max_turns sentinel."""
-        cfg.dependency_map_delta_max_turns = _SENTINEL_MAX_TURNS
-        cmds, _, _ = capture(cfg_override=cfg)
+    def test_cmd_timeout_from_config(self, capture, cfg):
+        """fact_check_timeout_seconds from config must reach subprocess timeout kwarg.
+
+        Pass 1 now routes through CliDispatcher -> ClaudeInvoker which passes
+        config.fact_check_timeout_seconds as the hard outer subprocess timeout.
+        ClaudeInvoker does not use --max-turns; it uses a soft inner shell timeout.
+        """
+        _SENTINEL_TIMEOUT = 77  # distinctive value to prove config is read, not hardcoded
+        cfg.fact_check_timeout_seconds = _SENTINEL_TIMEOUT
+        cmds, _, _, call_kwargs = capture(cfg_override=cfg)
         assert cmds, "No subprocess.run calls were captured"
-        for cmd in cmds:
-            assert "--max-turns" in cmd, f"--max-turns missing from cmd: {cmd}"
-            idx = cmd.index("--max-turns")
-            assert cmd[idx + 1] == str(_SENTINEL_MAX_TURNS), (
-                f"Expected --max-turns {_SENTINEL_MAX_TURNS}, got {cmd[idx + 1]!r}"
+        for kw in call_kwargs:
+            assert "timeout" in kw, (
+                f"subprocess.run was not called with timeout kwarg: {kw}"
+            )
+            assert kw["timeout"] == cfg.fact_check_timeout_seconds, (
+                f"Expected subprocess timeout={cfg.fact_check_timeout_seconds} from "
+                f"fact_check_timeout_seconds, got {kw['timeout']!r}"
             )
 
     def test_cmd_does_NOT_include_output_format_json(self, capture):
         """--output-format must be absent (v1 flag removed in v2)."""
-        cmds, _, _ = capture()
+        cmds, _, _, _ = capture()
         assert cmds, "No subprocess.run calls were captured"
         for cmd in cmds:
-            assert "--output-format" not in cmd, (
+            assert not any("--output-format" in arg for arg in cmd), (
                 f"--output-format found in cmd (must be absent in v2): {cmd}"
             )
 
@@ -148,7 +163,7 @@ class TestPromptContent:
 
     def test_prompt_contains_file_edit_complete_sentinel(self, capture):
         """Prompt must reference FILE_EDIT_COMPLETE (from _build_file_based_instructions)."""
-        _, prompts, _ = capture()
+        _, prompts, _, _ = capture()
         assert prompts, "No prompts were captured"
         prompt = prompts[0]
         assert _SENTINEL in prompt, (
@@ -158,7 +173,7 @@ class TestPromptContent:
 
     def test_prompt_contains_temp_file_path(self, capture):
         """Prompt must contain the absolute temp file path."""
-        _, prompts, temp_file = capture()
+        _, prompts, temp_file, _ = capture()
         assert prompts, "No prompts were captured"
         prompt = prompts[0]
         assert str(temp_file) in prompt, (
@@ -168,7 +183,7 @@ class TestPromptContent:
 
     def test_prompt_contains_repo_alias(self, capture):
         """Prompt must mention the repo alias passed in repo_list."""
-        _, prompts, _ = capture()
+        _, prompts, _, _ = capture()
         assert prompts, "No prompts were captured"
         prompt = prompts[0]
         assert "r1" in prompt, (
