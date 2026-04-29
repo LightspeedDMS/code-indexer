@@ -528,6 +528,8 @@ class FilesystemVectorStore:
                 and collection_name in self._indexing_session_changes
             ):
                 del self._indexing_session_changes[collection_name]
+            # Signal "handled" so the fallback full-rebuild path (line ~559) is skipped.
+            incremental_update_result = True  # sentinel: filtered rebuild already handled
         elif (
             hasattr(self, "_indexing_session_changes")
             and collection_name in self._indexing_session_changes
