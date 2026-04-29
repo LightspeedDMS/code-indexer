@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from urllib.parse import quote, urlparse
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from fastapi import APIRouter, Query, Request, Response, Form, HTTPException, status
+from fastapi import APIRouter, Depends, Query, Request, Response, Form, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -882,7 +882,11 @@ def dashboard_api_chart_partial(
     )
 
 
-@web_router.post("/langfuse-sync/trigger", response_class=JSONResponse)
+@web_router.post(
+    "/langfuse-sync/trigger",
+    response_class=JSONResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def langfuse_sync_trigger(request: Request):
     """
     Story #168 AC4: Trigger immediate Langfuse sync.
@@ -1054,7 +1058,11 @@ def users_page(request: Request):
     return _create_users_page_response(request, session)
 
 
-@web_router.post("/users/create", response_class=HTMLResponse)
+@web_router.post(
+    "/users/create",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def create_user(
     request: Request,
     new_username: str = Form(...),
@@ -1139,7 +1147,11 @@ def create_user(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/users/{username}/role", response_class=HTMLResponse)
+@web_router.post(
+    "/users/{username}/role",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_user_role(
     request: Request,
     username: str,
@@ -1189,7 +1201,11 @@ def update_user_role(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/users/{username}/password", response_class=HTMLResponse)
+@web_router.post(
+    "/users/{username}/password",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def change_user_password(
     request: Request,
     username: str,
@@ -1239,7 +1255,11 @@ def change_user_password(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/users/{username}/email", response_class=HTMLResponse)
+@web_router.post(
+    "/users/{username}/email",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_user_email(
     request: Request,
     username: str,
@@ -1280,7 +1300,11 @@ def update_user_email(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/users/{username}/delete", response_class=HTMLResponse)
+@web_router.post(
+    "/users/{username}/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def delete_user(
     request: Request,
     username: str,
@@ -1594,7 +1618,11 @@ def groups_page(request: Request):
     return _create_groups_page_response(request, session)
 
 
-@web_router.post("/groups/create", response_class=HTMLResponse)
+@web_router.post(
+    "/groups/create",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def create_group(
     request: Request,
     name: str = Form(...),
@@ -1630,7 +1658,11 @@ def create_group(
         return _create_groups_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/groups/{group_id}/update", response_class=HTMLResponse)
+@web_router.post(
+    "/groups/{group_id}/update",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_group(
     request: Request,
     group_id: int,
@@ -1686,7 +1718,11 @@ def update_group(
         return _create_groups_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/groups/{group_id}/delete", response_class=HTMLResponse)
+@web_router.post(
+    "/groups/{group_id}/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def delete_group(
     request: Request,
     group_id: int,
@@ -1734,7 +1770,11 @@ def delete_group(
         return _create_groups_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/groups/users/{user_id:path}/assign", response_class=HTMLResponse)
+@web_router.post(
+    "/groups/users/{user_id:path}/assign",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def assign_user_to_group(
     request: Request,
     user_id: str,
@@ -2050,7 +2090,10 @@ def _repo_access_success_response(
     )
 
 
-@web_router.post("/groups/repo-access/grant")
+@web_router.post(
+    "/groups/repo-access/grant",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def grant_repo_access(
     request: Request,
     repo_name: Optional[str] = Form(None),
@@ -2126,7 +2169,10 @@ async def grant_repo_access(
         return _repo_access_error_response(is_ajax, request, session, str(e), 500)
 
 
-@web_router.post("/groups/repo-access/revoke")
+@web_router.post(
+    "/groups/repo-access/revoke",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def revoke_repo_access(
     request: Request,
     repo_name: Optional[str] = Form(None),
@@ -2667,7 +2713,11 @@ def golden_repos_page(request: Request):
     return _create_golden_repos_page_response(request, session)
 
 
-@web_router.post("/golden-repos/add", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/add",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def add_golden_repo(
     request: Request,
     alias: str = Form(...),
@@ -2723,7 +2773,10 @@ def add_golden_repo(
         )
 
 
-@web_router.post("/golden-repos/batch-create")
+@web_router.post(
+    "/golden-repos/batch-create",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def batch_create_golden_repos(
     request: Request,
     repos: str = Form(...),
@@ -2785,7 +2838,11 @@ def batch_create_golden_repos(
     return JSONResponse(results)
 
 
-@web_router.post("/golden-repos/{alias}/delete", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def delete_golden_repo(
     request: Request,
     alias: str,
@@ -2823,7 +2880,11 @@ def delete_golden_repo(
         )
 
 
-@web_router.post("/golden-repos/{alias}/refresh", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/refresh",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def refresh_golden_repo(
     request: Request,
     alias: str,
@@ -2872,7 +2933,11 @@ def refresh_golden_repo(
         )
 
 
-@web_router.post("/golden-repos/{alias}/force-resync", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/force-resync",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def force_resync_golden_repo(
     request: Request,
     alias: str,
@@ -2921,7 +2986,11 @@ def force_resync_golden_repo(
         )
 
 
-@web_router.post("/golden-repos/{alias}/wiki-toggle", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/wiki-toggle",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def toggle_wiki_enabled(
     request: Request,
     alias: str,
@@ -2984,7 +3053,11 @@ def toggle_wiki_enabled(
     )
 
 
-@web_router.post("/golden-repos/{alias}/temporal-options", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/temporal-options",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def save_temporal_options(
     request: Request,
     alias: str,
@@ -3060,7 +3133,11 @@ def save_temporal_options(
     )
 
 
-@web_router.post("/golden-repos/{alias}/wiki-refresh", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/wiki-refresh",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def refresh_wiki_cache(
     request: Request,
     alias: str,
@@ -3086,7 +3163,10 @@ def refresh_wiki_cache(
     )
 
 
-@web_router.post("/golden-repos/{alias}/change-branch")
+@web_router.post(
+    "/golden-repos/{alias}/change-branch",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def change_golden_repo_branch(
     request: Request,
     alias: str,
@@ -3187,7 +3267,11 @@ def get_golden_repo_branches(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@web_router.post("/golden-repos/activate", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/activate",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def activate_golden_repo(
     request: Request,
     golden_alias: str = Form(...),
@@ -3860,7 +3944,9 @@ def repo_details(
 
 
 @web_router.post(
-    "/repos/{username}/{user_alias}/deactivate", response_class=HTMLResponse
+    "/repos/{username}/{user_alias}/deactivate",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def deactivate_repo(
     request: Request,
@@ -3903,7 +3989,9 @@ def deactivate_repo(
 
 
 @web_router.post(
-    "/activated-repos/{username}/{alias}/wiki-toggle", response_class=JSONResponse
+    "/activated-repos/{username}/{alias}/wiki-toggle",
+    response_class=JSONResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def toggle_user_wiki_enabled(
     request: Request,
@@ -4236,7 +4324,11 @@ def jobs_list_partial(
     return response
 
 
-@web_router.post("/jobs/{job_id}/cancel", response_class=HTMLResponse)
+@web_router.post(
+    "/jobs/{job_id}/cancel",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def cancel_job(
     request: Request,
     job_id: str,
@@ -6937,7 +7029,10 @@ def discovery_all(
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-@web_router.post("/api/discovery/{platform}/enrich")
+@web_router.post(
+    "/api/discovery/{platform}/enrich",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def discovery_enrich(
     request: Request,
     platform: str,
@@ -7195,7 +7290,11 @@ async def _validate_discovery_hide_request(
     return None, repo_identifier
 
 
-@web_router.post("/api/discovery/hide", response_class=HTMLResponse)
+@web_router.post(
+    "/api/discovery/hide",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def hide_discovery_repo(request: Request):
     """Hide a repository from the auto-discovery view (Story #719)."""
     error, repo_identifier = await _validate_discovery_hide_request(request)
@@ -7207,7 +7306,11 @@ async def hide_discovery_repo(request: Request):
     return HTMLResponse(content="", status_code=status.HTTP_200_OK)
 
 
-@web_router.post("/api/discovery/unhide", response_class=HTMLResponse)
+@web_router.post(
+    "/api/discovery/unhide",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def unhide_discovery_repo(request: Request):
     """Unhide a repository from the auto-discovery view (Story #719)."""
     error, repo_identifier = await _validate_discovery_hide_request(request)
@@ -7224,7 +7327,10 @@ async def unhide_discovery_repo(request: Request):
 # =============================================================================
 
 
-@web_router.post("/api/discovery/branches")
+@web_router.post(
+    "/api/discovery/branches",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def fetch_discovery_branches(request: Request):
     """
     Fetch branches for remote repositories during auto-discovery.
@@ -7351,7 +7457,11 @@ def config_page(request: Request):
     return _create_config_page_response(request, session)
 
 
-@web_router.post("/config/claude_delegation", response_class=HTMLResponse)
+@web_router.post(
+    "/config/claude_delegation",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def update_claude_delegation_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -7492,7 +7602,11 @@ async def update_claude_delegation_config(
 
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
 # caught by the parameterized route. FastAPI matches routes in order of definition.
-@web_router.post("/config/reset", response_class=HTMLResponse)
+@web_router.post(
+    "/config/reset",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def reset_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -7537,7 +7651,11 @@ def reset_config(
 
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
 # caught by the parameterized route. FastAPI matches routes in order of definition.
-@web_router.post("/config/langfuse_pull", response_class=HTMLResponse)
+@web_router.post(
+    "/config/langfuse_pull",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def update_langfuse_pull_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -7617,7 +7735,11 @@ def _extract_git_hostname(remote_url: str) -> Optional[str]:
     return None
 
 
-@web_router.post("/config/cidx_meta_backup", response_class=HTMLResponse)
+@web_router.post(
+    "/config/cidx_meta_backup",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def update_cidx_meta_backup_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -7681,7 +7803,11 @@ async def update_cidx_meta_backup_config(
         )
 
 
-@web_router.post("/config/{section}", response_class=HTMLResponse)
+@web_router.post(
+    "/config/{section}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def update_config_section(
     request: Request,
     section: str,
@@ -7893,7 +8019,11 @@ def config_section_partial(
 # =============================================================================
 
 
-@web_router.post("/config/api-keys/{platform}", response_class=HTMLResponse)
+@web_router.post(
+    "/config/api-keys/{platform}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def save_api_key(
     request: Request,
     platform: str,
@@ -7955,7 +8085,11 @@ def save_api_key(
         )
 
 
-@web_router.delete("/config/api-keys/{platform}", response_class=HTMLResponse)
+@web_router.delete(
+    "/config/api-keys/{platform}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def delete_api_key(
     request: Request,
     platform: str,
@@ -8269,7 +8403,10 @@ def admin_git_credentials_list_partial(request: Request):
     return response
 
 
-@web_router.post("/git-credentials")
+@web_router.post(
+    "/git-credentials",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def admin_git_credentials_add(request: Request):
     """Add a new git credential via admin form submission."""
     session = _require_admin_session(request)
@@ -8315,7 +8452,10 @@ async def admin_git_credentials_add(request: Request):
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
-@web_router.delete("/git-credentials/{credential_id}")
+@web_router.delete(
+    "/git-credentials/{credential_id}",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def admin_git_credentials_delete(request: Request, credential_id: str):
     """Delete a git credential from admin interface."""
     session = _require_admin_session(request)
@@ -8760,7 +8900,11 @@ def _create_ssh_keys_page_response(
     return response
 
 
-@web_router.post("/ssh-keys/create", response_class=HTMLResponse)
+@web_router.post(
+    "/ssh-keys/create",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def create_ssh_key(
     request: Request,
     key_name: str = Form(...),
@@ -8820,7 +8964,11 @@ def create_ssh_key(
         )
 
 
-@web_router.post("/ssh-keys/delete", response_class=HTMLResponse)
+@web_router.post(
+    "/ssh-keys/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def delete_ssh_key(
     request: Request,
     key_name: str = Form(...),
@@ -8859,7 +9007,11 @@ def delete_ssh_key(
         )
 
 
-@web_router.post("/ssh-keys/assign-host", response_class=HTMLResponse)
+@web_router.post(
+    "/ssh-keys/assign-host",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def assign_host_to_key(
     request: Request,
     key_name: str = Form(...),
@@ -9880,7 +10032,11 @@ def self_monitoring_page(request: Request):
     )
 
 
-@web_router.post("/self-monitoring", response_class=HTMLResponse)
+@web_router.post(
+    "/self-monitoring",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def save_self_monitoring_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -9979,7 +10135,11 @@ async def save_self_monitoring_config(
     )
 
 
-@web_router.post("/self-monitoring/run-now", response_class=JSONResponse)
+@web_router.post(
+    "/self-monitoring/run-now",
+    response_class=JSONResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def trigger_manual_scan(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -10251,7 +10411,11 @@ def _schedule_delayed_restart(delay: int = 2) -> None:
     restart_thread.start()
 
 
-@web_router.post("/restart", response_class=JSONResponse)
+@web_router.post(
+    "/restart",
+    response_class=JSONResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def restart_server(request: Request) -> JSONResponse:
     """
     Restart the CIDX server (admin only).
