@@ -81,7 +81,9 @@ def _make_http_status_error_response(status_code: int, body_text):
 
 def _invoke_create_issue_with_mock_response(manager, mock_response):
     """Patch httpx.post, call _create_github_issue_via_api, return the raised RuntimeError."""
-    with patch("code_indexer.server.self_monitoring.issue_manager.httpx.post") as mock_post:
+    with patch(
+        "code_indexer.server.self_monitoring.issue_manager.httpx.post"
+    ) as mock_post:
         mock_post.return_value = mock_response
         with pytest.raises(RuntimeError) as exc_info:
             manager._create_github_issue_via_api(title="[BUG] Test", body="body")
@@ -697,7 +699,9 @@ class TestIssueManager:
 class TestBug949IssueManagerHttpStatusErrorBody:
     """Bug #949: GitHub API errors must include response body in RuntimeError."""
 
-    def test_http_status_error_includes_body_in_runtime_error(self, issue_manager_for_bug949):
+    def test_http_status_error_includes_body_in_runtime_error(
+        self, issue_manager_for_bug949
+    ):
         """AC1: RuntimeError must contain the GitHub response body text."""
         err = _invoke_create_issue_with_mock_response(
             issue_manager_for_bug949,
@@ -705,7 +709,9 @@ class TestBug949IssueManagerHttpStatusErrorBody:
         )
         assert "Bad credentials" in str(err)
 
-    def test_http_status_error_body_truncated_at_500_chars(self, issue_manager_for_bug949):
+    def test_http_status_error_body_truncated_at_500_chars(
+        self, issue_manager_for_bug949
+    ):
         """AC3: Response body included in RuntimeError must be truncated to 500 characters."""
         err = _invoke_create_issue_with_mock_response(
             issue_manager_for_bug949,

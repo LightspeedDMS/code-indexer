@@ -29,9 +29,12 @@ def _bypass_elevation(app, router):
     for route in router.routes:
         if not isinstance(route, APIRoute):
             continue
-        for dep in (route.dependencies or []):
+        for dep in route.dependencies or []:
             dep_callable = getattr(dep, "dependency", None)
-            if dep_callable and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME:
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
                 app.dependency_overrides[dep_callable] = lambda: None
 
 
