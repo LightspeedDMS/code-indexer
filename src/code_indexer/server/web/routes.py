@@ -21,7 +21,16 @@ from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from urllib.parse import quote, urlparse
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from fastapi import APIRouter, Depends, Query, Request, Response, Form, HTTPException, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Query,
+    Request,
+    Response,
+    Form,
+    HTTPException,
+    status,
+)
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
