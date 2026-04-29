@@ -5789,7 +5789,7 @@ def _get_current_config() -> dict:
         "timeouts": settings["timeouts"],
         "password_security": settings["password_security"],
         # Bug #943: TOTP step-up elevation runtime config
-        "totp_elevation": settings["totp_elevation"],
+        "totp_elevation": settings.get("totp_elevation", {}),
         "oidc": oidc_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,

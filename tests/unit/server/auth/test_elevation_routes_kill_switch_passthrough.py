@@ -1,8 +1,10 @@
-"""Tests for POST /auth/elevate kill-switch passthrough behavior.
+"""Tests for POST /auth/elevate kill-switch behavior.
 
 When elevation enforcement is disabled (kill switch off), POST /auth/elevate
-must return a synthetic success (HTTP 200, elevated=True) instead of 503,
-so that the protected operation can proceed per user policy.
+must return HTTP 503 with error 'elevation_enforcement_disabled' (NOT a synthetic
+200 success). The /auth/elevate endpoint has no meaning when elevation is
+administratively disabled — silent passthrough would violate anti-fallback
+(Rule 2) and anti-silent-failure (Rule 13).
 
 Patch targets follow the exact established pattern in test_elevation_routes.py:
 patch at the module-level import seam (not internal helpers).
@@ -121,21 +123,23 @@ def _elevate_ctx(enforcement: bool = True, totp_svc=None, esm=None):
 # ---------------------------------------------------------------------------
 
 
-def test_post_elevate_when_disabled_returns_synthetic_success(client):
-    """Kill switch OFF -> HTTP 200 with elevated=True (not 503).
+def test_post_elevate_when_disabled_returns_503(client):
+    """Kill switch OFF -> HTTP 503 elevation_enforcement_disabled.
 
-    Per user policy: 'if no TOTP elevation is enabled, you must passthru'.
-    The endpoint must return a synthetic ElevateResponse rather than raising
-    HTTP 503 SERVICE_UNAVAILABLE.
+    Per CLAUDE.md: 'Kill switch returns HTTP 503 NOT 403 when
+    elevation_enforcement_enabled=false. 503 correctly signals
+    feature administratively off.'
     """
     with _elevate_ctx(enforcement=False):
         resp = client.post("/auth/elevate", json={"totp_code": "123456"})
 
-    assert resp.status_code == 200, (
-        f"Expected 200 (synthetic success), got {resp.status_code}: {resp.text}"
+    assert resp.status_code == 503, (
+        f"Expected 503 (kill switch off), got {resp.status_code}: {resp.text}"
     )
     body = resp.json()
-    assert body["elevated"] is True, f"Expected elevated=True, got: {body}"
+    assert body["detail"]["error"] == "elevation_enforcement_disabled", (
+        f"Expected elevation_enforcement_disabled, got: {body}"
+    )
 
 
 def test_post_elevate_when_enabled_validates_otp_normally(client):
