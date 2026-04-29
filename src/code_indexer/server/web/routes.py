@@ -145,6 +145,7 @@ _VALID_CONFIG_SECTIONS = (
     "cache",
     "timeouts",
     "password_security",
+    "totp_elevation",  # Bug #943: TOTP step-up elevation runtime config
     "oidc",
     "telemetry",
     "langfuse",
@@ -5686,6 +5687,8 @@ def _get_current_config() -> dict:
         "cache": settings["cache"],
         "timeouts": settings["timeouts"],
         "password_security": settings["password_security"],
+        # Bug #943: TOTP step-up elevation runtime config
+        "totp_elevation": settings["totp_elevation"],
         "oidc": oidc_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,
@@ -7720,6 +7723,53 @@ async def update_config_section(
     # Save configuration using ConfigService
     try:
         config_service = get_config_service()
+
+        if section == "totp_elevation":
+            # Bug #943 Fix #1/#2/#3: atomic batch path — validate final tuple,
+            # rollback on save failure, hot-reload live session manager.
+            from code_indexer.server.auth.elevated_session_manager import (
+                elevated_session_manager as _esm,
+            )
+            from code_indexer.server.services.config_service import (
+                _TOTP_TRUTHY as _TOTP_TRUTHY_SET,
+            )
+
+            _raw_enabled = data.get("elevation_enforcement_enabled")
+            _raw_idle = data.get("elevation_idle_timeout_seconds")
+            _raw_max_age = data.get("elevation_max_age_seconds")
+
+            # All 3 fields are required. The template uses a hidden fallback
+            # input for elevation_enforcement_enabled so it is always submitted.
+            if _raw_enabled is None or _raw_idle is None or _raw_max_age is None:
+                return _create_config_page_response(
+                    request,
+                    session,
+                    error_message=(
+                        "Missing required field: elevation_enforcement_enabled, "
+                        "elevation_idle_timeout_seconds, or elevation_max_age_seconds"
+                    ),
+                )
+
+            try:
+                _idle = int(str(_raw_idle))
+                _max_age = int(str(_raw_max_age))
+            except (ValueError, TypeError) as _e:
+                return _create_config_page_response(
+                    request, session, error_message=f"Invalid numeric value: {_e}"
+                )
+
+            _enabled = str(_raw_enabled).lower() in _TOTP_TRUTHY_SET
+            config_service.update_totp_elevation_atomic(
+                enabled=_enabled,
+                idle_timeout_seconds=_idle,
+                max_age_seconds=_max_age,
+                session_manager=_esm,
+            )
+            return _create_config_page_response(
+                request,
+                session,
+                success_message=f"{section.title()} configuration saved successfully",
+            )
 
         # Update all settings without validating (batch update)
         for key, value in data.items():

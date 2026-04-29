@@ -211,6 +211,49 @@ class ElevatedSessionManager:
     # Cluster wiring (mirrors MfaChallengeManager.set_connection_pool)
     # ------------------------------------------------------------------
 
+    # Bounds matching ConfigService._TOTP_IDLE_MIN/MAX and _TOTP_MAX_AGE_MIN/MAX
+    _UPDATE_IDLE_MIN: int = 60
+    _UPDATE_IDLE_MAX: int = 3600
+    _UPDATE_MAX_AGE_MIN: int = 300
+    _UPDATE_MAX_AGE_MAX: int = 7200
+
+    def update_timeouts(self, idle_timeout_seconds: int, max_age_seconds: int) -> None:
+        """Hot-reload timeout parameters into the live manager (Bug #943 Fix #2).
+
+        Called after a successful totp_elevation atomic save so operators see
+        new idle/max_age values take effect immediately without a restart.
+
+        Raises ValueError for out-of-range or cross-field violations.
+        Both fields are updated under self._lock so no reader sees a half-update.
+        """
+        if not (self._UPDATE_IDLE_MIN <= idle_timeout_seconds <= self._UPDATE_IDLE_MAX):
+            raise ValueError(
+                f"idle_timeout_seconds must be between "
+                f"{self._UPDATE_IDLE_MIN} and {self._UPDATE_IDLE_MAX}, "
+                f"got {idle_timeout_seconds}"
+            )
+        if not (
+            self._UPDATE_MAX_AGE_MIN <= max_age_seconds <= self._UPDATE_MAX_AGE_MAX
+        ):
+            raise ValueError(
+                f"max_age_seconds must be between "
+                f"{self._UPDATE_MAX_AGE_MIN} and {self._UPDATE_MAX_AGE_MAX}, "
+                f"got {max_age_seconds}"
+            )
+        if max_age_seconds < idle_timeout_seconds:
+            raise ValueError(
+                f"max_age_seconds ({max_age_seconds}) must be >= "
+                f"idle_timeout_seconds ({idle_timeout_seconds})"
+            )
+        with self._lock:
+            self._idle_timeout = idle_timeout_seconds
+            self._max_age = max_age_seconds
+        logger.info(
+            "ElevatedSessionManager timeouts updated: idle=%ds max_age=%ds",
+            idle_timeout_seconds,
+            max_age_seconds,
+        )
+
     def set_connection_pool(self, pool: Any) -> None:
         """Set PostgreSQL connection pool for cluster mode.
 

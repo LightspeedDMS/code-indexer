@@ -1990,6 +1990,23 @@ def make_lifespan(
                                 exc_info=True,
                             )
 
+                        # Bug #943 Fix #2: hot-reload elevation timeouts into the live
+                        # singleton so PG config-poll changes take effect without restart.
+                        try:
+                            from code_indexer.server.auth.elevated_session_manager import (
+                                elevated_session_manager as _esm,
+                            )
+
+                            _esm.update_timeouts(
+                                new_config.elevation_idle_timeout_seconds,
+                                new_config.elevation_max_age_seconds,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Bug #943: elevation timeout hot-reload on config change failed",
+                                exc_info=True,
+                            )
+
                     from code_indexer.server.services.config_service import (
                         get_config_service as _get_cs,
                     )
