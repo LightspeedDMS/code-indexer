@@ -21,6 +21,7 @@ Test suite:
   test_exempt_routes_accessible_without_elevation -- logout/elevate not gated
 """
 
+import inspect
 import tempfile
 from pathlib import Path
 from typing import Optional, cast
@@ -51,6 +52,18 @@ _EXEMPT_ROUTES: frozenset = frozenset(
         # routes perform no server-state mutation.
         ("POST", "/query"),
         ("POST", "/partials/query-results"),
+        # TOTP setup activation — circular bootstrap deadlock: elevation cannot
+        # be obtained before TOTP is active, yet TOTP activation requires this
+        # endpoint to be reachable without elevation.
+        ("POST", "/admin/mfa/verify"),
+        # Pre-authentication MFA challenge — must be reachable before any admin
+        # session exists; gating would prevent login entirely.
+        ("POST", "/admin/mfa/challenge/verify"),
+        # MFA disable — elevation is enforced inline via _check_elevation_window
+        # with totp_repair scope rather than require_elevation(); same security
+        # guarantee via a different code path that prevents full-scope elevation
+        # requirements for TOTP repair operations.
+        ("POST", "/admin/mfa/disable"),
     ]
 )
 
@@ -61,14 +74,84 @@ _EXEMPT_ROUTES: frozenset = frozenset(
 
 
 def _route_has_elevation_dep(route) -> bool:
-    """Return True if route.dependencies contains a require_elevation closure."""
+    """Return True if require_elevation() is wired to this route.
+
+    Checks two locations:
+    1. route.dependencies — the list passed to the @router.xxx(..., dependencies=[...])
+       decorator argument.
+    2. The route handler's function-parameter Depends() declarations — e.g.
+       ``_elev: User = Depends(dependencies.require_elevation())``.
+
+    Both patterns are valid FastAPI elevation wiring; the gate must accept either.
+
+    inspect.signature() raises ValueError only for built-in C callables, which are
+    never FastAPI route endpoints. In that unlikely case we fall back to False, which
+    is the conservative (safe) result — the test will flag the route as ungated.
+    """
+    # Check route-level dependencies (decorator list)
     for dep in getattr(route, "dependencies", []):
         dep_callable = getattr(dep, "dependency", None)
         if dep_callable is None:
             continue
         if getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME:
             return True
+    # Check function-parameter Depends() declarations
+    try:
+        sig = inspect.signature(route.endpoint)
+    except ValueError:
+        # Built-in C callable — cannot inspect; conservative result: not gated.
+        return False
+    for param in sig.parameters.values():
+        dep_callable = getattr(param.default, "dependency", None)
+        if dep_callable is None:
+            continue
+        if getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME:
+            return True
     return False
+
+
+def _admin_routers():
+    """Return all routers that handle /admin-prefixed mutation endpoints."""
+    from code_indexer.server.web.routes import web_router
+    from code_indexer.server.web.repo_category_routes import repo_category_web_router
+    from code_indexer.server.web.dependency_map_routes import dependency_map_router
+    from code_indexer.server.routers.research_assistant import (
+        router as research_assistant_router,
+    )
+    from code_indexer.server.routers.diagnostics import router as diagnostics_router
+    from code_indexer.server.routers.admin_provider_health import (
+        router as admin_provider_health_router,
+    )
+    from code_indexer.server.web.mfa_routes import mfa_router
+
+    return [
+        web_router,
+        repo_category_web_router,
+        dependency_map_router,
+        research_assistant_router,
+        diagnostics_router,
+        admin_provider_health_router,
+        mfa_router,
+    ]
+
+
+def _find_ungated_admin_mutations(routers) -> list:
+    """Return list of 'METHOD path' strings for ungated non-exempt mutation routes."""
+    from fastapi.routing import APIRoute
+
+    ungated = []
+    for router in routers:
+        for route in router.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            for method in route.methods or []:
+                if method.upper() not in ("POST", "PUT", "DELETE", "PATCH"):
+                    continue
+                if _is_exempt(method, route.path):
+                    continue
+                if not _route_has_elevation_dep(route):
+                    ungated.append(f"{method.upper()} {route.path}")
+    return ungated
 
 
 def _find_route(path: str, method: Optional[str] = None):
@@ -134,32 +217,15 @@ class TestAdminElevationGating:
     """CI gate tests for bug #956 admin web UI elevation enforcement."""
 
     def test_ungated_routes_table(self):
-        """CI gate: every non-exempt mutation route in web_router must have
-        require_elevation() wired as a FastAPI dependency.
-
-        This test introspects the route registry so it automatically fails
-        when a new mutation route ships without the dependency.
+        """CI gate: every non-exempt mutation route across all admin routers
+        must have require_elevation() wired (decorator deps or param Depends).
+        Fails automatically when a new mutation route ships without gating.
         """
-        from fastapi.routing import APIRoute
-
-        from code_indexer.server.web.routes import web_router
-
-        ungated: list = []
-        for route in web_router.routes:
-            if not isinstance(route, APIRoute):
-                continue
-            for method in route.methods or []:
-                if method.upper() not in ("POST", "PUT", "DELETE", "PATCH"):
-                    continue
-                if _is_exempt(method, route.path):
-                    continue
-                if not _route_has_elevation_dep(route):
-                    ungated.append(f"{method.upper()} {route.path}")
-
+        ungated = _find_ungated_admin_mutations(_admin_routers())
         assert ungated == [], (
-            "The following web_router mutation routes lack require_elevation() — "
+            "Admin mutation routes lack require_elevation() — "
             "add dependencies=[Depends(dependencies.require_elevation())] "
-            "to each decorator:\n"
+            "or wire it as a function-parameter Depends():\n"
             + "\n".join(f"  {r}" for r in sorted(ungated))
         )
 

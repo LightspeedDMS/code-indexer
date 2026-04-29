@@ -22,10 +22,11 @@ from typing import Optional, Set, Tuple
 from urllib.parse import quote
 
 from code_indexer import __version__ as _cidx_version
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from code_indexer.server.auth import dependencies
 from .routes import (
     _require_admin_session,
     _create_login_redirect,
@@ -719,7 +720,9 @@ def depmap_job_status_partial(request: Request):
 
 
 @dependency_map_router.post(
-    "/partials/depmap-job-status/retry", response_class=HTMLResponse
+    "/partials/depmap-job-status/retry",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def depmap_job_status_retry(request: Request):
     """
@@ -1368,7 +1371,10 @@ def _run_repair_with_feedback(
     )
 
 
-@dependency_map_router.post("/dependency-map/repair")
+@dependency_map_router.post(
+    "/dependency-map/repair",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def trigger_dependency_map_repair(request: Request):
     """
     Trigger dependency map repair (Story #342, #352).
@@ -1437,7 +1443,10 @@ def trigger_dependency_map_repair(request: Request):
     )
 
 
-@dependency_map_router.post("/dependency-map/trigger")
+@dependency_map_router.post(
+    "/dependency-map/trigger",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def trigger_dependency_map(
     request: Request,
     mode: Optional[str] = Form(None),
@@ -1514,7 +1523,10 @@ def trigger_dependency_map(
         )
 
 
-@dependency_map_router.post("/dependency-map/trigger-refinement")
+@dependency_map_router.post(
+    "/dependency-map/trigger-refinement",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def trigger_refinement(request: Request):
     """
     Trigger a manual refinement cycle (Bug #371).
