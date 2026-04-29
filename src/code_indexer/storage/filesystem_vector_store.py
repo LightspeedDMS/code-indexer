@@ -512,7 +512,7 @@ class FilesystemVectorStore:
         hnsw_skipped = False
 
         # HNSW-002: Auto-detection for incremental vs full rebuild
-        incremental_update_result = None
+        incremental_update_result: Optional[Dict[str, Any]] = None
 
         # #941: When branch isolation already performed a filtered HNSW rebuild,
         # skip the incremental path entirely so it cannot undo the filtered result.
@@ -529,7 +529,7 @@ class FilesystemVectorStore:
             ):
                 del self._indexing_session_changes[collection_name]
             # Signal "handled" so the fallback full-rebuild path (line ~559) is skipped.
-            incremental_update_result = True  # sentinel: filtered rebuild already handled
+            incremental_update_result = {}  # sentinel: filtered rebuild already handled
         elif (
             hasattr(self, "_indexing_session_changes")
             and collection_name in self._indexing_session_changes

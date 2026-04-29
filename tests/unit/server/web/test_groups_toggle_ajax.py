@@ -527,7 +527,12 @@ class TestCsrfTokenEmbedding:
             mock_gen.return_value = csrf_token
 
             with patch("code_indexer.server.web.routes._get_golden_repo_manager"):
-                response = test_client.get("/admin/groups")
+                with patch("code_indexer.server.web.routes.set_csrf_cookie"):
+                    with patch(
+                        "code_indexer.server.web.routes._get_users_list",
+                        return_value=[],
+                    ):
+                        response = test_client.get("/admin/groups")
 
         assert response.status_code == 200
         html_content = response.text
@@ -546,7 +551,12 @@ class TestCsrfTokenEmbedding:
             mock_gen.return_value = csrf_token
 
             with patch("code_indexer.server.web.routes._get_golden_repo_manager"):
-                response = test_client.get("/admin/groups")
+                with patch("code_indexer.server.web.routes.set_csrf_cookie"):
+                    with patch(
+                        "code_indexer.server.web.routes._get_users_list",
+                        return_value=[],
+                    ):
+                        response = test_client.get("/admin/groups")
 
         assert response.status_code == 200
         html_content = response.text

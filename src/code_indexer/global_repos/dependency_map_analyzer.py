@@ -508,6 +508,7 @@ class DependencyMapAnalyzer:
             prompt,
             timeout,
             dangerously_skip_permissions=True,
+            max_turns=max_turns,
         )
 
         # ── Canary failure fast-path ──
@@ -578,6 +579,7 @@ class DependencyMapAnalyzer:
                 retry_prompt,
                 timeout,
                 dangerously_skip_permissions=True,
+                max_turns=max_turns,
             )
 
             if pass1_file.exists():
@@ -1197,15 +1199,26 @@ Rules:
         prompt: str,
         timeout: int,
         dangerously_skip_permissions: bool = False,
+        max_turns: int = 0,
     ) -> str:
         """Invoke CliDispatcher for Pass 1 domain discovery (Bug #936).
 
-        Validates prompt (non-empty str) and timeout (positive int).
+        Validates prompt (non-empty str), timeout (positive int), and
+        max_turns (int >= 0).
         dangerously_skip_permissions accepted for API parity; not forwarded to Codex.
         Logs INFO when failover fires. Returns result.output as str.
 
+        Args:
+            prompt:                        Prompt text (non-empty str).
+            timeout:                       Hard timeout seconds (positive int).
+            dangerously_skip_permissions:  Accepted for API parity; not forwarded.
+            max_turns:                     When > 0, passed to dispatcher to enable
+                                           agentic mode.  Must be int >= 0.
+                                           Default 0 = single-shot.
+
         Raises:
-            ValueError: If prompt is empty/non-str or timeout is not a positive int.
+            ValueError: If prompt is empty/non-str, timeout is not a positive int,
+                        or max_turns is not a non-negative int.
         """
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError(
@@ -1215,11 +1228,20 @@ Rules:
             raise ValueError(
                 f"_invoke_pass1_dispatcher: timeout must be positive int, got {timeout!r}"
             )
+        if (
+            not isinstance(max_turns, int)
+            or isinstance(max_turns, bool)
+            or max_turns < 0
+        ):
+            raise ValueError(
+                f"_invoke_pass1_dispatcher: max_turns must be int >= 0, got {max_turns!r}"
+            )
         result = self._get_pass1_dispatcher().dispatch(
             flow="dependency_map_pass_1",
             cwd=str(self.golden_repos_root),
             prompt=prompt,
             timeout=timeout,
+            max_turns=max_turns,
         )
         if result.was_failover:
             logger.info(
@@ -1315,24 +1337,42 @@ Rules:
             self._cached_pass3_dispatcher = self._build_pass3_dispatcher()
         return self._cached_pass3_dispatcher
 
-    def _invoke_pass3_dispatcher(self, prompt: str, timeout: int) -> str:
+    def _invoke_pass3_dispatcher(
+        self, prompt: str, timeout: int, max_turns: int = 0
+    ) -> str:
         """Invoke CliDispatcher for Pass 3 index generation (Bug #936).
 
-        Validates timeout (positive int). Logs INFO when failover fires.
-        Returns result.output as str.
+        Validates timeout (positive int) and max_turns (int >= 0).
+        Logs INFO when failover fires. Returns result.output as str.
+
+        Args:
+            prompt:    Prompt text.
+            timeout:   Hard timeout seconds (positive int).
+            max_turns: When > 0, passed to dispatcher to enable agentic mode.
+                       Must be int >= 0.  Default 0 = single-shot.
 
         Raises:
-            ValueError: If timeout is not a positive int.
+            ValueError: If timeout is not a positive int or max_turns is not
+                        a non-negative int.
         """
         if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
             raise ValueError(
                 f"_invoke_pass3_dispatcher: timeout must be a positive int, got {timeout!r}"
+            )
+        if (
+            not isinstance(max_turns, int)
+            or isinstance(max_turns, bool)
+            or max_turns < 0
+        ):
+            raise ValueError(
+                f"_invoke_pass3_dispatcher: max_turns must be int >= 0, got {max_turns!r}"
             )
         result = self._get_pass3_dispatcher().dispatch(
             flow="dependency_map_pass_3",
             cwd=str(self.golden_repos_root),
             prompt=prompt,
             timeout=timeout,
+            max_turns=max_turns,
         )
         if result.was_failover:
             logger.info(
@@ -1733,7 +1773,7 @@ Rules:
         # Bug #936: Route Pass 3 through CliDispatcher so Codex can participate.
         # Pass 3 does not need MCP tools — pure text generation from domain files.
         timeout = self.pass_timeout // 2  # Pass 3 uses half timeout (lighter workload)
-        result = self._invoke_pass3_dispatcher(prompt, timeout)
+        result = self._invoke_pass3_dispatcher(prompt, timeout, max_turns=max_turns)
 
         # Strip meta-commentary from output (Fix 3: same as Pass 2)
         result = self._strip_meta_commentary(result)

@@ -72,10 +72,19 @@ class TestWebUserCreationAutoGroupAssignment:
         """Test creating an admin user via web UI assigns them to admins group."""
         from code_indexer.server.web import routes
         from code_indexer.server.auth import dependencies
+        from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
 
         app = FastAPI()
         app.add_middleware(SessionMiddleware, secret_key="test-secret")
         app.include_router(routes.web_router)
+
+        # Bypass _hybrid_auth_impl (requires initialized session manager) for require_elevation()
+        mock_admin_user = MagicMock()
+        mock_admin_user.username = "admin"
+        mock_admin_user.has_permission.return_value = True
+        app.dependency_overrides[get_current_admin_user_hybrid] = (
+            lambda: mock_admin_user
+        )
 
         app.state.group_manager = group_manager
 
@@ -124,10 +133,19 @@ class TestWebUserCreationAutoGroupAssignment:
         """Test creating a regular user via web UI assigns them to users group."""
         from code_indexer.server.web import routes
         from code_indexer.server.auth import dependencies
+        from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
 
         app = FastAPI()
         app.add_middleware(SessionMiddleware, secret_key="test-secret")
         app.include_router(routes.web_router)
+
+        # Bypass _hybrid_auth_impl (requires initialized session manager) for require_elevation()
+        mock_admin_user = MagicMock()
+        mock_admin_user.username = "admin"
+        mock_admin_user.has_permission.return_value = True
+        app.dependency_overrides[get_current_admin_user_hybrid] = (
+            lambda: mock_admin_user
+        )
 
         app.state.group_manager = group_manager
 

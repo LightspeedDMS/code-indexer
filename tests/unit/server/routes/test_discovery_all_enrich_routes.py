@@ -28,10 +28,21 @@ from fastapi.testclient import TestClient
 def client():
     """TestClient wrapping the web_router mounted at /admin."""
     from code_indexer.server.web.routes import web_router
+    from unittest.mock import MagicMock
 
     app = FastAPI()
     app.include_router(web_router, prefix="/admin")
-    return TestClient(app, raise_server_exceptions=False)
+
+    # Mock get_session_manager at the auth module level so that
+    # _hybrid_auth_impl (which does a local import) doesn't crash.
+    # Returns a SM with no active session → auth fails → 401.
+    mock_sm = MagicMock()
+    mock_sm.get_session.return_value = None
+
+    with patch(
+        "code_indexer.server.web.auth.get_session_manager", return_value=mock_sm
+    ):
+        yield TestClient(app, raise_server_exceptions=False)
 
 
 # ---------------------------------------------------------------------------
@@ -103,27 +114,31 @@ def test_discovery_enrich_requires_auth(client, platform):
 def test_enrich_rejects_more_than_50_urls(platform):
     """POST /admin/api/discovery/{platform}/enrich with 51 clone_urls must return 400.
 
-    Auth is bypassed via mocked get_session_manager so the request reaches
-    the body validation logic and the max-50 limit check is exercised.
+    Auth is bypassed in two layers so the request reaches body validation:
+    - dependency_overrides[get_current_admin_user_hybrid]: bypasses _hybrid_auth_impl
+    - patch _resolve_provider: bypasses the inline session check inside the route body
     """
     from code_indexer.server.web.routes import web_router
+    from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
 
     app = FastAPI()
     app.include_router(web_router, prefix="/admin")
+
+    mock_user = MagicMock()
+    mock_user.username = "admin"
+    mock_user.has_permission.return_value = True
+    app.dependency_overrides[get_current_admin_user_hybrid] = lambda: mock_user
+
+    mock_provider = MagicMock()
+    mock_provider.is_configured.return_value = True
+
     client = TestClient(app, raise_server_exceptions=False)
-
-    mock_session = MagicMock()
-    mock_session.username = "admin"
-    mock_session.role = "admin"
-
-    mock_session_manager = MagicMock()
-    mock_session_manager.get_session.return_value = mock_session
 
     too_many_urls = [f"https://example.com/repo{i}.git" for i in range(51)]
 
     with patch(
-        "code_indexer.server.web.routes.get_session_manager",
-        return_value=mock_session_manager,
+        "code_indexer.server.web.routes._resolve_provider",
+        return_value=(mock_provider, None),
     ):
         response = client.post(
             f"/admin/api/discovery/{platform}/enrich",

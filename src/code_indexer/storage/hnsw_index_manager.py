@@ -928,7 +928,9 @@ class HNSWIndexManager:
                 try:
                     try:
                         tmp_f = os.fdopen(tmp_meta_fd, "w")
-                        fd_owned_by_file_obj = True  # fdopen took ownership; do not close fd directly
+                        fd_owned_by_file_obj = (
+                            True  # fdopen took ownership; do not close fd directly
+                        )
                         with tmp_f:
                             json.dump(metadata, tmp_f, indent=2)
                         os.replace(tmp_meta_path, str(meta_file))

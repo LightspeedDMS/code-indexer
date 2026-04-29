@@ -67,24 +67,22 @@ class TestFileServiceTokenEnforcement:
     def _get_config(self):
         """Get current file content limits config."""
         config_service = get_config_service()
-        return config_service.get_config().file_content_limits_config
+        return config_service.get_config().content_limits_config
 
-    def _update_config(self, max_tokens_per_request, chars_per_token):
+    def _update_config(self, file_content_max_tokens, chars_per_token):
         """Update file content limits config."""
         config_service = get_config_service()
         config = config_service.get_config()
-        assert config.file_content_limits_config is not None
-        config.file_content_limits_config.max_tokens_per_request = (
-            max_tokens_per_request
-        )
-        config.file_content_limits_config.chars_per_token = chars_per_token
+        assert config.content_limits_config is not None
+        config.content_limits_config.file_content_max_tokens = file_content_max_tokens
+        config.content_limits_config.chars_per_token = chars_per_token
         config_service.config_manager.save_config(config)
 
     def test_default_behavior_returns_first_chunk_only(self):
         """Test that calling get_file_content_by_path without params enforces token limits."""
-        # Default config: 5000 tokens, 4 chars/token = 20000 chars max
+        # Default config: 50000 tokens, 4 chars/token = 200000 chars max
         config = self._get_config()
-        assert config.max_tokens_per_request == 5000
+        assert config.file_content_max_tokens == 50000
         assert config.chars_per_token == 4
 
         # Call without offset/limit
@@ -99,8 +97,8 @@ class TestFileServiceTokenEnforcement:
         content = result["content"]
         metadata = result["metadata"]
 
-        assert len(content) <= config.max_chars_per_request
-        assert metadata["estimated_tokens"] <= config.max_tokens_per_request
+        assert len(content) <= config.file_content_max_tokens * config.chars_per_token
+        assert metadata["estimated_tokens"] <= config.file_content_max_tokens
         assert "pagination_hint" in metadata
 
         # Test file is only ~5000 chars (100 lines * 50 chars), well under 20000 char budget
@@ -135,6 +133,9 @@ class TestFileServiceTokenEnforcement:
 
     def test_token_enforcement_truncates_large_content(self):
         """Test that content exceeding token budget is truncated."""
+        # Set low limit: 5000 tokens * 4 chars = 20000 chars max
+        self._update_config(5000, 4)
+
         # Create large file (1000 lines, will exceed 5000 tokens)
         large_file = self.repo_path / "large.py"
         large_lines = [
@@ -156,14 +157,14 @@ class TestFileServiceTokenEnforcement:
 
         # Config: 5000 tokens * 4 chars/token = 20000 chars max
         config = self._get_config()
-        assert len(content) <= config.max_chars_per_request
+        assert len(content) <= config.file_content_max_tokens * config.chars_per_token
 
         # Should be truncated
         assert metadata["truncated"] is True
         assert metadata["truncated_at_line"] is not None
         assert metadata["truncated_at_line"] < metadata["total_lines"]
         assert metadata["requires_pagination"] is True
-        assert metadata["estimated_tokens"] <= config.max_tokens_per_request
+        assert metadata["estimated_tokens"] <= config.file_content_max_tokens
 
     def test_user_specified_offset_limit_respects_token_budget(self):
         """Test that user-specified offset/limit still enforces token budget."""
@@ -180,8 +181,8 @@ class TestFileServiceTokenEnforcement:
 
         # Config: 5000 tokens * 4 chars/token = 20000 chars max
         config = self._get_config()
-        assert len(content) <= config.max_chars_per_request
-        assert metadata["estimated_tokens"] <= config.max_tokens_per_request
+        assert len(content) <= config.file_content_max_tokens * config.chars_per_token
+        assert metadata["estimated_tokens"] <= config.file_content_max_tokens
 
         # Metadata should reflect actual returned content
         assert metadata["offset"] == 1
@@ -215,7 +216,7 @@ class TestFileServiceTokenEnforcement:
         config = self._get_config()
 
         assert "max_tokens_per_request" in metadata
-        assert metadata["max_tokens_per_request"] == config.max_tokens_per_request
+        assert metadata["max_tokens_per_request"] == config.file_content_max_tokens
 
     def test_metadata_includes_truncated_flag(self):
         """Test that metadata includes truncated flag."""
@@ -234,7 +235,12 @@ class TestFileServiceTokenEnforcement:
 
         assert result["metadata"]["truncated"] is False
 
-        # Large file (truncated) - needs to exceed 20000 chars (5000 tokens * 4 chars/token)
+        # Lower token limit so the large file exceeds the budget.
+        # New default is 50000 tokens (200000 chars) — too large to trigger truncation.
+        # Set 1000 tokens * 4 chars = 4000 chars max so the ~75000-char file IS truncated.
+        self._update_config(file_content_max_tokens=1000, chars_per_token=4)
+
+        # Large file (truncated) - needs to exceed 4000 chars (1000 tokens * 4 chars/token)
         # Create file with 1000 lines of ~75 chars each = ~75000 chars (will be truncated)
         large_file = self.repo_path / "large.py"
         large_lines = [
@@ -311,7 +317,7 @@ class TestFileServiceTokenEnforcement:
     def test_custom_config_affects_token_limit(self):
         """Test that updating config changes token enforcement."""
         # Update config to smaller token limit
-        self._update_config(max_tokens_per_request=1000, chars_per_token=4)
+        self._update_config(file_content_max_tokens=1000, chars_per_token=4)
 
         # Create file that would fit in 5000 tokens but not 1000 tokens
         # 200 lines * 24 chars = 4800 chars total, exceeds 1000 token budget (4000 chars)
@@ -358,8 +364,8 @@ class TestFileServiceTokenEnforcement:
         config = self._get_config()
 
         # CRITICAL: NEVER exceed token budget
-        assert len(content) <= config.max_chars_per_request
-        assert metadata["estimated_tokens"] <= config.max_tokens_per_request
+        assert len(content) <= config.file_content_max_tokens * config.chars_per_token
+        assert metadata["estimated_tokens"] <= config.file_content_max_tokens
 
     def test_get_file_content_applies_same_enforcement(self):
         """Test that get_file_content (with repo lookup) applies same token enforcement."""
@@ -387,5 +393,5 @@ class TestFileServiceTokenEnforcement:
         assert metadata["returned_lines"] <= 20
 
         config = self._get_config()
-        assert len(content) <= config.max_chars_per_request
-        assert metadata["estimated_tokens"] <= config.max_tokens_per_request
+        assert len(content) <= config.file_content_max_tokens * config.chars_per_token
+        assert metadata["estimated_tokens"] <= config.file_content_max_tokens

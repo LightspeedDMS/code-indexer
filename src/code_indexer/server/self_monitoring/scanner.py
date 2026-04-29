@@ -819,7 +819,9 @@ class LogScanner:
         """
         # Bug #936: route through dispatcher (Claude or Codex) instead of
         # calling subprocess.run directly.
-        dispatcher = build_dep_map_dispatcher(get_config_service().get_config())
+        dispatcher = build_dep_map_dispatcher(
+            get_config_service().get_config(), analysis_model=self.model
+        )
         result = dispatcher.dispatch(
             flow="self_monitoring_scan",
             cwd=self.repo_root or ".",

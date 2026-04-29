@@ -44,7 +44,6 @@ def test_all_server_config_fields_are_classified() -> None:
             "oidc_provider_config",
             "telemetry_config",
             "search_limits_config",
-            "file_content_limits_config",
             "golden_repos_config",
             "mcp_session_config",
             "health_config",

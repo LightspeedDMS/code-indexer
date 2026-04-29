@@ -70,7 +70,9 @@ class TestRemoveVectorAlreadyDeleted:
         manager = _make_manager()
 
         mock_index = MagicMock()
-        mock_index.mark_deleted.side_effect = RuntimeError("some unrelated hnswlib internal error")
+        mock_index.mark_deleted.side_effect = RuntimeError(
+            "some unrelated hnswlib internal error"
+        )
 
         id_to_label = {"point_abc": 5}
         label_to_id = {5: "point_abc"}
@@ -165,7 +167,11 @@ class TestSaveIncrementalUpdateAtomic:
         with pytest.raises(OSError, match="simulated disk full"):
             with patch("json.dump", side_effect=crashing_json_dump):
                 manager.save_incremental_update(
-                    mock_index, collection_path, id_to_label, label_to_id, vector_count=1
+                    mock_index,
+                    collection_path,
+                    id_to_label,
+                    label_to_id,
+                    vector_count=1,
                 )
 
         with open(meta_file) as f:

@@ -12,7 +12,7 @@ from code_indexer.server.utils.config_manager import (
     ServerConfigManager,
     ServerConfig,
     SearchLimitsConfig,
-    FileContentLimitsConfig,
+    ContentLimitsConfig,
     GoldenReposConfig,
 )
 from code_indexer.server.services.config_service import ConfigService
@@ -46,32 +46,30 @@ class TestSearchLimitsConfig:
 
 
 class TestFileContentLimitsConfig:
-    """Test suite for FileContentLimitsConfig dataclass (AC-M3, AC-M4)."""
+    """Test suite for ContentLimitsConfig dataclass (AC-M3, AC-M4)."""
 
     def test_default_values(self):
-        """Test FileContentLimitsConfig has correct default values."""
-        config = FileContentLimitsConfig()
+        """Test ContentLimitsConfig has correct default values."""
+        config = ContentLimitsConfig()
 
-        # AC-M3: Default 5000 tokens
-        assert config.max_tokens_per_request == 5000
+        # AC-M3: Default 50000 tokens (Bug #939: raised from 5000)
+        assert config.file_content_max_tokens == 50000
         # AC-M4: Default 4 chars/token
         assert config.chars_per_token == 4
 
     def test_custom_values(self):
-        """Test FileContentLimitsConfig accepts custom values."""
-        config = FileContentLimitsConfig(
-            max_tokens_per_request=10000, chars_per_token=3
-        )
+        """Test ContentLimitsConfig accepts custom values."""
+        config = ContentLimitsConfig(file_content_max_tokens=10000, chars_per_token=3)
 
-        assert config.max_tokens_per_request == 10000
+        assert config.file_content_max_tokens == 10000
         assert config.chars_per_token == 3
 
-    def test_max_chars_per_request_property(self):
-        """Test max_chars_per_request computed property."""
-        config = FileContentLimitsConfig(max_tokens_per_request=5000, chars_per_token=4)
+    def test_max_chars_inline_computation(self):
+        """Test that max chars can be computed from tokens * chars_per_token."""
+        config = ContentLimitsConfig(file_content_max_tokens=5000, chars_per_token=4)
 
         # 5000 * 4 = 20000 chars
-        assert config.max_chars_per_request == 20000
+        assert config.file_content_max_tokens * config.chars_per_token == 20000
 
 
 class TestGoldenReposConfig:
@@ -103,12 +101,12 @@ class TestServerConfigIntegration:
         assert config.search_limits_config.timeout_seconds == 30
 
     def test_server_config_includes_file_content_limits(self):
-        """Test ServerConfig includes file_content_limits_config with defaults."""
+        """Test ServerConfig includes content_limits_config with defaults."""
         config = ServerConfig(server_dir="/tmp/test")
 
-        assert config.file_content_limits_config is not None
-        assert config.file_content_limits_config.max_tokens_per_request == 5000
-        assert config.file_content_limits_config.chars_per_token == 4
+        assert config.content_limits_config is not None
+        assert config.content_limits_config.file_content_max_tokens == 50000
+        assert config.content_limits_config.chars_per_token == 4
 
     def test_server_config_includes_golden_repos(self):
         """Test ServerConfig includes golden_repos_config with defaults."""
@@ -129,8 +127,8 @@ class TestServerConfigIntegration:
                 max_result_size_mb=50,
                 timeout_seconds=120,
             ),
-            file_content_limits_config=FileContentLimitsConfig(
-                max_tokens_per_request=10000,
+            content_limits_config=ContentLimitsConfig(
+                file_content_max_tokens=10000,
                 chars_per_token=3,
             ),
             golden_repos_config=GoldenReposConfig(
@@ -148,8 +146,8 @@ class TestServerConfigIntegration:
         assert loaded is not None
         assert loaded.search_limits_config.max_result_size_mb == 50
         assert loaded.search_limits_config.timeout_seconds == 120
-        assert loaded.file_content_limits_config.max_tokens_per_request == 10000
-        assert loaded.file_content_limits_config.chars_per_token == 3
+        assert loaded.content_limits_config.file_content_max_tokens == 10000
+        assert loaded.content_limits_config.chars_per_token == 3
         assert loaded.golden_repos_config.refresh_interval_seconds == 1800
 
 
@@ -166,13 +164,13 @@ class TestConfigServiceIntegration:
         assert settings["search_limits"]["timeout_seconds"] == 30
 
     def test_get_all_settings_includes_file_content_limits(self, tmp_path):
-        """Test get_all_settings() returns file_content_limits section."""
+        """Test ContentLimitsConfig defaults are accessible via ServerConfig (Bug #939: unified config)."""
         service = ConfigService(str(tmp_path))
-        settings = service.get_all_settings()
+        config = service.get_config()
 
-        assert "file_content_limits" in settings
-        assert settings["file_content_limits"]["max_tokens_per_request"] == 5000
-        assert settings["file_content_limits"]["chars_per_token"] == 4
+        assert config.content_limits_config is not None
+        assert config.content_limits_config.file_content_max_tokens == 50000
+        assert config.content_limits_config.chars_per_token == 4
 
     def test_get_all_settings_includes_golden_repos(self, tmp_path):
         """Test get_all_settings() returns golden_repos section."""
@@ -197,18 +195,21 @@ class TestConfigServiceIntegration:
         assert settings["search_limits"]["timeout_seconds"] == 120
 
     def test_update_file_content_limits_setting(self, tmp_path):
-        """Test update_setting() can modify file_content_limits settings."""
+        """Test ContentLimitsConfig fields can be updated via config_manager (Bug #939: unified config)."""
         service = ConfigService(str(tmp_path))
+        config = service.get_config()
 
-        # Update max_tokens_per_request
-        service.update_setting("file_content_limits", "max_tokens_per_request", 10000)
-        settings = service.get_all_settings()
-        assert settings["file_content_limits"]["max_tokens_per_request"] == 10000
+        # Update file_content_max_tokens directly on the config object
+        config.content_limits_config.file_content_max_tokens = 10000
+        service.config_manager.save_config(config)
+        loaded = service.config_manager.load_config()
+        assert loaded.content_limits_config.file_content_max_tokens == 10000
 
         # Update chars_per_token
-        service.update_setting("file_content_limits", "chars_per_token", 3)
-        settings = service.get_all_settings()
-        assert settings["file_content_limits"]["chars_per_token"] == 3
+        config.content_limits_config.chars_per_token = 3
+        service.config_manager.save_config(config)
+        loaded = service.config_manager.load_config()
+        assert loaded.content_limits_config.chars_per_token == 3
 
     def test_update_golden_repos_setting(self, tmp_path):
         """Test update_setting() can modify golden_repos settings."""
@@ -282,38 +283,32 @@ class TestConfigValidation:
             manager.validate_config(config)
 
     def test_file_content_limits_max_tokens_valid_range(self, tmp_path):
-        """Test max_tokens_per_request accepts valid range (1000-50000 tokens)."""
+        """Test file_content_max_tokens accepts valid range (1000-200000 tokens)."""
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(
-                max_tokens_per_request=5000
-            ),
+            content_limits_config=ContentLimitsConfig(file_content_max_tokens=50000),
         )
         manager.validate_config(config)  # Should not raise
 
     def test_file_content_limits_max_tokens_invalid_below_min(self, tmp_path):
-        """Test max_tokens_per_request rejects values below minimum (< 1000 tokens)."""
+        """Test file_content_max_tokens rejects values below minimum (< 1000 tokens)."""
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(
-                max_tokens_per_request=999
-            ),
+            content_limits_config=ContentLimitsConfig(file_content_max_tokens=999),
         )
-        with pytest.raises(ValueError, match="max_tokens_per_request"):
+        with pytest.raises(ValueError, match="file_content_max_tokens"):
             manager.validate_config(config)
 
     def test_file_content_limits_max_tokens_invalid_above_max(self, tmp_path):
-        """Test max_tokens_per_request rejects values above maximum (> 50000 tokens)."""
+        """Test file_content_max_tokens rejects values above maximum (> 200000 tokens)."""
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(
-                max_tokens_per_request=50001
-            ),
+            content_limits_config=ContentLimitsConfig(file_content_max_tokens=200001),
         )
-        with pytest.raises(ValueError, match="max_tokens_per_request"):
+        with pytest.raises(ValueError, match="file_content_max_tokens"):
             manager.validate_config(config)
 
     def test_file_content_limits_chars_per_token_valid_range(self, tmp_path):
@@ -321,7 +316,7 @@ class TestConfigValidation:
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(chars_per_token=4),
+            content_limits_config=ContentLimitsConfig(chars_per_token=4),
         )
         manager.validate_config(config)  # Should not raise
 
@@ -330,7 +325,7 @@ class TestConfigValidation:
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(chars_per_token=0),
+            content_limits_config=ContentLimitsConfig(chars_per_token=0),
         )
         with pytest.raises(ValueError, match="chars_per_token"):
             manager.validate_config(config)
@@ -340,7 +335,7 @@ class TestConfigValidation:
         manager = ServerConfigManager(str(tmp_path))
         config = ServerConfig(
             server_dir=str(tmp_path),
-            file_content_limits_config=FileContentLimitsConfig(chars_per_token=11),
+            content_limits_config=ContentLimitsConfig(chars_per_token=11),
         )
         with pytest.raises(ValueError, match="chars_per_token"):
             manager.validate_config(config)

@@ -130,7 +130,9 @@ class TestCmdFlags:
         config.fact_check_timeout_seconds as the hard outer subprocess timeout.
         ClaudeInvoker does not use --max-turns; it uses a soft inner shell timeout.
         """
-        _SENTINEL_TIMEOUT = 77  # distinctive value to prove config is read, not hardcoded
+        _SENTINEL_TIMEOUT = (
+            77  # distinctive value to prove config is read, not hardcoded
+        )
         cfg.fact_check_timeout_seconds = _SENTINEL_TIMEOUT
         cmds, _, _, call_kwargs = capture(cfg_override=cfg)
         assert cmds, "No subprocess.run calls were captured"

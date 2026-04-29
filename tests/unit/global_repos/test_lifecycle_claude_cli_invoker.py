@@ -30,6 +30,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from code_indexer.global_repos.unified_response_parser import UnifiedResult
+from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
 
 
 def _make_default_config_service_mock() -> MagicMock:
@@ -79,9 +80,13 @@ _VALID_RESPONSE_JSON = json.dumps(
 
 def test_invoker_returns_unified_result_on_success(tmp_path: Path) -> None:
     """
-    When invoke_claude_cli returns (True, raw_json), the adapter parses
-    the body via UnifiedResponseParser and returns a UnifiedResult with
+    When the dispatcher returns a successful InvocationResult, the adapter
+    parses the body via UnifiedResponseParser and returns a UnifiedResult with
     the expected description and lifecycle fields.
+
+    Patches build_dep_map_dispatcher (the external factory used by
+    _build_dispatcher) rather than invoke_claude_cli, which is no longer
+    called after the Bug #936 refactor to CliDispatcher.dispatch().
     """
     from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
         LifecycleClaudeCliInvoker,
@@ -90,29 +95,32 @@ def test_invoker_returns_unified_result_on_success(tmp_path: Path) -> None:
     repo_path = tmp_path / "alias-a"
     repo_path.mkdir()
 
-    # Capture the arguments passed to invoke_claude_cli so we can assert
-    # the timeouts and the prompt non-emptiness in the same test.
-    captured: dict = {}
+    # Build the mock config and extract the expected outer timeout so there
+    # are no magic numbers in the assertions below.
+    mock_config_svc = _make_default_config_service_mock()
+    expected_outer_timeout = (
+        mock_config_svc.get_config().lifecycle_analysis_config.outer_timeout_seconds
+    )
 
-    def _fake_invoke(
-        rp: str, prompt: str, shell_timeout: int, outer_timeout: int
-    ) -> Tuple[bool, str]:
-        captured["repo_path"] = rp
-        captured["prompt"] = prompt
-        captured["shell_timeout"] = shell_timeout
-        captured["outer_timeout"] = outer_timeout
-        return True, _VALID_RESPONSE_JSON
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.dispatch.return_value = InvocationResult(
+        success=True,
+        output=_VALID_RESPONSE_JSON,
+        error="",
+        cli_used="claude",
+        was_failover=False,
+    )
 
     invoker = LifecycleClaudeCliInvoker()
 
     with (
         patch(
-            "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
-            side_effect=_fake_invoke,
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.build_dep_map_dispatcher",
+            return_value=mock_dispatcher,
         ),
         patch(
             "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
-            return_value=_make_default_config_service_mock(),
+            return_value=mock_config_svc,
         ),
     ):
         result = invoker("alias-a", repo_path)
@@ -123,16 +131,18 @@ def test_invoker_returns_unified_result_on_success(tmp_path: Path) -> None:
     assert result.lifecycle["ci_system"] == "github-actions"
     assert result.lifecycle["confidence"] == "high"
 
-    # -- subprocess wiring ----------------------------------------------
-    # Repo path must be passed as string (cwd for subprocess).
-    assert captured["repo_path"] == str(repo_path)
-    # v4 timeouts: 360s inner shell timeout + 420s outer Python timeout.
-    assert captured["shell_timeout"] == 360
-    assert captured["outer_timeout"] == 420
+    # -- dispatcher wiring -----------------------------------------------
+    assert mock_dispatcher.dispatch.called
+    call_kwargs = mock_dispatcher.dispatch.call_args.kwargs
+    # cwd must be the repo path as string (subprocess working directory).
+    assert call_kwargs.get("cwd") == str(repo_path)
+    # outer timeout must match what ConfigService provides.
+    assert call_kwargs.get("timeout") == expected_outer_timeout
     # Prompt must be loaded from the packaged lifecycle_unified.md file.
-    assert captured["prompt"], "prompt must be non-empty"
-    assert "description" in captured["prompt"]
-    assert "lifecycle" in captured["prompt"]
+    prompt_used = call_kwargs.get("prompt", "")
+    assert prompt_used, "prompt must be non-empty"
+    assert "description" in prompt_used
+    assert "lifecycle" in prompt_used
 
 
 # ---------------------------------------------------------------------------

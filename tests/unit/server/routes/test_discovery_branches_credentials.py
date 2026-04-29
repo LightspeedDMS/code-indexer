@@ -30,10 +30,17 @@ class TestDiscoveryBranchesCredentialRetrieval:
         from code_indexer.server.services.ci_token_manager import TokenData
         from fastapi import FastAPI
 
+        from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
+
         app = FastAPI()
         app.include_router(web_router, prefix="/admin")
 
-        # Mock the session manager to bypass auth
+        mock_user = MagicMock()
+        mock_user.username = "admin"
+        mock_user.has_permission.return_value = True
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: mock_user
+
+        # Mock the session manager to bypass auth (used by _require_admin_session in route body)
         mock_session = MagicMock()
         mock_session.username = "admin"
         mock_session.role = "admin"
@@ -109,10 +116,17 @@ class TestDiscoveryBranchesCredentialRetrieval:
         from code_indexer.server.services.ci_token_manager import TokenData
         from fastapi import FastAPI
 
+        from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
+
         app = FastAPI()
         app.include_router(web_router, prefix="/admin")
 
-        # Mock the session manager to bypass auth
+        mock_user = MagicMock()
+        mock_user.username = "admin"
+        mock_user.has_permission.return_value = True
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: mock_user
+
+        # Mock the session manager to bypass auth (used by _require_admin_session in route body)
         mock_session = MagicMock()
         mock_session.username = "admin"
         mock_session.role = "admin"
@@ -181,10 +195,17 @@ class TestDiscoveryBranchesCredentialRetrieval:
         from code_indexer.server.web.routes import web_router
         from fastapi import FastAPI
 
+        from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
+
         app = FastAPI()
         app.include_router(web_router, prefix="/admin")
 
-        # Mock the session manager to bypass auth
+        mock_user = MagicMock()
+        mock_user.username = "admin"
+        mock_user.has_permission.return_value = True
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: mock_user
+
+        # Mock the session manager to bypass auth (used by _require_admin_session in route body)
         mock_session = MagicMock()
         mock_session.username = "admin"
         mock_session.role = "admin"
@@ -248,8 +269,15 @@ class TestDiscoveryBranchesCredentialRetrieval:
         from code_indexer.server.services.ci_token_manager import TokenData
         from fastapi import FastAPI
 
+        from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
+
         app = FastAPI()
         app.include_router(web_router, prefix="/admin")
+
+        mock_user = MagicMock()
+        mock_user.username = "admin"
+        mock_user.has_permission.return_value = True
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: mock_user
 
         mock_session = MagicMock()
         mock_session.username = "admin"

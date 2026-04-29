@@ -7,7 +7,9 @@ from unittest.mock import patch
 
 
 def test_resolve_success_calls_invoke_claude_cli(tmp_path):
-    """# Story #926 AC4: resolver delegates conflict resolution to invoke_claude_cli and succeeds when conflicts are cleared."""
+    """# Story #926 AC4 (Bug #936): resolver delegates conflict resolution to dispatcher and succeeds when conflicts are cleared."""
+    from unittest.mock import MagicMock
+
     from code_indexer.server.services.cidx_meta_backup.conflict_resolver import (
         ClaudeConflictResolver,
     )
@@ -15,11 +17,22 @@ def test_resolve_success_calls_invoke_claude_cli(tmp_path):
     repo = tmp_path / "cidx-meta"
     repo.mkdir()
 
+    mock_result = MagicMock()
+    mock_result.success = True
+    mock_result.output = "resolved"
+    mock_result.error = None
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.dispatch.return_value = mock_result
+
     with (
         patch(
-            "code_indexer.server.services.cidx_meta_backup.conflict_resolver.invoke_claude_cli",
-            return_value=(True, "resolved"),
-        ) as invoke_mock,
+            "code_indexer.server.services.cidx_meta_backup.conflict_resolver.build_dep_map_dispatcher",
+            return_value=mock_dispatcher,
+        ),
+        patch(
+            "code_indexer.server.services.cidx_meta_backup.conflict_resolver.get_config_service",
+            return_value=MagicMock(get_config=lambda: MagicMock()),
+        ),
         patch(
             "code_indexer.server.services.cidx_meta_backup.conflict_resolver.subprocess.run",
             return_value=CompletedProcess(
@@ -33,11 +46,13 @@ def test_resolve_success_calls_invoke_claude_cli(tmp_path):
 
     assert result.success is True
     assert result.error is None
-    invoke_mock.assert_called_once()
+    mock_dispatcher.dispatch.assert_called_once()
 
 
 def test_resolve_timeout_returns_failure(tmp_path):
-    """# Story #926 AC5: resolver surfaces a Claude CLI timeout as a failure result."""
+    """# Story #926 AC5 (Bug #936): resolver surfaces a dispatcher timeout as a failure result."""
+    from unittest.mock import MagicMock
+
     from code_indexer.server.services.cidx_meta_backup.conflict_resolver import (
         ClaudeConflictResolver,
     )
@@ -45,10 +60,21 @@ def test_resolve_timeout_returns_failure(tmp_path):
     repo = tmp_path / "cidx-meta"
     repo.mkdir()
 
+    mock_result = MagicMock()
+    mock_result.success = False
+    mock_result.error = "Conflict resolver timed out after 600s"
+    mock_result.output = ""
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.dispatch.return_value = mock_result
+
     with (
         patch(
-            "code_indexer.server.services.cidx_meta_backup.conflict_resolver.invoke_claude_cli",
-            return_value=(False, "Claude resolver timed out after 600s"),
+            "code_indexer.server.services.cidx_meta_backup.conflict_resolver.build_dep_map_dispatcher",
+            return_value=mock_dispatcher,
+        ),
+        patch(
+            "code_indexer.server.services.cidx_meta_backup.conflict_resolver.get_config_service",
+            return_value=MagicMock(get_config=lambda: MagicMock()),
         ),
         patch(
             "code_indexer.server.services.cidx_meta_backup.conflict_resolver.subprocess.run",
@@ -139,14 +165,29 @@ def test_resolve_defensive_check_unmerged_paths(tmp_path):
     _init_conflict_repo(repo, conflict_file)
     _assert_uu_conflict_state(repo, conflict_file)
 
-    with patch(
-        "code_indexer.server.services.cidx_meta_backup.conflict_resolver.invoke_claude_cli",
-        return_value=(True, "done"),
+    from unittest.mock import MagicMock
+
+    mock_result = MagicMock()
+    mock_result.success = True
+    mock_result.output = "done"
+    mock_result.error = None
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.dispatch.return_value = mock_result
+
+    with (
+        patch(
+            "code_indexer.server.services.cidx_meta_backup.conflict_resolver.build_dep_map_dispatcher",
+            return_value=mock_dispatcher,
+        ),
+        patch(
+            "code_indexer.server.services.cidx_meta_backup.conflict_resolver.get_config_service",
+            return_value=MagicMock(get_config=lambda: MagicMock()),
+        ),
     ):
         result = ClaudeConflictResolver().resolve(str(repo), [conflict_file], "master")
 
     assert result.success is False
-    assert result.error == "Claude did not resolve all conflicts"
+    assert result.error == "Conflict resolver did not resolve all conflicts"
 
 
 def test_resolve_uses_externalized_prompt():
