@@ -7,15 +7,37 @@ Tests Web UI routes for AC1-AC4.
 
 import pytest
 import re
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, router):
+    """Override all require_elevation deps so tests can call routes without TOTP setup."""
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in (route.dependencies or []):
+            dep_callable = getattr(dep, "dependency", None)
+            if dep_callable and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME:
+                app.dependency_overrides[dep_callable] = lambda: None
 
 
 @pytest.fixture
 def test_app():
-    """Create a test FastAPI app with minimal setup."""
-    from code_indexer.server.app import app
+    """Create a test FastAPI app with minimal setup.
 
-    return app
+    Yields the global app singleton with elevation bypassed for repo-category routes,
+    then restores the original dependency_overrides to prevent cross-test contamination.
+    """
+    from code_indexer.server.app import app
+    from code_indexer.server.web.repo_category_routes import repo_category_web_router
+
+    original_overrides = dict(app.dependency_overrides)
+    _bypass_elevation(app, repo_category_web_router)
+    yield app
+    app.dependency_overrides = original_overrides
 
 
 @pytest.fixture
