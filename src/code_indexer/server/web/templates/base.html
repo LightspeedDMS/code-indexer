@@ -52,6 +52,68 @@
             };
         })();
 
+        // Global plain-HTML form interceptor: routes /admin/ POST forms through fetch()
+        // so the elevation 403 interceptor above can open the modal instead of raw JSON.
+        // Uses bubble phase so that onsubmit attribute handlers (e.g. lpSync) run first.
+        (function () {
+            function _formPath(form) {
+                try { return new URL(form.action, window.location.href).pathname; }
+                catch (e) { return form.action || ''; }
+            }
+            function _shouldIntercept(form) {
+                if (!form || form.method.toLowerCase() !== 'post') return false;
+                if (_formPath(form).indexOf('/admin/') !== 0) return false;
+                if (form.hasAttribute('hx-post') || form.hasAttribute('hx-put') ||
+                    form.hasAttribute('hx-delete') || form.hasAttribute('hx-patch')) return false;
+                if (form.hasAttribute('data-no-ajax')) return false;
+                return true;
+            }
+            function _setBusy(form, busy) {
+                form.querySelectorAll('[type="submit"]').forEach(function (b) {
+                    b.disabled = busy;
+                    if (busy) { b.setAttribute('aria-busy', 'true'); }
+                    else { b.removeAttribute('aria-busy'); }
+                });
+            }
+            function _doSubmit(form) {
+                _setBusy(form, true);
+                fetch(form.action, {
+                    method: 'POST',
+                    body: new FormData(form),
+                    credentials: 'same-origin',
+                }).then(function (resp) {
+                    return resp.text().then(function (html) {
+                        _setBusy(form, false);
+                        if (resp.redirected) {
+                            window.location.href = resp.url;
+                        } else {
+                            document.open();
+                            document.write(html);
+                            document.close();
+                        }
+                    });
+                }).catch(function (err) {
+                    _setBusy(form, false);
+                    if (!err || err.message !== 'elevation_cancelled') {
+                        window.location.reload();
+                    }
+                });
+            }
+            // Bubble phase: inline onsubmit fires first.
+            document.addEventListener('submit', function (evt) {
+                if (evt.defaultPrevented) return;
+                if (!_shouldIntercept(evt.target)) return;
+                evt.preventDefault();
+                _doSubmit(evt.target);
+            }, false);
+            // Programmatic .submit() override (no submit event fires for these).
+            var _origSubmit = HTMLFormElement.prototype.submit;
+            HTMLFormElement.prototype.submit = function () {
+                if (_shouldIntercept(this)) { _doSubmit(this); return; }
+                _origSubmit.apply(this, arguments);
+            };
+        })();
+
         document.addEventListener('htmx:beforeSwap', function(evt) {
             var xhr = evt.detail.xhr;
 
