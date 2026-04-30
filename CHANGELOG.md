@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.4 — 2026-04-29
+
+### Fixed (bug sweep + test suite green pass)
+
+- **TOTP elevation bypass in admin Web UI (#956)**. All admin Web UI mutation routes (create/update/delete across golden repos, users, config, CICD, MCP credentials, TOTP, maintenance, research assistant) were missing `Depends(require_elevation())`. Any session with a valid JWT could mutate admin state without completing a TOTP challenge. Fixed by adding `require_elevation` to all relevant endpoints across `routes.py`, `mcp_credential_routes.py`, `cicd_routes.py`, `dependency_map_routes.py`, and `dep_map_health_repair_routes.py`. 14 additional mutation routes gated in the follow-up pass. Test fixtures updated with `_bypass_elevation` helper across 5 test files to prevent 403 failures.
+
+- **HTMX silent failure on 403 elevation_required/totp_setup_required (#955)**. When the TOTP kill switch is ON and an ungated Web UI form submits a mutation, the server returns HTTP 403 with `error: elevation_required` or `totp_setup_required`. HTMX's default swap silently discarded the error response body and swapped empty content into the target. Added a global `htmx:beforeSwap` handler that intercepts 403 responses containing these error codes, prevents the swap, and triggers a full page reload so the elevation dialog is shown instead.
+
+- **HNSW double-delete crash on incremental save retry (#944)**. `save_incremental_update` could be called twice for the same point if a background retry fired while the first save was in progress. The second call hit hnswlib's `mark_deleted` on an already-deleted ID, raising `RuntimeError: Cannot delete point not existing`. Added an `_already_deleted` set guard and made the metadata write atomic (temp-file + `os.replace`) so partial kills leave the previous consistent state on disk.
+
+- **GitHub API errors lose response body (#949)**. When GitHub API calls fail, `RuntimeError` was raised with only the HTTP status code string (e.g. "404"), discarding the response body. Changed to include both status code and response text so operators can diagnose without forensic log inspection. 35 pre-existing test failures fixed in the same changeset.
+
+- **Test suite green pass — 8 daemon-thread pollution and timeout fixes**. `fast-automation.sh` and `server-fast-automation.sh` both reach zero failures after fixing: (1) module-global `dependencies.*` singletons left pointing at deleted tmpdirs across chunk-4 tests (new `conftest.py` with restore+bootstrap fixtures); (2) TOTP singleton surviving across TestClient lifespan cycles (`set_totp_service(None)` on shutdown); (3) semaphore concurrency tests timing out under GIL pressure (300s internal + 360s pytest ceiling); (4) Cohere sleep-patch tests capturing daemon threads (thread-ID filter); (5) temporal metadata caplog leaking daemon warnings (logger namespace filter); (6) MagicMock auto-attributes polluting `indexed_blobs` set (explicit `blob_hash=None`); (7) temporal rampup 100ms threshold failing under load (raised to 2000ms); (8) SCIP definition test hitting 15s global cap (60s override).
+
 ## v10.0.3 — 2026-04-28
 
 ### Fixed (Story #923 AC gap remediation + v10.0.2 regression revert)
