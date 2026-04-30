@@ -9,6 +9,7 @@ final graph edge assembly.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple, Union
 
@@ -27,6 +28,12 @@ from code_indexer.server.services.dep_map_parser_tables import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-path dedup set: once a missing domain file has been warned about, subsequent
+# calls log at DEBUG level only (Bug #960 — suppress repeated missing-file noise).
+# Lock ensures thread-safe access in the multi-threaded FastAPI server.
+_warned_missing_domains: set = set()
+_warned_missing_domains_lock: threading.Lock = threading.Lock()
 
 # Column indices (mirrors dep_map_parser_tables constants; re-declared locally
 # to avoid cross-module constant coupling for these graph-specific usages).
@@ -250,6 +257,31 @@ def parse_domain_file_for_graph(
     try:
         content = md_file.read_text(encoding="utf-8")
         parse_frontmatter_strict(content)
+    except FileNotFoundError as exc:
+        domain_path_str = str(md_file)
+        with _warned_missing_domains_lock:
+            already_warned = domain_path_str in _warned_missing_domains
+            if not already_warned:
+                _warned_missing_domains.add(domain_path_str)
+        if not already_warned:
+            logger.warning(
+                "parse_domain_file_for_graph: missing domain file %s (suppressing future repeats)",
+                domain_path_str,
+            )
+        else:
+            logger.debug(
+                "parse_domain_file_for_graph: still missing %s",
+                domain_path_str,
+            )
+        anomalies.append(
+            AnomalyEntry(
+                type=AnomalyType.MALFORMED_YAML,
+                file=str(md_file),
+                message=str(exc),
+                channel="parser",
+            )
+        )
+        return
     except Exception as exc:
         logger.warning(
             "parse_domain_file_for_graph: failed to read/parse %s",
