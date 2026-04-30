@@ -14,6 +14,44 @@
         window._cidxElevationPending = null;
         window._cidxRedirecting = false;
 
+        // Global fetch() interceptor: transparently intercepts 403 elevation_required on
+        // all fetch() calls, opens the TOTP modal, and retries the original request after
+        // elevation so callers never see the 403. Fixes fetch()-based endpoints that are
+        // not intercepted by htmx:beforeSwap (e.g. change-branch, restart, auto-discovery).
+        (function() {
+            var _origFetch = window.fetch;
+            window._cidxOrigFetch = _origFetch;
+            window.fetch = function() {
+                var args = arguments;
+                return _origFetch.apply(this, args).then(function(response) {
+                    if (response.status !== 403) return response;
+                    return response.clone().json().then(function(body) {
+                        var err = (body && body.detail && body.detail.error) || (body && body.error);
+                        if (err === 'totp_setup_required') {
+                            if (!window._cidxRedirecting) {
+                                window._cidxRedirecting = true;
+                                window.location.href = (body.detail && body.detail.setup_url) || '/admin/mfa/setup';
+                                setTimeout(function() { window._cidxRedirecting = false; }, 3000);
+                            }
+                            return response;
+                        }
+                        if (err === 'elevation_required') {
+                            return new Promise(function(resolve, reject) {
+                                window._cidxElevationPending = {
+                                    callback: function() {
+                                        _origFetch.apply(window, args).then(resolve).catch(reject);
+                                    },
+                                    _fetchReject: reject,
+                                };
+                                _cidxOpenElevationModal();
+                            });
+                        }
+                        return response;
+                    }).catch(function() { return response; });
+                });
+            };
+        })();
+
         document.addEventListener('htmx:beforeSwap', function(evt) {
             var xhr = evt.detail.xhr;
 
@@ -70,10 +108,14 @@
             setTimeout(function() { document.getElementById('elevationTotpCode').focus(); }, 50);
         }
 
-        function _cidxCloseElevationModal() {
+        function _cidxCloseElevationModal(cancelled) {
             var modal = document.getElementById('elevationModal');
             if (modal && modal.open) modal.close();
+            var pending = window._cidxElevationPending;
             window._cidxElevationPending = null;
+            if (cancelled && pending && typeof pending._fetchReject === 'function') {
+                pending._fetchReject(new Error('elevation_cancelled'));
+            }
         }
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -81,7 +123,7 @@
             if (!modal) return;
 
             document.getElementById('elevationCancelBtn').addEventListener('click', function() {
-                _cidxCloseElevationModal();
+                _cidxCloseElevationModal(true);
             });
 
             function _doElevateAjax() {
@@ -107,12 +149,14 @@
                     btn.disabled = false;
                     if (result.data && result.data.success) {
                         var pending = window._cidxElevationPending;
-                        _cidxCloseElevationModal();
+                        _cidxCloseElevationModal(false);
                         if (pending && pending.verb && pending.path) {
                             htmx.ajax(pending.verb.toUpperCase(), pending.path, {
                                 target: pending.target,
                                 values: pending.parameters || {},
                             });
+                        } else if (pending && typeof pending.callback === 'function') {
+                            pending.callback();
                         }
                     } else {
                         var errEl = document.getElementById('elevationError');
