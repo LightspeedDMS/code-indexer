@@ -102,6 +102,8 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
 
             # Gate 2: manager reference (singleton — always non-None after startup)
             esm = elevated_session_manager
+            if esm is None:
+                return _disabled_error("ElevatedSessionManager not initialised.")
 
             # Gate 3: TOTP service availability
             totp = get_totp_service()

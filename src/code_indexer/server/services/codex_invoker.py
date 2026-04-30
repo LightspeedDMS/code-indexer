@@ -110,7 +110,7 @@ class CodexInvoker:
         self._auth_header_provider = auth_header_provider
 
     def invoke(
-        self, flow: str, cwd: str, prompt: str, timeout: int
+        self, flow: str, cwd: str, prompt: str, timeout: int, max_turns: int = 0
     ) -> InvocationResult:
         """
         Invoke Codex CLI and return the parsed result.
@@ -118,11 +118,13 @@ class CodexInvoker:
         Orchestration only: validate → start → communicate → interpret.
 
         Args:
-            flow:    Logical flow name (e.g. "describe", "refine"). Informational;
-                     not passed to the subprocess. Must be a non-empty string.
-            cwd:     Working directory for the subprocess. Must be non-empty.
-            prompt:  Prompt text to pass to codex. Must be non-empty.
-            timeout: Maximum seconds to wait; must be > 0.
+            flow:      Logical flow name (e.g. "describe", "refine"). Informational;
+                       not passed to the subprocess. Must be a non-empty string.
+            cwd:       Working directory for the subprocess. Must be non-empty.
+            prompt:    Prompt text to pass to codex. Must be non-empty.
+            timeout:   Maximum seconds to wait; must be > 0.
+            max_turns: Accepted for protocol compatibility with IntelligenceCliInvoker
+                       but ignored — Codex CLI does not support ``--max-turns``.
         """
         validation_error = self._validate_inputs(flow, cwd, prompt, timeout)
         if validation_error is not None:

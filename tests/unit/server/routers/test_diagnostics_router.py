@@ -11,6 +11,7 @@ Tests cover:
 
 import pytest
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock
 from code_indexer.server.routers.diagnostics import router
@@ -20,12 +21,29 @@ from code_indexer.server.services.diagnostics_service import (
     DiagnosticResult,
 )
 
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, router):
+    """Override all require_elevation deps so tests can call routes without TOTP setup."""
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
+
 
 @pytest.fixture
 def app():
     """Create test FastAPI app with diagnostics router."""
     app = FastAPI()
     app.include_router(router)
+    _bypass_elevation(app, router)
     return app
 
 
@@ -44,6 +62,12 @@ def mock_diagnostics_service():
 
 class TestDiagnosticsPageEndpoint:
     """Test GET /admin/diagnostics endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def mock_csrf_cookie(self):
+        """Patch set_csrf_cookie to avoid calling get_session_manager() in unit tests."""
+        with patch("code_indexer.server.routers.diagnostics.set_csrf_cookie"):
+            yield
 
     def test_diagnostics_page_renders(self, client):
         """Test diagnostics page renders successfully."""

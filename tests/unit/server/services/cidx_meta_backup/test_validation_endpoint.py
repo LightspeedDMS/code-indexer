@@ -7,11 +7,28 @@ from fastapi.responses import HTMLResponse
 from fastapi.testclient import TestClient
 
 
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
 def _build_client(monkeypatch, config_service, ssh_key_manager, bootstrap):
+    from fastapi.routing import APIRoute
+
     from code_indexer.server.web import routes
 
     app = FastAPI()
     app.include_router(routes.web_router, prefix="/admin")
+
+    # Bypass require_elevation() dependencies so tests don't need TOTP setup.
+    for route in routes.web_router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
 
     monkeypatch.setattr(routes, "_require_admin_session", lambda request: object())
     monkeypatch.setattr(

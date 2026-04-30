@@ -32,13 +32,12 @@ class TestLogScannerModelParameter:
 
             scanner._invoke_claude_cli("test prompt")
 
-            # Verify subprocess called with --model opus
+            # Command is wrapped: ['script', '-q', '-c', "timeout N claude --model M ...", '/dev/null']
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]  # Get the command list
-            assert "claude" in call_args
-            assert "--model" in call_args
-            model_index = call_args.index("--model")
-            assert call_args[model_index + 1] == "opus"
+            shell_cmd = call_args[3]  # inner shell command string
+            assert "claude" in shell_cmd
+            assert "--model opus" in shell_cmd
 
     def test_invoke_claude_cli_includes_model_sonnet(self):
         """AC5: _invoke_claude_cli passes --model sonnet when model='sonnet'."""
@@ -58,13 +57,12 @@ class TestLogScannerModelParameter:
 
             scanner._invoke_claude_cli("test prompt")
 
-            # Verify subprocess called with --model sonnet
+            # Command is wrapped: ['script', '-q', '-c', "timeout N claude --model M ...", '/dev/null']
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]  # Get the command list
-            assert "claude" in call_args
-            assert "--model" in call_args
-            model_index = call_args.index("--model")
-            assert call_args[model_index + 1] == "sonnet"
+            shell_cmd = call_args[3]  # inner shell command string
+            assert "claude" in shell_cmd
+            assert "--model sonnet" in shell_cmd
 
     def test_invoke_claude_cli_model_parameter_position(self):
         """AC5: Verify --model parameter appears before prompt input."""
@@ -84,13 +82,15 @@ class TestLogScannerModelParameter:
 
             scanner._invoke_claude_cli("test prompt")
 
-            # Verify command structure: claude --model <value> --json
+            # Command is wrapped: ['script', '-q', '-c', "timeout N claude --model M ...", '/dev/null']
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]
-            assert call_args[0] == "claude"
-            # Model should be early in the command
-            model_index = call_args.index("--model")
-            assert model_index < len(call_args) - 1  # Not at the end
+            assert call_args[0] == "script"  # outer wrapper
+            shell_cmd = call_args[3]  # inner shell command string
+            # Model should appear before the prompt (-p flag)
+            model_pos = shell_cmd.index("--model")
+            prompt_pos = shell_cmd.index(" -p ")
+            assert model_pos < prompt_pos
 
     def test_scanner_initialization_with_model(self):
         """AC5: LogScanner accepts model parameter in __init__."""
@@ -118,8 +118,13 @@ class TestLogScannerModelParameter:
         # Should default to opus
         assert scanner.model == "opus"
 
-    def test_invoke_claude_cli_includes_allowed_tools_bash(self):
-        """Claude CLI must have --allowedTools Bash to query log database via sqlite3."""
+    def test_invoke_claude_cli_includes_dangerously_skip_permissions(self):
+        """Claude CLI must skip permission prompts so Bash (sqlite3) runs unattended.
+
+        The old --allowedTools Bash flag was removed when the scanner was refactored
+        to route through the CliDispatcher. The equivalent grant is now provided via
+        --dangerously-skip-permissions which allows all tools including Bash.
+        """
         scanner = LogScanner(
             db_path="/fake/db.db",
             scan_id="scan-123",
@@ -136,9 +141,8 @@ class TestLogScannerModelParameter:
 
             scanner._invoke_claude_cli("test prompt")
 
-            # Verify subprocess called with --allowedTools Bash
+            # Command is wrapped: ['script', '-q', '-c', "timeout N claude ... --dangerously-skip-permissions", '/dev/null']
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]  # Get the command list
-            assert "--allowedTools" in call_args
-            tools_index = call_args.index("--allowedTools")
-            assert call_args[tools_index + 1] == "Bash"
+            shell_cmd = call_args[3]  # inner shell command string
+            assert "--dangerously-skip-permissions" in shell_cmd

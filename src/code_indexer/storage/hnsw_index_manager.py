@@ -5,11 +5,16 @@ algorithm for approximate nearest neighbor search with better query performance.
 """
 
 import json
+import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Try to import hnswlib, gracefully degrade if not available
 try:
@@ -97,7 +102,12 @@ class HNSWIndexManager:
 
         # Create HNSW index
         index = hnswlib.Index(space=self.space, dim=self.vector_dim)
-        index.init_index(max_elements=num_vectors, M=M, ef_construction=ef_construction)
+        index.init_index(
+            max_elements=num_vectors,
+            M=M,
+            ef_construction=ef_construction,
+            allow_replace_deleted=True,
+        )
 
         # Add vectors to index with labels (use indices as labels)
         # We'll store the ID mapping separately in metadata
@@ -401,7 +411,12 @@ class HNSWIndexManager:
             """Build HNSW index to temp file."""
             # Create HNSW index
             index = hnswlib.Index(space=self.space, dim=self.vector_dim)
-            index.init_index(max_elements=len(vectors), M=16, ef_construction=200)
+            index.init_index(
+                max_elements=len(vectors),
+                M=16,
+                ef_construction=200,
+                allow_replace_deleted=True,
+            )
 
             # Add vectors
             labels = np.arange(len(vectors))
@@ -748,8 +763,20 @@ class HNSWIndexManager:
             # Existing point - reuse label
             label = id_to_label[point_id]
 
-            # Mark old version as deleted (soft delete)
-            index.mark_deleted(label)
+            # Mark old version as deleted (soft delete).
+            # Bug #944: hnswlib raises RuntimeError when label is already deleted
+            # (concurrent double-delete race). Swallow it — the re-add below
+            # proceeds regardless, since the slot is effectively free either way.
+            try:
+                index.mark_deleted(label)
+            except RuntimeError as exc:
+                if "already deleted" not in str(exc):
+                    raise
+                logger.warning(
+                    "Tolerated double-delete of HNSW label %d for point %s (desync self-heal)",
+                    label,
+                    point_id,
+                )
 
             # Add updated version with same label
             # Note: HNSW doesn't support in-place update, so we delete + re-add
@@ -794,7 +821,16 @@ class HNSWIndexManager:
         """
         if point_id in id_to_label:
             label = id_to_label[point_id]
-            index.mark_deleted(label)
+            try:
+                index.mark_deleted(label)
+            except RuntimeError as exc:
+                if "already deleted" not in str(exc):
+                    raise
+                logger.warning(
+                    "Tolerated double-delete of HNSW label %d for point %s (desync self-heal)",
+                    label,
+                    point_id,
+                )
 
             # Clean up mappings to prevent stale metadata (Story #540)
             del id_to_label[point_id]
@@ -823,9 +859,6 @@ class HNSWIndexManager:
             Preserves existing HNSW parameters (M, ef_construction).
         """
         import fcntl
-        import logging
-
-        logger = logging.getLogger(__name__)
 
         # DEBUG: Mark incremental update for manual testing
         current_index_size = index.get_current_count() if index else 0
@@ -887,9 +920,33 @@ class HNSWIndexManager:
                     "last_marked_stale": None,
                 }
 
-                # Save metadata
-                with open(meta_file, "w") as f:
-                    json.dump(metadata, f, indent=2)
+                # Save metadata atomically — temp file + rename prevents corruption on crash
+                tmp_meta_fd, tmp_meta_path = tempfile.mkstemp(
+                    dir=str(collection_path), suffix=".tmp"
+                )
+                fd_owned_by_file_obj = False
+                try:
+                    try:
+                        tmp_f = os.fdopen(tmp_meta_fd, "w")
+                        fd_owned_by_file_obj = (
+                            True  # fdopen took ownership; do not close fd directly
+                        )
+                        with tmp_f:
+                            json.dump(metadata, tmp_f, indent=2)
+                        os.replace(tmp_meta_path, str(meta_file))
+                    finally:
+                        if not fd_owned_by_file_obj:
+                            # fdopen raised before taking ownership — close raw fd explicitly
+                            try:
+                                os.close(tmp_meta_fd)
+                            except OSError:
+                                pass  # Already closed or invalid — discard
+                except Exception:
+                    try:
+                        os.unlink(tmp_meta_path)
+                    except FileNotFoundError:
+                        pass  # Already gone — nothing to clean up
+                    raise
             finally:
                 # Release lock
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)

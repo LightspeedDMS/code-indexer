@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from ..auth import dependencies
 from ..auth.dependencies import get_current_admin_user_hybrid
 from ..auth.user_manager import User
 from ...services.provider_health_monitor import ProviderHealthMonitor
@@ -41,7 +42,10 @@ class ClearSinbinRequest(BaseModel):
     target: Optional[str] = None
 
 
-@router.post("/clear-sinbin")
+@router.post(
+    "/clear-sinbin",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def clear_sinbin(
     body: ClearSinbinRequest,
     current_user: User = Depends(get_current_admin_user_hybrid),
@@ -61,7 +65,10 @@ def clear_sinbin(
     return {"cleared": "all"}
 
 
-@router.post("/reset-state")
+@router.post(
+    "/reset-state",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def reset_health_state(
     current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Dict[str, Any]:

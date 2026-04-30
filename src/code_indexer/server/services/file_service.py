@@ -876,9 +876,8 @@ class FileListingService:
             # Original behavior: Apply line-based limits and token truncation
 
             # Bug #939: When limit=None, use MAX_ALLOWED_LIMIT so that token
-            # truncation (not line truncation) is the authoritative constraint.
-            # This makes ContentLimitsConfig.file_content_max_tokens the cap
-            # for unlimited reads instead of the conservative DEFAULT_MAX_LINES.
+            # truncation is the authoritative constraint (not line truncation).
+            # Story #686 DEFAULT_MAX_LINES applies only to get_file_content (alias-based).
             if limit is None:
                 effective_limit = self.MAX_ALLOWED_LIMIT
             else:

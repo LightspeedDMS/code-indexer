@@ -20,7 +20,32 @@ import re
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Elevation bypass (same pattern as test_repo_category_routes.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, router):
+    """Override all require_elevation deps so tests run without TOTP setup.
+
+    Necessary because the dev/CI database may have elevation_enforcement_enabled=True,
+    causing elevation-gated endpoints to return 403 without an active TOTP window.
+    """
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,10 +269,18 @@ class TestRunTrackedRefinementFailsJobOnException:
 
 @pytest.fixture
 def app():
-    """Create FastAPI app with minimal startup."""
-    from code_indexer.server.app import app as _app
+    """Create FastAPI app with elevation bypassed for dependency-map routes.
 
-    return _app
+    Restores original dependency_overrides after each test to prevent
+    cross-test contamination.
+    """
+    from code_indexer.server.app import app as _app
+    from code_indexer.server.web.dependency_map_routes import dependency_map_router
+
+    original_overrides = dict(_app.dependency_overrides)
+    _bypass_elevation(_app, dependency_map_router)
+    yield _app
+    _app.dependency_overrides = original_overrides
 
 
 @pytest.fixture

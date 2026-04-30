@@ -175,7 +175,7 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
             content_points,
             None,
         )
-        processor.vector_store_client._batch_update_points.return_value = None
+        processor.vector_store_client._batch_update_payload_only.return_value = None
 
         processor.hide_files_not_in_branch_thread_safe(
             branch="feature-branch",
@@ -184,8 +184,8 @@ class TestFTSBranchIsolationNoOpsWhenManagerNone:
             fts_manager=None,
         )
 
-        # _batch_update_points should still be called for semantic hiding
-        processor.vector_store_client._batch_update_points.assert_called()
+        # _batch_update_payload_only should still be called for semantic hiding
+        processor.vector_store_client._batch_update_payload_only.assert_called()
 
 
 class TestFTSBranchIsolationNoOpsWhenNoFilesToHide:

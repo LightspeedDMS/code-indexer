@@ -59,16 +59,18 @@ class IntelligenceCliInvoker(Protocol):
     """
 
     def invoke(
-        self, flow: str, cwd: str, prompt: str, timeout: int
+        self, flow: str, cwd: str, prompt: str, timeout: int, max_turns: int = 0
     ) -> InvocationResult:
         """
         Invoke the CLI with the given prompt.
 
         Args:
-            flow:    Logical flow name, e.g. "describe" or "refine".
-            cwd:     Working directory for the subprocess.
-            prompt:  Full prompt text to pass to the CLI.
-            timeout: Maximum seconds to wait before killing the process.
+            flow:      Logical flow name, e.g. "describe" or "refine".
+            cwd:       Working directory for the subprocess.
+            prompt:    Full prompt text to pass to the CLI.
+            timeout:   Maximum seconds to wait before killing the process.
+            max_turns: When > 0, enables agentic mode with that many turns.
+                       Default 0 = single-shot mode.
 
         Returns:
             InvocationResult with success, output, error, cli_used, was_failover,

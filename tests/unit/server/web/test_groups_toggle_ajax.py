@@ -16,11 +16,28 @@ import pytest
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from code_indexer.server.services.group_access_manager import (
     GroupAccessManager,
 )
+
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, router):
+    """Override all require_elevation deps so tests can call routes without TOTP setup."""
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
 
 
 @pytest.fixture
@@ -62,6 +79,7 @@ def test_client(group_manager):
         with patch("code_indexer.server.web.routes._get_group_manager") as mock_gm:
             mock_gm.return_value = group_manager
 
+            _bypass_elevation(app, web_router)
             yield TestClient(app)
 
 
@@ -509,7 +527,12 @@ class TestCsrfTokenEmbedding:
             mock_gen.return_value = csrf_token
 
             with patch("code_indexer.server.web.routes._get_golden_repo_manager"):
-                response = test_client.get("/admin/groups")
+                with patch("code_indexer.server.web.routes.set_csrf_cookie"):
+                    with patch(
+                        "code_indexer.server.web.routes._get_users_list",
+                        return_value=[],
+                    ):
+                        response = test_client.get("/admin/groups")
 
         assert response.status_code == 200
         html_content = response.text
@@ -528,7 +551,12 @@ class TestCsrfTokenEmbedding:
             mock_gen.return_value = csrf_token
 
             with patch("code_indexer.server.web.routes._get_golden_repo_manager"):
-                response = test_client.get("/admin/groups")
+                with patch("code_indexer.server.web.routes.set_csrf_cookie"):
+                    with patch(
+                        "code_indexer.server.web.routes._get_users_list",
+                        return_value=[],
+                    ):
+                        response = test_client.get("/admin/groups")
 
         assert response.status_code == 200
         html_content = response.text

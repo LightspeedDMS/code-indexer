@@ -16,6 +16,80 @@ from unittest.mock import Mock, patch
 from datetime import datetime
 
 
+_ISSUE_MANAGER_DB_SCHEMA = """
+    CREATE TABLE self_monitoring_issues (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id TEXT NOT NULL,
+        github_issue_number INTEGER,
+        github_issue_url TEXT,
+        classification TEXT NOT NULL,
+        error_codes TEXT,
+        fingerprint TEXT NOT NULL,
+        source_log_ids TEXT NOT NULL,
+        source_files TEXT,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+"""
+
+
+@pytest.fixture
+def temp_db_for_bug949():
+    """Module-level temp database fixture for Bug #949 tests."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    conn = sqlite3.connect(db_path)
+    conn.execute(_ISSUE_MANAGER_DB_SCHEMA)
+    conn.commit()
+    conn.close()
+    yield db_path
+    Path(db_path).unlink(missing_ok=True)
+
+
+@pytest.fixture
+def issue_manager_for_bug949(temp_db_for_bug949):
+    """Module-level IssueManager fixture for Bug #949 tests."""
+    from code_indexer.server.self_monitoring.issue_manager import IssueManager
+
+    return IssueManager(
+        db_path=temp_db_for_bug949,
+        scan_id="scan-949",
+        github_repo="owner/repo",
+        github_token="FAKE_GITHUB_TOKEN",
+    )
+
+
+def _make_http_status_error_response(status_code: int, body_text):
+    """Build a Mock httpx response that raises HTTPStatusError on raise_for_status."""
+    import httpx
+
+    mock_response = Mock()
+    mock_response.status_code = status_code
+    mock_response.text = body_text
+    mock_response.headers = {}
+
+    def _raise():
+        raise httpx.HTTPStatusError(
+            f"HTTP {status_code}",
+            request=Mock(),
+            response=mock_response,
+        )
+
+    mock_response.raise_for_status = _raise
+    return mock_response
+
+
+def _invoke_create_issue_with_mock_response(manager, mock_response):
+    """Patch httpx.post, call _create_github_issue_via_api, return the raised RuntimeError."""
+    with patch(
+        "code_indexer.server.self_monitoring.issue_manager.httpx.post"
+    ) as mock_post:
+        mock_post.return_value = mock_response
+        with pytest.raises(RuntimeError) as exc_info:
+            manager._create_github_issue_via_api(title="[BUG] Test", body="body")
+    return exc_info.value
+
+
 class TestIssueManager:
     """Test suite for IssueManager issue creation and metadata storage."""
 
@@ -620,3 +694,37 @@ class TestIssueManager:
         assert server_ip_count == 1, (
             f"Expected 'Server IP:' once, found {server_ip_count} times"
         )
+
+
+class TestBug949IssueManagerHttpStatusErrorBody:
+    """Bug #949: GitHub API errors must include response body in RuntimeError."""
+
+    def test_http_status_error_includes_body_in_runtime_error(
+        self, issue_manager_for_bug949
+    ):
+        """AC1: RuntimeError must contain the GitHub response body text."""
+        err = _invoke_create_issue_with_mock_response(
+            issue_manager_for_bug949,
+            _make_http_status_error_response(422, '{"message":"Bad credentials"}'),
+        )
+        assert "Bad credentials" in str(err)
+
+    def test_http_status_error_body_truncated_at_500_chars(
+        self, issue_manager_for_bug949
+    ):
+        """AC3: Response body included in RuntimeError must be truncated to 500 characters."""
+        err = _invoke_create_issue_with_mock_response(
+            issue_manager_for_bug949,
+            _make_http_status_error_response(500, "x" * 1000),
+        )
+        error_message = str(err)
+        assert "x" * 500 in error_message
+        assert "x" * 501 not in error_message
+
+    def test_http_status_error_handles_none_body(self, issue_manager_for_bug949):
+        """AC4: When response.text is None, must raise RuntimeError (not TypeError)."""
+        err = _invoke_create_issue_with_mock_response(
+            issue_manager_for_bug949,
+            _make_http_status_error_response(403, None),
+        )
+        assert "403" in str(err)
