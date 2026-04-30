@@ -253,6 +253,179 @@ class TestRunWithPopenProgress:
         )
 
 
+class TestSigtermErrorDetails:
+    """Tests for Bug #934: SIGTERM (returncode -15) must always appear in error_details."""
+
+    def test_sigterm_exit_error_details_contains_signal_info(self):
+        """
+        When subprocess returncode is -15 (SIGTERM) and stderr is empty but stdout
+        has content (e.g. startup banner), the raised IndexingSubprocessError must
+        contain signal-identifying text so the refresh_scheduler SIGTERM matcher works.
+        The startup banner text must NOT be the only content.
+        """
+        import os
+        import signal
+        import sys
+
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
+        from code_indexer.services.progress_subprocess_runner import (
+            IndexingSubprocessError,
+            run_with_popen_progress,
+        )
+
+        allocator = ProgressPhaseAllocator()
+        allocator.calculate_weights(
+            index_types=["semantic"],
+            file_count=10,
+            commit_count=0,
+        )
+
+        # Script prints banner to stdout (like cidx startup), then kills itself with SIGTERM.
+        # stderr stays empty. Simulates cidx being SIGTERMed while it just printed its banner.
+        script = (
+            "import os, signal, sys\n"
+            "sys.stdout.write('cidx startup banner line 1\\n')\n"
+            "sys.stdout.write('cidx startup banner line 2\\n')\n"
+            "sys.stdout.flush()\n"
+            "os.kill(os.getpid(), signal.SIGTERM)\n"
+        )
+        command = [sys.executable, "-c", script]
+        all_stdout: list = []
+        all_stderr: list = []
+
+        with pytest.raises(IndexingSubprocessError) as exc_info:
+            run_with_popen_progress(
+                command=command,
+                phase_name="semantic",
+                allocator=allocator,
+                progress_callback=None,
+                all_stdout=all_stdout,
+                all_stderr=all_stderr,
+                cwd=None,
+            )
+
+        error_msg = str(exc_info.value)
+        # Bug #934: signal info must be present — "Exit code -15" is what refresh_scheduler matches
+        assert "Exit code -15" in error_msg, (
+            f"Expected 'Exit code -15' in error message for SIGTERM kill, "
+            f"but got: {error_msg!r}. The startup banner must not be the only content."
+        )
+
+    def test_negative_returncode_signal_info_always_present(self):
+        """
+        For any negative returncode (not just -15), the error_details must
+        contain 'Exit code <N>' so that callers can reliably match on returncode.
+        When stderr is empty and stdout has content, the signal info still takes precedence.
+        """
+        import sys
+
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
+        from code_indexer.services.progress_subprocess_runner import (
+            IndexingSubprocessError,
+            run_with_popen_progress,
+        )
+
+        allocator = ProgressPhaseAllocator()
+        allocator.calculate_weights(
+            index_types=["semantic"],
+            file_count=10,
+            commit_count=0,
+        )
+
+        # Script prints stdout banner, then exits with SIGKILL equivalent (-9) by using
+        # os.kill with SIGKILL.
+        import signal
+
+        script = (
+            "import os, signal, sys\n"
+            "sys.stdout.write('some startup output\\n')\n"
+            "sys.stdout.flush()\n"
+            "os.kill(os.getpid(), signal.SIGKILL)\n"
+        )
+        command = [sys.executable, "-c", script]
+        all_stdout: list = []
+        all_stderr: list = []
+
+        with pytest.raises(IndexingSubprocessError) as exc_info:
+            run_with_popen_progress(
+                command=command,
+                phase_name="semantic",
+                allocator=allocator,
+                progress_callback=None,
+                all_stdout=all_stdout,
+                all_stderr=all_stderr,
+                cwd=None,
+            )
+
+        error_msg = str(exc_info.value)
+        # For SIGKILL (-9), error must contain "Exit code -9"
+        assert "Exit code -9" in error_msg, (
+            f"Expected 'Exit code -9' in error for SIGKILL, got: {error_msg!r}"
+        )
+
+    def test_refresh_scheduler_sigterm_detection_matches_new_format(self):
+        """
+        The refresh_scheduler.py SIGTERM detection at line 1683 checks for
+        'Exit code -15' in the error message. After Bug #934 fix, the
+        IndexingSubprocessError raised for returncode=-15 must contain that
+        substring so the routing works correctly.
+        This test verifies the produced error message is compatible with the
+        refresh_scheduler matcher without importing refresh_scheduler itself.
+        """
+        import signal
+        import sys
+
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
+        from code_indexer.services.progress_subprocess_runner import (
+            IndexingSubprocessError,
+            run_with_popen_progress,
+        )
+
+        allocator = ProgressPhaseAllocator()
+        allocator.calculate_weights(
+            index_types=["semantic"],
+            file_count=10,
+            commit_count=0,
+        )
+
+        # Simulate cidx being SIGTERMed with non-empty stdout (startup banner) and empty stderr
+        script = (
+            "import os, signal, sys\n"
+            "sys.stdout.write('Code Indexer v9.x.y - startup banner\\n')\n"
+            "sys.stdout.flush()\n"
+            "os.kill(os.getpid(), signal.SIGTERM)\n"
+        )
+        command = [sys.executable, "-c", script]
+        all_stdout: list = []
+        all_stderr: list = []
+
+        error_msg = ""
+        with pytest.raises(IndexingSubprocessError) as exc_info:
+            run_with_popen_progress(
+                command=command,
+                phase_name="semantic",
+                allocator=allocator,
+                progress_callback=None,
+                all_stdout=all_stdout,
+                all_stderr=all_stderr,
+                cwd=None,
+            )
+        error_msg = str(exc_info.value)
+
+        # This is exactly what refresh_scheduler.py:1683 checks:
+        sigterm_detected = "Exit code -15" in error_msg or "returncode=-15" in error_msg
+        assert sigterm_detected, (
+            f"refresh_scheduler SIGTERM detection would FAIL for error: {error_msg!r}. "
+            f"SIGTERM jobs would be mis-routed to ERROR path and counted as failed_jobs."
+        )
+
+
 class TestGatherRepoMetrics:
     """Tests for gather_repo_metrics shared utility."""
 

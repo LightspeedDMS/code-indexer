@@ -1005,3 +1005,80 @@ class TestOrphanedScanCleanup:
         assert call_order.index("cleanup") < call_order.index("submit"), (
             f"Expected cleanup before submit, got order: {call_order}"
         )
+
+
+class TestTokenRotation:
+    """Test suite for Bug #957 - token_fetcher refreshes token on each scheduled scan."""
+
+    @pytest.fixture()
+    def tmp_db(self, tmp_path):
+        """Provide a guaranteed-cleanup temp SQLite DB path via tmp_path."""
+        import sqlite3
+
+        db_file = tmp_path / "test_monitor.db"
+        conn = sqlite3.connect(str(db_file))
+        conn.close()
+        return str(db_file)
+
+    def _run_scan_and_capture_tokens(self, service, scan_count=1):
+        """Run _execute_scan() scan_count times; return list of github_token values passed to LogScanner."""
+        from unittest.mock import patch, MagicMock
+
+        tokens_passed = []
+
+        def capture_scanner(**kwargs):
+            tokens_passed.append(kwargs.get("github_token"))
+            mock_inst = MagicMock()
+            mock_inst.execute_scan.return_value = {"status": "SUCCESS"}
+            return mock_inst
+
+        with patch(
+            "code_indexer.server.self_monitoring.scanner.LogScanner",
+            side_effect=capture_scanner,
+        ):
+            for _ in range(scan_count):
+                service._execute_scan()
+
+        return tokens_passed
+
+    def _make_service(self, tmp_db, github_token=None, token_fetcher=None):
+        """Construct SelfMonitoringService wired to tmp_db with configurable token params."""
+        from code_indexer.server.self_monitoring.service import SelfMonitoringService
+        from unittest.mock import MagicMock
+
+        return SelfMonitoringService(
+            enabled=True,
+            cadence_minutes=60,
+            job_manager=MagicMock(),
+            db_path=tmp_db,
+            log_db_path=tmp_db,
+            github_repo="owner/repo",
+            github_token=github_token,
+            token_fetcher=token_fetcher,
+        )
+
+    def test_scheduled_scan_uses_fresh_token_after_rotation(self, tmp_db):
+        """
+        Bug #957: Second scan must pick up the rotated token, not the boot-time token.
+
+        token_fetcher returns 'old_token' on first call and 'new_token' on second,
+        simulating a token rotation between two scheduled scan ticks.
+        """
+        tokens = ["old_token", "new_token"]
+        call_index = {"n": 0}
+
+        def rotating_fetcher():
+            idx = call_index["n"]
+            call_index["n"] += 1
+            return tokens[min(idx, len(tokens) - 1)]
+
+        service = self._make_service(tmp_db, github_token=None, token_fetcher=rotating_fetcher)
+        captured = self._run_scan_and_capture_tokens(service, scan_count=2)
+
+        assert len(captured) == 2
+        assert captured[0] == "old_token", (
+            f"First scan should use 'old_token', got '{captured[0]}'"
+        )
+        assert captured[1] == "new_token", (
+            f"Second scan should use 'new_token' after rotation, got '{captured[1]}'"
+        )
