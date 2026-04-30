@@ -62,6 +62,10 @@ class HNSWIndexManager:
         self.vector_dim = vector_dim
         self.space = space
 
+    def _save_hnsw_index(self, index: Any, path: str) -> None:
+        # Any: hnswlib.Index is a C extension with no Python type stubs
+        index.save_index(path)
+
     def build_index(
         self,
         collection_path: Path,
@@ -130,9 +134,30 @@ class HNSWIndexManager:
         if progress_callback:
             progress_callback(0, 0, Path(""), info="🔧 HNSW index built ✓")
 
-        # Save index to disk
+        # Save index to disk atomically — temp file + rename prevents corruption on crash
         index_file = collection_path / self.INDEX_FILENAME
-        index.save_index(str(index_file))
+        tmp_hnsw_fd, tmp_hnsw_path = tempfile.mkstemp(
+            dir=str(collection_path),
+            prefix=".tmp_hnsw_",
+            suffix=".tmp",
+        )
+        os.close(tmp_hnsw_fd)  # hnswlib opens by path, not fd
+        try:
+            index.save_index(tmp_hnsw_path)
+            os.replace(tmp_hnsw_path, str(index_file))
+        except Exception:
+            try:
+                os.unlink(tmp_hnsw_path)
+            except OSError as cleanup_err:
+                # Best-effort cleanup — temp file may already be gone or unlink may
+                # fail on a read-only filesystem. Log and discard so the original
+                # exception propagates unmodified.
+                logger.warning(
+                    "Failed to clean up temp HNSW file %s after write error: %s",
+                    tmp_hnsw_path,
+                    cleanup_err,
+                )
+            raise
 
         # Update metadata
         self._update_metadata(
@@ -526,9 +551,35 @@ class HNSWIndexManager:
                     timezone.utc
                 ).isoformat()
 
-                # Save metadata
-                with open(meta_file, "w") as f:
-                    json.dump(metadata, f, indent=2)
+                # Save metadata atomically — temp file + rename prevents corruption on crash
+                tmp_fd, tmp_path = tempfile.mkstemp(
+                    dir=str(collection_path), suffix=".tmp"
+                )
+                fd_owned = False
+                try:
+                    try:
+                        tmp_f = os.fdopen(tmp_fd, "w")
+                        fd_owned = True
+                        with tmp_f:
+                            json.dump(metadata, tmp_f, indent=2)
+                        os.replace(tmp_path, str(meta_file))
+                    finally:
+                        if not fd_owned:
+                            try:
+                                os.close(tmp_fd)
+                            except OSError:
+                                pass  # Already closed or invalid — discard
+                except Exception:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError as cleanup_err:
+                        # Best-effort cleanup — log and discard so original exception propagates
+                        logger.warning(
+                            "Failed to clean up temp metadata file %s: %s",
+                            tmp_path,
+                            cleanup_err,
+                        )
+                    raise
             finally:
                 # Release lock
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
@@ -684,9 +735,35 @@ class HNSWIndexManager:
 
                 metadata["hnsw_index"] = hnsw_meta
 
-                # Save metadata
-                with open(meta_file, "w") as f:
-                    json.dump(metadata, f, indent=2)
+                # Save metadata atomically — temp file + rename prevents corruption on crash
+                tmp_fd, tmp_path = tempfile.mkstemp(
+                    dir=str(collection_path), suffix=".tmp"
+                )
+                fd_owned = False
+                try:
+                    try:
+                        tmp_f = os.fdopen(tmp_fd, "w")
+                        fd_owned = True
+                        with tmp_f:
+                            json.dump(metadata, tmp_f, indent=2)
+                        os.replace(tmp_path, str(meta_file))
+                    finally:
+                        if not fd_owned:
+                            try:
+                                os.close(tmp_fd)
+                            except OSError:
+                                pass  # Already closed or invalid — discard
+                except Exception:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError as cleanup_err:
+                        # Best-effort cleanup — log and discard so original exception propagates
+                        logger.warning(
+                            "Failed to clean up temp metadata file %s: %s",
+                            tmp_path,
+                            cleanup_err,
+                        )
+                    raise
             finally:
                 # Release lock
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
@@ -896,9 +973,30 @@ class HNSWIndexManager:
             f"⚡ INCREMENTAL HNSW UPDATE: Adding/updating {num_new_vectors} vectors (total index size: {current_index_size})"
         )
 
-        # Save index to disk
+        # Save index to disk atomically — temp file + rename prevents corruption on crash
         index_file = collection_path / self.INDEX_FILENAME
-        index.save_index(str(index_file))
+        tmp_hnsw_fd, tmp_hnsw_path = tempfile.mkstemp(
+            dir=str(collection_path),
+            prefix=".tmp_hnsw_",
+            suffix=".tmp",
+        )
+        os.close(tmp_hnsw_fd)  # hnswlib opens by path, not fd
+        try:
+            self._save_hnsw_index(index, tmp_hnsw_path)
+            os.replace(tmp_hnsw_path, str(index_file))
+        except Exception:
+            try:
+                os.unlink(tmp_hnsw_path)
+            except OSError as cleanup_err:
+                # Best-effort cleanup — temp file may already be gone or unlink may
+                # fail on a read-only filesystem.  Log and discard so the original
+                # exception propagates unmodified.
+                logger.warning(
+                    "Failed to clean up temp HNSW file %s after write error: %s",
+                    tmp_hnsw_path,
+                    cleanup_err,
+                )
+            raise
 
         # Update metadata with new mappings
         meta_file = collection_path / "collection_meta.json"
