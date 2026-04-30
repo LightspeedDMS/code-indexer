@@ -105,6 +105,8 @@ class ProviderHealthMonitor:
         self._sinbin_failure_deque: Dict[
             str, deque
         ] = {}  # provider -> recent failure timestamps
+        # Bug #959: transition-gate health status logging to suppress repeated spam
+        self._last_logged_status: Dict[str, str] = {}
         # Story #691: optional file-backed persistence of sin-bin state
         self._persistence_path: Optional[Path] = persistence_path
         if persistence_path is not None:
@@ -592,12 +594,12 @@ class ProviderHealthMonitor:
                 if provider not in self._metrics:
                     return {provider: self._empty_status(provider)}
                 self._prune_old_metrics(provider)
-                return {provider: self._compute_status(provider)}
+                return {provider: self._compute_status(provider, _log_transitions=True)}
 
             result = {}
             for pname in list(self._metrics.keys()):
                 self._prune_old_metrics(pname)
-                result[pname] = self._compute_status(pname)
+                result[pname] = self._compute_status(pname, _log_transitions=True)
             return result
 
     def get_best_provider(self, providers: List[str]) -> Optional[str]:
@@ -622,8 +624,17 @@ class ProviderHealthMonitor:
             while metrics and metrics[0].timestamp < cutoff:
                 metrics.popleft()
 
-    def _compute_status(self, provider: str) -> ProviderHealthStatus:
-        """Compute health status from current metrics. Must hold _data_lock."""
+    def _compute_status(
+        self, provider: str, _log_transitions: bool = False
+    ) -> ProviderHealthStatus:
+        """Compute health status from current metrics. Must hold _data_lock.
+
+        _log_transitions: when True, emit transition-gate log messages (WARNING
+        on status entry, DEBUG on repeat, INFO on healthy recovery).  Callers
+        that invoke _compute_status purely for internal state tracking (e.g.
+        record_call) pass False (the default) so they do not consume the
+        transition before get_health() reports it to the caller.
+        """
         metrics = self._metrics.get(provider)
         if not metrics:
             return self._empty_status(provider)
@@ -662,15 +673,41 @@ class ProviderHealthMonitor:
         else:
             status = "healthy"
 
-        if status in ("degraded", "down"):
-            logger.warning(
-                "Provider %s health: %s (error_rate=%.2f, p95=%.0fms, availability=%.2f)",
-                provider,
-                status,
-                error_rate,
-                p95,
-                availability,
-            )
+        # Bug #959: transition-gate logging — warn once on status entry, debug on repeat.
+        # Only fires when _log_transitions=True so record_call's internal call does not
+        # consume the transition before get_health() can report it.
+        if _log_transitions:
+            _prev_logged = self._last_logged_status.get(provider, "")
+            if status in ("degraded", "down"):
+                if status != _prev_logged:
+                    logger.warning(
+                        "Provider %s health: %s (error_rate=%.2f, p95=%.0fms, availability=%.2f)",
+                        provider,
+                        status,
+                        error_rate,
+                        p95,
+                        availability,
+                    )
+                    self._last_logged_status[provider] = status
+                else:
+                    logger.debug(
+                        "Provider %s health still %s (error_rate=%.2f, p95=%.0fms, availability=%.2f)",
+                        provider,
+                        status,
+                        error_rate,
+                        p95,
+                        availability,
+                    )
+            elif status == "healthy" and _prev_logged in ("degraded", "down"):
+                logger.info(
+                    "Provider %s health recovered to %s (error_rate=%.2f, p95=%.0fms, availability=%.2f)",
+                    provider,
+                    status,
+                    error_rate,
+                    p95,
+                    availability,
+                )
+                self._last_logged_status.pop(provider, None)
 
         # Bug #678: check sin-bin state without re-acquiring _data_lock (already held)
         is_sb = time.monotonic() < self._sinbin_until.get(provider, _SINBIN_NOT_ACTIVE)
