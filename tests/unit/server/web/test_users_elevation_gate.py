@@ -7,6 +7,8 @@ Tests:
   GET /admin/users               - shell page returns 200 without elevation
 """
 
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,19 +65,39 @@ def mock_session():
 
 
 @pytest.fixture
-def app():
-    """Real app with overrides restored after each test."""
-    from code_indexer.server.app import app as _app
+def tmpdir_path():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)
 
-    original_overrides = dict(_app.dependency_overrides)
-    yield _app
-    _app.dependency_overrides = original_overrides
+
+@pytest.fixture
+def app(tmpdir_path):
+    """Isolated app instance with a fresh temp DB — avoids locking the real DB.
+
+    Imports are placed INSIDE the patch.dict block so that if code_indexer.server.app
+    is first imported here, the module-level `app = create_app()` fires with the
+    tmpdir env var active (no existing locked DB → fresh files created → no error).
+    If already imported (cached from another test), the import is a no-op.
+    """
+    with patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": str(tmpdir_path)}):
+        from code_indexer.server.app import create_app
+        from code_indexer.server.services.config_service import reset_config_service
+        from code_indexer.server.storage.database_manager import DatabaseSchema
+
+        DatabaseSchema(str(tmpdir_path / "test.db")).initialize_database()
+        reset_config_service()
+        _app = create_app()
+        original_overrides = dict(_app.dependency_overrides)
+        yield _app
+        _app.dependency_overrides = original_overrides
+        reset_config_service()
 
 
 @pytest.fixture
 def client(app):
-    """TestClient bound to the real app."""
-    return TestClient(app, raise_server_exceptions=False)
+    """TestClient bound to the isolated app."""
+    with TestClient(app, follow_redirects=False) as test_client:
+        yield test_client
 
 
 class TestUsersListPartialElevationGate:
