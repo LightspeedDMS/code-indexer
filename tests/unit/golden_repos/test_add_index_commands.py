@@ -571,6 +571,149 @@ class TestTemporalIndexOptionsModel:
 
 
 # ---------------------------------------------------------------------------
+# Bug #945: Temporal add-index must not use --clear when vector files exist
+# ---------------------------------------------------------------------------
+
+
+class TestTemporalVectorExistenceCheck:
+    """
+    Bug #945: --clear flag destroys expensive vector_*.json files.
+
+    When vector_*.json files already exist in any temporal collection directory
+    under <repo_path>/.code-indexer/index/, the add-index temporal command must
+    omit --clear so the HNSW index can be rebuilt from existing vectors at zero
+    embedding API cost.
+
+    When no vector_*.json files exist (fresh index), --clear is kept so the
+    intent is explicit and the directory is cleaned before indexing starts.
+    """
+
+    def _capture_temporal_commands(
+        self,
+        registered_manager,
+        repo_path,
+        temporal_options=None,
+    ):
+        """Call add_index_to_golden_repo with temporal index_type and capture commands."""
+        registered_manager.golden_repos["test-repo"].temporal_options = temporal_options
+        captured_cmds = []
+
+        def fake_submit_job(operation_type, func, **kwargs):
+            collected = []
+
+            def recording_run(cmd, **kw):
+                collected.append(list(cmd))
+                r = MagicMock()
+                r.returncode = 0
+                r.stdout = "ok"
+                r.stderr = ""
+                return r
+
+            with (
+                patch("subprocess.run", side_effect=recording_run),
+                patch("subprocess.Popen", side_effect=_make_success_popen(collected)),
+                patch.object(
+                    registered_manager,
+                    "get_actual_repo_path",
+                    return_value=str(repo_path),
+                ),
+            ):
+                func()
+            captured_cmds.extend(collected)
+            return "fake-job-id"
+
+        with patch.object(
+            registered_manager.background_job_manager,
+            "submit_job",
+            side_effect=fake_submit_job,
+        ):
+            registered_manager.add_index_to_golden_repo(
+                alias="test-repo",
+                index_type="temporal",
+            )
+
+        return [c for c in captured_cmds if c[:2] == ["cidx", "index"]]
+
+    def test_temporal_omits_clear_when_vectors_exist(
+        self, registered_manager, repo_path
+    ):
+        """
+        Bug #945: when vector_*.json files already exist in the temporal collection
+        directory, --clear must NOT appear in the cidx index command.
+
+        Vectors are expensive (embedding API calls). The HNSW index is cheap to
+        rebuild from them. Omitting --clear triggers rebuild_from_vectors path.
+        """
+        # Create a temporal collection directory with a vector file
+        temporal_dir = (
+            repo_path / ".code-indexer" / "index" / "code-indexer-temporal"
+        )
+        temporal_dir.mkdir(parents=True)
+        (temporal_dir / "vector_abc123.json").write_text('{"id": "test"}')
+
+        cmds = self._capture_temporal_commands(registered_manager, repo_path)
+
+        assert cmds, "No 'cidx index' command issued for temporal index type."
+        temporal_cmd = cmds[0]
+        assert "--clear" not in temporal_cmd, (
+            f"Bug #945: when vector files exist, '--clear' must be omitted to "
+            f"preserve expensive embedding results. Got command: {temporal_cmd}"
+        )
+        assert "--index-commits" in temporal_cmd, (
+            f"--index-commits must still be present. Got: {temporal_cmd}"
+        )
+
+    def test_temporal_includes_clear_when_no_vectors_exist(
+        self, registered_manager, repo_path
+    ):
+        """
+        Bug #945: when NO vector_*.json files exist (fresh index), --clear must
+        still be included in the cidx index command.
+
+        For a fresh temporal index, --clear is harmless and keeps intent explicit.
+        """
+        # Do NOT create any vector files — fresh index scenario
+        # The .code-indexer/index directory may not even exist
+        cmds = self._capture_temporal_commands(registered_manager, repo_path)
+
+        assert cmds, "No 'cidx index' command issued for temporal index type."
+        temporal_cmd = cmds[0]
+        assert "--clear" in temporal_cmd, (
+            f"Bug #945: when no vector files exist, '--clear' must be present "
+            f"for a fresh temporal index. Got command: {temporal_cmd}"
+        )
+        assert "--index-commits" in temporal_cmd, (
+            f"--index-commits must be present. Got: {temporal_cmd}"
+        )
+
+    def test_temporal_omits_clear_with_provider_aware_collection(
+        self, registered_manager, repo_path
+    ):
+        """
+        Bug #945: vector existence check works for provider-aware collection names
+        (code-indexer-temporal-voyage_code_3) as well as the legacy name.
+        """
+        # Create a provider-aware temporal collection directory with a vector file
+        temporal_dir = (
+            repo_path
+            / ".code-indexer"
+            / "index"
+            / "code-indexer-temporal-voyage_code_3"
+        )
+        temporal_dir.mkdir(parents=True)
+        (temporal_dir / "vector_def456.json").write_text('{"id": "test2"}')
+
+        cmds = self._capture_temporal_commands(registered_manager, repo_path)
+
+        assert cmds, "No 'cidx index' command issued for temporal index type."
+        temporal_cmd = cmds[0]
+        assert "--clear" not in temporal_cmd, (
+            f"Bug #945: provider-aware collection with vector files must omit "
+            f"'--clear'. Got command: {temporal_cmd}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Story #478: SQLite persistence of temporal_options per golden repo
 # ---------------------------------------------------------------------------
 
