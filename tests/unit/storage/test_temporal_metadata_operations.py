@@ -207,9 +207,15 @@ class TestTemporalMetadataOperations:
             with caplog.at_level(logging.WARNING):
                 metadata_store.save_metadata(point_id, payload)
 
-            # Bug #648/#7: no WARNING must be emitted for commit_message entries
+            # Bug #648/#7: no WARNING must be emitted for commit_message entries.
+            # Filter to code_indexer.storage logger namespace (where
+            # TemporalMetadataStore lives) so leaked daemon threads (e.g.
+            # provider_health_monitor) don't fire false positives.
             warning_records = [
-                r for r in caplog.records if r.levelno >= logging.WARNING
+                r
+                for r in caplog.records
+                if r.levelno >= logging.WARNING
+                and r.name.startswith("code_indexer.storage")
             ]
             assert not warning_records, (
                 f"Expected no warnings for commit_message payload, got: "

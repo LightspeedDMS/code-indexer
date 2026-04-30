@@ -16,6 +16,10 @@ import pytest
 
 from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
 
+# The subprocess command has the shape: ['script', '-q', '-c', <shell_str>, '/dev/null']
+# Index 3 is the embedded shell command string containing the actual claude invocation.
+_SCRIPT_SHELL_CMD_IDX = 3
+
 
 class TestClaudeMdGeneration:
     """Test CLAUDE.md orientation file generation (AC2)."""
@@ -67,7 +71,7 @@ class TestClaudeMdGeneration:
 class TestPass1Synthesis:
     """Test Pass 1: Domain synthesis (AC1)."""
 
-    @patch("subprocess.run")
+    @patch("code_indexer.server.services.claude_invoker.subprocess.run")
     def test_run_pass_1_invokes_claude_cli(self, mock_subprocess, tmp_path):
         """Test that run_pass_1_synthesis invokes Claude CLI with correct parameters."""
         # Mock subprocess response
@@ -121,16 +125,20 @@ class TestPass1Synthesis:
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
 
-        # Check command structure (last element is the prompt)
-        # Pass 1 uses allowed_tools=None (no --allowedTools flag - built-in tools available)
+        # Check command structure.
+        # Pass 1 routes through CliDispatcher -> ClaudeInvoker which builds:
+        #   ['script', '-q', '-c', 'timeout <N> claude --model <m> -p <prompt> ...', '/dev/null']
+        # so 'claude' and the prompt appear inside cmd[3] (the shell command string).
         cmd = call_args[0][0]
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
-        assert "--model" in cmd
-        assert "--max-turns" in cmd
-        # Prompt is passed via stdin (input= kwarg), not as -p CLI arg (avoids E2BIG with large prompts)
-        assert "-p" not in cmd
-        assert "Identify domain clusters" in call_args[1]["input"]  # Prompt via stdin
+        assert any("claude" in arg for arg in cmd), (
+            f"Expected 'claude' somewhere in cmd: {cmd}"
+        )
+        assert any("--print" in arg for arg in cmd)
+        assert any("--model" in arg for arg in cmd)
+        # Prompt is embedded in cmd[3] (the -c argument to script) via -p flag.
+        # ClaudeInvoker does not add --max-turns; it uses a soft inner timeout instead.
+        assert any("-p" in arg for arg in cmd)
+        assert "Identify domain clusters" in cmd[3]
         assert call_args[1]["cwd"] == str(tmp_path)
         assert (
             call_args[1]["timeout"] == 600
@@ -377,9 +385,13 @@ class TestPass3Index:
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
 
-        assert call_args[0][0][0] == "claude"
-        assert "--max-turns" in call_args[0][0]
-        assert "30" in call_args[0][0]
+        cmd = call_args[0][
+            0
+        ]  # subprocess command list: ['script', '-q', '-c', <shell_str>, '/dev/null']
+        assert cmd[0] == "script"
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "--max-turns" in shell_cmd
+        assert "30" in shell_cmd
         assert call_args[1]["timeout"] == 300  # half of pass_timeout
 
     def test_run_pass_3_writes_index_with_frontmatter(self, tmp_path):
@@ -687,17 +699,24 @@ class TestPass1PromptGuardrails:
         # Verify prompt contains critical guardrails
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]  # Prompt passed via stdin
+        cmd = call_args[0][
+            0
+        ]  # subprocess command list: ['script', '-q', '-c', <shell_str>, '/dev/null']
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
 
         # Verify COMPLETENESS MANDATE section instructs internal verification
-        assert "Verify INTERNALLY that total repos across all domains equals" in prompt
-        assert "Do NOT output the verification" in prompt
+        assert (
+            "Verify INTERNALLY that total repos across all domains equals" in shell_cmd
+        )
+        assert "Do NOT output the verification" in shell_cmd
 
         # Verify file-based output instructions (Story #349 — replaces old Output Format section)
-        assert "You MUST write your output as a JSON file" in prompt
+        assert "You MUST write your output as a JSON file" in shell_cmd
         # Softened: now allows stdout fallback when permissions block file writing
-        assert "PREFERRED: Write to the file above" in prompt or "FALLBACK" in prompt
-        assert "python3 -m json.tool" in prompt
+        assert (
+            "PREFERRED: Write to the file above" in shell_cmd or "FALLBACK" in shell_cmd
+        )
+        assert "python3 -m json.tool" in shell_cmd
 
 
 class TestPass1JsonParseFailure:
@@ -785,21 +804,25 @@ class TestPass1JsonParseFailure:
         # Verify subprocess was called twice (agentic + agentic retry)
         assert mock_subprocess.call_count == 2
 
-        # Verify first call used max_turns=50 (agentic)
+        # Verify first call used max_turns=50 (agentic) — flags in embedded shell string
         first_call_args = mock_subprocess.call_args_list[0]
-        first_cmd = first_call_args[0][0]
-        assert "--max-turns" in first_cmd
-        first_turns_idx = first_cmd.index("--max-turns")
-        assert first_cmd[first_turns_idx + 1] == "50"
+        first_cmd = first_call_args.args[
+            0
+        ]  # positional arg 0 = the subprocess command list
+        first_shell_cmd = first_cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "--max-turns" in first_shell_cmd
+        assert "--max-turns 50" in first_shell_cmd
 
         # Verify second call also uses agentic mode (Story #349: no more single-shot retry)
         second_call_args = mock_subprocess.call_args_list[1]
-        second_cmd = second_call_args[0][0]
-        assert "--max-turns" in second_cmd
+        second_cmd = second_call_args.args[
+            0
+        ]  # positional arg 0 = the subprocess command list
+        second_shell_cmd = second_cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "--max-turns" in second_shell_cmd
 
-        # Verify retry prompt contains file-write reminder
-        second_prompt = second_call_args[1]["input"]
-        assert "CRITICAL: You MUST write your output to the file" in second_prompt
+        # Verify retry prompt contains file-write reminder — embedded in cmd[3]
+        assert "CRITICAL: You MUST write your output to the file" in second_shell_cmd
 
         # Verify result is from successful retry
         assert len(result) == 1
@@ -1117,14 +1140,17 @@ class TestSingleShotVsAgenticMode:
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
 
-        # Verify command structure: claude --print --model opus
-        # WITHOUT --max-turns, prompt passed via stdin (not -p CLI arg)
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
-        assert "--model" in cmd
-        assert "--max-turns" not in cmd
-        assert "-p" not in cmd  # Prompt via stdin to avoid E2BIG
-        assert "input" in call_args[1]  # Prompt passed as stdin input
+        # Verify command structure: script -q -c "timeout 90 claude ..." /dev/null
+        # WITHOUT --max-turns in the embedded shell command string
+        assert cmd[0] == "script"
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "claude" in shell_cmd
+        assert "--print" in shell_cmd
+        assert "--model" in shell_cmd
+        assert "--max-turns" not in shell_cmd
+        assert (
+            "input" not in call_args[1]
+        )  # Prompt is embedded in shell cmd, not via stdin
 
     @patch("subprocess.run")
     def test_agentic_mode_includes_max_turns(self, mock_subprocess, tmp_path):
@@ -1169,15 +1195,17 @@ class TestSingleShotVsAgenticMode:
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
 
-        # Verify command includes --max-turns 50
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
-        assert "--model" in cmd
-        assert "--max-turns" in cmd
-        turns_idx = cmd.index("--max-turns")
-        assert cmd[turns_idx + 1] == "50"
-        assert "-p" not in cmd  # Prompt via stdin to avoid E2BIG
-        assert "input" in call_args[1]  # Prompt passed as stdin input
+        # Verify command structure: script -q -c "timeout 90 claude ... --max-turns 50 ..." /dev/null
+        assert cmd[0] == "script"
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "claude" in shell_cmd
+        assert "--print" in shell_cmd
+        assert "--model" in shell_cmd
+        assert "--max-turns" in shell_cmd
+        assert "--max-turns 50" in shell_cmd
+        assert (
+            "input" not in call_args[1]
+        )  # Prompt is embedded in shell cmd, not via stdin
 
 
 class TestEmptyOutputDetection:
@@ -3060,13 +3088,16 @@ class TestIteration15InsideOutAndConciseness:
             staging_dir, {}, repo_list=repo_list, max_turns=50
         )
 
-        # Extract prompt from subprocess call
+        # Extract the shell string from the subprocess command list.
+        # Since Bug #936 the prompt is embedded in cmd[3] (the shell string),
+        # not passed via input= kwarg.
         mock_subprocess.assert_called_once()
-        prompt = mock_subprocess.call_args[1]["input"]
+        cmd = mock_subprocess.call_args[0][0]
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
 
-        # Verify file count and MB size in prompt
-        assert "150 files" in prompt
-        assert "5.0 MB" in prompt or "5 MB" in prompt
+        # Verify file count and MB size are embedded in the shell string.
+        assert "150 files" in shell_cmd
+        assert "5.0 MB" in shell_cmd or "5 MB" in shell_cmd
 
     # ---------------------------------------------------------------------------
     # Shared helper for Pass 2 dispatcher-injection tests (Story #848)
@@ -3300,6 +3331,14 @@ class TestIteration15InsideOutAndConciseness:
 
 class TestIteration16CrossDomainGraph:
     """Test Iteration 16: Cross-domain dependency graph in Pass 3."""
+
+    @pytest.fixture
+    def mock_pass3_subprocess(self):
+        with patch("subprocess.run") as mock_sp:
+            mock_sp.return_value = MagicMock(
+                returncode=0, stdout="# Index Content\n\nGenerated index."
+            )
+            yield mock_sp
 
     def test_extract_cross_domain_section_basic(self):
         """Test standard heading extraction from domain file."""
@@ -3658,7 +3697,9 @@ Uses **repo-b** from domain-b.
         # At minimum, should not crash
         assert isinstance(graph_section, str)
 
-    def test_cross_domain_graph_appended_to_index(self, tmp_path):
+    def test_cross_domain_graph_appended_to_index(
+        self, tmp_path, mock_pass3_subprocess
+    ):
         """Test that graph section appears in _index.md after Pass 3."""
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
@@ -3699,10 +3740,7 @@ Uses **repo-b** from domain-b.
             pass_timeout=600,
         )
 
-        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
-            mock_invoke.return_value = "# Index Content\n\nGenerated index."
-
-            analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
+        analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
 
         # Check that _index.md contains cross-domain graph section
         index_file = staging_dir / "_index.md"
@@ -3713,7 +3751,9 @@ Uses **repo-b** from domain-b.
         assert "domain-a" in content
         assert "domain-b" in content
 
-    def test_cross_domain_graph_not_appended_when_no_edges(self, tmp_path):
+    def test_cross_domain_graph_not_appended_when_no_edges(
+        self, tmp_path, mock_pass3_subprocess
+    ):
         """Test no graph section when no edges exist."""
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
@@ -3746,10 +3786,7 @@ Standalone domain.
             pass_timeout=600,
         )
 
-        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
-            mock_invoke.return_value = "# Index Content\n\nGenerated index."
-
-            analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
+        analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
 
         index_file = staging_dir / "_index.md"
         content = index_file.read_text()

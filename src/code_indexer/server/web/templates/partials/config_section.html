@@ -2039,9 +2039,9 @@ function saveLlmCredsConfig() {
             {% endif %}
             <div class="form-grid">
                 <label for="totp-enforcement-enabled">
-                    Enforcement Enabled
                     <input type="checkbox" id="totp-enforcement-enabled" name="elevation_enforcement_enabled" value="true"
                         {% if config.totp_elevation.elevation_enforcement_enabled %}checked{% endif %}>
+                    Enforcement Enabled
                     <small>OFF = passthru (no TOTP prompt). ON = require TOTP step-up on protected operations.</small>
                 </label>
                 <label for="totp-idle-timeout">

@@ -2213,6 +2213,15 @@ def make_lifespan(
 
         yield  # Server is now running
 
+        # Prevent test pollution across repeated TestClient/lifespan cycles:
+        # the FastAPI lifespan instantiates a real TOTPService and stores it in
+        # the mfa_routes._totp_service singleton on startup. Without this clear,
+        # subsequent lifespan cycles in the same Python process would inherit
+        # the stale singleton (db_path may point to a deleted SQLite file).
+        from code_indexer.server.web.mfa_routes import set_totp_service
+
+        set_totp_service(None)
+
         # Story #578: Stop config reload thread before cluster services
         try:
             from code_indexer.server.services.config_service import (

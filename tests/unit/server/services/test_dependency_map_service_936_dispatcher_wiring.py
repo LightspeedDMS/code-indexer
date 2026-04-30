@@ -203,7 +203,7 @@ def test_service_passes_dispatcher_backed_callable_to_executor_codex_weight_one(
 
     codex_invoke_calls: List[dict] = []
 
-    def _fake_codex_invoke(self_inner, flow, cwd, prompt, timeout):
+    def _fake_codex_invoke(self_inner, flow, cwd, prompt, timeout, max_turns=0):
         codex_invoke_calls.append({"flow": flow})
         return _make_invocation_result("codex")
 
@@ -235,7 +235,7 @@ def test_service_passes_claude_backed_callable_when_codex_disabled(tmp_path: Pat
 
     claude_invoke_calls: List[dict] = []
 
-    def _fake_claude_invoke(self_inner, flow, cwd, prompt, timeout):
+    def _fake_claude_invoke(self_inner, flow, cwd, prompt, timeout, max_turns=0):
         claude_invoke_calls.append({"flow": flow})
         return _make_invocation_result("claude")
 

@@ -304,7 +304,11 @@ async def poll_job(
 # Story #143: Session Management CRUD Endpoints
 
 
-@router.post("/sessions", response_class=HTMLResponse)
+@router.post(
+    "/sessions",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def create_session(
     request: Request,
     session_data: SessionData = Depends(require_admin_session),
@@ -339,7 +343,11 @@ async def create_session(
     )
 
 
-@router.put("/sessions/{session_id}", response_class=HTMLResponse)
+@router.put(
+    "/sessions/{session_id}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def rename_session(
     request: Request,
     session_id: str,
@@ -389,7 +397,11 @@ async def rename_session(
     )
 
 
-@router.delete("/sessions/{session_id}", response_class=HTMLResponse)
+@router.delete(
+    "/sessions/{session_id}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def delete_session(
     request: Request,
     session_id: str,
@@ -596,7 +608,10 @@ async def list_files(
     return JSONResponse(content={"files": files}, status_code=200)
 
 
-@router.delete("/sessions/{session_id}/files/{filename}")
+@router.delete(
+    "/sessions/{session_id}/files/{filename}",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def delete_file(
     request: Request,
     session_id: str,

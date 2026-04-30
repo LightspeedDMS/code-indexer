@@ -73,9 +73,13 @@ class TestTemporalIndexerProgress:
             for i in range(10)
         ]
 
-        # Mock diff scanner to return some diffs for each commit
+        # Mock diff scanner to return some diffs for each commit.
+        # blob_hash=None short-circuits the `if diff_info.blob_hash and ...` check
+        # in temporal_indexer.py:764, preventing MagicMock auto-attributes from
+        # polluting the indexed_blobs set under parallel processing.
         mock_diff_scanner.get_diffs_for_commit.return_value = [
             MagicMock(
+                blob_hash=None,
                 file_path=f"file{i}.py",
                 change_type="modified",
                 content_before="old",

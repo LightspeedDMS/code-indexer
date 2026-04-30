@@ -52,7 +52,9 @@ _STDERR_SNIPPET_LEN = 200
 # ---------------------------------------------------------------------------
 
 
-def _build_claude_command(prompt: str, analysis_model: str, soft_timeout: int) -> list:
+def _build_claude_command(
+    prompt: str, analysis_model: str, soft_timeout: int, max_turns: int = 0
+) -> list:
     """
     Build the shell command list for invoking Claude CLI via ``script``.
 
@@ -63,14 +65,18 @@ def _build_claude_command(prompt: str, analysis_model: str, soft_timeout: int) -
         prompt:         Prompt string to pass to Claude.
         analysis_model: Model name (e.g. "opus", "sonnet").
         soft_timeout:   Inner shell timeout budget in seconds.
+        max_turns:      When > 0, adds ``--max-turns`` flag to enable agentic
+                        mode.  When 0 (default), single-shot ``--print`` mode.
 
     Returns:
         Command list suitable for ``subprocess.run``.
     """
+    max_turns_flag = f" --max-turns {max_turns}" if max_turns > 0 else ""
     claude_cmd = (
         f"timeout {soft_timeout}"
         f" claude --model {shlex.quote(analysis_model)}"
         f" -p {shlex.quote(prompt)}"
+        f"{max_turns_flag}"
         f" --print --dangerously-skip-permissions"
     )
     return ["script", "-q", "-c", claude_cmd, os.devnull]
@@ -195,7 +201,7 @@ class ClaudeInvoker:
         self._soft_timeout_seconds = soft_timeout_seconds
 
     def invoke(
-        self, flow: str, cwd: str, prompt: str, timeout: int
+        self, flow: str, cwd: str, prompt: str, timeout: int, max_turns: int = 0
     ) -> InvocationResult:
         """
         Invoke the Claude CLI and return a normalised result.
@@ -204,12 +210,15 @@ class ClaudeInvoker:
         receive a well-typed InvocationResult, never a raw exception.
 
         Args:
-            flow:    Logical flow name (informational; not passed to subprocess).
-                     Must be non-empty string.
-            cwd:     Working directory. Must be non-empty string.
-            prompt:  Prompt text. Must be non-empty string.
-            timeout: Hard timeout seconds for subprocess.run.
-                     Must be exactly int (not bool) and > 0.
+            flow:      Logical flow name (informational; not passed to subprocess).
+                       Must be non-empty string.
+            cwd:       Working directory. Must be non-empty string.
+            prompt:    Prompt text. Must be non-empty string.
+            timeout:   Hard timeout seconds for subprocess.run.
+                       Must be exactly int (not bool) and > 0.
+            max_turns: When > 0, passed as ``--max-turns`` to Claude CLI to
+                       enable agentic mode.  Must be int (not bool) and >= 0.
+                       Default 0 = single-shot mode.
 
         Returns:
             InvocationResult with all fields set appropriately.
@@ -218,8 +227,16 @@ class ClaudeInvoker:
         if validation_error is not None:
             return validation_error
 
+        if (
+            not isinstance(max_turns, int)
+            or isinstance(max_turns, bool)
+            or max_turns < 0
+        ):
+            error_msg = f"ClaudeInvoker: max_turns must be int >= 0, got {max_turns!r}"
+            return _make_failure(error_msg, FailureClass.NOT_RETRYABLE)
+
         cmd = _build_claude_command(
-            prompt, self._analysis_model, self._soft_timeout_seconds
+            prompt, self._analysis_model, self._soft_timeout_seconds, max_turns
         )
         env = _build_claude_env(os.environ)
 

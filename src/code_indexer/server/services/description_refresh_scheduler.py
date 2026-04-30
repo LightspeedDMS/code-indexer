@@ -12,6 +12,7 @@ import logging
 import random
 import re
 import threading
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
@@ -36,6 +37,11 @@ logger = logging.getLogger(__name__)
 # required for Claude CLI in non-interactive environments.
 _CLAUDE_CLI_SOFT_TIMEOUT_SECONDS = 90  # inner shell ``timeout`` budget
 _CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 120  # Python subprocess.run cap
+
+# Bug #953: circuit-breaker threshold for consecutive prompt-generation failures.
+# After this many consecutive None-prompt results for the same repo, the scheduler
+# stops rescheduling (quarantines) and logs one ERROR.  Reset to 0 on success.
+PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3
 
 
 def _build_claude_env() -> dict:
@@ -188,6 +194,12 @@ class DescriptionRefreshScheduler:
             self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Bug #953: per-repo consecutive prompt-failure counter.
+        # Incremented each time _get_refresh_prompt() returns None.
+        # Reset to 0 by on_refresh_complete(success=True).
+        # When the count reaches PROMPT_FAILURE_QUARANTINE_THRESHOLD the repo is
+        # quarantined (not rescheduled) and one ERROR log is emitted.
+        self._prompt_failure_counts: Dict[str, int] = defaultdict(int)
 
         # Story #728 AC5: Bounded thread pool sized by max_concurrent_claude_cli config.
         # Prevents mass backfill from spawning N unbounded concurrent Claude CLI processes.
@@ -658,6 +670,8 @@ class DescriptionRefreshScheduler:
 
         # Update tracking record
         if success:
+            # Bug #953: reset circuit-breaker counter on any successful refresh.
+            self._prompt_failure_counts[repo_alias] = 0
             self._tracking_backend.upsert_tracking(
                 repo_alias=repo_alias,
                 status="completed",
@@ -744,8 +758,29 @@ class DescriptionRefreshScheduler:
                 # Get refresh prompt using RepoAnalyzer
                 prompt = self._get_refresh_prompt(alias, clone_path)
                 if prompt is None:
+                    # Bug #953: circuit-breaker — count consecutive prompt failures.
+                    self._prompt_failure_counts[alias] += 1
+                    failure_count = self._prompt_failure_counts[alias]
+                    if failure_count >= PROMPT_FAILURE_QUARANTINE_THRESHOLD:
+                        # Log exactly once at the quarantine boundary; subsequent
+                        # passes are silently skipped to avoid log spam.
+                        if failure_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD:
+                            logger.error(
+                                "Repo %s entered quarantine after %d consecutive "
+                                "prompt-generation failures — will not reschedule until "
+                                "a successful refresh resets the counter.",
+                                alias,
+                                failure_count,
+                            )
+                        # Do NOT call upsert_tracking — leave next_run stale so the
+                        # repo stays quarantined until the counter is reset externally.
+                        continue
                     logger.warning(
-                        f"Cannot refresh {alias}: failed to generate prompt, rescheduling"
+                        "Cannot refresh %s: failed to generate prompt, rescheduling"
+                        " (failure %d/%d)",
+                        alias,
+                        failure_count,
+                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
                     )
                     # Reschedule to next cycle to avoid infinite retry loop (Finding N3)
                     now = datetime.now(timezone.utc).isoformat()

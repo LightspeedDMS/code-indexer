@@ -23,9 +23,15 @@
                 <button class="outline small" onclick="toggleEmailForm('{{ user.username }}')">Change Email</button>
                 <button class="outline small" onclick="togglePasswordForm('{{ user.username }}')">Change Password</button>
                 {% if user.mfa_enabled %}
-                <a href="/admin/mfa/setup?user={{ user.username }}&mode=show" class="outline small" role="button" style="display:inline-block;padding:4px 8px;font-size:0.8em">Show QR</a>
+                <a hx-get="/admin/mfa/setup?user={{ user.username }}&mode=show&confirm_overwrite=1"
+                   hx-target="body"
+                   hx-push-url="true"
+                   class="outline small" role="button" style="display:inline-block;padding:4px 8px;font-size:0.8em">Show QR</a>
                 {% else %}
-                <a href="/admin/mfa/setup?user={{ user.username }}" class="outline small" role="button" style="display:inline-block;padding:4px 8px;font-size:0.8em">Setup MFA</a>
+                <a hx-get="/admin/mfa/setup?user={{ user.username }}&confirm_overwrite=1"
+                   hx-target="body"
+                   hx-push-url="true"
+                   class="outline small" role="button" style="display:inline-block;padding:4px 8px;font-size:0.8em">Setup MFA</a>
                 {% endif %}
                 {% if user.username != current_username %}
                 <button class="outline small danger" onclick="confirmDelete('{{ user.username }}')">Delete</button>

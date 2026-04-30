@@ -7,8 +7,6 @@ Story #216 AC7:
 - invoke_delta_merge_file passes allowed_tools and dangerously_skip_permissions
 """
 
-from unittest.mock import patch
-
 _SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
 _MTIME_TICK_S = 0.05
 
@@ -123,36 +121,49 @@ class TestBuildDeltaMergePromptClonePaths:
 
 
 class TestInvokeDeltaMergeFileAllowedTools:
-    """AC7: invoke_delta_merge_file passes allowed_tools and dangerously_skip_permissions."""
+    """AC7 (Bug #936): invoke_delta_merge_file routes through the dispatcher with the correct flow.
+
+    Bug #936 changed invoke_delta_merge_file to call _dispatch_via_flow with
+    flow='dependency_map_delta_merge' instead of calling subprocess.run directly.
+    The --allowedTools CLI flag is not forwarded because IntelligenceCliInvoker
+    has no tool-restriction param and Codex has no equivalent.
+    """
 
     def test_invoke_delta_merge_file_passes_search_code_tool(self, tmp_path):
-        """AC7: invoke_delta_merge_file passes --allowedTools mcp__cidx-local__search_code."""
-        analyzer = _make_analyzer(tmp_path)
-        updated_content = "# Domain Analysis: auth\n\nUpdated content."
+        """AC7 (Bug #936): invoke_delta_merge_file dispatches with flow='dependency_map_delta_merge'."""
+        from unittest.mock import MagicMock
 
-        with patch(
-            _SUBPROCESS_PATH,
-            side_effect=_make_edit_side_effect(
-                "_delta_merge_*.md", updated_content, tmp_path
-            ),
-        ) as mock_run:
-            analyzer.invoke_delta_merge_file(
-                domain_name="auth",
-                existing_content=EXISTING_CONTENT,
-                merge_prompt="test prompt",
-                timeout=60,
-                max_turns=5,
-                temp_dir=tmp_path,
-            )
+        from code_indexer.global_repos.dependency_map_analyzer import (
+            DependencyMapAnalyzer,
+        )
 
-        cmd = mock_run.call_args[0][0]
-        assert "--allowedTools" in cmd, (
-            "invoke_delta_merge_file must pass --allowedTools"
+        # Inject a mock dispatcher via the documented DI constructor parameter.
+        mock_dispatcher = MagicMock()
+        mock_dispatch_result = MagicMock()
+        mock_dispatch_result.success = True
+        mock_dispatch_result.output = "FILE_EDIT_COMPLETE"
+        mock_dispatch_result.was_failover = False
+        mock_dispatcher.dispatch.return_value = mock_dispatch_result
+
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
-        allowed_tools_idx = cmd.index("--allowedTools")
-        assert cmd[allowed_tools_idx + 1] == "mcp__cidx-local__search_code", (
-            f"--allowedTools must be mcp__cidx-local__search_code, got: {cmd[allowed_tools_idx + 1]}"
+
+        analyzer.invoke_delta_merge_file(
+            domain_name="auth",
+            existing_content=EXISTING_CONTENT,
+            merge_prompt="test prompt",
+            timeout=60,
+            max_turns=5,
+            temp_dir=tmp_path,
         )
-        assert "--dangerously-skip-permissions" in cmd, (
-            "invoke_delta_merge_file must pass --dangerously-skip-permissions"
+
+        mock_dispatcher.dispatch.assert_called_once()
+        call_kwargs = mock_dispatcher.dispatch.call_args
+        flow_used = call_kwargs.kwargs.get("flow") or call_kwargs[1].get("flow")
+        assert flow_used == "dependency_map_delta_merge", (
+            f"invoke_delta_merge_file must dispatch with flow='dependency_map_delta_merge', got: {flow_used}"
         )

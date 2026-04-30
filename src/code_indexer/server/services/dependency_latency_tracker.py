@@ -9,6 +9,7 @@ Provides:
 """
 
 import logging
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -56,6 +57,14 @@ _EXCEPTION_STATUS_CODE = -1
 
 # Node ID placeholder: resolved from environment / config if available
 _DEFAULT_NODE_ID = "local"
+
+# Substring present in sqlite3.ProgrammingError when the database connection is
+# closed — used to detect a terminal condition in the writer thread.
+_CLOSED_DB_SUBSTRING = "closed database"
+
+# Number of consecutive flush/prune failures (any error type) before the writer
+# thread gives up and terminates — prevents infinite loops on persistent errors.
+_MAX_CONSECUTIVE_FAILURES = 5
 
 
 def _validate_positive_float(value: Any, name: str) -> None:
@@ -208,29 +217,56 @@ class DependencyLatencyTracker:
         """
         Background daemon loop: flush buffer to storage, delete stale samples.
 
-        Termination: exits when ``_stop_event`` is set by ``shutdown()``.
-        Each iteration is guarded by a top-level try/except so that unexpected
-        errors in flush/prune do not kill the thread.
+        Termination paths:
+        1. Normal shutdown: ``_stop_event`` set by ``shutdown()`` — final flush runs.
+        2. Closed-database terminal: ``_flush_buffer`` / ``_prune_stale`` set
+           ``_stop_event`` and re-raise; the loop detects the set event and breaks
+           without additional logging. Final flush is skipped.
+        3. Max consecutive failures: after ``_MAX_CONSECUTIVE_FAILURES`` consecutive
+           exceptions (that did NOT already set ``_stop_event``), the loop sets
+           ``_stop_event`` and logs exactly ONE error, then breaks. Final flush is
+           skipped.
+
+        A successful iteration resets the consecutive-failures counter to zero.
         """
+        consecutive_failures = 0
+        terminal_failure = False
         # Daemon-service pattern: loop is bounded by stop_event (set by shutdown).
         # Event.wait(timeout) ensures the thread wakes at most every flush_interval_s
         # and exits immediately when the event fires — termination is event-driven.
         while not self._stop_event.is_set():
             self._stop_event.wait(timeout=self._flush_interval_s)
+            if self._stop_event.is_set():
+                break
+            try:
+                self._flush_and_prune()
+                consecutive_failures = 0
+            except Exception:
+                # If _flush_buffer/_prune_stale already set _stop_event (closed-db),
+                # exit immediately — they already logged the terminal warning.
+                if self._stop_event.is_set():
+                    terminal_failure = True
+                    break
+                consecutive_failures += 1
+                if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    self._stop_event.set()
+                    terminal_failure = True
+                    logger.error(
+                        "DependencyLatencyTracker: %d consecutive failures — "
+                        "writer thread terminating",
+                        consecutive_failures,
+                    )
+                    break
+
+        # Final flush on normal shutdown only — skip when a terminal failure ended
+        # the loop to avoid triggering additional log noise on a broken backend.
+        if not terminal_failure:
             try:
                 self._flush_and_prune()
             except Exception as exc:
                 logger.warning(
-                    "DependencyLatencyTracker: writer iteration failed: %s", exc
+                    "DependencyLatencyTracker: final flush on shutdown failed: %s", exc
                 )
-
-        # Final flush on shutdown — also guarded
-        try:
-            self._flush_and_prune()
-        except Exception as exc:
-            logger.warning(
-                "DependencyLatencyTracker: final flush on shutdown failed: %s", exc
-            )
 
     def _flush_and_prune(self) -> None:
         """Drain the buffer into storage and delete samples outside the retention window."""
@@ -238,7 +274,12 @@ class DependencyLatencyTracker:
         self._prune_stale()
 
     def _flush_buffer(self) -> None:
-        """Drain all samples currently in the buffer into the storage backend."""
+        """Drain all samples currently in the buffer into the storage backend.
+
+        Raises:
+            sqlite3.ProgrammingError: re-raised when the database is closed so
+                the caller (_writer_loop) can treat it as a terminal condition.
+        """
         with self._buffer_lock:
             if not self._buffer:
                 return
@@ -247,13 +288,32 @@ class DependencyLatencyTracker:
 
         try:
             self._backend.insert_batch(samples)
-        except Exception as exc:
-            logger.warning("DependencyLatencyTracker: flush failed: %s", exc)
+        except sqlite3.ProgrammingError as exc:
+            if _CLOSED_DB_SUBSTRING in str(exc).lower():
+                self._stop_event.set()
+                logger.warning(
+                    "DependencyLatencyTracker: database closed — writer thread terminating"
+                )
+            raise
+        except Exception:
+            raise
 
     def _prune_stale(self) -> None:
-        """Delete samples older than retention_s from the storage backend."""
+        """Delete samples older than retention_s from the storage backend.
+
+        Raises:
+            sqlite3.ProgrammingError: re-raised when the database is closed so
+                the caller (_writer_loop) can treat it as a terminal condition.
+        """
         cutoff = time.time() - self._retention_s
         try:
             self._backend.delete_older_than(cutoff)
-        except Exception as exc:
-            logger.warning("DependencyLatencyTracker: prune failed: %s", exc)
+        except sqlite3.ProgrammingError as exc:
+            if _CLOSED_DB_SUBSTRING in str(exc).lower():
+                self._stop_event.set()
+                logger.warning(
+                    "DependencyLatencyTracker: database closed — writer thread terminating"
+                )
+            raise
+        except Exception:
+            raise

@@ -2,7 +2,7 @@
 Tests for @require_mcp_elevation decorator (Story #925 AC1).
 
 12 tests covering all error paths and success paths:
-1. Kill switch off            -> elevation_enforcement_disabled
+1. Kill switch off            -> passthrough to handler
 2. manager is None            -> elevation_enforcement_disabled (fail closed)
 3. TOTP service None          -> elevation_enforcement_disabled
 4. TOTP not set up            -> totp_setup_required (with setup_url)
@@ -139,13 +139,14 @@ def active_repair_session(manager):
 # ---------------------------------------------------------------------------
 
 
-def test_kill_switch_off_returns_disabled_error(
+def test_kill_switch_off_passes_through_to_handler(
     decorated, admin_user, manager, totp_enabled
 ):
     with _patch_all(manager, totp_enabled, enforcement=False):
         result = decorated({}, admin_user, session_key=_SESSION_KEY)
-    assert result["error"] == "elevation_enforcement_disabled"
-    assert "disabled" in result["message"].lower()
+    # Kill switch off -> passthrough, handler runs normally
+    assert result["success"] is True
+    assert result["called"] is True
 
 
 # ---------------------------------------------------------------------------

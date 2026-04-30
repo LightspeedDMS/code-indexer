@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Optional
 
 from code_indexer import __version__ as _cidx_version
-from fastapi import APIRouter, Request, Form
+from fastapi import APIRouter, Depends, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+
+from code_indexer.server.auth import dependencies
 
 from .routes import (
     _require_admin_session,
@@ -90,7 +92,11 @@ def repo_categories_page(request: Request):
     return response
 
 
-@repo_category_web_router.post("/repo-categories/create", response_class=HTMLResponse)
+@repo_category_web_router.post(
+    "/repo-categories/create",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def create_category(
     request: Request,
     name: str = Form(...),
@@ -163,7 +169,9 @@ def create_category(
 
 
 @repo_category_web_router.post(
-    "/repo-categories/{category_id}/update", response_class=HTMLResponse
+    "/repo-categories/{category_id}/update",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def update_category(
     request: Request,
@@ -240,7 +248,9 @@ def update_category(
 
 
 @repo_category_web_router.post(
-    "/repo-categories/{category_id}/delete", response_class=HTMLResponse
+    "/repo-categories/{category_id}/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def delete_category(
     request: Request,
@@ -281,7 +291,11 @@ def delete_category(
         )
 
 
-@repo_category_web_router.post("/repo-categories/reorder", response_class=HTMLResponse)
+@repo_category_web_router.post(
+    "/repo-categories/reorder",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def reorder_categories(
     request: Request,
     ordered_ids: str = Form(...),
@@ -337,7 +351,9 @@ def reorder_categories(
 
 
 @repo_category_web_router.post(
-    "/repo-categories/re-evaluate", response_class=HTMLResponse
+    "/repo-categories/re-evaluate",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def re_evaluate_categories(
     request: Request,
@@ -450,7 +466,9 @@ def _render_categories_response(
 
 
 @repo_category_web_router.post(
-    "/golden-repos/{alias}/category", response_class=HTMLResponse
+    "/golden-repos/{alias}/category",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def update_repo_category_route(
     request: Request,

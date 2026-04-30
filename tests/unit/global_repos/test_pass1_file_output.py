@@ -100,11 +100,11 @@ class TestPass1PromptFileOutputInstructions:
         """Helper: run pass 1 and capture the prompt sent to Claude CLI."""
         captured_prompt = {}
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             captured_prompt["value"] = prompt
             return valid_domain_json
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -191,11 +191,11 @@ class TestPass1PromptPrimacy:
         """Helper: run pass 1 and capture the prompt sent to Claude CLI."""
         captured_prompt = {}
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             captured_prompt["value"] = prompt
             return valid_domain_json
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -257,12 +257,12 @@ class TestPass1FileBasedReadPath:
         """When pass1_domains.json exists, domains are read from the file."""
         pass1_file = staging_dir / "pass1_domains.json"
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             # Simulate Claude writing the file
             pass1_file.write_text(valid_domain_json)
             return "Claude processed the task and wrote the file."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         result = analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -295,11 +295,11 @@ class TestPass1FileBasedReadPath:
 
         pass1_file = staging_dir / "pass1_domains.json"
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             pass1_file.write_text(two_domain_json)
             return "Done."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         result = analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -322,11 +322,11 @@ class TestPass1FileCleanup:
         """pass1_domains.json is deleted after successful read and parse."""
         pass1_file = staging_dir / "pass1_domains.json"
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             pass1_file.write_text(valid_domain_json)
             return "Done."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -353,12 +353,12 @@ class TestPass1FileCleanup:
             ]
         )
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             # Write invalid JSON to file
             pass1_file.write_text("this is not valid json {{{")
             return fallback_json  # Valid JSON in stdout as fallback
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         # Should fall through to stdout extraction and not crash
         # (file has invalid JSON → fallback to stdout)
         try:
@@ -385,11 +385,11 @@ class TestPass1StdoutFallback:
     ):
         """When file is not written, falls back to _extract_json on stdout."""
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             # Does NOT write a file — stdout has the JSON
             return valid_domain_json
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         result = analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -409,10 +409,10 @@ class TestPass1StdoutFallback:
         """When falling back to stdout extraction, a WARNING must be logged."""
         import logging
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             return valid_domain_json
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with caplog.at_level(
             logging.WARNING, logger="code_indexer.global_repos.dependency_map_analyzer"
@@ -447,11 +447,11 @@ class TestPass1StdoutFallback:
 
         pass1_file = staging_dir / "pass1_domains.json"
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             pass1_file.write_text(valid_domain_json)
             return "Done."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with caplog.at_level(
             logging.INFO, logger="code_indexer.global_repos.dependency_map_analyzer"
@@ -482,7 +482,7 @@ class TestPass1RetryLogic:
         """When first attempt has no file and no parseable stdout, a retry occurs."""
         call_count = [0]
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 # First attempt: no file, bad stdout
@@ -493,7 +493,7 @@ class TestPass1RetryLogic:
                 pass1_file.write_text(valid_domain_json)
                 return "Done."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         result = analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -509,7 +509,7 @@ class TestPass1RetryLogic:
         """Retry prompt must include explicit reminder to write the file."""
         prompts_received = []
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             prompts_received.append(prompt)
             if len(prompts_received) == 1:
                 # First attempt fails
@@ -520,7 +520,7 @@ class TestPass1RetryLogic:
                 pass1_file.write_text(valid_domain_json)
                 return "Done."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -545,10 +545,10 @@ class TestPass1RetryLogic:
     ):
         """RuntimeError is raised when both attempts fail (no file, no parseable stdout)."""
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             return "I analyzed the repositories and here are my findings: lots of interesting code."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
             analyzer.run_pass_1_synthesis(
@@ -565,10 +565,10 @@ class TestPass1RetryLogic:
     ):
         """RuntimeError message must include diagnostic info about the file path checked."""
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             return "Narrative response without valid JSON"
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
             analyzer.run_pass_1_synthesis(
@@ -587,7 +587,7 @@ class TestPass1RetryLogic:
         """On retry, if Claude writes the file, result is read from the file."""
         call_count = [0]
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return "Narrative only, no JSON"
@@ -596,7 +596,7 @@ class TestPass1RetryLogic:
                 pass1_file.write_text(valid_domain_json)
                 return "File written."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         result = analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -612,11 +612,11 @@ class TestPass1RetryLogic:
         """Only one retry is allowed — does not loop indefinitely."""
         call_count = [0]
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             call_count[0] += 1
             return "No JSON here"
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with pytest.raises(RuntimeError):
             analyzer.run_pass_1_synthesis(
@@ -632,7 +632,7 @@ class TestPass1RetryLogic:
         """A stale pass1_domains.json from first attempt is deleted before retry."""
         call_count = [0]
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 # First attempt: write invalid JSON (will fail to parse)
@@ -645,7 +645,7 @@ class TestPass1RetryLogic:
                 pass1_file.write_text(valid_domain_json)
                 return "Done."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         result = analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -666,11 +666,11 @@ class TestPass1CanaryFileWriteTest:
         """Helper: run pass 1 and capture the prompt sent to Claude CLI."""
         captured_prompt = {}
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             captured_prompt["value"] = prompt
             return valid_domain_json
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
@@ -716,10 +716,10 @@ class TestPass1CanaryFileWriteTest:
         """When CANARY_FAIL appears in output, RuntimeError is raised immediately."""
         canary_fail_output = "CANARY_FAIL: Cannot write to /some/dir — [reason: Claude permission denied]"
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             return canary_fail_output
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
             analyzer.run_pass_1_synthesis(
@@ -738,10 +738,10 @@ class TestPass1CanaryFileWriteTest:
             "CANARY_FAIL: Cannot write to /some/dir — [reason: OS permission denied]"
         )
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             return canary_fail_output
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
             analyzer.run_pass_1_synthesis(
@@ -760,11 +760,11 @@ class TestPass1CanaryFileWriteTest:
         """CANARY_FAIL must raise immediately — no retry attempt."""
         call_count = [0]
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             call_count[0] += 1
             return "CANARY_FAIL: Cannot write — permission denied"
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with pytest.raises(RuntimeError):
             analyzer.run_pass_1_synthesis(
@@ -786,10 +786,10 @@ class TestPass1CanaryFileWriteTest:
             "Exiting as instructed."
         )
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             return multiline_output
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
             analyzer.run_pass_1_synthesis(
@@ -806,12 +806,12 @@ class TestPass1CanaryFileWriteTest:
         """Output without CANARY_FAIL proceeds through normal file/stdout parsing."""
         pass1_file = staging_dir / "pass1_domains.json"
 
-        def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
+        def fake_invoke(prompt, timeout, dangerously_skip_permissions=False, **kwargs):
             # Normal output with CANARY_OK in it (but no CANARY_FAIL)
             pass1_file.write_text(valid_domain_json)
             return "CANARY_OK\nFile written successfully."
 
-        analyzer._invoke_claude_cli = fake_invoke
+        analyzer._invoke_pass1_dispatcher = fake_invoke
         result = analyzer.run_pass_1_synthesis(
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )

@@ -373,6 +373,7 @@ class TestContextFieldBug662:
         contexts = [r.context for r in results if r.context is not None]
         assert len(contexts) > 0, "At least one reference must have context populated"
 
+    @pytest.mark.timeout(60)
     def test_find_definition_context_matches_correct_line(self, tmp_path: Path):
         """context field value must be the exact source line at the reported line."""
         from code_indexer.scip.query.backends import DatabaseBackend

@@ -65,24 +65,43 @@ class CliDispatcher:
         self.codex_weight = codex_weight if codex is not None else 0.0
 
     def dispatch(
-        self, flow: str, cwd: str, prompt: str, timeout: int
+        self, flow: str, cwd: str, prompt: str, timeout: int, max_turns: int = 0
     ) -> InvocationResult:
         """
         Invoke the primary CLI and failover to the alternate if needed.
 
         Args:
-            flow:    Logical flow name forwarded to the invoker.
-            cwd:     Working directory forwarded to the invoker.
-            prompt:  Prompt text forwarded to the invoker.
-            timeout: Hard timeout seconds forwarded to the invoker.
+            flow:      Logical flow name forwarded to the invoker.
+            cwd:       Working directory forwarded to the invoker.
+            prompt:    Prompt text forwarded to the invoker.
+            timeout:   Hard timeout seconds forwarded to the invoker.
+            max_turns: When > 0, forwarded as ``--max-turns`` to enable agentic
+                       mode.  Must be int (not bool) and >= 0.
+                       Default 0 = single-shot mode.
+
+        Raises:
+            ValueError: If max_turns is not an int or is negative.
 
         Returns:
             InvocationResult from whichever invoker ultimately ran.
         """
+        if (
+            not isinstance(max_turns, int)
+            or isinstance(max_turns, bool)
+            or max_turns < 0
+        ):
+            raise ValueError(
+                f"CliDispatcher.dispatch: max_turns must be int >= 0, got {max_turns!r}"
+            )
+
         # When codex is absent, bypass selection entirely.
         if self.codex is None:
             return self.claude.invoke(
-                flow=flow, cwd=cwd, prompt=prompt, timeout=timeout
+                flow=flow,
+                cwd=cwd,
+                prompt=prompt,
+                timeout=timeout,
+                max_turns=max_turns,
             )
 
         codex_primary = random.random() < self.codex_weight
@@ -91,13 +110,21 @@ class CliDispatcher:
         )
 
         # First attempt on primary.
-        result = primary.invoke(flow=flow, cwd=cwd, prompt=prompt, timeout=timeout)
+        result = primary.invoke(
+            flow=flow, cwd=cwd, prompt=prompt, timeout=timeout, max_turns=max_turns
+        )
         if result.success:
             return result
 
         # Single retry on RETRYABLE_ON_SAME before failing over.
         if result.failure_class == FailureClass.RETRYABLE_ON_SAME:
-            retry = primary.invoke(flow=flow, cwd=cwd, prompt=prompt, timeout=timeout)
+            retry = primary.invoke(
+                flow=flow,
+                cwd=cwd,
+                prompt=prompt,
+                timeout=timeout,
+                max_turns=max_turns,
+            )
             if retry.success:
                 return retry
             # Carry the retry's error forward into the failover path.
@@ -105,7 +132,9 @@ class CliDispatcher:
 
         # Failover to alternate (RETRYABLE_ON_OTHER OR exhausted RETRYABLE_ON_SAME).
         primary_error = f"primary={result.cli_used}: {result.error}"
-        failover = alternate.invoke(flow=flow, cwd=cwd, prompt=prompt, timeout=timeout)
+        failover = alternate.invoke(
+            flow=flow, cwd=cwd, prompt=prompt, timeout=timeout, max_turns=max_turns
+        )
         failover.was_failover = True
         if not failover.success:
             failover.error = (

@@ -257,7 +257,7 @@ def test_conflict_resolver_failover_codex_to_claude_succeeds(tmp_path: Path):
     codex_invoke_calls: list = []
     claude_invoke_calls: list = []
 
-    def _codex_invoke(self, flow, cwd, prompt, timeout):
+    def _codex_invoke(self, flow, cwd, prompt, timeout, max_turns=0):
         codex_invoke_calls.append((flow, cwd))
         return _make_failed_result(
             error="Codex process failed",
@@ -265,7 +265,7 @@ def test_conflict_resolver_failover_codex_to_claude_succeeds(tmp_path: Path):
             failure_class=FailureClass.RETRYABLE_ON_OTHER,
         )
 
-    def _claude_invoke(self, flow, cwd, prompt, timeout):
+    def _claude_invoke(self, flow, cwd, prompt, timeout, max_turns=0):
         claude_invoke_calls.append((flow, cwd))
         return _make_success_result(cli_used="claude")
 
