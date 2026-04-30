@@ -648,6 +648,7 @@ def _hybrid_auth_impl(
             logger.info(
                 f"Hybrid auth ({auth_type}): Session auth SUCCESS for {session.username}"
             )
+            request.state.user_jti = session_cookie_value  # enables elevation session key resolution
             return user
         else:
             logger.debug(f"Hybrid auth ({auth_type}): Session invalid")
