@@ -987,6 +987,7 @@ class TestCohereExponentialBackoffFlagBug603:
 
     def test_exponential_backoff_false_uses_flat_delay_on_5xx(self, cohere_provider):
         """When exponential_backoff=False, all 5xx retry sleeps must use the same fixed delay."""
+        import threading
         from unittest.mock import MagicMock, patch
 
         cohere_provider.config.exponential_backoff = False
@@ -1008,9 +1009,17 @@ class TestCohereExponentialBackoffFlagBug603:
             mock_response_ok,
         ]
 
+        # Filter sleep_calls to this thread only — leaked daemons (e.g. daemon/cache.py
+        # check loop with time.sleep(60)) would otherwise pollute the captures.
+        test_tid = threading.get_ident()
         sleep_calls = []
+
+        def _capture_if_test_thread(s):
+            if threading.get_ident() == test_tid:
+                sleep_calls.append(s)
+
         with patch("httpx.Client", mock_client_cls):
-            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("time.sleep", side_effect=_capture_if_test_thread):
                 cohere_provider._make_sync_request(["test"])
 
         assert len(sleep_calls) >= 2, (
@@ -1026,6 +1035,7 @@ class TestCohereExponentialBackoffFlagBug603:
         self, cohere_provider
     ):
         """When exponential_backoff=True, successive 5xx retry sleeps must increase."""
+        import threading
         from unittest.mock import MagicMock, patch
 
         cohere_provider.config.exponential_backoff = True
@@ -1047,9 +1057,17 @@ class TestCohereExponentialBackoffFlagBug603:
             mock_response_ok,
         ]
 
+        # Filter sleep_calls to this thread only — leaked daemons (e.g. daemon/cache.py
+        # check loop with time.sleep(60)) would otherwise pollute the captures.
+        test_tid = threading.get_ident()
         sleep_calls = []
+
+        def _capture_if_test_thread(s):
+            if threading.get_ident() == test_tid:
+                sleep_calls.append(s)
+
         with patch("httpx.Client", mock_client_cls):
-            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("time.sleep", side_effect=_capture_if_test_thread):
                 cohere_provider._make_sync_request(["test"])
 
         assert len(sleep_calls) >= 2, (
