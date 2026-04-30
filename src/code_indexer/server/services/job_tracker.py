@@ -436,7 +436,7 @@ class JobTracker:
         with self._lock:
             job = self._active_jobs.get(job_id)
             if job is None:
-                logger.warning(f"JobTracker.update_status: job {job_id} not in memory")
+                logger.debug(f"JobTracker.update_status: job {job_id} not in memory")
                 return
 
             if status is not None:

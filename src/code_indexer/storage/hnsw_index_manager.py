@@ -227,8 +227,36 @@ class HNSWIndexManager:
         # Set ef parameter for query-time accuracy (must be set after k_actual is known)
         index.set_ef(ef_actual)
 
-        # Query index (returns labels and distances)
-        labels, distances = index.knn_query(query_vector, k=k_actual)
+        # Query index (returns labels and distances).
+        # Bug #954/#948: hnswlib can still raise "contiguous 2D array" even after
+        # the ef>=k guard above (e.g. index M parameter too small, corrupted index).
+        # Retry with progressively smaller k so callers get partial results rather
+        # than a hard failure.  A WARNING is emitted when entering the first retry
+        # so operators see the degraded-index signal regardless of retry outcome.
+        # Unrelated RuntimeErrors propagate immediately without retry.
+        first_exc: RuntimeError | None = None
+        labels = distances = None
+        for attempt_idx, attempt_k in enumerate(
+            [k_actual, max(1, k_actual // 2), max(1, k_actual // 4), 1]
+        ):
+            if attempt_idx == 1 and first_exc is not None:
+                # Entering first retry — warn once so operators see degraded index.
+                logger.warning(
+                    "knn_query failed with contiguous-2D-array error at k=%d; "
+                    "retrying with k=%d (degraded index — ef or M may be too small)",
+                    k_actual,
+                    attempt_k,
+                )
+            try:
+                labels, distances = index.knn_query(query_vector, k=attempt_k)
+                break
+            except RuntimeError as exc:
+                if "contiguous 2D array" not in str(exc):
+                    raise
+                if first_exc is None:
+                    first_exc = exc
+        if first_exc is not None and labels is None:
+            raise first_exc
 
         # Convert labels to IDs
         result_ids = [id_mapping.get(int(label), f"vec_{label}") for label in labels[0]]
