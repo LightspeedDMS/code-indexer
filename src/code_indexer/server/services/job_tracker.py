@@ -945,6 +945,22 @@ class JobTracker:
         with self._lock:
             return sum(1 for j in self._active_jobs.values() if j.status == "pending")
 
+    def get_running_jobs_count(self) -> int:
+        """Return the count of running jobs.
+
+        Alias for get_active_job_count() using the plural-form name expected by
+        MaintenanceState.register_job_tracker() interface (drain-status monitoring).
+        """
+        return self.get_active_job_count()
+
+    def get_queued_jobs_count(self) -> int:
+        """Return the count of pending (queued) jobs.
+
+        Alias for get_pending_job_count() using the plural-form name expected by
+        MaintenanceState.register_job_tracker() interface (drain-status monitoring).
+        """
+        return self.get_pending_job_count()
+
     # ------------------------------------------------------------------
     # Private SQLite helpers
     # ------------------------------------------------------------------
