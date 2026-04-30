@@ -1023,7 +1023,6 @@ def _create_users_page_response(
 ) -> HTMLResponse:
     """Create users page response with all necessary context."""
     csrf_token = generate_csrf_token()
-    users = _get_users_list()
 
     response = templates.TemplateResponse(
         "users.html",
@@ -1034,20 +1033,6 @@ def _create_users_page_response(
             "current_page": "users",
             "show_nav": True,
             "csrf_token": csrf_token,
-            "users": [
-                {
-                    "username": u.username,
-                    "role": u.role.value,
-                    "created_at": (
-                        u.created_at.strftime("%Y-%m-%d %H:%M")
-                        if u.created_at
-                        else "N/A"
-                    ),
-                    "email": u.email,
-                    "mfa_enabled": _get_user_mfa_status(u.username),
-                }
-                for u in users
-            ],
             "success_message": success_message,
             "error_message": error_message,
         },
@@ -1381,7 +1366,11 @@ async def delete_user(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.get("/partials/users-list", response_class=HTMLResponse)
+@web_router.get(
+    "/partials/users-list",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def users_list_partial(request: Request):
     """
     Partial refresh endpoint for users list section.

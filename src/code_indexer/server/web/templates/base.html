@@ -20,7 +20,7 @@
             if (xhr.status === 403) {
                 try {
                     var body = JSON.parse(xhr.responseText);
-                    var err = body && body.detail && body.detail.error;
+                    var err = (body && body.detail && body.detail.error) || (body && body.error);
                     if (err === 'totp_setup_required') {
                         evt.detail.shouldSwap = false;
                         if (!window._cidxRedirecting) {
