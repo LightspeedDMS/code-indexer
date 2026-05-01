@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.11 — 2026-05-01
+
+### Fixed
+
+- **MCP TOTP elevation still failed after v10.0.10** — the v10.0.10 fix wired `session_id` (random MCP transport UUID) as `session_key`, but elevation windows are keyed by JWT `jti`. `get_current_user_for_mcp` never wrote `request.state.user_jti`, so `mcp_endpoint` always saw `elevation_key=None` and all MCP elevation checks returned `elevation_required`. Fixed by: (1) extracting JWT `jti` in `get_current_user_for_mcp` for both Bearer token path and `cidx_session` cookie path using `_jti_token = token or request.cookies.get(CIDX_SESSION_COOKIE)`, writing to `request.state.user_jti`; (2) extracting jti in `get_optional_user_from_cookie` for the `/mcp-public` cookie path; (3) threading `elevation_key` as a separate parameter through `_invoke_handler` → `handle_tools_call` → `process_jsonrpc_request` → `process_batch_request` → `mcp_endpoint`, populated from `request.state.user_jti`; (4) `_invoke_handler` injects `session_key` from `elevation_key` only — `session_id` (MCP transport UUID) is never used as elevation key per CLAUDE.md invariant. Covered by 14 new unit tests (AC1-AC14) in `test_session_key_injection_protocol.py`.
+
 ## v10.0.10 — 2026-05-01
 
 ### Fixed
