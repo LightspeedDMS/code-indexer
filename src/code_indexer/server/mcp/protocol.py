@@ -163,6 +163,7 @@ async def _invoke_handler(
     sig: Any,
     is_async: bool,
     session_id: Optional[str] = None,
+    elevation_key: Optional[str] = None,
 ) -> Any:
     """
     Invoke handler with appropriate parameters.
@@ -174,7 +175,11 @@ async def _invoke_handler(
         session_state: Session state (may be None)
         sig: Handler function signature (from inspect.signature)
         is_async: Whether handler is async
-        session_id: MCP session ID injected as session_key for elevation-gated handlers
+        session_id: MCP session ID for session state management
+        elevation_key: JWT jti used as session_key for elevation lookup.
+            Only elevation_key is used for session_key injection; session_id
+            is intentionally never used as an elevation key per CLAUDE.md
+            invariant (session_key = JWT jti Bearer OR cidx_session cookie).
 
     Returns:
         Handler result
@@ -184,15 +189,18 @@ async def _invoke_handler(
     if "session_state" in sig.parameters:
         extra_kwargs["session_state"] = session_state
 
-    # Inject session_key for TOTP elevation handlers — only when session_id is truthy.
+    # Inject session_key ONLY from the canonical elevation_key (JWT jti for Bearer auth,
+    # cookie jti for Web UI). session_id (MCP transport UUID) is intentionally NOT
+    # used as a fallback: CLAUDE.md invariant requires
+    # session_key = JWT jti (Bearer) OR cidx_session cookie (Web UI).
     # Case A: handler explicitly declares session_key (e.g., elevate_session).
     #   inspect.signature follows __wrapped__ so sig reflects the original sig.
-    if session_id and "session_key" in sig.parameters:
-        extra_kwargs["session_key"] = session_id
-    elif session_id and getattr(handler, "__mcp_requires_session_key__", False):
+    if elevation_key and "session_key" in sig.parameters:
+        extra_kwargs["session_key"] = elevation_key
+    elif elevation_key and getattr(handler, "__mcp_requires_session_key__", False):
         # Case B: handler is wrapped with @require_mcp_elevation.
         # The explicit marker replaces the fragile VAR_KEYWORD heuristic.
-        extra_kwargs["session_key"] = session_id
+        extra_kwargs["session_key"] = elevation_key
 
     if is_async:
         return await handler(arguments, user, **extra_kwargs)
@@ -324,7 +332,10 @@ def _check_repository_access(
 
 
 async def handle_tools_call(
-    params: Dict[str, Any], user: User, session_id: Optional[str] = None
+    params: Dict[str, Any],
+    user: User,
+    session_id: Optional[str] = None,
+    elevation_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Handle tools/call method - dispatches to actual tool handlers.
@@ -333,6 +344,8 @@ async def handle_tools_call(
         params: Request parameters (must contain 'name' and optional 'arguments')
         user: Authenticated user
         session_id: Optional MCP session ID for session state management
+        elevation_key: JWT jti for TOTP elevation window lookup.
+            Takes precedence over session_id when injecting session_key.
 
     Returns:
         Dictionary with call result
@@ -483,6 +496,7 @@ async def handle_tools_call(
                 sig,
                 is_async,
                 session_id=session_id,
+                elevation_key=elevation_key,
             )
 
         # Execute through span interceptor
@@ -512,6 +526,7 @@ async def handle_tools_call(
             sig,
             is_async,
             session_id=session_id,
+            elevation_key=elevation_key,
         )
 
     # Bug #350: Protocol-level API metrics tracking.
@@ -524,7 +539,10 @@ async def handle_tools_call(
 
 
 async def process_jsonrpc_request(
-    request: Dict[str, Any], user: User, session_id: Optional[str] = None
+    request: Dict[str, Any],
+    user: User,
+    session_id: Optional[str] = None,
+    elevation_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Process a single JSON-RPC 2.0 request.
@@ -533,6 +551,8 @@ async def process_jsonrpc_request(
         request: The JSON-RPC request dictionary
         user: Authenticated user
         session_id: Optional MCP session ID for session state management
+        elevation_key: JWT jti for TOTP elevation window lookup.
+            Passed through to handle_tools_call for session_key injection.
 
     Returns:
         JSON-RPC response dictionary (success or error)
@@ -586,7 +606,9 @@ async def process_jsonrpc_request(
             result = {"resources": []}
             return create_jsonrpc_response(result, request_id)
         elif method == "tools/call":
-            result = await handle_tools_call(params, user, session_id=session_id)
+            result = await handle_tools_call(
+                params, user, session_id=session_id, elevation_key=elevation_key
+            )
             return create_jsonrpc_response(result, request_id)
         else:
             return create_jsonrpc_error(
@@ -606,7 +628,10 @@ async def process_jsonrpc_request(
 
 
 async def process_batch_request(
-    batch: List[Dict[str, Any]], user: User, session_id: Optional[str] = None
+    batch: List[Dict[str, Any]],
+    user: User,
+    session_id: Optional[str] = None,
+    elevation_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Process a batch of JSON-RPC 2.0 requests.
@@ -615,6 +640,8 @@ async def process_batch_request(
         batch: List of JSON-RPC request dictionaries
         user: Authenticated user
         session_id: Optional MCP session ID for session state management
+        elevation_key: JWT jti for TOTP elevation window lookup.
+            Passed through to each process_jsonrpc_request call.
 
     Returns:
         List of JSON-RPC response dictionaries
@@ -622,7 +649,9 @@ async def process_batch_request(
     responses = []
 
     for request in batch:
-        response = await process_jsonrpc_request(request, user, session_id=session_id)
+        response = await process_jsonrpc_request(
+            request, user, session_id=session_id, elevation_key=elevation_key
+        )
         responses.append(response)
 
     return responses
@@ -660,6 +689,14 @@ async def mcp_endpoint(
         session_id = str(uuid.uuid4())
     response.headers["Mcp-Session-Id"] = session_id
 
+    # Extract JWT jti for TOTP elevation window lookup.
+    # CLAUDE.md invariant: session_key = JWT jti (Bearer) OR cidx_session cookie.
+    # The MCP session UUID (session_id) is NOT the elevation key.
+    elevation_key: Optional[str] = None
+    _jti = getattr(getattr(request, "state", None), "user_jti", None)
+    if _jti:
+        elevation_key = str(_jti)
+
     try:
         # Sliding expiration for cookie-authenticated sessions only (no Bearer header)
         if "authorization" not in request.headers:
@@ -669,9 +706,10 @@ async def mcp_endpoint(
                     payload = auth_deps.jwt_manager.validate_token(token)
                     if _should_refresh_token(payload):
                         _refresh_jwt_cookie(response, payload)
-                except Exception:
-                    # Ignore refresh errors; normal auth flow already enforced
-                    pass
+                except Exception as _refresh_err:
+                    # Refresh errors are non-fatal: the normal auth flow already
+                    # enforced validity. Log at debug so failures are visible.
+                    logger.debug("Cookie token refresh skipped: %s", _refresh_err)
 
         body = await request.json()
     except Exception:
@@ -680,9 +718,13 @@ async def mcp_endpoint(
 
     # Check if batch request (array) or single request (object)
     if isinstance(body, list):
-        return await process_batch_request(body, current_user, session_id=session_id)
+        return await process_batch_request(
+            body, current_user, session_id=session_id, elevation_key=elevation_key
+        )
     elif isinstance(body, dict):
-        return await process_jsonrpc_request(body, current_user, session_id=session_id)
+        return await process_jsonrpc_request(
+            body, current_user, session_id=session_id, elevation_key=elevation_key
+        )
     else:
         return create_jsonrpc_error(
             -32600, "Invalid Request: body must be object or array", None
@@ -791,14 +833,30 @@ def mcp_delete_session(
 def get_optional_user_from_cookie(request: Request) -> Optional[User]:
     """Get user from JWT cookie if valid, None otherwise."""
     import logging
-    from code_indexer.server.auth.dependencies import _validate_jwt_and_get_user
+    from code_indexer.server.auth.dependencies import (
+        _validate_jwt_and_get_user,
+        InvalidTokenError,
+        TokenExpiredError,
+        jwt_manager,
+    )
 
     token = request.cookies.get("cidx_session")
     if not token:
         return None
 
     try:
-        return _validate_jwt_and_get_user(token)
+        user = _validate_jwt_and_get_user(token)
+        if user is not None and jwt_manager:
+            try:
+                payload = jwt_manager.validate_token(token)
+                jti = payload.get("jti")
+                if jti:
+                    request.state.user_jti = str(jti)
+            except (TokenExpiredError, InvalidTokenError) as e:
+                logging.getLogger(__name__).debug(
+                    "cookie jti extraction: %s — elevation unavailable", e
+                )
+        return user
     except Exception as e:
         logging.getLogger(__name__).debug(f"Cookie auth failed: {e}")
         return None
@@ -839,6 +897,7 @@ async def process_public_jsonrpc_request(
     http_request: Request,
     http_response: Response,
     session_id: Optional[str] = None,
+    elevation_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Process JSON-RPC request for /mcp-public endpoint."""
     request_id = request_data.get("id")
@@ -914,7 +973,9 @@ async def process_public_jsonrpc_request(
                     request_id,
                 )
 
-            result = await handle_tools_call(params, user, session_id=session_id)
+            result = await handle_tools_call(
+                params, user, session_id=session_id, elevation_key=elevation_key
+            )
             return create_jsonrpc_response(result, request_id)
 
         else:
@@ -965,10 +1026,18 @@ async def mcp_public_endpoint(
             payload = auth_deps.jwt_manager.validate_token(token)
             if _should_refresh_token(payload):
                 _refresh_jwt_cookie(response, payload)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("mcp_public cookie refresh error: %s", e)
 
     user = get_optional_user_from_cookie(request)
+
+    # Extract JWT jti for TOTP elevation window lookup (Web UI cookie-auth path).
+    # CLAUDE.md invariant: session_key = JWT jti (Bearer) OR cidx_session cookie.
+    elevation_key: Optional[str] = None
+    if user is not None:
+        _jti = getattr(getattr(request, "state", None), "user_jti", None)
+        if _jti:
+            elevation_key = str(_jti)
 
     try:
         body = await request.json()
@@ -978,13 +1047,23 @@ async def mcp_public_endpoint(
     if isinstance(body, list):
         return [
             await process_public_jsonrpc_request(
-                req, user, request, response, session_id=session_id
+                req,
+                user,
+                request,
+                response,
+                session_id=session_id,
+                elevation_key=elevation_key,
             )
             for req in body
         ]
     elif isinstance(body, dict):
         return await process_public_jsonrpc_request(
-            body, user, request, response, session_id=session_id
+            body,
+            user,
+            request,
+            response,
+            session_id=session_id,
+            elevation_key=elevation_key,
         )
     else:
         return create_jsonrpc_error(

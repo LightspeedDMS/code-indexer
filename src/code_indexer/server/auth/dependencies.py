@@ -540,13 +540,31 @@ async def get_current_user_for_mcp(request: Request) -> User:
     # Priority 2: Fall back to OAuth/JWT (existing auth)
     # Extract credentials from request for get_current_user
     credentials: Optional[HTTPAuthorizationCredentials] = None
+    token: Optional[str] = None
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]  # Remove "Bearer " prefix
         credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
     try:
-        return get_current_user(request, credentials)
+        user = get_current_user(request, credentials)
+        # Extract jti for elevation key — Bearer path or cookie fallback path.
+        # token is only set when Authorization: Bearer ... is present; when the
+        # client authenticates via cidx_session cookie, token is None and we must
+        # fall back to the cookie value so that elevation works for cookie-authed
+        # /mcp clients (Issue: cookie-auth /mcp path never sets user_jti).
+        _jti_token = token or request.cookies.get(CIDX_SESSION_COOKIE)
+        if _jti_token and jwt_manager:
+            try:
+                payload = jwt_manager.validate_token(_jti_token)
+                jti = payload.get("jti")
+                if jti:
+                    request.state.user_jti = str(jti)
+            except (TokenExpiredError, InvalidTokenError) as e:
+                logger.debug(
+                    "MCP jti extraction after auth: %s — elevation unavailable", e
+                )
+        return user
     except HTTPException as exc:
         # Story #563: Let 403 (non-SSO restriction) pass through unchanged
         if exc.status_code == status.HTTP_403_FORBIDDEN:
