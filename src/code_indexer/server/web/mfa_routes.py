@@ -177,7 +177,7 @@ def _render_setup(
     success: str = "",
     show_mode: bool = False,
     verify_route: str = "/admin/mfa/verify",
-    back_link: str = "/admin/users",
+    back_link: str = "/admin/",
     recovery_link_prefix: str = "/admin/mfa",
     re_setup_link: str = "",
 ) -> str:
@@ -260,7 +260,7 @@ def _render_setup(
         "<p class='info'>Or enter this key manually:</p>"
         f"<div class='mk'>{manual_key}</div>"
         f"{form_section}"
-        f"<a href='{back_link}' class='back'>Back</a>"
+        f"<a href='{back_link}' class='back'>Cancel — Go to Dashboard</a>"
         "</div></body></html>"
     )
 
@@ -395,7 +395,7 @@ def _render_qr_error(
     error_msg: str,
     show_mode: bool,
     verify_route: str = "/admin/mfa/verify",
-    back_link: str = "/admin/users",
+    back_link: str = "/admin/",
     recovery_link_prefix: str = "/admin/mfa",
     re_setup_link: str = "",
 ) -> HTMLResponse:
