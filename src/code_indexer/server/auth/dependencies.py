@@ -660,6 +660,22 @@ def _hybrid_auth_impl(
         try:
             current_user = get_current_user(request, credentials)
 
+            # Set user_jti for elevation session key resolution.
+            # Session-cookie path sets this at the session success block above;
+            # Bearer token path must set it here from the JWT jti claim.
+            if jwt_manager:
+                try:
+                    payload = jwt_manager.validate_token(credentials.credentials)
+                    jti = payload.get("jti")
+                    if jti:
+                        request.state.user_jti = jti
+                except (InvalidTokenError, TokenExpiredError) as exc:
+                    # Non-JWT credentials (OAuth, opaque tokens) and expired tokens
+                    # have no extractable jti; elevation simply won't be available.
+                    logger.debug(
+                        f"Hybrid auth ({auth_type}): jti extraction skipped — {exc}"
+                    )
+
             # Check admin requirement for token auth
             if require_admin and not current_user.has_permission("manage_users"):
                 raise HTTPException(

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.9 — 2026-05-01
+
+### Fixed
+
+- **Bearer token clients could not use elevation-gated REST endpoints**. `_hybrid_auth_impl` set `request.state.user_jti` only in the session-cookie auth path, but never in the Bearer token path. `_resolve_session_key` checks `user_jti` first, so Bearer token clients always got `None` — meaning their elevation windows were invisible to `require_elevation()`, producing a permanent 403 `elevation_required` even when a valid window existed. Fixed by extracting the JWT `jti` claim from the decoded Bearer token and setting `request.state.user_jti` immediately after `get_current_user` succeeds. `InvalidTokenError`/`TokenExpiredError` (OAuth tokens, opaque credentials) are caught and logged at DEBUG; elevation is simply unavailable for those token types. Covered by 5 new unit tests in `test_hybrid_auth_jti_bearer.py`.
+
 ## v10.0.8 — 2026-04-30
 
 ### Fixed
