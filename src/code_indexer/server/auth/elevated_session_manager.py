@@ -14,6 +14,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+try:
+    from psycopg.rows import dict_row
+except ImportError:  # psycopg3 not installed (standalone mode)
+    dict_row = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_IDLE_TIMEOUT = 300  # 5 minutes
@@ -57,6 +62,7 @@ SET last_touched_at = %s
 WHERE session_key = %s
   AND last_touched_at > %s
   AND elevated_at > %s
+RETURNING session_key, username, elevated_at, last_touched_at, elevated_from_ip, scope
 """
 
 _PG_SELECT_VALID = """
@@ -65,6 +71,16 @@ FROM elevated_sessions
 WHERE session_key = %s
   AND last_touched_at > %s
   AND elevated_at > %s
+"""
+
+_PG_TOUCH_FOR_USER = """
+UPDATE elevated_sessions
+SET last_touched_at = %s
+WHERE session_key = %s
+  AND username = %s
+  AND last_touched_at > %s
+  AND elevated_at > %s
+RETURNING session_key, username, elevated_at, last_touched_at, elevated_from_ip, scope
 """
 
 _PG_DELETE_KEY = "DELETE FROM elevated_sessions WHERE session_key = %s"
@@ -132,11 +148,26 @@ class _PgBackend:
         idle_cutoff = now - self._idle_timeout
         abs_cutoff = now - self._max_age
         with self._pool.connection() as conn:
-            conn.execute(_PG_TOUCH, (now, session_key, idle_cutoff, abs_cutoff))
-            conn.commit()
+            conn.row_factory = dict_row
             row = conn.execute(
-                _PG_SELECT_VALID, (session_key, idle_cutoff, abs_cutoff)
+                _PG_TOUCH, (now, session_key, idle_cutoff, abs_cutoff)
             ).fetchone()
+            conn.commit()
+        return _row_to_elevated_session(row) if row else None
+
+    def touch_atomic_for_user(
+        self, session_key: str, username: str
+    ) -> Optional[ElevatedSession]:
+        now = time.time()
+        idle_cutoff = now - self._idle_timeout
+        abs_cutoff = now - self._max_age
+        with self._pool.connection() as conn:
+            conn.row_factory = dict_row
+            row = conn.execute(
+                _PG_TOUCH_FOR_USER,
+                (now, session_key, username, idle_cutoff, abs_cutoff),
+            ).fetchone()
+            conn.commit()
         return _row_to_elevated_session(row) if row else None
 
     def revoke(self, session_key: str) -> None:
@@ -154,6 +185,7 @@ class _PgBackend:
         idle_cutoff = now - self._idle_timeout
         abs_cutoff = now - self._max_age
         with self._pool.connection() as conn:
+            conn.row_factory = dict_row
             row = conn.execute(
                 _PG_SELECT_VALID, (session_key, idle_cutoff, abs_cutoff)
             ).fetchone()
@@ -379,6 +411,47 @@ class ElevatedSessionManager:
                 updated = conn.execute(
                     "SELECT * FROM elevated_sessions WHERE session_key = ?",
                     (session_key,),
+                ).fetchone()
+                return _row_to_elevated_session(updated) if updated else None
+            finally:
+                conn.close()
+
+    def touch_atomic_for_user(
+        self, session_key: str, username: str
+    ) -> Optional[ElevatedSession]:
+        """Advance last_touched_at only when session_key is owned by username."""
+        if not isinstance(session_key, str) or not session_key.strip():
+            raise ValueError("session_key must be a non-empty string")
+        if not isinstance(username, str) or not username.strip():
+            raise ValueError("username must be a non-empty string")
+
+        if self._pool is not None:
+            return self._pg().touch_atomic_for_user(session_key, username)
+
+        now = time.time()
+        idle_cutoff = now - self._idle_timeout
+        abs_cutoff = now - self._max_age
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN EXCLUSIVE")
+                row = conn.execute(
+                    "SELECT * FROM elevated_sessions "
+                    "WHERE session_key = ? AND username = ? AND last_touched_at > ? AND elevated_at > ?",
+                    (session_key, username, idle_cutoff, abs_cutoff),
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return None
+                conn.execute(
+                    "UPDATE elevated_sessions SET last_touched_at = ? "
+                    "WHERE session_key = ? AND username = ?",
+                    (now, session_key, username),
+                )
+                conn.commit()
+                updated = conn.execute(
+                    "SELECT * FROM elevated_sessions WHERE session_key = ? AND username = ?",
+                    (session_key, username),
                 ).fetchone()
                 return _row_to_elevated_session(updated) if updated else None
             finally:

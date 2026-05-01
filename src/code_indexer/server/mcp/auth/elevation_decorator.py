@@ -122,8 +122,9 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
             if not session_key:
                 return _elevation_required_error("No session key on MCP request.")
 
-            # Gate 6: atomic touch — validates window exists and resets idle timer
-            session = esm.touch_atomic(str(session_key))
+            # Gate 6: atomic touch — validates window exists, owned by this user,
+            # and resets idle timer. Username binding closes the cross-user bypass.
+            session = esm.touch_atomic_for_user(str(session_key), user.username)
             if session is None:
                 return _elevation_required_error(
                     "No active elevation window. Call elevate_session first."
@@ -143,6 +144,7 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
             # All gates passed — invoke the real handler
             return handler(args, user, *extra, **kwargs)
 
+        wrapper.__mcp_requires_session_key__ = True
         return wrapper
 
     return decorator

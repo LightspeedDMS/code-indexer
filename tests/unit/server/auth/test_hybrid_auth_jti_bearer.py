@@ -105,9 +105,7 @@ def _run_bearer_auth(
             "code_indexer.server.auth.dependencies.jwt_manager",
             mock_jwt_manager,
         ):
-            with patch(
-                "code_indexer.server.web.auth.get_session_manager"
-            ) as mock_gsm:
+            with patch("code_indexer.server.web.auth.get_session_manager") as mock_gsm:
                 mock_gsm.return_value.get_session.return_value = None
                 result = _hybrid_auth_impl(
                     request=request,
@@ -202,9 +200,7 @@ class TestSessionCookieJtiUnchanged:
         mock_user_manager = MagicMock()
         mock_user_manager.get_user.return_value = user
 
-        with patch(
-            "code_indexer.server.web.auth.get_session_manager"
-        ) as mock_gsm:
+        with patch("code_indexer.server.web.auth.get_session_manager") as mock_gsm:
             mock_session_manager = MagicMock()
             mock_session_manager.get_session.return_value = session_data
             mock_gsm.return_value = mock_session_manager
