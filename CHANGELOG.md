@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.7 — 2026-04-30
+
+### Fixed
+
+- **Elevation window not found for Web UI session users (mfa_routes)**. `mfa_routes._resolve_session_key` only read the `"cidx_session"` cookie, but web UI auth stores the elevation window under the `"session"` cookie value (mapped via `request.state.user_jti` by `_hybrid_auth_impl`). The lookup always missed for web UI users, causing a spurious 403 `elevation_required` even when the user had a valid active elevation window. Fixed by checking `request.state.user_jti` first (consistent with `dependencies.py` and `elevation_web_routes.py`). Affected: cross-user MFA setup, recovery codes page, and MFA disable for web UI session users.
+
+- **Navigation trap on /admin/mfa/setup**. Admins without TOTP were redirected to the setup page via `window.location.href`, which pushed a browser history entry. Pressing Back returned to the same triggering page, looping forever. Fixed: `window.location.replace()` now replaces the history entry. Back link on the setup page changed from `/admin/users` to `/admin/` (dashboard) with label "Cancel — Go to Dashboard" so admins can always escape. Elevation modal text updated to emphasize "your" authenticator code to reduce confusion when managing another user's MFA.
+
 ## v10.0.4 — 2026-04-29
 
 ### Fixed (bug sweep + test suite green pass)
