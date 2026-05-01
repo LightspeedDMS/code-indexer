@@ -387,3 +387,54 @@ def test_check_elevation_window_finds_window_via_user_jti(esm):
     # Before fix: returns elevation_required error dict (jti key not checked).
     # After fix: returns None (elevation found via user_jti).
     assert result is None, f"Expected None (elevation found), got: {result}"
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: _resolve_session_key must fall back to session cookie for
+# endpoints like mfa_setup_page that use _get_session_username (not
+# get_current_admin_user_hybrid), so user_jti is never set on request.state.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_session_key_falls_back_to_session_cookie_when_no_jti_no_cidx():
+    """_resolve_session_key uses session cookie when user_jti and cidx_session are absent.
+
+    This is the SSO production scenario: mfa_setup_page does not call
+    get_current_admin_user_hybrid so user_jti is not set, and SSO users have
+    no cidx_session cookie. The session cookie must be the intermediate fallback."""
+    from code_indexer.server.web.mfa_routes import _resolve_session_key
+
+    class _NoJtiState:
+        pass
+
+    request = MagicMock()
+    request.state = _NoJtiState()  # no user_jti attribute
+    request.cookies = {"session": "web-session-id-abc"}  # only session cookie present
+
+    result = _resolve_session_key(request)
+    assert result == "web-session-id-abc"
+
+
+def test_cross_user_setup_with_session_cookie_elevation_succeeds(client, esm):
+    """SSO scenario: cross-user setup succeeds when elevation is stored under the
+    session cookie value and no cidx_session cookie is present.
+
+    elevate_ajax stores elevation under user_jti = session cookie value.
+    mfa_setup_page has no user_jti set on request.state (it uses _get_session_username
+    not get_current_admin_user_hybrid), so _resolve_session_key must fall back to
+    reading the session cookie directly to find the elevation window."""
+    session_cookie_value = _make_session_key()
+    # Create elevation window under the session cookie value (as elevate_ajax does)
+    esm.create(
+        session_key=session_cookie_value,
+        username=_ADMIN,
+        elevated_from_ip=None,
+        scope="full",
+    )
+    with _as_admin(_ADMIN), patch(_ESM_PATH, esm):
+        resp = client.get(
+            f"/admin/mfa/setup?user={_OTHER}&confirm_overwrite=1",
+            # Only session cookie present — no cidx_session cookie
+            cookies={"session": session_cookie_value},
+        )
+    assert resp.status_code == 200

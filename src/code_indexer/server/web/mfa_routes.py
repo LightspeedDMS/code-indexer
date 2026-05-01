@@ -34,16 +34,28 @@ _SCOPE_RANK: Dict[str, int] = {"full": 0, "totp_repair": 1}
 
 
 def _resolve_session_key(request: Request) -> Optional[str]:
-    """Return elevation session key: user_jti from request state, or cidx_session cookie.
+    """Return elevation session key: user_jti, session cookie, or cidx_session cookie.
 
     Web UI auth sets request.state.user_jti from the "session" cookie value via
     _hybrid_auth_impl. Bearer-authenticated callers carry user_jti from the JWT jti
     claim. Both paths store elevation windows under this key, so user_jti must be
-    checked first. Falls back to the cidx_session cookie for compatibility.
+    checked first.
+
+    mfa_setup_page uses _get_session_username (not get_current_admin_user_hybrid),
+    so user_jti is NOT set on request.state for that endpoint. Fall back to reading
+    the session cookie directly — _hybrid_auth_impl sets user_jti = session cookie
+    value, so they are equivalent elevation keys.
     """
     jti = getattr(getattr(request, "state", None), "user_jti", None)
     if jti:
         return str(jti)
+    # Fallback for endpoints that don't go through _hybrid_auth_impl.
+    # Lazy import avoids circular dependency at module level.
+    from code_indexer.server.web.auth import SESSION_COOKIE_NAME as _SESSION_COOKIE
+
+    session_cookie = request.cookies.get(_SESSION_COOKIE)
+    if session_cookie is not None:
+        return str(session_cookie)
     cookie = request.cookies.get(CIDX_SESSION_COOKIE)
     return str(cookie) if cookie is not None else None
 

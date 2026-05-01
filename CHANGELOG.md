@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.8 — 2026-04-30
+
+### Fixed
+
+- **Elevation modal infinite loop on cross-user MFA setup for SSO users**. After the v10.0.7 fix taught `mfa_routes._resolve_session_key` to check `request.state.user_jti` first, a second mismatch remained: `mfa_setup_page` uses `_get_session_username` (not `get_current_admin_user_hybrid`), so `user_jti` is **never set** on `request.state` for that endpoint. `elevate_ajax` stores the elevation window under the `session` cookie value (via `user_jti`), but `mfa_setup_page` fell back to the `cidx_session` cookie which SSO users don't have — so the elevation check always failed, and the HTMX retry triggered the modal again indefinitely. Fixed by adding the `session` cookie as an intermediate fallback in `_resolve_session_key` (between `user_jti` and `cidx_session`), so endpoints that don't run through `get_current_admin_user_hybrid` can still resolve the correct elevation window.
+
 ## v10.0.7 — 2026-04-30
 
 ### Fixed
