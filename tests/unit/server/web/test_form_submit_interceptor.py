@@ -59,9 +59,7 @@ def test_bubble_phase_submit_listener_present():
     ensuring the false third argument belongs to the submit listener itself.
     """
     content = _read_base()
-    pattern = (
-        r"addEventListener\(['\"]submit['\"],\s*function\s*\([^)]*\)\s*\{.*?\},\s*false\)"
-    )
+    pattern = r"addEventListener\(['\"]submit['\"],\s*function\s*\([^)]*\)\s*\{.*?\},\s*false\)"
     assert re.search(pattern, content, re.DOTALL) is not None, (
         "base.html submit listener does not use bubble phase. "
         "Expected addEventListener('submit', function(...) { ... }, false) "

@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Set, Tuple
 import pytest
 
 import code_indexer.server.services.dep_map_parser_graph as dep_map_parser_graph
-from code_indexer.server.services.dep_map_parser_graph import parse_domain_file_for_graph
+from code_indexer.server.services.dep_map_parser_graph import (
+    parse_domain_file_for_graph,
+)
 from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
 
 
@@ -117,7 +119,14 @@ class TestMissingFileWarningOnce:
 
         class _Handler(logging.Handler):
             def emit(self, record: logging.LogRecord) -> None:
-                captured.append((record.levelname, record.message if hasattr(record, "message") else record.getMessage()))
+                captured.append(
+                    (
+                        record.levelname,
+                        record.message
+                        if hasattr(record, "message")
+                        else record.getMessage(),
+                    )
+                )
 
         logger = logging.getLogger("code_indexer.server.services.dep_map_parser_graph")
         handler = _Handler()
@@ -128,13 +137,21 @@ class TestMissingFileWarningOnce:
         try:
             for _ in range(3):
                 parse_domain_file_for_graph(
-                    output_dir, base_dir, "domain-alpha",
-                    {}, set(), [],
+                    output_dir,
+                    base_dir,
+                    "domain-alpha",
+                    {},
+                    set(),
+                    [],
                 )
             for _ in range(3):
                 parse_domain_file_for_graph(
-                    output_dir, base_dir, "domain-beta",
-                    {}, set(), [],
+                    output_dir,
+                    base_dir,
+                    "domain-beta",
+                    {},
+                    set(),
+                    [],
                 )
         finally:
             logger.removeHandler(handler)

@@ -280,3 +280,110 @@ def test_cross_user_without_elevation_does_not_call_generate_secret(
         resp = client.get(f"/admin/mfa/setup?user={_OTHER}&confirm_overwrite=1")
     assert resp.status_code == 403
     totp_mock.generate_secret.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Navigation escape-route: back link must go to dashboard, not /admin/users
+# ---------------------------------------------------------------------------
+
+
+def test_render_setup_default_back_link_is_dashboard():
+    """_render_setup default back_link must be /admin/ so admins can escape setup."""
+    from code_indexer.server.web.mfa_routes import _render_setup
+
+    html = _render_setup("qrdata", "MANUALKEY", "csrf", "testuser")
+    assert "href='/admin/'" in html, "back link must point to /admin/ by default"
+
+
+def test_render_setup_back_link_label_contains_cancel():
+    """_render_setup back link label must contain 'Cancel' so the escape is obvious."""
+    from code_indexer.server.web.mfa_routes import _render_setup
+
+    html = _render_setup("qrdata", "MANUALKEY", "csrf", "testuser")
+    assert "Cancel" in html, "back link must say 'Cancel' (not just 'Back')"
+
+
+def test_render_qr_error_default_back_link_is_dashboard():
+    """_render_qr_error default back_link must be /admin/ (dashboard escape route)."""
+    from unittest.mock import MagicMock
+
+    from code_indexer.server.web.mfa_routes import _render_qr_error, set_totp_service
+
+    mock_svc = MagicMock()
+    mock_svc.get_provisioning_uri.return_value = "otpauth://totp/test"
+    mock_svc.generate_qr_code.return_value = b"\x89PNG"
+    mock_svc.get_manual_entry_key.return_value = "ABCDEFGHIJ"
+    set_totp_service(mock_svc)
+    try:
+        resp = _render_qr_error("testuser", "bad code", show_mode=False)
+        assert "href='/admin/'" in resp.body.decode(), (
+            "back link in QR error page must point to /admin/ by default"
+        )
+    finally:
+        set_totp_service(None)
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: _resolve_session_key must prefer user_jti over cidx_session cookie
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_session_key_prefers_user_jti_over_cidx_cookie():
+    """Bug fix: _resolve_session_key must prefer request.state.user_jti over cidx_session cookie.
+
+    Web UI auth stores elevation under the "session" cookie value (mapped via user_jti),
+    not under "cidx_session". Previously mfa_routes only checked "cidx_session" causing
+    elevation lookup to always fail for web UI session users."""
+    from code_indexer.server.web.mfa_routes import _resolve_session_key
+
+    request = MagicMock()
+    request.state.user_jti = "web-ui-session-key"
+    request.cookies.get.return_value = "cidx-session-value"  # different value
+
+    result = _resolve_session_key(request)
+    assert result == "web-ui-session-key"
+
+
+def test_resolve_session_key_falls_back_to_cidx_cookie_when_no_user_jti():
+    """_resolve_session_key falls back to cidx_session cookie when user_jti absent."""
+    from code_indexer.server.auth.dependencies import CIDX_SESSION_COOKIE
+    from code_indexer.server.web.mfa_routes import _resolve_session_key
+
+    class _NoJtiState:
+        pass
+
+    request = MagicMock()
+    request.state = _NoJtiState()  # no user_jti attribute
+    request.cookies = {CIDX_SESSION_COOKIE: "cidx-session-value"}
+
+    result = _resolve_session_key(request)
+    assert result == "cidx-session-value"
+
+
+def test_check_elevation_window_finds_window_via_user_jti(esm):
+    """Bug fix: _check_elevation_window must find elevation stored under user_jti.
+
+    When web UI auth sets request.state.user_jti (from the "session" cookie),
+    the elevation window is stored under that jti value. _check_elevation_window
+    must look up that key, not the cidx_session cookie."""
+    from code_indexer.server.web.mfa_routes import _check_elevation_window
+
+    session_key = _make_session_key()
+    esm.create(
+        session_key=session_key,
+        username=_ADMIN,
+        elevated_from_ip=None,
+        scope="full",
+    )
+
+    # Build a minimal request-like object with user_jti set but no cidx_session cookie.
+    request = MagicMock()
+    request.state.user_jti = session_key
+    request.cookies = {}  # no cidx_session cookie present
+
+    with patch(_ESM_PATH, esm):
+        result = _check_elevation_window(request, required_scope="full")
+
+    # Before fix: returns elevation_required error dict (jti key not checked).
+    # After fix: returns None (elevation found via user_jti).
+    assert result is None, f"Expected None (elevation found), got: {result}"

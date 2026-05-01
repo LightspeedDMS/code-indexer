@@ -3010,11 +3010,7 @@ class GoldenRepoManager:
                         # Bug #945: Only use --clear when no vector_*.json files exist.
                         # Vectors are expensive (embedding API). HNSW is cheap to rebuild.
                         # If vectors exist, omit --clear so rebuild_from_vectors is used.
-                        _index_dir = (
-                            Path(repo_path)
-                            / ".code-indexer"
-                            / "index"
-                        )
+                        _index_dir = Path(repo_path) / ".code-indexer" / "index"
                         _temporal_vectors_exist = any(
                             True
                             for _coll_dir in _index_dir.glob("code-indexer-temporal*")

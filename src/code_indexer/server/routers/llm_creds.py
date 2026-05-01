@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.llm_creds_client import LlmCredsClient
@@ -149,7 +150,11 @@ def lease_status(
     )
 
 
-@router.post("/save-config", response_model=SaveConfigResponse)
+@router.post(
+    "/save-config",
+    response_model=SaveConfigResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def save_config(
     request: SaveConfigRequest,
     http_request: Request,

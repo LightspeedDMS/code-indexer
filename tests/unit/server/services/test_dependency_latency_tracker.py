@@ -515,9 +515,11 @@ class _LogCapture:
         self._handler = _Handler()
 
     def __enter__(self) -> "_LogCapture":
-        import logging
-
-        effective = min(self._level, self._logger.level) if self._logger.level > 0 else self._level
+        effective = (
+            min(self._level, self._logger.level)
+            if self._logger.level > 0
+            else self._level
+        )
         self._logger.setLevel(effective)
         self._logger.addHandler(self._handler)
         return self
@@ -558,12 +560,16 @@ class TestDependencyLatencyTrackerBug951:
         backend = _ClosedDbBackend()
         t = _make_bug951_tracker(backend)
         with _LogCapture(logging.WARNING) as cap:
-            terminated = _wait_for_stop_event(t._stop_event, BUG951_LOOP_TERMINATE_TIMEOUT_S)
+            terminated = _wait_for_stop_event(
+                t._stop_event, BUG951_LOOP_TERMINATE_TIMEOUT_S
+            )
         t._stop_event.set()
         t._writer_thread.join(timeout=2.0)
 
         assert terminated, "stop_event must be set when backend signals closed database"
-        assert not t._writer_thread.is_alive(), "writer thread must exit after closed-database"
+        assert not t._writer_thread.is_alive(), (
+            "writer thread must exit after closed-database"
+        )
         assert backend.call_count >= 1, "backend must have been called at least once"
         assert len(cap.messages) <= 1, (
             f"Expected at most 1 warning (terminal), got {len(cap.messages)}: {cap.messages}"
@@ -579,12 +585,16 @@ class TestDependencyLatencyTrackerBug951:
         backend = _PersistentFailureBackend()
         t = _make_bug951_tracker(backend)
         with _LogCapture(logging.ERROR) as cap:
-            terminated = _wait_for_stop_event(t._stop_event, BUG951_LOOP_TERMINATE_TIMEOUT_S)
+            terminated = _wait_for_stop_event(
+                t._stop_event, BUG951_LOOP_TERMINATE_TIMEOUT_S
+            )
         t._stop_event.set()
         t._writer_thread.join(timeout=2.0)
 
         assert terminated, "stop_event must be set after max consecutive failures"
-        assert not t._writer_thread.is_alive(), "writer thread must exit after max failures"
+        assert not t._writer_thread.is_alive(), (
+            "writer thread must exit after max failures"
+        )
         assert backend.call_count >= MAX_CONSECUTIVE_FAILURES, (
             f"Backend must be called at least {MAX_CONSECUTIVE_FAILURES} times"
         )

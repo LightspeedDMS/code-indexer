@@ -128,9 +128,7 @@ class TestUsersListPartialElevationGate:
             "dependencies list"
         )
 
-    def test_users_list_partial_allowed_when_elevated(
-        self, app, client, mock_session
-    ):
+    def test_users_list_partial_allowed_when_elevated(self, app, client, mock_session):
         """Admin with active elevation gets 200 from /admin/partials/users-list.
 
         _bypass_elevation simulates an active TOTP window (established pattern).
@@ -161,9 +159,7 @@ class TestUsersListPartialElevationGate:
 class TestUsersPageShell:
     """GET /admin/users shell page must NOT require elevation."""
 
-    def test_users_page_shell_does_not_require_elevation(
-        self, client, mock_session
-    ):
+    def test_users_page_shell_does_not_require_elevation(self, client, mock_session):
         """Shell /admin/users page renders without elevation.
 
         The user list no longer inlines via Jinja include — it loads via HTMX.

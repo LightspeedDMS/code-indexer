@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
+from ..auth import dependencies
 from ..auth.dependencies import get_current_admin_user_hybrid
 from ..auth.user_manager import User
 
@@ -70,7 +71,9 @@ async def get_provider_index_status(
     return {"repository_alias": alias, "provider_indexes": status}
 
 
-@router.post("/add", status_code=202)
+@router.post(
+    "/add", status_code=202, dependencies=[Depends(dependencies.require_elevation())]
+)
 async def add_provider_index(
     body: ProviderIndexRequest,
     request: Request,
@@ -86,7 +89,11 @@ async def add_provider_index(
     )
 
 
-@router.post("/recreate", status_code=202)
+@router.post(
+    "/recreate",
+    status_code=202,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def recreate_provider_index(
     body: ProviderIndexRequest,
     request: Request,
@@ -102,7 +109,7 @@ async def recreate_provider_index(
     )
 
 
-@router.post("/remove")
+@router.post("/remove", dependencies=[Depends(dependencies.require_elevation())])
 async def remove_provider_index(
     body: ProviderIndexRequest,
     request: Request,
@@ -148,7 +155,11 @@ async def remove_provider_index(
     }
 
 
-@router.post("/bulk-add", status_code=202)
+@router.post(
+    "/bulk-add",
+    status_code=202,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def bulk_add(
     body: BulkAddRequest,
     request: Request,

@@ -67,6 +67,7 @@ def _get_scip_helpers():
 # =============================================================================
 
 
+@require_mcp_elevation()
 def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all users (admin only)."""
     try:
@@ -500,6 +501,7 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 # =============================================================================
 
 
+@require_mcp_elevation()
 def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Query operational logs with pagination and filtering.
@@ -561,6 +563,7 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     )
 
 
+@require_mcp_elevation()
 def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     Export operational logs in JSON or CSV format.
@@ -888,6 +891,7 @@ def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Update a custom group's name and/or description."""
     try:
@@ -1061,6 +1065,7 @@ def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[st
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Grant a group access to one or more repositories."""
     try:
@@ -1105,6 +1110,7 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Revoke a group's access to a single repository."""
     from ....services.group_access_manager import CidxMetaCannotBeRevokedError
@@ -1162,6 +1168,7 @@ def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_bulk_remove_repos_from_group(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -1251,6 +1258,7 @@ def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new API key for the authenticated user."""
     try:
@@ -1338,6 +1346,7 @@ def handle_list_mcp_credentials(args: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_create_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new MCP credential for the authenticated user."""
     try:
@@ -1366,6 +1375,7 @@ def handle_create_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, 
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_delete_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete an MCP credential belonging to the authenticated user."""
     try:
@@ -1399,6 +1409,7 @@ def handle_delete_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, 
 # =============================================================================
 
 
+@require_mcp_elevation()
 def handle_admin_list_user_mcp_credentials(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -1484,6 +1495,7 @@ def handle_admin_create_user_mcp_credential(
 # =============================================================================
 
 
+@require_mcp_elevation()
 def handle_admin_delete_user_mcp_credential(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -1522,6 +1534,7 @@ def handle_admin_delete_user_mcp_credential(
         return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_admin_list_all_mcp_credentials(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -1566,6 +1579,7 @@ def handle_admin_list_all_mcp_credentials(
 # =============================================================================
 
 
+@require_mcp_elevation()
 def handle_admin_list_system_mcp_credentials(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -1604,6 +1618,7 @@ def handle_admin_list_system_mcp_credentials(
 # =============================================================================
 
 
+@require_mcp_elevation()
 def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Query security audit logs with optional filtering (admin only)."""
     try:

@@ -16,6 +16,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field, model_validator
 
+from ..auth import dependencies
 from ..auth.dependencies import get_current_admin_user
 from ..auth.user_manager import User
 from ..services.constants import CIDX_META_REPO
@@ -226,6 +227,7 @@ def list_groups(
     "",
     response_model=GroupResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         201: {"description": "Custom group created successfully"},
         409: {"description": "Group name already exists"},
@@ -305,6 +307,7 @@ def get_group(
 @router.put(
     "/{group_id}",
     response_model=GroupResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         200: {"description": "Group updated successfully"},
         404: {"description": "Group not found"},
@@ -357,7 +360,11 @@ def update_group(
         )
 
 
-@router.post("/{group_id}/members", response_model=MessageResponse)
+@router.post(
+    "/{group_id}/members",
+    response_model=MessageResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def assign_user_to_group(
     group_id: int,
     request: AssignUserRequest,
@@ -391,6 +398,7 @@ def assign_user_to_group(
 @router.delete(
     "/{group_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         204: {"description": "Group deleted successfully"},
         400: {"description": "Cannot delete default group or group with users"},
@@ -454,6 +462,7 @@ def delete_group(
 @router.post(
     "/{group_id}/repos",
     response_model=BulkAddReposResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         201: {"description": "New repositories added to group"},
         200: {"description": "No new repositories added (idempotent)"},
@@ -519,6 +528,7 @@ def add_repo_to_group(
 @router.delete(
     "/{group_id}/repos/{repo_name}",
     status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         204: {"description": "Repository access revoked"},
         400: {"description": "Cannot revoke cidx-meta access"},
@@ -570,6 +580,7 @@ def remove_repo_from_group(
 @router.delete(
     "/{group_id}/repos",
     response_model=BulkRemoveReposResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         200: {"description": "Repositories removed from group"},
         404: {"description": "Group not found"},
@@ -654,7 +665,11 @@ class UsersListResponse(BaseModel):
     total: int
 
 
-@users_router.get("", response_model=UsersListResponse)
+@users_router.get(
+    "",
+    response_model=UsersListResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def list_users(
     limit: Optional[int] = None,
     offset: int = 0,
@@ -684,6 +699,7 @@ class MoveUserToGroupRequest(BaseModel):
 @users_router.put(
     "/{user_id}/group",
     response_model=MessageResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         200: {"description": "User moved to group successfully"},
         404: {"description": "User or group not found"},
@@ -748,7 +764,11 @@ def move_user_to_group(
 audit_router = APIRouter(prefix="/api/v1/audit-logs", tags=["audit"])
 
 
-@audit_router.get("", response_model=AuditLogsListResponse)
+@audit_router.get(
+    "",
+    response_model=AuditLogsListResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def get_audit_logs(
     action_type: Optional[str] = None,
     target_type: Optional[str] = None,

@@ -330,11 +330,15 @@ def test_provider_indexes_private_helpers_importable():
     assert callable(_provider_index_job)
 
 
-def test_no_circular_imports():
+@pytest.mark.timeout(90)
+def test_no_circular_imports(tmp_path):
     """Package import must complete without circular import errors (AC3).
 
     Uses a subprocess to test import in a clean interpreter — avoids
     issues with sys.modules aliasing used in the Phase 1 package scaffold.
+    CIDX_SERVER_DATA_DIR is set to an isolated temp dir so create_app() in
+    app.py (module-level) does not contend with the real DB.
+    Marked timeout=90s because DB schema init under parallel load takes >15s.
     """
     import subprocess
     import sys
@@ -347,6 +351,7 @@ def test_no_circular_imports():
         ],
         capture_output=True,
         text=True,
+        timeout=60,
         env={
             "PYTHONPATH": str(
                 os.path.normpath(
@@ -354,7 +359,8 @@ def test_no_circular_imports():
                         os.path.dirname(__file__), "..", "..", "..", "..", "src"
                     )
                 )
-            )
+            ),
+            "CIDX_SERVER_DATA_DIR": str(tmp_path),
         },
     )
     assert result.returncode == 0, f"Circular import detected. stderr:\n{result.stderr}"

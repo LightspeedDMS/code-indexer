@@ -193,7 +193,9 @@ def _attempt_elevation(
         )
         return _ElevResult.NO_SESSION, None
 
-    scope = _verify_credentials(totp_service, username, totp_code, recovery_code, client_ip)
+    scope = _verify_credentials(
+        totp_service, username, totp_code, recovery_code, client_ip
+    )
     if scope is None:
         code_type = "recovery code" if recovery_code else "TOTP code"
         logger.warning(
@@ -210,7 +212,9 @@ def _attempt_elevation(
         elevated_from_ip=client_ip,
         scope=scope,
     )
-    logger.info("Elevation granted for %s from %s (scope=%s)", username, client_ip, scope)
+    logger.info(
+        "Elevation granted for %s from %s (scope=%s)", username, client_ip, scope
+    )
     return _ElevResult.SUCCESS, scope
 
 
@@ -256,7 +260,9 @@ def elevate_form(
         return RedirectResponse(url=safe_next, status_code=_HTTP_SEE_OTHER)
     if result == _ElevResult.KILL_SWITCH_OFF:
         return _elev_error(
-            request, safe_next, "Step-up elevation is currently disabled.",
+            request,
+            safe_next,
+            "Step-up elevation is currently disabled.",
             _HTTP_SERVICE_UNAVAILABLE,
         )
     if result == _ElevResult.NO_CODE:

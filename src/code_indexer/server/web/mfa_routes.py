@@ -34,7 +34,16 @@ _SCOPE_RANK: Dict[str, int] = {"full": 0, "totp_repair": 1}
 
 
 def _resolve_session_key(request: Request) -> Optional[str]:
-    """Return cidx_session cookie value as elevation session key, or None."""
+    """Return elevation session key: user_jti from request state, or cidx_session cookie.
+
+    Web UI auth sets request.state.user_jti from the "session" cookie value via
+    _hybrid_auth_impl. Bearer-authenticated callers carry user_jti from the JWT jti
+    claim. Both paths store elevation windows under this key, so user_jti must be
+    checked first. Falls back to the cidx_session cookie for compatibility.
+    """
+    jti = getattr(getattr(request, "state", None), "user_jti", None)
+    if jti:
+        return str(jti)
     cookie = request.cookies.get(CIDX_SESSION_COOKIE)
     return str(cookie) if cookie is not None else None
 
@@ -168,7 +177,7 @@ def _render_setup(
     success: str = "",
     show_mode: bool = False,
     verify_route: str = "/admin/mfa/verify",
-    back_link: str = "/admin/users",
+    back_link: str = "/admin/",
     recovery_link_prefix: str = "/admin/mfa",
     re_setup_link: str = "",
 ) -> str:
@@ -251,7 +260,7 @@ def _render_setup(
         "<p class='info'>Or enter this key manually:</p>"
         f"<div class='mk'>{manual_key}</div>"
         f"{form_section}"
-        f"<a href='{back_link}' class='back'>Back</a>"
+        f"<a href='{back_link}' class='back'>Cancel — Go to Dashboard</a>"
         "</div></body></html>"
     )
 
@@ -386,7 +395,7 @@ def _render_qr_error(
     error_msg: str,
     show_mode: bool,
     verify_route: str = "/admin/mfa/verify",
-    back_link: str = "/admin/users",
+    back_link: str = "/admin/",
     recovery_link_prefix: str = "/admin/mfa",
     re_setup_link: str = "",
 ) -> HTMLResponse:

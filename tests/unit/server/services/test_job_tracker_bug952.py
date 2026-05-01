@@ -91,9 +91,7 @@ class TestUpdateStatusUnknownJobNoWarning:
             logging.WARNING,
             logger="code_indexer.server.services.job_tracker",
         ):
-            result = tracker.update_status(
-                "job-never-existed-952", status="running"
-            )
+            result = tracker.update_status("job-never-existed-952", status="running")
 
         _assert_no_warning(caplog)
         assert result is None

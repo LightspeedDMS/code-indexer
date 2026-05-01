@@ -30,7 +30,7 @@
                         if (err === 'totp_setup_required') {
                             if (!window._cidxRedirecting) {
                                 window._cidxRedirecting = true;
-                                window.location.href = (body.detail && body.detail.setup_url) || '/admin/mfa/setup';
+                                window.location.replace((body.detail && body.detail.setup_url) || '/admin/mfa/setup');
                                 setTimeout(function() { window._cidxRedirecting = false; }, 3000);
                             }
                             return response;
@@ -125,7 +125,7 @@
                         evt.detail.shouldSwap = false;
                         if (!window._cidxRedirecting) {
                             window._cidxRedirecting = true;
-                            window.location.href = (body.detail.setup_url) || '/admin/mfa/setup';
+                            window.location.replace((body.detail.setup_url) || '/admin/mfa/setup');
                             setTimeout(function() { window._cidxRedirecting = false; }, 3000);
                         }
                         return;
@@ -287,7 +287,7 @@
                 <header>
                     <h2 id="elevationModalTitle">Verify your identity</h2>
                 </header>
-                <p>Enter your authenticator code to continue.</p>
+                <p>Enter <strong>your</strong> authenticator code to continue.</p>
                 <div id="elevationError" role="alert" class="error-message" style="display:none"></div>
                 <label for="elevationTotpCode">
                     Authenticator code
