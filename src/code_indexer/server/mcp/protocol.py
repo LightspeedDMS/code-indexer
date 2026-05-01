@@ -162,6 +162,7 @@ async def _invoke_handler(
     session_state: Any,
     sig: Any,
     is_async: bool,
+    session_id: Optional[str] = None,
 ) -> Any:
     """
     Invoke handler with appropriate parameters.
@@ -173,26 +174,32 @@ async def _invoke_handler(
         session_state: Session state (may be None)
         sig: Handler function signature (from inspect.signature)
         is_async: Whether handler is async
+        session_id: MCP session ID injected as session_key for elevation-gated handlers
 
     Returns:
         Handler result
     """
+    extra_kwargs: Dict[str, Any] = {}
+
     if "session_state" in sig.parameters:
-        if is_async:
-            return await handler(arguments, user, session_state=session_state)
-        else:
-            loop = asyncio.get_running_loop()
-            bound = functools.partial(
-                handler, arguments, user, session_state=session_state
-            )
-            return await loop.run_in_executor(None, bound)
+        extra_kwargs["session_state"] = session_state
+
+    # Inject session_key for TOTP elevation handlers — only when session_id is truthy.
+    # Case A: handler explicitly declares session_key (e.g., elevate_session).
+    #   inspect.signature follows __wrapped__ so sig reflects the original sig.
+    if session_id and "session_key" in sig.parameters:
+        extra_kwargs["session_key"] = session_id
+    elif session_id and getattr(handler, "__mcp_requires_session_key__", False):
+        # Case B: handler is wrapped with @require_mcp_elevation.
+        # The explicit marker replaces the fragile VAR_KEYWORD heuristic.
+        extra_kwargs["session_key"] = session_id
+
+    if is_async:
+        return await handler(arguments, user, **extra_kwargs)
     else:
-        if is_async:
-            return await handler(arguments, user)
-        else:
-            loop = asyncio.get_running_loop()
-            bound = functools.partial(handler, arguments, user)
-            return await loop.run_in_executor(None, bound)
+        loop = asyncio.get_running_loop()
+        bound = functools.partial(handler, arguments, user, **extra_kwargs)
+        return await loop.run_in_executor(None, bound)
 
 
 def _validate_acting_users(value: Any) -> None:
@@ -469,7 +476,13 @@ async def handle_tools_call(
         # Create async wrapper for handler execution
         async def handler_wrapper():
             return await _invoke_handler(
-                handler, arguments, user, session_state, sig, is_async
+                handler,
+                arguments,
+                user,
+                session_state,
+                sig,
+                is_async,
+                session_id=session_id,
             )
 
         # Execute through span interceptor
@@ -492,7 +505,13 @@ async def handle_tools_call(
     else:
         # No interception - execute handler directly
         result = await _invoke_handler(
-            handler, arguments, user, session_state, sig, is_async
+            handler,
+            arguments,
+            user,
+            session_state,
+            sig,
+            is_async,
+            session_id=session_id,
         )
 
     # Bug #350: Protocol-level API metrics tracking.

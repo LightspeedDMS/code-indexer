@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.10 — 2026-05-01
+
+### Fixed
+
+- **MCP TOTP elevation always failed** — `_invoke_handler` never forwarded the MCP `session_id` as `session_key` to handlers, so `elevate_session` could not locate the caller's elevation window and gated tools always returned `elevation_required`. Fixed by adding `session_id` parameter to `_invoke_handler` with two injection paths: Case A (handler explicitly declares `session_key` param) and Case B (`__mcp_requires_session_key__ = True` marker on `@require_mcp_elevation` wrappers). Both `handle_tools_call` call sites now pass `session_id`.
+- **Cross-user elevation bypass on MCP path** — `elevation_decorator.py` Gate 6 called `touch_atomic(session_key)` with no username constraint, so any client knowing a valid `session_key` could extend another user's elevation window. Fixed by introducing `touch_atomic_for_user(session_key, username)` on both `_PgBackend` and `ElevatedSessionManager` (SQLite path uses `BEGIN EXCLUSIVE` + `WHERE username = ?`; PG path uses `UPDATE...RETURNING` with `AND username = %s`). Decorator now calls `touch_atomic_for_user(session_key, user.username)`.
+- **TOCTOU window in PG `touch_atomic`** (REST + Web elevation paths) — the prior two-step `UPDATE` then separate `SELECT` left a race window where a concurrent `revoke_all_for_username()` could delete the row between statements. Fixed by converting `_PG_TOUCH` to `UPDATE...RETURNING` single-statement form for `_PgBackend.touch_atomic()` and `touch_atomic_for_user()`.
+- **psycopg3 `TypeError` on PG elevation row reads** — `_PgBackend` methods `touch_atomic`, `touch_atomic_for_user`, and `get_status` called `_row_to_elevated_session()` (dict-style access) without setting `conn.row_factory = dict_row`; psycopg3 default is `tuple_row`. Fixed by adding `conn.row_factory = dict_row` in all three methods (mirrors `mfa_challenge.py` pattern).
+
 ## v10.0.9 — 2026-05-01
 
 ### Fixed

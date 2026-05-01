@@ -435,11 +435,60 @@ class _EsmPgConn:
     def _translate(query: str) -> str:
         return query.replace("%s", "?")
 
-    def execute(self, query: str, params=None):
-        translated = self._translate(query)
-        if params:
-            return self._conn.execute(translated, params)
-        return self._conn.execute(translated)
+    def _run(self, sql: str, params=None) -> sqlite3.Cursor:
+        """Execute an already-translated SQL string against the underlying connection."""
+        return self._conn.execute(sql, params) if params else self._conn.execute(sql)
+
+    @staticmethod
+    def _returning_session_key(query_no_returning: str, params) -> str:
+        """Return the session_key value for a RETURNING re-SELECT.
+
+        Validates table == elevated_sessions and derives session_key as the
+        first WHERE param (immediately after the SET params). Raises RuntimeError
+        on any parse failure — no silent fallbacks.
+        """
+        import re
+
+        table_match = re.search(
+            r"\bUPDATE\s+(\w+)\b", query_no_returning, re.IGNORECASE
+        )
+        set_match = re.search(
+            r"\bSET\b(.*?)\bWHERE\b", query_no_returning, re.IGNORECASE | re.DOTALL
+        )
+        if not table_match or not set_match:
+            raise RuntimeError(
+                "_EsmPgConn: cannot emulate RETURNING — unrecognised UPDATE shape: "
+                f"{query_no_returning!r}"
+            )
+        table = table_match.group(1)
+        if table != "elevated_sessions":
+            raise RuntimeError(
+                "_EsmPgConn: RETURNING emulation only supports elevated_sessions, "
+                f"got {table!r}"
+            )
+        set_param_count = set_match.group(1).count("%s")
+        if not params or len(params) <= set_param_count:
+            raise RuntimeError(
+                f"_EsmPgConn: expected at least {set_param_count + 1} params "
+                f"(SET + session_key…), got {params!r}"
+            )
+        return str(params[set_param_count])  # first WHERE param is always session_key
+
+    def execute(self, query: str, params=None) -> sqlite3.Cursor:
+        import re
+
+        returning_match = re.search(r"\bRETURNING\b", query, re.IGNORECASE)
+        if returning_match:
+            query_no_ret = query[: returning_match.start()].strip()
+            cursor = self._run(self._translate(query_no_ret), params)
+            if cursor.rowcount > 0:
+                session_key = self._returning_session_key(query_no_ret, params)
+                return self._run(
+                    "SELECT * FROM elevated_sessions WHERE session_key = ?",
+                    (session_key,),
+                )
+            return self._run("SELECT * FROM elevated_sessions WHERE 0")
+        return self._run(self._translate(query), params)
 
     def commit(self) -> None:
         self._conn.commit()
