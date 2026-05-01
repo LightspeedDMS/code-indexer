@@ -155,19 +155,12 @@ def test_gated_tool_returns_elevation_required(
 # ---------------------------------------------------------------------------
 
 
-def test_list_users_not_gated(admin_user, manager, totp_enabled):
-    """list_users is not elevation-gated and must not return elevation_required."""
-    mock_um = MagicMock()
-    mock_um.get_all_users.return_value = []
-    with (
-        _patch_all(manager, totp_enabled),
-        patch(
-            "code_indexer.server.mcp.handlers._utils.app_module.user_manager", mock_um
-        ),
-    ):
+def test_list_users_is_gated(admin_user, manager, totp_enabled):
+    """list_users is elevation-gated and must return elevation_required when no window."""
+    with _patch_all(manager, totp_enabled):
         result = admin_handlers.list_users({}, admin_user)
-    assert result.get("error") != "elevation_required", (
-        f"list_users should not be elevation-gated: {result}"
+    assert result.get("error") == "elevation_required", (
+        f"list_users should be elevation-gated: {result}"
     )
 
 

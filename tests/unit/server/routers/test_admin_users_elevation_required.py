@@ -10,13 +10,13 @@ Verifies:
 """
 
 import contextlib
+import tempfile
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from code_indexer.server.app import app
 from code_indexer.server.auth import dependencies as _deps
 from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -62,6 +62,24 @@ def manager():
     )
 
 
+@pytest.fixture
+def tmpdir_path():
+    """Isolated temp dir — prevents DB lock when run alongside other tests."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield tmpdir
+
+
+def _get_app(tmpdir: str):
+    """Lazy-import app with isolated DB to avoid collection-time DB lock."""
+    from code_indexer.server.services.config_service import reset_config_service
+
+    with patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": tmpdir}):
+        reset_config_service()
+        from code_indexer.server.app import app as _app
+
+        return _app
+
+
 @pytest.fixture(autouse=True)
 def _restore_manager():
     """Restore module-level elevated_session_manager after each test."""
@@ -83,8 +101,9 @@ def _elevation_ctx(enforcement: bool = True, mfa_enabled: bool = True):
 
 
 @pytest.fixture
-def client_no_elevation(admin_user, manager):
+def client_no_elevation(admin_user, manager, tmpdir_path):
     """TestClient with admin auth but NO elevation window; enforcement ON."""
+    app = _get_app(tmpdir_path)
     _deps.elevated_session_manager = manager
     app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: admin_user
     yield TestClient(app, raise_server_exceptions=False), manager
@@ -92,8 +111,9 @@ def client_no_elevation(admin_user, manager):
 
 
 @pytest.fixture
-def client_with_elevation(admin_user, manager):
+def client_with_elevation(admin_user, manager, tmpdir_path):
     """TestClient with admin auth AND an active elevation window."""
+    app = _get_app(tmpdir_path)
     _deps.elevated_session_manager = manager
     manager.create(_SESSION_KEY, _USERNAME, _IP)
     app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: admin_user

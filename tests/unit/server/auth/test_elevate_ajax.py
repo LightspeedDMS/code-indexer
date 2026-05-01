@@ -22,12 +22,8 @@ from code_indexer.server.web.elevation_web_routes import router as elevation_web
 _ENFORCEMENT_PATH = (
     "code_indexer.server.web.elevation_web_routes._is_elevation_enforcement_enabled"
 )
-_TOTP_SERVICE_PATH = (
-    "code_indexer.server.web.elevation_web_routes.get_totp_service"
-)
-_ESM_PATH = (
-    "code_indexer.server.web.elevation_web_routes.elevated_session_manager"
-)
+_TOTP_SERVICE_PATH = "code_indexer.server.web.elevation_web_routes.get_totp_service"
+_ESM_PATH = "code_indexer.server.web.elevation_web_routes.elevated_session_manager"
 _RESOLVE_SESSION_PATH = (
     "code_indexer.server.web.elevation_web_routes._resolve_session_key"
 )
@@ -66,9 +62,7 @@ def app(admin_user):
     _app.include_router(elevation_web_router)
     from code_indexer.server.auth import dependencies as _deps
 
-    _app.dependency_overrides[_deps.get_current_admin_user_hybrid] = (
-        lambda: admin_user
-    )
+    _app.dependency_overrides[_deps.get_current_admin_user_hybrid] = lambda: admin_user
     return _app
 
 

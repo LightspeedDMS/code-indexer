@@ -17,6 +17,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from starlette.requests import Request
+from ..auth import dependencies
 from ..auth.dependencies import get_current_admin_user_hybrid
 from ..auth.user_manager import User
 from ..services.api_key_management import (
@@ -305,7 +306,11 @@ def _clear_from_rc_files(key_to_clear: str, env_var_name: str) -> List[str]:
 router = APIRouter(prefix="/api/api-keys", tags=["API Keys"])
 
 
-@router.post("/anthropic", response_model=SaveApiKeyResponse)
+@router.post(
+    "/anthropic",
+    response_model=SaveApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def save_anthropic_key(
     request: SaveApiKeyRequest,
     http_request: Request,
@@ -363,7 +368,11 @@ def save_anthropic_key(
     )
 
 
-@router.post("/voyageai", response_model=SaveApiKeyResponse)
+@router.post(
+    "/voyageai",
+    response_model=SaveApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def save_voyageai_key(
     request: SaveApiKeyRequest,
     http_request: Request,
@@ -554,7 +563,11 @@ class ClearApiKeyResponse(BaseModel):
     message: str
 
 
-@router.post("/cohere", response_model=SaveApiKeyResponse)
+@router.post(
+    "/cohere",
+    response_model=SaveApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def save_cohere_key(
     request: SaveApiKeyRequest,
     http_request: Request,
@@ -654,7 +667,11 @@ async def test_configured_cohere_key(
     )
 
 
-@router.delete("/cohere", response_model=ClearApiKeyResponse)
+@router.delete(
+    "/cohere",
+    response_model=ClearApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def clear_cohere_key(
     http_request: Request,
     _current_user: User = Depends(get_current_admin_user_hybrid),
@@ -690,7 +707,11 @@ def clear_cohere_key(
     )
 
 
-@router.delete("/anthropic", response_model=ClearApiKeyResponse)
+@router.delete(
+    "/anthropic",
+    response_model=ClearApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def clear_anthropic_key(
     http_request: Request,
     _current_user: User = Depends(get_current_admin_user_hybrid),
@@ -732,7 +753,11 @@ def clear_anthropic_key(
     )
 
 
-@router.delete("/voyageai", response_model=ClearApiKeyResponse)
+@router.delete(
+    "/voyageai",
+    response_model=ClearApiKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def clear_voyageai_key(
     http_request: Request,
     _current_user: User = Depends(get_current_admin_user_hybrid),

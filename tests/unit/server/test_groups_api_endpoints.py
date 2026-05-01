@@ -19,10 +19,16 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 from datetime import datetime, timezone
 
-from code_indexer.server.app import create_app
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.group_access_manager import GroupAccessManager
 from code_indexer.server.routers.groups import set_group_manager
+
+
+@pytest.fixture
+def tmpdir_path():
+    """Isolated temp dir — prevents DB lock when run alongside other tests."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)
 
 
 @pytest.fixture
@@ -50,10 +56,18 @@ class TestGroupsListEndpoint:
     """Tests for GET /api/v1/groups endpoint."""
 
     @pytest.fixture
-    def client(self, initialized_group_manager):
+    def client(self, initialized_group_manager, tmpdir_path):
         """Create FastAPI test client with initialized group manager."""
-        app = create_app()
-        return TestClient(app)
+        from code_indexer.server.services.config_service import reset_config_service
+
+        with patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": str(tmpdir_path)}):
+            from code_indexer.server.app import create_app
+
+            reset_config_service()
+            _app = create_app()
+            with TestClient(_app) as c:
+                yield c
+            reset_config_service()
 
     @pytest.fixture
     def mock_user_manager(self):
@@ -175,10 +189,18 @@ class TestGroupDetailsEndpoint:
     """Tests for GET /api/v1/groups/{id} endpoint."""
 
     @pytest.fixture
-    def client(self, initialized_group_manager):
+    def client(self, initialized_group_manager, tmpdir_path):
         """Create FastAPI test client with initialized group manager."""
-        app = create_app()
-        return TestClient(app)
+        from code_indexer.server.services.config_service import reset_config_service
+
+        with patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": str(tmpdir_path)}):
+            from code_indexer.server.app import create_app
+
+            reset_config_service()
+            _app = create_app()
+            with TestClient(_app) as c:
+                yield c
+            reset_config_service()
 
     @pytest.fixture
     def mock_user_manager(self):
@@ -346,10 +368,18 @@ class TestGroupMembershipEndpoints:
     """Tests for group membership and deletion API endpoints."""
 
     @pytest.fixture
-    def client(self, initialized_group_manager):
+    def client(self, initialized_group_manager, tmpdir_path):
         """Create FastAPI test client with initialized group manager."""
-        app = create_app()
-        return TestClient(app)
+        from code_indexer.server.services.config_service import reset_config_service
+
+        with patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": str(tmpdir_path)}):
+            from code_indexer.server.app import create_app
+
+            reset_config_service()
+            _app = create_app()
+            with TestClient(_app) as c:
+                yield c
+            reset_config_service()
 
     @pytest.fixture
     def mock_user_manager(self):

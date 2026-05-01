@@ -1072,7 +1072,9 @@ class TestTokenRotation:
             call_index["n"] += 1
             return tokens[min(idx, len(tokens) - 1)]
 
-        service = self._make_service(tmp_db, github_token=None, token_fetcher=rotating_fetcher)
+        service = self._make_service(
+            tmp_db, github_token=None, token_fetcher=rotating_fetcher
+        )
         captured = self._run_scan_and_capture_tokens(service, scan_count=2)
 
         assert len(captured) == 2
