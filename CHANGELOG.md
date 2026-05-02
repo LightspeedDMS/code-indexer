@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.16 — 2026-05-02
+
+### Fixed
+
+- **Bug fix — cidx-meta backup bootstrap falls back gracefully on strict branch protection** — `CidxMetaBackupBootstrap.bootstrap()` previously used `git push --force` unconditionally when initializing or re-pointing a remote, which is rejected by repositories with strict branch-protection rules (e.g. production git hosts). The two force-push call sites are replaced by a `_push_with_fallback()` helper that first attempts a plain `git push`; if the remote rejects it (e.g. non-fast-forward), it retries with `--force`; if the force push is also rejected, it raises `RuntimeError` with a clear message. This allows bootstrap to succeed against fresh remotes without privileges, and still recover via force push when the remote has diverged history.
+
 ## v10.0.15 — 2026-05-02
 
 ### Fixed
