@@ -1511,39 +1511,25 @@ def _execute_semantic_search(
                     time.time() - staleness_start
                 ) * 1000
 
-                # Convert enhanced results back to local format
-                enhanced_local_results = []
-                for enhanced in enhanced_results:
-                    # Find corresponding original result
-                    original = next(
-                        r
-                        for r in results
-                        if r["payload"].get("path") == enhanced.file_path
-                    )
+                # Annotate results with staleness detection metadata.
+                # No reranker in this function — use preserve_order=False so
+                # fresh results sort before stale ones (staleness-first ordering).
+                results = _annotate_staleness(
+                    results, enhanced_results, preserve_order=False
+                )
 
-                    # Add staleness metadata to the result
-                    enhanced_result = original.copy()
-                    enhanced_result["staleness"] = {
-                        "is_stale": enhanced.is_stale,
-                        "staleness_indicator": enhanced.staleness_indicator,
-                        "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-                    }
-                    enhanced_local_results.append(enhanced_result)
-
-                # Replace results with staleness-enhanced results
-                results = enhanced_local_results
-
-            except Exception:
-                # Graceful fallback - continue with original results
-                pass
+            except Exception as _staleness_exc:
+                # Staleness detection is best-effort; continue with original results.
+                # Log at debug so failures are visible without spamming users.
+                logging.getLogger(__name__).debug(
+                    "Staleness detection skipped: %s", _staleness_exc, exc_info=True
+                )
 
         return results
 
     except Exception as e:
         if not quiet:
             console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
-        import logging
-
         logger = logging.getLogger(__name__)
         logger.error(f"Semantic search error: {e}", exc_info=True)
         return []
@@ -4730,6 +4716,80 @@ def display_temporal_results(results, temporal_service):
         index += 1
 
 
+def _annotate_staleness(
+    results: List[Dict[str, Any]],
+    enhanced_results: Any,
+    preserve_order: bool = False,
+) -> List[Dict[str, Any]]:
+    """Annotate raw results with staleness metadata.
+
+    When ``preserve_order=True``, iterates ``results`` in input order (e.g.
+    reranked order) and looks up staleness data by file path.  This preserves
+    the caller's ordering instead of the staleness-sort order that
+    ``apply_staleness_detection`` applies internally (bug #965 fix).
+
+    When ``preserve_order=False`` (default), iterates ``enhanced_results``
+    which is already sorted by (is_stale, -score) so fresh results appear
+    first.  Use this for non-reranked queries.
+
+    Args:
+        results: Raw result dicts in display order (reranked or original).
+        enhanced_results: EnhancedQueryResultItem objects from StalenessDetector.
+        preserve_order: When True, keep ``results`` iteration order (reranked).
+            When False, use ``enhanced_results`` iteration order (fresh-first).
+
+    Returns:
+        New list of result dicts with a ``staleness`` key on each entry that
+        had a matching enhanced result.  Entries with no match are included
+        unchanged (no ``staleness`` key).
+    """
+    if preserve_order:
+        # Reranked path: iterate results in caller order, look up staleness by
+        # (path, line_number) composite key so sibling chunks from the same file
+        # are not silently overwritten by a path-only dict key.
+        enhanced_by_chunk = {(e.file_path, e.line_number): e for e in enhanced_results}
+        annotated = []
+        for original in results:
+            path = original["payload"].get("path", "")
+            line_start = original["payload"].get("line_start", 1)
+            enhanced = enhanced_by_chunk.get((path, line_start))
+            result_copy = original.copy()
+            if enhanced:
+                result_copy["staleness"] = {
+                    "is_stale": enhanced.is_stale,
+                    "staleness_indicator": enhanced.staleness_indicator,
+                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                }
+            annotated.append(result_copy)
+        return annotated
+    else:
+        # Non-reranked path: annotate each result with staleness metadata, then
+        # sort fresh-first (is_stale ascending) with score-descending tie-break.
+        # Explicit sort ensures correct ordering regardless of enhanced_results
+        # input order.  Use (path, line_start) composite key so sibling chunks
+        # from the same file are each reachable.
+        results_by_chunk = {
+            (r["payload"].get("path", ""), r["payload"].get("line_start", 1)): r
+            for r in results
+        }
+        annotated = []
+        for enhanced in enhanced_results:
+            matched: Optional[Dict[str, Any]] = results_by_chunk.get(
+                (enhanced.file_path, enhanced.line_number)
+            )
+            if matched is None:
+                continue
+            result_copy = matched.copy()
+            result_copy["staleness"] = {
+                "is_stale": enhanced.is_stale,
+                "staleness_indicator": enhanced.staleness_indicator,
+                "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+            }
+            annotated.append(result_copy)
+        annotated.sort(key=lambda r: (r["staleness"]["is_stale"], -r.get("score", 0.0)))
+        return annotated
+
+
 @cli.command()
 @click.argument("query")
 @click.option(
@@ -6713,27 +6773,17 @@ def query(
                     time.time() - staleness_start
                 ) * 1000
 
-                # Convert enhanced results back to local format but preserve staleness info
-                enhanced_local_results = []
-                for enhanced in enhanced_results:
-                    # Find corresponding original result
-                    original = next(
-                        r
-                        for r in results
-                        if r["payload"].get("path") == enhanced.file_path
-                    )
-
-                    # Add staleness metadata to the result
-                    enhanced_result = original.copy()
-                    enhanced_result["staleness"] = {
-                        "is_stale": enhanced.is_stale,
-                        "staleness_indicator": enhanced.staleness_indicator,
-                        "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-                    }
-                    enhanced_local_results.append(enhanced_result)
-
-                # Replace results with staleness-enhanced results
-                results = enhanced_local_results
+                # Annotate results with staleness detection metadata.
+                # When a reranker was applied (effective_rerank_query is set),
+                # pass preserve_order=True so _annotate_staleness iterates
+                # `results` (reranked order) and does not clobber it with the
+                # staleness-sort that apply_staleness_detection uses internally
+                # (bug #965).  Without a reranker, fresh results sort first.
+                results = _annotate_staleness(
+                    results,
+                    enhanced_results,
+                    preserve_order=bool(effective_rerank_query),
+                )
 
             except Exception as e:
                 # Graceful fallback - continue with original results if staleness detection fails
