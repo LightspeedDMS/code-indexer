@@ -469,8 +469,11 @@ class CIDXRemoteAPIClient:
                         retry_count += 1
                         continue
 
-                    # Handle other error status codes using network error handler
-                    if response.status_code >= 400:
+                    # Handle other error status codes using network error handler.
+                    # 403 responses are returned as-is: admin methods call
+                    # _check_elevation_required() to inspect the body before
+                    # raising AuthenticationError, so they need the raw response.
+                    if response.status_code >= 400 and response.status_code != 403:
                         # Create HTTPStatusError for classification
                         mock_request = type("MockRequest", (), {})()
                         http_error = httpx.HTTPStatusError(
