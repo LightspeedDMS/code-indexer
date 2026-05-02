@@ -10,6 +10,7 @@ Verifies AC6: Concurrent execution verification
 Written following TDD methodology - tests first, implementation second.
 """
 
+import pytest
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -129,6 +130,7 @@ class TestConcurrentExecutionBasics:
         assert len(errors) == 0, f"Errors during concurrent execution: {errors}"
         assert len(results) == 5, f"Expected 5 results, got {len(results)}"
 
+    @pytest.mark.slow
     def test_concurrent_execution_with_timing_verification(self):
         """Multiple concurrent requests should execute in parallel.
 

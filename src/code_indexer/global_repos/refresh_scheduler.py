@@ -1058,7 +1058,9 @@ class RefreshScheduler:
                     # Get current alias target
                     current_target = self.alias_manager.read_alias(alias_name)
                     if not current_target:
-                        logger.warning(f"Alias {alias_name} not found, skipping refresh")
+                        logger.warning(
+                            f"Alias {alias_name} not found, skipping refresh"
+                        )
                         return {
                             "success": True,
                             "alias": alias_name,
@@ -1083,7 +1085,9 @@ class RefreshScheduler:
                     # anything else → remote git repo, uses GitPullUpdater
                     repo_url = repo_info.get("repo_url", "")
                     is_meta_repo = repo_url is None
-                    is_local_repo = repo_url.startswith("local://") if repo_url else False
+                    is_local_repo = (
+                        repo_url.startswith("local://") if repo_url else False
+                    )
 
                     # Story #236 Fix 2: Always derive master path from golden_repos_dir / repo_name.
                     # current_target from alias JSON may point to a .versioned/ snapshot after first
@@ -1093,8 +1097,12 @@ class RefreshScheduler:
 
                     # AC6: Reconcile registry with filesystem at START of refresh
                     # This ensures registry flags reflect actual index state before refresh begins
-                    detected_indexes = self._detect_existing_indexes(Path(current_target))
-                    self._reconcile_registry_with_filesystem(alias_name, detected_indexes)
+                    detected_indexes = self._detect_existing_indexes(
+                        Path(current_target)
+                    )
+                    self._reconcile_registry_with_filesystem(
+                        alias_name, detected_indexes
+                    )
                     logger.info(
                         f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
                     )
@@ -1162,7 +1170,10 @@ class RefreshScheduler:
                                     _cfg_err,
                                 )
 
-                            if _backup_cfg_local is not None and _backup_cfg_local.enabled:
+                            if (
+                                _backup_cfg_local is not None
+                                and _backup_cfg_local.enabled
+                            ):
                                 _handled_by_backup = True
 
                                 # MED-3: MetaDirectoryUpdater first so description files are
@@ -1219,7 +1230,9 @@ class RefreshScheduler:
                         # C2: Use mtime-based change detection for local repos.
                         # Skipped when the backup-aware path already handled cidx-meta-global.
                         if not _handled_by_backup:
-                            has_changes = self._has_local_changes(source_path, alias_name)
+                            has_changes = self._has_local_changes(
+                                source_path, alias_name
+                            )
 
                             if not has_changes:
                                 logger.info(
@@ -1272,7 +1285,9 @@ class RefreshScheduler:
                             # does not block backup sync (matching the defensive pattern
                             # used for backup_cfg fetch and bootstrap errors in this block).
                             try:
-                                MetaDirectoryUpdater(master_path, self.registry).update()
+                                MetaDirectoryUpdater(
+                                    master_path, self.registry
+                                ).update()
                             except Exception as meta_err:
                                 logger.warning(
                                     "MetaDirectoryUpdater failed for %s before backup sync: %s",
@@ -1319,7 +1334,9 @@ class RefreshScheduler:
                             # GitPullUpdater — they sync description files, not git history.
                             updater: UpdateStrategy
                             if is_meta_repo:
-                                updater = MetaDirectoryUpdater(master_path, self.registry)
+                                updater = MetaDirectoryUpdater(
+                                    master_path, self.registry
+                                )
                             else:
                                 # Story #236 Fix 2: Always git pull into the master golden repo, never into
                                 # a versioned snapshot. current_target may be a .versioned/ path after first
@@ -1343,7 +1360,9 @@ class RefreshScheduler:
                                     db_path = str(
                                         self.golden_repos_dir.parent / "cidx_server.db"
                                     )
-                                    _meta_backend = GoldenRepoMetadataSqliteBackend(db_path)
+                                    _meta_backend = GoldenRepoMetadataSqliteBackend(
+                                        db_path
+                                    )
                                     base_alias = alias_name.removesuffix("-global")
                                     meta = _meta_backend.get_repo(base_alias)
                                     if meta and meta.get("default_branch"):
@@ -1519,8 +1538,12 @@ class RefreshScheduler:
 
                     # AC6: Reconcile registry with filesystem at END of refresh
                     # This captures any new indexes created during refresh (semantic, FTS, temporal, SCIP)
-                    detected_indexes = self._detect_existing_indexes(Path(new_index_path))
-                    self._reconcile_registry_with_filesystem(alias_name, detected_indexes)
+                    detected_indexes = self._detect_existing_indexes(
+                        Path(new_index_path)
+                    )
+                    self._reconcile_registry_with_filesystem(
+                        alias_name, detected_indexes
+                    )
                     logger.info(
                         f"Reconciled registry with filesystem at END for {alias_name}: {detected_indexes}"
                     )

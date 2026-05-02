@@ -94,6 +94,12 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
         def wrapper(
             args: Dict[str, Any], user: User, *extra: Any, **kwargs: Any
         ) -> Dict[str, Any]:
+            # Pop session_key early — must not leak to handlers that don't declare it,
+            # regardless of which gate fires first.
+            session_key: Optional[str] = kwargs.pop("session_key", None) or (
+                extra[0] if extra else None
+            )
+
             # Gate 1: kill switch — passthrough when enforcement is disabled.
             # Per operator policy: if elevation is globally off, the handler
             # must proceed without a TOTP challenge.
@@ -114,11 +120,7 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
             if not totp.is_mfa_enabled(user.username):
                 return _totp_setup_required_error()
 
-            # Gate 5: resolve session key (kwarg preferred, then first positional extra).
-            # Pop from kwargs so handlers that don't declare session_key don't get TypeError.
-            session_key: Optional[str] = kwargs.pop("session_key", None) or (
-                extra[0] if extra else None
-            )
+            # Gate 5: session key resolved above.
             if not session_key:
                 return _elevation_required_error("No session key on MCP request.")
 

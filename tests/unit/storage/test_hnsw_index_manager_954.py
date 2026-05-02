@@ -22,7 +22,9 @@ import pytest
 
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
-_CONTIGUOUS_MSG = "Cannot return the results in a contiguous 2D array. Probably ef or M is too small"
+_CONTIGUOUS_MSG = (
+    "Cannot return the results in a contiguous 2D array. Probably ef or M is too small"
+)
 
 
 def _make_manager(vector_dim: int = 64) -> HNSWIndexManager:
@@ -115,7 +117,9 @@ class TestKnnQueryRetryOnContiguous2DArrayError:
         mock_index.knn_query.side_effect = knn_side_effect
 
         query_vector = np.random.randn(64).astype(np.float32)
-        with caplog.at_level(logging.WARNING, logger="code_indexer.storage.hnsw_index_manager"):
+        with caplog.at_level(
+            logging.WARNING, logger="code_indexer.storage.hnsw_index_manager"
+        ):
             manager.query(mock_index, query_vector, collection_path, k=8, ef=50)
 
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -123,7 +127,10 @@ class TestKnnQueryRetryOnContiguous2DArrayError:
             f"Expected exactly 1 WARNING on first retry, got {len(warning_records)}: "
             + ", ".join(r.message for r in warning_records)
         )
-        assert "contiguous" in warning_records[0].message.lower() or "degraded" in warning_records[0].message.lower()
+        assert (
+            "contiguous" in warning_records[0].message.lower()
+            or "degraded" in warning_records[0].message.lower()
+        )
 
     def test_all_retries_fail_reraises_original_error(self, tmp_path: Path):
         """When all retry attempts fail (including k=1), the original error is re-raised."""
@@ -223,7 +230,9 @@ class TestKnnQueryRetryOnContiguous2DArrayError:
         mock_index.knn_query.side_effect = knn_side_effect
 
         query_vector = np.random.randn(64).astype(np.float32)
-        with caplog.at_level(logging.WARNING, logger="code_indexer.storage.hnsw_index_manager"):
+        with caplog.at_level(
+            logging.WARNING, logger="code_indexer.storage.hnsw_index_manager"
+        ):
             manager.query(mock_index, query_vector, collection_path, k=20, ef=50)
 
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]

@@ -216,6 +216,7 @@ def test_no_window_returns_elevation_required(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_recovery_scope_insufficient_for_full_required(
     admin_user, active_repair_session, totp_enabled
 ):

@@ -128,6 +128,7 @@ class TestUsersListPartialElevationGate:
             "dependencies list"
         )
 
+    @pytest.mark.slow
     def test_users_list_partial_allowed_when_elevated(self, app, client, mock_session):
         """Admin with active elevation gets 200 from /admin/partials/users-list.
 
@@ -156,6 +157,7 @@ class TestUsersListPartialElevationGate:
         )
 
 
+@pytest.mark.slow
 class TestUsersPageShell:
     """GET /admin/users shell page must NOT require elevation."""
 

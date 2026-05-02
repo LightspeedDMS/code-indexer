@@ -706,11 +706,16 @@ class TestUpdateGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_update_group_returns_success(self, admin_user, mock_group_manager):
+    def test_update_group_returns_success(
+        self, admin_user, mock_group_manager, tmp_path
+    ):
         """update_group handler returns success on valid update."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Create a custom group first
             custom_group = mock_group_manager.create_group(
@@ -725,6 +730,7 @@ class TestUpdateGroupHandler:
                     "description": "Updated description",
                 },
                 admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])
@@ -901,11 +907,16 @@ class TestAddReposToGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_add_repos_to_group_succeeds(self, admin_user, mock_group_manager):
+    def test_add_repos_to_group_succeeds(
+        self, admin_user, mock_group_manager, tmp_path
+    ):
         """add_repos_to_group handler succeeds for valid inputs."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Get a valid group
             groups = mock_group_manager.get_all_groups()
@@ -915,6 +926,7 @@ class TestAddReposToGroupHandler:
             result = handler(
                 {"group_id": str(group_id), "repo_names": ["repo1", "repo2"]},
                 admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])
@@ -922,12 +934,15 @@ class TestAddReposToGroupHandler:
             assert "added_count" in content
 
     def test_add_repos_to_group_returns_added_count(
-        self, admin_user, mock_group_manager
+        self, admin_user, mock_group_manager, tmp_path
     ):
         """add_repos_to_group handler returns count of repos added."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
@@ -936,6 +951,7 @@ class TestAddReposToGroupHandler:
             result = handler(
                 {"group_id": str(group_id), "repo_names": ["repo1", "repo2", "repo3"]},
                 admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])
@@ -953,11 +969,16 @@ class TestRemoveRepoFromGroupHandler:
         manager = GroupAccessManager(temp_groups_db)
         return manager
 
-    def test_remove_repo_from_group_succeeds(self, admin_user, mock_group_manager):
+    def test_remove_repo_from_group_succeeds(
+        self, admin_user, mock_group_manager, tmp_path
+    ):
         """remove_repo_from_group handler succeeds for existing repo access."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Get a valid group and add a repo first
             groups = mock_group_manager.get_all_groups()
@@ -966,7 +987,9 @@ class TestRemoveRepoFromGroupHandler:
 
             handler = HANDLER_REGISTRY["remove_repo_from_group"]
             result = handler(
-                {"group_id": str(group_id), "repo_name": "test_repo"}, admin_user
+                {"group_id": str(group_id), "repo_name": "test_repo"},
+                admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])
@@ -986,12 +1009,15 @@ class TestBulkRemoveReposFromGroupHandler:
         return manager
 
     def test_bulk_remove_repos_from_group_succeeds(
-        self, admin_user, mock_group_manager
+        self, admin_user, mock_group_manager, tmp_path
     ):
         """bulk_remove_repos_from_group handler succeeds for valid inputs."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             # Get a valid group and add repos first
             groups = mock_group_manager.get_all_groups()
@@ -1003,6 +1029,7 @@ class TestBulkRemoveReposFromGroupHandler:
             result = handler(
                 {"group_id": str(group_id), "repo_names": ["repo1", "repo2"]},
                 admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])
@@ -1010,12 +1037,15 @@ class TestBulkRemoveReposFromGroupHandler:
             assert "removed_count" in content
 
     def test_bulk_remove_repos_from_group_returns_removed_count(
-        self, admin_user, mock_group_manager
+        self, admin_user, mock_group_manager, tmp_path
     ):
         """bulk_remove_repos_from_group handler returns count of repos removed."""
-        with patch(
-            "code_indexer.server.mcp.handlers._get_group_manager",
-            return_value=mock_group_manager,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_group_manager",
+                return_value=mock_group_manager,
+            ),
+            _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
@@ -1026,6 +1056,7 @@ class TestBulkRemoveReposFromGroupHandler:
             result = handler(
                 {"group_id": str(group_id), "repo_names": ["repo_a", "repo_b"]},
                 admin_user,
+                session_key=session_key,
             )
 
             content = json.loads(result["content"][0]["text"])

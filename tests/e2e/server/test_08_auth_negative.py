@@ -106,13 +106,40 @@ def _restore_elevation_enforcement(prior: bool) -> None:
     config.elevation_enforcement_enabled = prior
 
 
-def _create_elevation_window(admin_username: str) -> str:
-    """Create an elevation window and return the unique session key used."""
+def _create_elevation_window(
+    admin_username: str, admin_token: Optional[str] = None
+) -> str:
+    """Create an elevation window and return the unique session key used.
+
+    If *admin_token* is provided, the JWT ``jti`` claim is extracted and used
+    as the session_key so the REST layer (which keys elevation windows by
+    ``jti``) can find the window.  Falls back to a random UUID when ``jti``
+    is absent from the token.
+    """
+    import jwt as pyjwt
+
     from code_indexer.server.auth.elevated_session_manager import (
         elevated_session_manager,
     )
 
     session_key = str(uuid.uuid4())
+    if admin_token:
+        try:
+            decoded = pyjwt.decode(
+                admin_token,
+                options={"verify_signature": False},
+                algorithms=["HS256"],
+            )
+            jti = decoded.get("jti")
+            if jti:
+                session_key = str(jti)
+        except Exception as exc:
+            logger.warning(
+                "Failed to decode admin_token for jti extraction, "
+                "falling back to random UUID: %s",
+                exc,
+            )
+
     elevated_session_manager.create(
         session_key=session_key,
         username=admin_username,
@@ -123,12 +150,20 @@ def _create_elevation_window(admin_username: str) -> str:
 
 
 @contextmanager
-def _setup_admin_elevation(admin_username: str) -> Iterator[Dict[str, str]]:
+def _setup_admin_elevation(
+    admin_username: str, admin_token: Optional[str] = None
+) -> Iterator[Dict[str, str]]:
     """Orchestrate elevation setup and yield a cidx_session cookie dict.
 
     Sets up TOTP, enables enforcement, creates an elevation window, then
     yields ``{"cidx_session": session_key}``.  Tears down in reverse order:
     revoke the window, restore prior enforcement state, disable TOTP.
+
+    Args:
+        admin_username: Username of the admin account to elevate.
+        admin_token: Optional Bearer token for the admin session.  When
+            provided, the JWT ``jti`` is used as the session_key so the REST
+            layer can match the elevation window to the request.
     """
     from code_indexer.server.auth.elevated_session_manager import (
         elevated_session_manager,
@@ -137,7 +172,7 @@ def _setup_admin_elevation(admin_username: str) -> Iterator[Dict[str, str]]:
 
     _activate_admin_totp(admin_username)
     prior_enforcement = _enable_elevation_enforcement()
-    session_key = _create_elevation_window(admin_username)
+    session_key = _create_elevation_window(admin_username, admin_token)
     try:
         yield {"cidx_session": session_key}
     finally:
@@ -529,8 +564,9 @@ def test_regular_user_cannot_access_admin_endpoint(test_client: TestClient) -> N
     """
     admin_headers = _login_as_admin(test_client)
     admin_username = _admin_login_payload()["username"]
+    admin_token = admin_headers.get("Authorization", "").removeprefix("Bearer ").strip()
 
-    with _setup_admin_elevation(admin_username) as elev_cookies:
+    with _setup_admin_elevation(admin_username, admin_token) as elev_cookies:
         with _provision_normal_user(
             test_client, admin_headers, extra_cookies=elev_cookies
         ) as user_headers:

@@ -78,8 +78,9 @@ def _make_decorated_handler() -> Tuple[Any, dict]:
     """Return (decorated_callable, received_dict) for elevation-wrapper tests.
 
     Uses the real require_mcp_elevation decorator (enforcement mocked off in tests).
-    The inner_handler does NOT declare session_key — the wrapper receives it via
-    **kwargs and the real decorator's kill-switch passthrough delivers it.
+    The inner_handler does NOT declare session_key. The decorator pops session_key
+    before calling the inner handler (Bug A fix) — session_key is consumed by the
+    wrapper for elevation validation and is NOT propagated to inner_handler.
 
     received_dict["session_key"] is populated when the inner handler is called.
     """
@@ -248,7 +249,8 @@ async def test_ac3_elevation_decorated_handler_receives_session_key():
 
     Enforcement is mocked off so the decorator passes through without checking
     the elevation window. The test validates the injection path (protocol.py
-    reading __mcp_requires_session_key__ marker), not gate logic.
+    reading __mcp_requires_session_key__ marker). After Bug A fix, the decorator
+    consumes session_key and inner_handler receives None.
     """
     decorated, received = _make_decorated_handler()
 
@@ -272,9 +274,9 @@ async def test_ac3_elevation_decorated_handler_receives_session_key():
         )
 
     assert result == {"elevated": True}
-    assert received["session_key"] == _ELEVATION_KEY_TEST_FIXTURE, (
-        f"Expected session_key={_ELEVATION_KEY_TEST_FIXTURE!r} via __mcp_requires_session_key__ path, "
-        f"got {received['session_key']!r}."
+    assert received["session_key"] is None, (
+        f"After Bug A fix, require_mcp_elevation pops session_key before calling "
+        f"inner_handler. inner_handler received {received['session_key']!r} (expected None)."
     )
 
 
@@ -391,10 +393,10 @@ async def test_ac7_handle_tools_call_passes_elevation_key_to_elevation_decorated
         elevation_key=_ELEVATION_KEY_TEST_FIXTURE,
     )
 
-    assert received.get("session_key") == _ELEVATION_KEY_TEST_FIXTURE, (
-        f"Expected session_key={_ELEVATION_KEY_TEST_FIXTURE!r} via **kwargs path, "
-        f"got {received.get('session_key')!r}. "
-        "handle_tools_call does not pass elevation_key via **kwargs to decorated handlers."
+    assert received.get("session_key") is None, (
+        "After Bug A fix, require_mcp_elevation pops session_key before calling "
+        "inner_handler. Decorator consumes session_key for elevation validation; "
+        f"inner_handler received {received.get('session_key')!r} (expected None)."
     )
 
 
