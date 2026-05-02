@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.14 — 2026-05-02
+
+### Added
+
+- **Story #980 — CLI remote mode TOTP step-up elevation** — When the CLI is configured to talk to a remote CIDX server and an admin endpoint returns 403 `elevation_required`, the CLI now automatically prompts for a TOTP code, calls `POST /auth/elevate` to open an elevation window, and retries the original command once. If the TOTP code is wrong (401 `elevation_failed`), the CLI prints a clear error and exits with code 1. If the admin account has no TOTP configured (403 `totp_setup_required`), the CLI prints the setup URL and exits with code 1. Affects all 6 `cidx admin users` commands and all `cidx admin groups` commands. New module `src/code_indexer/api_clients/elevation.py` contains `ElevationRequiredError`, `ElevationFailedError`, `elevate()`, and `with_elevation_retry()`. FastAPI's `{"detail": {"error": "..."}}` wrapping is handled transparently in `AdminAPIClient` and `GroupAPIClient`. Previously-skipped Phase 4 E2E tests in `test_03_admin_users.py` and `test_04_admin_groups.py` (18 tests) are now enabled and passing.
+
 ## v10.0.13 — 2026-05-02
 
 ### Fixed

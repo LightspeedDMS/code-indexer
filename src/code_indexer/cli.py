@@ -14469,16 +14469,23 @@ def admin_users_create(
 
         # Create admin client and create user
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
         with console.status("👤 Creating user account..."):
-            user_response = run_async(
-                admin_client.create_user(
-                    username=username, password=password, role=role
-                )
+            user_response = with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.create_user(
+                        username=username, password=password, role=role
+                    )
+                ),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
             )
 
         # Close the client
@@ -14627,14 +14634,21 @@ def admin_users_list(ctx, limit: int, offset: int, json_output: bool):
 
         # Create admin client and list users
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
         with console.status("👥 Retrieving user list..."):
-            users_response = run_async(
-                admin_client.list_users(limit=limit, offset=offset)
+            users_response = with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.list_users(limit=limit, offset=offset)
+                ),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
             )
 
         # Close the client
@@ -14814,13 +14828,20 @@ def admin_users_show(ctx, username: str, json_output: bool):
 
         # Create admin client and get user
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
         with console.status(f"👤 Retrieving user '{username}'..."):
-            user_response = run_async(admin_client.get_user(username))
+            user_response = with_elevation_retry(
+                fn=lambda: run_async(admin_client.get_user(username)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
         # Close the client
         admin_client.close()
@@ -14966,6 +14987,7 @@ def admin_users_update(ctx, username: str, role: str, json_output: bool):
 
         # Create admin client
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
@@ -15006,7 +15028,13 @@ def admin_users_update(ctx, username: str, role: str, json_output: bool):
             pass
 
         with console.status(f"🔄 Updating user '{username}' role to '{role}'..."):
-            run_async(admin_client.update_user(username, role))
+            with_elevation_retry(
+                fn=lambda: run_async(admin_client.update_user(username, role)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
         # Close the client
         admin_client.close()
@@ -15184,13 +15212,20 @@ def admin_users_delete(ctx, username: str, force: bool, json_output: bool):
 
         # Create admin client and delete user
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
         with console.status(f"🗑️  Deleting user '{username}'..."):
-            run_async(admin_client.delete_user(username))
+            with_elevation_retry(
+                fn=lambda: run_async(admin_client.delete_user(username)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
         # Close the client
         admin_client.close()
@@ -15352,6 +15387,7 @@ def admin_users_change_password(
 
         # Create admin client
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=remote_config["server_url"],
@@ -15380,7 +15416,15 @@ def admin_users_change_password(
                     sys.exit(0)
 
             # Change the password
-            run_async(admin_client.change_user_password(username, password))
+            with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.change_user_password(username, password)
+                ),
+                session=admin_client.session,
+                server_url=remote_config["server_url"],
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             # Handle JSON output
             if json_output:
@@ -17473,6 +17517,7 @@ def admin_groups_list(ctx, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17505,7 +17550,13 @@ def admin_groups_list(ctx, json_output: bool):
         )
 
         try:
-            result = run_async(client.list_groups())
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.list_groups()),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
             groups = result.get("groups", [])
 
             if json_output:
@@ -17553,6 +17604,7 @@ def admin_groups_create(ctx, name: str, description: str, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17585,7 +17637,15 @@ def admin_groups_create(ctx, name: str, description: str, json_output: bool):
         )
 
         try:
-            result = run_async(client.create_group(name=name, description=description))
+            result = with_elevation_retry(
+                fn=lambda: run_async(
+                    client.create_group(name=name, description=description)
+                ),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True, **result}, indent=2))
@@ -17618,6 +17678,7 @@ def admin_groups_show(ctx, group_id: int, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17650,7 +17711,13 @@ def admin_groups_show(ctx, group_id: int, json_output: bool):
         )
 
         try:
-            result = run_async(client.get_group(group_id))
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.get_group(group_id)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True, **result}, indent=2))
@@ -17692,6 +17759,7 @@ def admin_groups_update(
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17735,7 +17803,15 @@ def admin_groups_update(
         )
 
         try:
-            run_async(client.update_group(group_id, name=name, description=description))
+            with_elevation_retry(
+                fn=lambda: run_async(
+                    client.update_group(group_id, name=name, description=description)
+                ),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True}, indent=2))
@@ -17768,6 +17844,7 @@ def admin_groups_delete(ctx, group_id: int, confirm: bool, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17800,7 +17877,13 @@ def admin_groups_delete(ctx, group_id: int, confirm: bool, json_output: bool):
         )
 
         try:
-            run_async(client.delete_group(group_id))
+            with_elevation_retry(
+                fn=lambda: run_async(client.delete_group(group_id)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True}, indent=2))
@@ -17831,6 +17914,7 @@ def admin_groups_add_member(ctx, group_id: int, user: str, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17863,7 +17947,13 @@ def admin_groups_add_member(ctx, group_id: int, user: str, json_output: bool):
         )
 
         try:
-            run_async(client.add_member(group_id, user_id=user))
+            with_elevation_retry(
+                fn=lambda: run_async(client.add_member(group_id, user_id=user)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True}, indent=2))
@@ -17894,6 +17984,7 @@ def admin_groups_add_repos(ctx, group_id: int, repos: str, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17934,7 +18025,13 @@ def admin_groups_add_repos(ctx, group_id: int, repos: str, json_output: bool):
         )
 
         try:
-            result = run_async(client.add_repos(group_id, repo_names=repo_names))
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.add_repos(group_id, repo_names=repo_names)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
             added = result.get("added_count", 0)
 
             if json_output:
@@ -17970,6 +18067,7 @@ def admin_groups_remove_repo(ctx, group_id: int, repo: str, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -18002,7 +18100,13 @@ def admin_groups_remove_repo(ctx, group_id: int, repo: str, json_output: bool):
         )
 
         try:
-            run_async(client.remove_repo(group_id, repo_name=repo))
+            with_elevation_retry(
+                fn=lambda: run_async(client.remove_repo(group_id, repo_name=repo)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True}, indent=2))
@@ -18035,6 +18139,7 @@ def admin_groups_remove_repos(ctx, group_id: int, repos: str, json_output: bool)
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -18075,7 +18180,13 @@ def admin_groups_remove_repos(ctx, group_id: int, repos: str, json_output: bool)
         )
 
         try:
-            result = run_async(client.remove_repos(group_id, repo_names=repo_names))
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.remove_repos(group_id, repo_names=repo_names)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
             removed = result.get("removed_count", 0)
 
             if json_output:

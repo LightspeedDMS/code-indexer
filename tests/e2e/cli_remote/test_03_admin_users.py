@@ -17,12 +17,10 @@ Cleanup paths explicitly handle ``run_cidx`` return values: they assert
 success or accept only the documented "already gone" failure mode to avoid
 silent discard of unexpected errors.
 
-NOTE (Story #925): All tests in this module are currently skipped because the
-CLI has no mechanism to perform TOTP step-up elevation. The server returns
-HTTP 503 (elevation_enforcement_disabled) for all admin user endpoints when
-elevation_enforcement_enabled=False in the test environment. Tests will be
-re-enabled when the CLI gains --totp-code parameter or auto-elevation logic
-(Epic #922 / Story #925).
+NOTE (Story #980): All tests in this module are active. The CLI supports
+TOTP step-up elevation via with_elevation_retry(). In the E2E test environment
+elevation_enforcement_enabled is typically False, so admin user endpoints
+are accessible without TOTP challenge (server returns 503-disabled passthrough).
 
 Test functions (6):
   test_admin_users_create          -- create a new user account (self-contained)
@@ -40,17 +38,11 @@ import string
 import uuid
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import Generator
 
 import pytest
 
 from tests.e2e.helpers import run_cidx
-
-_SKIP_REASON = (
-    "Story #925 follow-up: admin users CLI does not yet support TOTP step-up "
-    "elevation flow. Server returns HTTP 503 (elevation_enforcement_disabled) "
-    "for admin user endpoints. Re-enable when CLI gains --totp-code parameter "
-    "or auto-elevation logic (Epic #922 / Story #925)."
-)
 
 
 def _make_policy_password(length: int = 16) -> str:
@@ -133,8 +125,34 @@ def _delete_user_best_effort(
 def created_user(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
-) -> None:
-    pytest.skip(_SKIP_REASON)
+) -> Generator[tuple[str, str], None, None]:
+    """Create a test user and yield (username, password). Delete on teardown."""
+    username = f"e2euser_{uuid.uuid4().hex[:8]}"
+    password = _make_policy_password()
+
+    result = run_cidx(
+        "admin",
+        "users",
+        "create",
+        username,
+        "--password",
+        password,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
+    )
+    assert result.returncode == 0, (
+        f"created_user fixture: cidx admin users create {username} failed "
+        f"(rc={result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+    yield username, password
+
+    _delete_user_best_effort(
+        username,
+        authenticated_workspace,
+        e2e_cli_env,
+        label="created_user fixture teardown",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +160,6 @@ def created_user(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
 def test_admin_users_create(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
@@ -174,7 +191,6 @@ def test_admin_users_create(
     )
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
 def test_admin_users_list(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
@@ -199,7 +215,6 @@ def test_admin_users_list(
     )
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
 def test_admin_users_show(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
@@ -221,7 +236,6 @@ def test_admin_users_show(
     )
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
 def test_admin_users_update(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
@@ -242,7 +256,6 @@ def test_admin_users_update(
     _assert_ok(result, f"cidx admin users update {username}")
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
 def test_admin_users_change_password(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
@@ -266,7 +279,6 @@ def test_admin_users_change_password(
     _assert_ok(result, f"cidx admin users change-password {username}")
 
 
-@pytest.mark.skip(reason=_SKIP_REASON)
 def test_admin_users_delete(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
