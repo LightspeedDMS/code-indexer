@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.15 — 2026-05-02
+
+### Fixed
+
+- **Bug fix (#980) — 403 responses not reaching admin client elevation check** — `_authenticated_request` in `base_client.py` was classifying all `>= 400` responses via `classify_network_error`, which converted 403 responses to `APIClientError` before admin methods could call `_check_elevation_required()`. This silently bypassed `ElevationRequiredError` raising, causing the CLI to print a generic "User creation failed" error instead of the proper TOTP setup/elevation prompt. Fix: exclude 403 from the network error classifier so admin methods receive the raw response and can inspect the body for elevation codes. Verified E2E against staging: `totp_setup_required` now correctly prints "TOTP setup required. Visit /admin/mfa/setup to configure your authenticator." and exits 1.
+
 ## v10.0.14 — 2026-05-02
 
 ### Added
