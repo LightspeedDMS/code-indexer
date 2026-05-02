@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1607,13 +1608,47 @@ def make_lifespan(
             config_service = get_config_service()
 
             # Define callback for auto-registering new Langfuse folders after sync
+            # Bug #964 Fix 3: track repos seen in previous cycle for short-circuit.
+            _previous_sync_repos: set = set()
+
             def _on_langfuse_sync_complete():
-                """Auto-register new Langfuse folders after sync and generate READMEs."""
+                """Auto-register new Langfuse folders after sync and generate READMEs.
+
+                Bug #964 Fix 3: skips registration and README generation when no new
+                repos were discovered compared to the previous sync cycle, avoiding
+                unnecessary work on every cycle when nothing has changed.
+                """
+                nonlocal _previous_sync_repos
+                _callback_start = time.monotonic()
+
+                # langfuse_sync_service is a module-level global assigned after this
+                # closure is defined; mypy cannot infer the type from the global
+                # declaration alone, hence type: ignore[name-defined] is required.
+                current_repos: set = set()
+                if langfuse_sync_service is not None:  # type: ignore[name-defined]
+                    current_repos = set(
+                        langfuse_sync_service._last_modified_repos  # type: ignore[name-defined]
+                    )
+
+                # Short-circuit: skip expensive work when no new repos discovered.
+                # Only activates after the first cycle (_previous_sync_repos non-empty)
+                # so the first run always registers repos even if the set is unchanged.
+                if current_repos == _previous_sync_repos and _previous_sync_repos:
+                    elapsed = time.monotonic() - _callback_start
+                    logger.info(
+                        f"_on_sync_complete took {elapsed:.2f}s (short-circuited: no new repos)"
+                    )
+                    return
+
+                _previous_sync_repos = current_repos
+
                 if golden_repo_manager is not None:
                     register_langfuse_golden_repos(
                         golden_repo_manager, str(golden_repos_dir)
                     )
                 # Generate README files for repos that received new/updated traces
+                # langfuse_sync_service assigned after closure definition; mypy cannot
+                # resolve name from the global declaration, hence type: ignore[name-defined].
                 if langfuse_sync_service is not None:  # type: ignore[name-defined]
                     try:
                         from code_indexer.server.services.langfuse_readme_generator import (
@@ -1637,6 +1672,9 @@ def make_lifespan(
                                 extra={"correlation_id": get_correlation_id()},
                             )
                         )
+
+                elapsed = time.monotonic() - _callback_start
+                logger.info(f"_on_sync_complete took {elapsed:.2f}s")
 
             # Create service with config_getter callable
             langfuse_sync_service = LangfuseTraceSyncService(  # type: ignore[name-defined]

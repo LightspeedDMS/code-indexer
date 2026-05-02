@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.12 — 2026-05-02
+
+### Fixed
+
+- **Bug #965 — CLI rerank order discarded by staleness detector** — `StalenessDetector.apply_staleness_detection` internally sorts results by `(is_stale, -score)`. The conversion loop iterated `enhanced_results` (staleness-sorted order), silently overriding the reranker's ranking. Extracted `_annotate_staleness(results, enhanced_results, preserve_order)` helper: when `preserve_order=True` (reranked queries) iterates `results` in caller order and looks up staleness by `(path, line_start)` composite chunk-identity key; when `preserve_order=False` (non-reranked) annotates all chunks then sorts fresh-first explicitly. Composite chunk-identity keys prevent sibling-chunk collisions when a file produces multiple result chunks. 5 regression tests added.
+- **Bug #964 — Langfuse sync sluggishness** — Three fixes: (1) `LangfuseTraceSyncService` was creating a new `ThreadPoolExecutor` per page; moved construction outside the page loop so one pool is reused for the entire project sync. (2) `LangfuseApiClient._request_with_retry` called `time.sleep(wait)` in worker threads; replaced with `stop_event.wait(timeout=wait)` and wired `self._stop_event` from the service into the client so `stop()` immediately interrupts any in-progress backoff; added `is_set()` guard at loop top and after each wait. (3) `_on_langfuse_sync_complete` ran `register_langfuse_golden_repos()` + README generation on every cycle; now short-circuits when no new repos discovered since previous cycle; timing logged at INFO. 11 regression tests added.
+- **Bug #966 — get_branches MCP tool only returned registration branch for golden repos** — `BranchService.list_branches` iterated only `repo.heads` (local branches); in a golden repo base clone only the registration branch exists locally. Now also iterates `repo.remotes.origin.refs`: strips `origin/` prefix, filters `origin/HEAD` symbolic ref, deduplicates with local branch taking precedence. `_resolve_branch_repo_path` was using `alias_manager.read_alias()` (returns frozen versioned-snapshot path); now calls `get_actual_repo_path(base_alias)` with `-global` suffix stripped (base clone has fresh remote refs). `GoldenRepoNotFoundError` falls back gracefully to AliasManager. 8 regression tests added.
+
 ## v10.0.11 — 2026-05-01
 
 ### Fixed
