@@ -1,5 +1,6 @@
 """Unit tests for Story #926 cidx-meta backup bootstrap."""
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -144,3 +145,85 @@ def test_bootstrap_uses_mutable_base_path(tmp_path):
     assert (mutable_path / ".git").is_dir()
     assert not (versioned_path / ".git").exists()
     assert (versioned_path / "SHOULD_NOT_CHANGE").read_text() == "snapshot\n"
+
+
+def _seed_remote_with_commit(remote_uri: str, work_dir: Path) -> None:
+    """Push a single commit directly to a bare remote to establish diverged history."""
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "seed",
+        "GIT_AUTHOR_EMAIL": "seed@test.invalid",
+        "GIT_COMMITTER_NAME": "seed",
+        "GIT_COMMITTER_EMAIL": "seed@test.invalid",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "remote_seed.txt").write_text("remote\n")
+    subprocess.run(["git", "init", str(work_dir)], check=True, capture_output=True)
+    # Force initial branch to master so it matches bootstrap's fallback branch name.
+    subprocess.run(
+        ["git", "-C", str(work_dir), "symbolic-ref", "HEAD", "refs/heads/master"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(work_dir), "add", "-A"],
+        check=True,
+        capture_output=True,
+        env=git_env,
+    )
+    subprocess.run(
+        ["git", "-C", str(work_dir), "commit", "-m", "remote seed"],
+        check=True,
+        capture_output=True,
+        env=git_env,
+    )
+    subprocess.run(
+        ["git", "-C", str(work_dir), "push", remote_uri, "master"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_push_with_fallback_force_succeeds_when_plain_rejected(tmp_path):
+    """_push_with_fallback falls back to --force when plain push is non-fast-forward rejected."""
+    from code_indexer.server.services.cidx_meta_backup.bootstrap import (
+        CidxMetaBackupBootstrap,
+    )
+
+    remote_path = _init_bare_remote(tmp_path)
+    _seed_remote_with_commit(remote_path.as_uri(), tmp_path / "seed")
+
+    # Bootstrap from a new local path — creates its own commit, diverging from remote.
+    repo_path = tmp_path / "cidx-meta"
+    repo_path.mkdir()
+    _write_seed_files(repo_path)
+
+    result = CidxMetaBackupBootstrap().bootstrap(str(repo_path), remote_path.as_uri())
+    assert result == "bootstrapped"
+
+    # Verify bootstrap's content is on the remote (force push won).
+    verify = tmp_path / "verify"
+    subprocess.run(
+        ["git", "clone", remote_path.as_uri(), str(verify)],
+        check=True,
+        capture_output=True,
+    )
+    assert (verify / "README.md").read_text() == "seed\n"
+
+
+def test_push_with_fallback_raises_when_both_fail(tmp_path):
+    """bootstrap raises RuntimeError when both plain and --force pushes fail."""
+    import pytest
+
+    from code_indexer.server.services.cidx_meta_backup.bootstrap import (
+        CidxMetaBackupBootstrap,
+    )
+
+    repo_path = tmp_path / "cidx-meta"
+    repo_path.mkdir()
+    _write_seed_files(repo_path)
+
+    bad_remote = str(tmp_path / "nonexistent" / "repo.git")
+    with pytest.raises(RuntimeError, match="push failed"):
+        CidxMetaBackupBootstrap().bootstrap(str(repo_path), bad_remote)
