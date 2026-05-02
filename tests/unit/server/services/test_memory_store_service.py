@@ -100,7 +100,7 @@ def _build_service(
         coarse_lock_ttl_seconds=60,
     )
     scheduler = MagicMock()
-    scheduler.is_write_lock_held.return_value = is_held
+    scheduler.is_write_locked.return_value = is_held
     scheduler.acquire_write_lock.return_value = acquire_ok
     scheduler.release_write_lock.return_value = True
     debouncer = MagicMock()
@@ -469,7 +469,7 @@ def test_edit_memory_immutable_field_change_rejected(
 def test_edit_memory_triggers_refresh_direct_acquire(
     memories_dir, lock_manager, rate_limiter
 ):
-    """Test 15: edit with is_write_lock_held=False calls trigger_refresh + release_write_lock once."""
+    """Test 15: edit with is_write_locked=False calls trigger_refresh + release_write_lock once."""
     ids = _make_counter_id_factory()
     svc, scheduler, debouncer, memory_id, original_hash = _create_one(
         memories_dir, lock_manager, rate_limiter, ids, is_held=False, acquire_ok=True
@@ -488,7 +488,7 @@ def test_edit_memory_triggers_refresh_direct_acquire(
 def test_edit_memory_triggers_refresh_piggyback(
     memories_dir, lock_manager, rate_limiter
 ):
-    """Test 16: edit with is_write_lock_held=True signals debouncer only; no coarse acquire/release."""
+    """Test 16: edit with is_write_locked=True signals debouncer only; no coarse acquire/release."""
     # Create with direct mode so the file lands on disk
     ids = _make_counter_id_factory()
     svc_create, _sc, _dc, memory_id, original_hash = _create_one(
@@ -584,7 +584,7 @@ def test_delete_memory_not_found(memories_dir, lock_manager, rate_limiter):
 def test_delete_triggers_refresh_direct_acquire(
     memories_dir, lock_manager, rate_limiter
 ):
-    """Test 21: delete with is_write_lock_held=False calls trigger_refresh + release_write_lock once."""
+    """Test 21: delete with is_write_locked=False calls trigger_refresh + release_write_lock once."""
     ids = _make_counter_id_factory()
     svc, scheduler, debouncer, memory_id, correct_hash = _create_one(
         memories_dir, lock_manager, rate_limiter, ids, is_held=False, acquire_ok=True
@@ -600,7 +600,7 @@ def test_delete_triggers_refresh_direct_acquire(
 
 
 def test_delete_triggers_refresh_piggyback(memories_dir, lock_manager, rate_limiter):
-    """Test 21b: delete with is_write_lock_held=True signals debouncer only; no coarse acquire/release."""
+    """Test 21b: delete with is_write_locked=True signals debouncer only; no coarse acquire/release."""
     ids = _make_counter_id_factory()
     svc_create, _sc, _dc, memory_id, correct_hash = _create_one(
         memories_dir, lock_manager, rate_limiter, ids, is_held=False, acquire_ok=True

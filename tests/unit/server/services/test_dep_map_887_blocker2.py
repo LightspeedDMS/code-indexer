@@ -10,10 +10,14 @@ Fix: reorder pipeline so finalize_graph_edges() runs BEFORE _build_graph_anomali
 
 import json
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple, Union, cast
 
 import pytest
 
+from code_indexer.server.services.dep_map_parser_hygiene import (
+    AnomalyAggregate,
+    AnomalyEntry,
+)
 from tests.unit.server.services.test_dep_map_887_fixtures import (
     import_hygiene_symbol,
     make_parser,
@@ -68,7 +72,14 @@ def _find_garbage(anomalies: List, AnomalyType) -> List:
 
 
 @pytest.fixture
-def _empty_types_graph_result(tmp_path: Path, AnomalyType) -> Tuple:
+def _empty_types_graph_result(
+    tmp_path: Path, AnomalyType
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Union[AnomalyEntry, AnomalyAggregate]],
+    List[Union[AnomalyEntry, AnomalyAggregate]],
+    List[Union[AnomalyEntry, AnomalyAggregate]],
+]:
     """Prepare the empty-types fixture and run get_cross_domain_graph().
 
     Returns the full 4-tuple (edges, all_anomalies, parser_anomalies, data_anomalies).
@@ -76,7 +87,17 @@ def _empty_types_graph_result(tmp_path: Path, AnomalyType) -> Tuple:
     dep_map_dir = tmp_path / "dependency-map"
     dep_map_dir.mkdir()
     _write_empty_types_fixture(dep_map_dir)
-    return make_parser(tmp_path).get_cross_domain_graph_with_channels()
+    # cast: make_parser() returns an untyped object (test helper); underlying method
+    # declares a precise 4-tuple return type, so this is a zero-behavior-change cast.
+    return cast(
+        Tuple[
+            List[Dict[str, Any]],
+            List[Union[AnomalyEntry, AnomalyAggregate]],
+            List[Union[AnomalyEntry, AnomalyAggregate]],
+            List[Union[AnomalyEntry, AnomalyAggregate]],
+        ],
+        make_parser(tmp_path).get_cross_domain_graph_with_channels(),
+    )
 
 
 class TestLateAnomalySilentDrop:

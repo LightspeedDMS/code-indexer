@@ -148,6 +148,7 @@ class TestMultiIndexTiming:
             "multimodal_timed_out should be False on success"
         )
 
+    @pytest.mark.slow
     def test_parallel_timing_is_max_not_sum(
         self, service, mock_vector_store, mock_project_root
     ):

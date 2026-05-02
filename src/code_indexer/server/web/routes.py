@@ -10,6 +10,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import json
 import logging
 import os
+import re as _re
 import secrets
 import sqlite3
 import sys
@@ -17,10 +18,19 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from fastapi import APIRouter, Query, Request, Response, Form, HTTPException, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Query,
+    Request,
+    Response,
+    Form,
+    HTTPException,
+    status,
+)
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -144,11 +154,11 @@ _VALID_CONFIG_SECTIONS = (
     "cache",
     "timeouts",
     "password_security",
+    "totp_elevation",  # Bug #943: TOTP step-up elevation runtime config
     "oidc",
     "telemetry",
     "langfuse",
     "search_limits",
-    "file_content_limits",
     "golden_repos",
     "mcp_session",
     "health",
@@ -179,6 +189,9 @@ _VALID_CONFIG_SECTIONS = (
     "rerank",
     # Story #885 - Lifecycle analysis timeouts
     "lifecycle_analysis",
+    # Story #844 - Codex CLI integration configuration
+    "codex_integration",
+    "cidx_meta_backup",
 )
 
 
@@ -324,6 +337,22 @@ def logout(request: Request):
 
     Redirects to unified login page after clearing session.
     """
+    # Story #923 AC8: revoke any elevation window for this session
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+
+    session_key = request.cookies.get("cidx_session")
+    if session_key:
+        try:
+            elevated_session_manager.revoke(session_key)
+        except Exception:
+            logger.warning(
+                "Failed to revoke elevation window on logout for session=%.8s",
+                session_key,
+                exc_info=True,
+            )
+
     session_manager = get_session_manager()
     response = RedirectResponse(
         url="/login",
@@ -862,7 +891,11 @@ def dashboard_api_chart_partial(
     )
 
 
-@web_router.post("/langfuse-sync/trigger", response_class=JSONResponse)
+@web_router.post(
+    "/langfuse-sync/trigger",
+    response_class=JSONResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def langfuse_sync_trigger(request: Request):
     """
     Story #168 AC4: Trigger immediate Langfuse sync.
@@ -990,7 +1023,6 @@ def _create_users_page_response(
 ) -> HTMLResponse:
     """Create users page response with all necessary context."""
     csrf_token = generate_csrf_token()
-    users = _get_users_list()
 
     response = templates.TemplateResponse(
         "users.html",
@@ -1001,20 +1033,6 @@ def _create_users_page_response(
             "current_page": "users",
             "show_nav": True,
             "csrf_token": csrf_token,
-            "users": [
-                {
-                    "username": u.username,
-                    "role": u.role.value,
-                    "created_at": (
-                        u.created_at.strftime("%Y-%m-%d %H:%M")
-                        if u.created_at
-                        else "N/A"
-                    ),
-                    "email": u.email,
-                    "mfa_enabled": _get_user_mfa_status(u.username),
-                }
-                for u in users
-            ],
             "success_message": success_message,
             "error_message": error_message,
         },
@@ -1034,7 +1052,11 @@ def users_page(request: Request):
     return _create_users_page_response(request, session)
 
 
-@web_router.post("/users/create", response_class=HTMLResponse)
+@web_router.post(
+    "/users/create",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def create_user(
     request: Request,
     new_username: str = Form(...),
@@ -1119,7 +1141,11 @@ def create_user(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/users/{username}/role", response_class=HTMLResponse)
+@web_router.post(
+    "/users/{username}/role",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_user_role(
     request: Request,
     username: str,
@@ -1169,7 +1195,11 @@ def update_user_role(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/users/{username}/password", response_class=HTMLResponse)
+@web_router.post(
+    "/users/{username}/password",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def change_user_password(
     request: Request,
     username: str,
@@ -1219,7 +1249,11 @@ def change_user_password(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/users/{username}/email", response_class=HTMLResponse)
+@web_router.post(
+    "/users/{username}/email",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_user_email(
     request: Request,
     username: str,
@@ -1260,7 +1294,11 @@ def update_user_email(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/users/{username}/delete", response_class=HTMLResponse)
+@web_router.post(
+    "/users/{username}/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def delete_user(
     request: Request,
     username: str,
@@ -1328,7 +1366,11 @@ async def delete_user(
         return _create_users_page_response(request, session, error_message=str(e))
 
 
-@web_router.get("/partials/users-list", response_class=HTMLResponse)
+@web_router.get(
+    "/partials/users-list",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def users_list_partial(request: Request):
     """
     Partial refresh endpoint for users list section.
@@ -1574,7 +1616,11 @@ def groups_page(request: Request):
     return _create_groups_page_response(request, session)
 
 
-@web_router.post("/groups/create", response_class=HTMLResponse)
+@web_router.post(
+    "/groups/create",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def create_group(
     request: Request,
     name: str = Form(...),
@@ -1610,7 +1656,11 @@ def create_group(
         return _create_groups_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/groups/{group_id}/update", response_class=HTMLResponse)
+@web_router.post(
+    "/groups/{group_id}/update",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def update_group(
     request: Request,
     group_id: int,
@@ -1666,7 +1716,11 @@ def update_group(
         return _create_groups_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/groups/{group_id}/delete", response_class=HTMLResponse)
+@web_router.post(
+    "/groups/{group_id}/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def delete_group(
     request: Request,
     group_id: int,
@@ -1714,7 +1768,11 @@ def delete_group(
         return _create_groups_page_response(request, session, error_message=str(e))
 
 
-@web_router.post("/groups/users/{user_id:path}/assign", response_class=HTMLResponse)
+@web_router.post(
+    "/groups/users/{user_id:path}/assign",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def assign_user_to_group(
     request: Request,
     user_id: str,
@@ -2030,7 +2088,10 @@ def _repo_access_success_response(
     )
 
 
-@web_router.post("/groups/repo-access/grant")
+@web_router.post(
+    "/groups/repo-access/grant",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def grant_repo_access(
     request: Request,
     repo_name: Optional[str] = Form(None),
@@ -2106,7 +2167,10 @@ async def grant_repo_access(
         return _repo_access_error_response(is_ajax, request, session, str(e), 500)
 
 
-@web_router.post("/groups/repo-access/revoke")
+@web_router.post(
+    "/groups/repo-access/revoke",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def revoke_repo_access(
     request: Request,
     repo_name: Optional[str] = Form(None),
@@ -2371,200 +2435,215 @@ def _batch_create_repos(
     }
 
 
-def _get_golden_repos_list(backend_registry=None):
-    """Get list of all golden repositories with global alias, version, and index info."""
-    try:
-        import os
-        import json
-        from pathlib import Path
+_SAFE_ALIAS_MAX_LEN = 127
+_SAFE_ALIAS_RE = _re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0," + str(_SAFE_ALIAS_MAX_LEN - 1) + r"}$"
+)
 
-        manager = _get_golden_repo_manager()
-        repos = manager.list_golden_repos()
 
-        server_data_dir = os.environ.get(
-            "CIDX_SERVER_DATA_DIR",
-            os.path.expanduser("~/.cidx-server"),
-        )
-        golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"
+def _is_safe_alias(alias: Optional[str]) -> bool:
+    """Return True iff alias is a safe filesystem path component (no traversal risk)."""
+    if not isinstance(alias, str) or not alias:
+        return False
+    return bool(_SAFE_ALIAS_RE.match(alias))
 
-        # Get global registry to check global activation status
-        if backend_registry is not None:
-            repos_dict = backend_registry.global_repos.list_repos()
-            global_repos = {v["repo_name"]: v for v in repos_dict.values()}
-        else:
-            global_repos = {}
 
-        # Get alias info for version and target path
-        aliases_dir = golden_repos_dir / "aliases"
+def _resolve_alias_metadata(
+    alias: str, global_repos: dict, aliases_dir: "Path"
+) -> tuple:
+    """
+    Return (global_alias, globally_queryable, version, last_refresh, index_path).
 
-        # Get category lookup by repo alias (Story #183)
-        category_lookup = {}
-        try:
-            category_service = _get_repo_category_service()
-            repo_map = category_service.get_repo_category_map()
-            for alias, info in repo_map.items():
-                if info.get("category_name"):
-                    category_lookup[alias] = {
-                        "category_id": info["category_id"],
-                        "category_name": info["category_name"],
-                        "category_priority": info["priority"],
-                    }
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "SCIP-GENERAL-048", f"Could not load category information: {e}"
-                ),
-                extra={"correlation_id": get_correlation_id()},
-            )
+    version and last_refresh are initialized to None before branching — never duplicated.
+    """
+    import json
 
-        # Add status, global alias, version, and index information for display
-        for repo in repos:
-            # Default status to 'ready' if not set
-            if "status" not in repo:
-                repo["status"] = "ready"
-            # Format last_indexed date if available
-            if "created_at" in repo and repo["created_at"]:
-                repo["last_indexed"] = repo["created_at"][:10]  # Just the date part
-            else:
-                repo["last_indexed"] = None
+    version = None
+    last_refresh = None
+    index_path = None
 
-            # Add global alias info if globally activated
-            alias = repo.get("alias", "")
-            global_alias_name = f"{alias}-global"
-            index_path = None
-            version = None
-
-            if alias in global_repos:
-                repo["global_alias"] = global_repos[alias]["alias_name"]
-                repo["globally_queryable"] = True
-
-                # Read alias file to get actual target path and version
-                alias_file = aliases_dir / f"{global_alias_name}.json"
-                if alias_file.exists():
-                    try:
-                        with open(alias_file, "r") as f:
-                            alias_data = json.load(f)
-                        index_path = alias_data.get("target_path")
-                        # Extract version from path (e.g., v_1764703630)
-                        if index_path and ".versioned" in index_path:
-                            version = Path(index_path).name
-                        repo["version"] = version
-                        repo["last_refresh"] = (
-                            alias_data.get("last_refresh", "")[:19]
-                            if alias_data.get("last_refresh")
-                            else None
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            format_error_log(
-                                "SCIP-GENERAL-045",
-                                f"Could not read alias file {alias_file}: {e}",
-                            ),
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                        repo["version"] = None
-                        repo["last_refresh"] = None
-                else:
-                    repo["version"] = None
-                    repo["last_refresh"] = None
-            else:
-                repo["global_alias"] = None
-                repo["globally_queryable"] = False
-                repo["version"] = None
-                repo["last_refresh"] = None
-                # Use clone_path for non-global repos
-                index_path = repo.get("clone_path")
-
-            # Fetch temporal status for globally activated repos
-            if repo.get("global_alias"):
+    if alias in global_repos:
+        global_alias = global_repos[alias]["alias_name"]
+        globally_queryable = True
+        if _is_safe_alias(alias):
+            alias_file = aliases_dir / f"{alias}-global.json"
+            if alias_file.exists():
                 try:
-                    from code_indexer.server.services.dashboard_service import (
-                        DashboardService,
-                    )
-
-                    dashboard = DashboardService()
-                    temporal_status = dashboard.get_temporal_index_status(
-                        username="_global", repo_alias=repo["global_alias"]
-                    )
-                    repo["temporal_status"] = temporal_status
+                    alias_data = json.loads(alias_file.read_text())
+                    index_path = alias_data.get("target_path")
+                    if index_path and ".versioned" in index_path:
+                        version = Path(index_path).name
+                    raw_refresh = alias_data.get("last_refresh", "")
+                    last_refresh = raw_refresh[:19] if raw_refresh else None
                 except Exception as e:
                     logger.warning(
                         format_error_log(
-                            "SCIP-GENERAL-046",
-                            f"Failed to get temporal status for {repo.get('alias')}: {e}",
+                            "SCIP-GENERAL-045",
+                            f"Could not read alias file for {alias}: {e}",
                         ),
                         extra={"correlation_id": get_correlation_id()},
                     )
-                    repo["temporal_status"] = {"format": "error", "message": str(e)}
-            else:
-                repo["temporal_status"] = {"format": "none"}
+    else:
+        global_alias = None
+        globally_queryable = False
+        index_path = None  # clone_path added by caller for non-global repos
 
-            # Check available indexes (factual check of filesystem)
-            repo["has_semantic"] = False
-            repo["has_fts"] = False
-            repo["has_temporal"] = False
-            repo["has_scip"] = False
+    return global_alias, globally_queryable, version, last_refresh, index_path
 
-            if index_path:
-                index_base = Path(index_path) / ".code-indexer"
-                if index_base.exists():
-                    # Check semantic index (any model directory with hnsw_index.bin)
-                    index_dir = index_base / "index"
-                    if index_dir.exists():
-                        for model_dir in index_dir.iterdir():
-                            if (
-                                model_dir.is_dir()
-                                and (model_dir / "hnsw_index.bin").exists()
-                            ):
-                                repo["has_semantic"] = True
-                                break
 
-                    # Check FTS index (tantivy_index with files)
-                    tantivy_dir = index_base / "tantivy_index"
-                    if tantivy_dir.exists() and any(tantivy_dir.iterdir()):
-                        repo["has_fts"] = True
+def _detect_index_flags(index_path: Optional[str]) -> dict:
+    """
+    Return has_semantic/has_fts/has_temporal/has_scip flags via filesystem inspection.
 
-                    # Check temporal index (any provider-aware or legacy temporal collection)
-                    from code_indexer.services.temporal.temporal_collection_naming import (
-                        is_temporal_collection as _is_temporal,
-                    )
+    All flags default False when index_path is None or the .code-indexer dir is absent.
+    """
+    flags = {
+        "has_semantic": False,
+        "has_fts": False,
+        "has_temporal": False,
+        "has_scip": False,
+    }
+    if not index_path:
+        return flags
+    index_base = Path(index_path) / ".code-indexer"
+    if not index_base.exists():
+        return flags
+    index_dir = index_base / "index"
+    if index_dir.exists():
+        for model_dir in index_dir.iterdir():
+            if model_dir.is_dir() and (model_dir / "hnsw_index.bin").exists():
+                flags["has_semantic"] = True
+                break
+    tantivy_dir = index_base / "tantivy_index"
+    if tantivy_dir.exists() and any(tantivy_dir.iterdir()):
+        flags["has_fts"] = True
+    from code_indexer.services.temporal.temporal_collection_naming import (
+        is_temporal_collection as _is_temporal,
+    )
 
-                    temporal_dir = next(
-                        (
-                            d
-                            for d in sorted(
-                                index_dir.iterdir() if index_dir.is_dir() else []
-                            )
-                            if d.is_dir()
-                            and _is_temporal(d.name)
-                            and (d / "hnsw_index.bin").exists()
-                        ),
-                        None,
-                    )
-                    if temporal_dir is not None:
-                        repo["has_temporal"] = True
+    temporal_dir = next(
+        (
+            d
+            for d in sorted(index_dir.iterdir() if index_dir.is_dir() else [])
+            if d.is_dir() and _is_temporal(d.name) and (d / "hnsw_index.bin").exists()
+        ),
+        None,
+    )
+    if temporal_dir is not None:
+        flags["has_temporal"] = True
+    scip_dir = (
+        index_base / "scip"
+    )  # CRITICAL: only .scip.db persists after cidx scip generate
+    if scip_dir.exists() and list(scip_dir.glob("**/*.scip.db")):
+        flags["has_scip"] = True
+    return flags
 
-                    # Check SCIP index (.code-indexer/scip/ with .scip.db files)
-                    # CRITICAL: .scip protobuf files are DELETED after database conversion
-                    # Only .scip.db (SQLite) files persist after 'cidx scip generate'
-                    scip_dir = index_base / "scip"
-                    if scip_dir.exists():
-                        # Check for any .scip.db files in scip directory or subdirectories
-                        scip_files = list(scip_dir.glob("**/*.scip.db"))
-                        if scip_files:
-                            repo["has_scip"] = True
 
-            # Add category information to each repo (Story #183)
+def _load_temporal_status(global_alias: Optional[str], repo_alias: str) -> dict:
+    """
+    Fetch temporal index status for a globally-activated repo.
+
+    repo_alias is used only in warning logs to preserve original log context.
+    Returns {"format": "none"} when global_alias is absent.
+    """
+    if not global_alias:
+        return {"format": "none"}
+    try:
+        from code_indexer.server.services.dashboard_service import DashboardService
+
+        # cast: DashboardService return type is too broad for mypy; narrowing to route contract
+        return cast(
+            Dict[str, Any],
+            DashboardService().get_temporal_index_status(
+                username="_global", repo_alias=global_alias
+            ),
+        )
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-046",
+                f"Failed to get temporal status for {repo_alias}: {e}",
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return {"format": "error", "message": str(e)}
+
+
+def _build_category_lookup() -> dict:
+    """
+    Build alias -> {category_id, category_name, category_priority} from RepoCategoryService.
+
+    Returns empty dict on failure; category data is non-critical display information.
+    """
+    try:
+        repo_map = _get_repo_category_service().get_repo_category_map()
+        return {
+            alias: {
+                "category_id": info["category_id"],
+                "category_name": info["category_name"],
+                "category_priority": info["priority"],
+            }
+            for alias, info in repo_map.items()
+            if info.get("category_name")
+        }
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-048", f"Could not load category information: {e}"
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return {}
+
+
+def _get_golden_repos_list(backend_registry=None):
+    """Get list of all golden repositories with global alias, version, and index info."""
+    try:
+        manager = _get_golden_repo_manager()
+        repos = manager.list_golden_repos()
+        server_data_dir = os.environ.get(
+            "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
+        )
+        aliases_dir = Path(server_data_dir) / "data" / "golden-repos" / "aliases"
+        if backend_registry is not None:
+            global_repos = {
+                v["repo_name"]: v
+                for v in backend_registry.global_repos.list_repos().values()
+            }
+        else:
+            global_repos = {}
+        category_lookup = _build_category_lookup()
+        for repo in repos:
+            if "status" not in repo:
+                repo["status"] = "ready"
+            repo["last_indexed"] = (
+                repo["created_at"][:10] if repo.get("created_at") else None
+            )
             alias = repo.get("alias", "")
-            if alias in category_lookup:
-                repo["category_id"] = category_lookup[alias]["category_id"]
-                repo["category_name"] = category_lookup[alias]["category_name"]
-                repo["category_priority"] = category_lookup[alias]["category_priority"]
-            else:
-                repo["category_id"] = None
-                repo["category_name"] = None
-                repo["category_priority"] = None
-
+            g_alias, g_queryable, version, last_refresh, index_path = (
+                _resolve_alias_metadata(alias, global_repos, aliases_dir)
+            )
+            repo.update(
+                {
+                    "global_alias": g_alias,
+                    "globally_queryable": g_queryable,
+                    "version": version,
+                    "last_refresh": last_refresh,
+                }
+            )
+            if not g_queryable:
+                index_path = repo.get("clone_path")
+            # temporal_status deferred to details partial (_get_single_repo_enriched)
+            # to avoid per-alias overhead on initial page load (Finding 3 / AC1).
+            repo.update(_detect_index_flags(index_path))
+            cat = category_lookup.get(alias, {})
+            repo.update(
+                {
+                    "category_id": cat.get("category_id"),
+                    "category_name": cat.get("category_name"),
+                    "category_priority": cat.get("category_priority"),
+                }
+            )
         return sorted(repos, key=lambda r: r.get("alias", "").lower())
     except Exception as e:
         logger.error(
@@ -2632,7 +2711,11 @@ def golden_repos_page(request: Request):
     return _create_golden_repos_page_response(request, session)
 
 
-@web_router.post("/golden-repos/add", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/add",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def add_golden_repo(
     request: Request,
     alias: str = Form(...),
@@ -2688,7 +2771,10 @@ def add_golden_repo(
         )
 
 
-@web_router.post("/golden-repos/batch-create")
+@web_router.post(
+    "/golden-repos/batch-create",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def batch_create_golden_repos(
     request: Request,
     repos: str = Form(...),
@@ -2750,7 +2836,11 @@ def batch_create_golden_repos(
     return JSONResponse(results)
 
 
-@web_router.post("/golden-repos/{alias}/delete", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def delete_golden_repo(
     request: Request,
     alias: str,
@@ -2788,7 +2878,11 @@ def delete_golden_repo(
         )
 
 
-@web_router.post("/golden-repos/{alias}/refresh", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/refresh",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def refresh_golden_repo(
     request: Request,
     alias: str,
@@ -2837,7 +2931,11 @@ def refresh_golden_repo(
         )
 
 
-@web_router.post("/golden-repos/{alias}/force-resync", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/force-resync",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def force_resync_golden_repo(
     request: Request,
     alias: str,
@@ -2886,7 +2984,11 @@ def force_resync_golden_repo(
         )
 
 
-@web_router.post("/golden-repos/{alias}/wiki-toggle", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/wiki-toggle",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def toggle_wiki_enabled(
     request: Request,
     alias: str,
@@ -2949,7 +3051,11 @@ def toggle_wiki_enabled(
     )
 
 
-@web_router.post("/golden-repos/{alias}/temporal-options", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/temporal-options",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def save_temporal_options(
     request: Request,
     alias: str,
@@ -3025,7 +3131,11 @@ def save_temporal_options(
     )
 
 
-@web_router.post("/golden-repos/{alias}/wiki-refresh", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/{alias}/wiki-refresh",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def refresh_wiki_cache(
     request: Request,
     alias: str,
@@ -3051,7 +3161,10 @@ def refresh_wiki_cache(
     )
 
 
-@web_router.post("/golden-repos/{alias}/change-branch")
+@web_router.post(
+    "/golden-repos/{alias}/change-branch",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def change_golden_repo_branch(
     request: Request,
     alias: str,
@@ -3152,7 +3265,11 @@ def get_golden_repo_branches(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@web_router.post("/golden-repos/activate", response_class=HTMLResponse)
+@web_router.post(
+    "/golden-repos/activate",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def activate_golden_repo(
     request: Request,
     golden_alias: str = Form(...),
@@ -3304,6 +3421,150 @@ def golden_repos_list_partial(request: Request):
 
     set_csrf_cookie(response, csrf_token)
     return response
+
+
+def _render_details_error(
+    request: Request,
+    alias: str,
+    message: str,
+    error_kind: str,
+    status_code: int,
+    show_retry: bool,
+) -> HTMLResponse:
+    """
+    Render the details_error.html fragment with the given parameters.
+
+    Used by golden_repo_details_partial for 401/404/500 error paths so the
+    client receives an inline HTML fragment rather than a redirect or JSON
+    error, allowing htmx to swap the message into the details cell.
+    """
+    return templates.TemplateResponse(
+        "partials/details_error.html",
+        {
+            "request": request,
+            "alias": alias,
+            "message": message,
+            "error_kind": error_kind,
+            "show_retry": show_retry,
+        },
+        status_code=status_code,
+    )
+
+
+def _get_single_repo_enriched(alias: str, backend_registry=None) -> Optional[dict]:
+    """
+    Return a fully-enriched repo dict for the given alias, or None if not found.
+
+    Applies the same enrichment as _get_golden_repos_list: global alias, version,
+    temporal status, index flags, and category data.
+    """
+    manager = _get_golden_repo_manager()
+    repos = manager.list_golden_repos()
+    repo = next((r for r in repos if r.get("alias") == alias), None)
+    if repo is None:
+        return None
+    server_data_dir = os.environ.get(
+        "CIDX_SERVER_DATA_DIR", os.path.expanduser("~/.cidx-server")
+    )
+    aliases_dir = Path(server_data_dir) / "data" / "golden-repos" / "aliases"
+    if backend_registry is not None:
+        global_repos = {
+            v["repo_name"]: v
+            for v in backend_registry.global_repos.list_repos().values()
+        }
+    else:
+        global_repos = {}
+    if "status" not in repo:
+        repo["status"] = "ready"
+    repo["last_indexed"] = repo["created_at"][:10] if repo.get("created_at") else None
+    g_alias, g_queryable, version, last_refresh, index_path = _resolve_alias_metadata(
+        alias, global_repos, aliases_dir
+    )
+    repo.update(
+        {
+            "global_alias": g_alias,
+            "globally_queryable": g_queryable,
+            "version": version,
+            "last_refresh": last_refresh,
+        }
+    )
+    if not g_queryable:
+        index_path = repo.get("clone_path")
+    repo["temporal_status"] = _load_temporal_status(g_alias, alias)
+    repo.update(_detect_index_flags(index_path))
+    cat = _build_category_lookup().get(alias, {})
+    repo.update(
+        {
+            "category_id": cat.get("category_id"),
+            "category_name": cat.get("category_name"),
+            "category_priority": cat.get("category_priority"),
+        }
+    )
+    # cast: list_golden_repos() returns List[Any]; narrowing to route contract
+    return cast(Optional[Dict[str, Any]], repo)
+
+
+@web_router.get("/partials/golden-repos/{alias}/details", response_class=HTMLResponse)
+def golden_repo_details_partial(request: Request, alias: str):
+    """
+    Lazy-load details partial for a single golden repo (Story #863).
+
+    Returns the enriched details card HTML fragment for htmx.ajax swap.
+    Does NOT rotate the CSRF token (Finding 2 / AC6/AC7/AC8): error paths
+    return inline HTML fragments via _render_details_error so htmx can swap
+    the message into the details cell without a page redirect.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return _render_details_error(
+            request,
+            alias,
+            "Session expired — please reload the page",
+            "session_expired",
+            401,
+            False,
+        )
+
+    try:
+        backend_registry = getattr(request.app.state, "backend_registry", None)
+        repo = _get_single_repo_enriched(alias, backend_registry)
+        if repo is None:
+            return _render_details_error(
+                request,
+                alias,
+                "Repository not found",
+                "not_found",
+                404,
+                False,
+            )
+        csrf_token = get_csrf_token_from_cookie(request)
+        categories = _get_repo_category_service().list_categories()
+        return templates.TemplateResponse(
+            "partials/golden_repo_details.html",
+            {
+                "request": request,
+                "repo": repo,
+                "csrf_token": csrf_token,
+                "categories": categories,
+            },
+        )
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "SCIP-GENERAL-052",
+                f"Unexpected error loading details for '{alias}': {e}",
+            ),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _render_details_error(
+            request,
+            alias,
+            "Failed to load repository details",
+            "internal_error",
+            500,
+            True,
+        )
 
 
 def _get_activated_repo_manager():
@@ -3681,7 +3942,9 @@ def repo_details(
 
 
 @web_router.post(
-    "/repos/{username}/{user_alias}/deactivate", response_class=HTMLResponse
+    "/repos/{username}/{user_alias}/deactivate",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def deactivate_repo(
     request: Request,
@@ -3724,7 +3987,9 @@ def deactivate_repo(
 
 
 @web_router.post(
-    "/activated-repos/{username}/{alias}/wiki-toggle", response_class=JSONResponse
+    "/activated-repos/{username}/{alias}/wiki-toggle",
+    response_class=JSONResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def toggle_user_wiki_enabled(
     request: Request,
@@ -4057,7 +4322,11 @@ def jobs_list_partial(
     return response
 
 
-@web_router.post("/jobs/{job_id}/cancel", response_class=HTMLResponse)
+@web_router.post(
+    "/jobs/{job_id}/cancel",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def cancel_job(
     request: Request,
     job_id: str,
@@ -5332,7 +5601,6 @@ def _get_current_config() -> dict:
         TelemetryConfig,
         LangfuseConfig,
         SearchLimitsConfig,
-        FileContentLimitsConfig,
         GoldenReposConfig,
         # Story #3 - Phase 2: P0/P1 settings (AC2-AC11)
         McpSessionConfig,
@@ -5354,6 +5622,8 @@ def _get_current_config() -> dict:
         RerankConfig,
         # Story #885 - Lifecycle analysis configuration
         LifecycleAnalysisConfig,
+        # Story #844 - Codex CLI integration configuration
+        CodexIntegrationConfig,
     )
     from dataclasses import asdict
 
@@ -5386,10 +5656,6 @@ def _get_current_config() -> dict:
     search_limits_config = settings.get("search_limits")
     if not search_limits_config:
         search_limits_config = asdict(SearchLimitsConfig())
-
-    file_content_limits_config = settings.get("file_content_limits")
-    if not file_content_limits_config:
-        file_content_limits_config = asdict(FileContentLimitsConfig())
 
     golden_repos_config = settings.get("golden_repos")
     if not golden_repos_config:
@@ -5511,12 +5777,13 @@ def _get_current_config() -> dict:
         "cache": settings["cache"],
         "timeouts": settings["timeouts"],
         "password_security": settings["password_security"],
+        # Bug #943: TOTP step-up elevation runtime config
+        "totp_elevation": settings.get("totp_elevation", {}),
         "oidc": oidc_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,
         "claude_delegation": claude_delegation_config,
         "search_limits": search_limits_config,
-        "file_content_limits": file_content_limits_config,
         "golden_repos": golden_repos_config,
         # Story #3 - Phase 2: P0/P1 settings
         "mcp_session": mcp_session_config,
@@ -5561,6 +5828,13 @@ def _get_current_config() -> dict:
         # Story #885: Lifecycle analysis configuration
         "lifecycle_analysis": settings.get(
             "lifecycle_analysis", asdict(LifecycleAnalysisConfig())
+        ),
+        # Story #844: Codex CLI integration configuration
+        "codex_integration": settings.get(
+            "codex_integration", asdict(CodexIntegrationConfig())
+        ),
+        "cidx_meta_backup": settings.get(
+            "cidx_meta_backup", {"enabled": False, "remote_url": ""}
         ),
     }
 
@@ -5763,16 +6037,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return f"{field_name} must be a valid number"
 
     elif section == "telemetry":
-        # Validate trace_sample_rate (0.0 to 1.0)
-        trace_sample_rate = data.get("trace_sample_rate")
-        if trace_sample_rate is not None:
-            try:
-                rate_float = float(trace_sample_rate)
-                if rate_float < 0 or rate_float > 1:
-                    return "Trace sample rate must be between 0.0 and 1.0"
-            except (ValueError, TypeError):
-                return "Trace sample rate must be a valid number"
-
         # Validate collector_protocol
         collector_protocol = data.get("collector_protocol")
         if collector_protocol is not None:
@@ -5819,27 +6083,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Timeout must be between 5 and 300 seconds"
             except (ValueError, TypeError):
                 return "Timeout must be a valid number"
-
-    elif section == "file_content_limits":
-        # Validate max_tokens_per_request (1000-50000 tokens)
-        max_tokens = data.get("max_tokens_per_request")
-        if max_tokens is not None:
-            try:
-                max_tokens_int = int(max_tokens)
-                if max_tokens_int < 1000 or max_tokens_int > 50000:
-                    return "Max Tokens per Request must be between 1000 and 50000"
-            except (ValueError, TypeError):
-                return "Max Tokens per Request must be a valid number"
-
-        # Validate chars_per_token (1-10 characters)
-        chars_per_token = data.get("chars_per_token")
-        if chars_per_token is not None:
-            try:
-                chars_int = int(chars_per_token)
-                if chars_int < 1 or chars_int > 10:
-                    return "Characters per Token must be between 1 and 10"
-            except (ValueError, TypeError):
-                return "Characters per Token must be a valid number"
 
     elif section == "golden_repos":
         # Validate refresh_interval_seconds (minimum 60 seconds)
@@ -5897,24 +6140,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 except (ValueError, TypeError):
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
-
-        # AC37: System Metrics Cache TTL
-        from ..services.constants import (
-            MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS,
-            MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS,
-        )
-
-        cache_ttl = data.get("metrics_cache_ttl_seconds")
-        if cache_ttl is not None:
-            try:
-                ttl_float = float(cache_ttl)
-                if (
-                    ttl_float < MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS
-                    or ttl_float > MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS
-                ):
-                    return f"System Metrics Cache TTL must be between {MIN_SYSTEM_METRICS_CACHE_TTL_SECONDS} and {MAX_SYSTEM_METRICS_CACHE_TTL_SECONDS} seconds"
-            except (ValueError, TypeError):
-                return "System Metrics Cache TTL must be a valid number"
 
     elif section == "scip":
         # Story #3 Phase 2 AC9-AC11: SCIP configuration
@@ -6464,15 +6689,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Cache TTL must be a valid number"
 
-        cache_max_entries = data.get("cache_max_entries")
-        if cache_max_entries is not None:
-            try:
-                val_int = int(cache_max_entries)
-                if val_int < 100 or val_int > 100000:
-                    return "Cache Max Entries must be between 100 and 100000"
-            except (ValueError, TypeError):
-                return "Cache Max Entries must be a valid number"
-
     elif section == "rerank":
         # Story #652: Reranking configuration validation
         for field_name, label in [
@@ -6811,7 +7027,10 @@ def discovery_all(
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-@web_router.post("/api/discovery/{platform}/enrich")
+@web_router.post(
+    "/api/discovery/{platform}/enrich",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def discovery_enrich(
     request: Request,
     platform: str,
@@ -7069,7 +7288,11 @@ async def _validate_discovery_hide_request(
     return None, repo_identifier
 
 
-@web_router.post("/api/discovery/hide", response_class=HTMLResponse)
+@web_router.post(
+    "/api/discovery/hide",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def hide_discovery_repo(request: Request):
     """Hide a repository from the auto-discovery view (Story #719)."""
     error, repo_identifier = await _validate_discovery_hide_request(request)
@@ -7081,7 +7304,11 @@ async def hide_discovery_repo(request: Request):
     return HTMLResponse(content="", status_code=status.HTTP_200_OK)
 
 
-@web_router.post("/api/discovery/unhide", response_class=HTMLResponse)
+@web_router.post(
+    "/api/discovery/unhide",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def unhide_discovery_repo(request: Request):
     """Unhide a repository from the auto-discovery view (Story #719)."""
     error, repo_identifier = await _validate_discovery_hide_request(request)
@@ -7098,7 +7325,10 @@ async def unhide_discovery_repo(request: Request):
 # =============================================================================
 
 
-@web_router.post("/api/discovery/branches")
+@web_router.post(
+    "/api/discovery/branches",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def fetch_discovery_branches(request: Request):
     """
     Fetch branches for remote repositories during auto-discovery.
@@ -7225,7 +7455,11 @@ def config_page(request: Request):
     return _create_config_page_response(request, session)
 
 
-@web_router.post("/config/claude_delegation", response_class=HTMLResponse)
+@web_router.post(
+    "/config/claude_delegation",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def update_claude_delegation_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -7366,7 +7600,11 @@ async def update_claude_delegation_config(
 
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
 # caught by the parameterized route. FastAPI matches routes in order of definition.
-@web_router.post("/config/reset", response_class=HTMLResponse)
+@web_router.post(
+    "/config/reset",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def reset_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -7411,7 +7649,11 @@ def reset_config(
 
 # NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
 # caught by the parameterized route. FastAPI matches routes in order of definition.
-@web_router.post("/config/langfuse_pull", response_class=HTMLResponse)
+@web_router.post(
+    "/config/langfuse_pull",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def update_langfuse_pull_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -7482,7 +7724,88 @@ async def update_langfuse_pull_config(
         )
 
 
-@web_router.post("/config/{section}", response_class=HTMLResponse)
+def _extract_git_hostname(remote_url: str) -> Optional[str]:
+    """Extract hostname from git@host:path or ssh:// URLs."""
+    if remote_url.startswith("git@") and ":" in remote_url:
+        return remote_url.split("@", 1)[1].split(":", 1)[0]
+    if remote_url.startswith("ssh://"):
+        return urlparse(remote_url).hostname
+    return None
+
+
+@web_router.post(
+    "/config/cidx_meta_backup",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+async def update_cidx_meta_backup_config(
+    request: Request,
+    csrf_token: Optional[str] = Form(None),
+):
+    """Update cidx-meta backup config with SSH validation and bootstrap."""
+    from ..services.cidx_meta_backup.bootstrap import CidxMetaBackupBootstrap
+    from ..services.config_service import get_config_service
+
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    if not validate_login_csrf_token(request, csrf_token):
+        return _create_config_page_response(
+            request, session, error_message="Invalid CSRF token"
+        )
+
+    form_data = await request.form()
+    enabled = str(form_data.get("enabled", "false")).lower() == "true"
+    remote_url = str(form_data.get("remote_url", "")).strip()
+
+    if remote_url and not (
+        remote_url.startswith("file://")
+        or remote_url.startswith("https://")
+        or remote_url.startswith("http://")
+    ):
+        hostname = _extract_git_hostname(remote_url)
+        key_list = _get_ssh_key_manager().list_keys()
+        if hostname and not any(hostname in key.hosts for key in key_list.managed):
+            return _create_config_page_response(
+                request,
+                session,
+                error_message=f"No SSH key configured for {hostname}",
+                validation_errors={
+                    "cidx_meta_backup": f"No SSH key configured for {hostname}"
+                },
+            )
+
+    try:
+        config_service = get_config_service()
+        config_service.update_setting("cidx_meta_backup", "enabled", enabled)
+        config_service.update_setting("cidx_meta_backup", "remote_url", remote_url)
+
+        if remote_url:
+            from ..services.cidx_meta_backup import get_cidx_meta_path
+
+            repo_root = get_cidx_meta_path(config_service.config_manager.server_dir)
+            CidxMetaBackupBootstrap().bootstrap(str(repo_root), remote_url)
+
+        return _create_config_page_response(
+            request,
+            session,
+            success_message="cidx-meta backup configuration saved",
+        )
+    except Exception as e:
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=f"Failed to save configuration: {str(e)}",
+            validation_errors={"cidx_meta_backup": str(e)},
+        )
+
+
+@web_router.post(
+    "/config/{section}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def update_config_section(
     request: Request,
     section: str,
@@ -7524,6 +7847,53 @@ async def update_config_section(
     # Save configuration using ConfigService
     try:
         config_service = get_config_service()
+
+        if section == "totp_elevation":
+            # Bug #943 Fix #1/#2/#3: atomic batch path — validate final tuple,
+            # rollback on save failure, hot-reload live session manager.
+            from code_indexer.server.auth.elevated_session_manager import (
+                elevated_session_manager as _esm,
+            )
+            from code_indexer.server.services.config_service import (
+                _TOTP_TRUTHY as _TOTP_TRUTHY_SET,
+            )
+
+            _raw_enabled = data.get("elevation_enforcement_enabled")
+            _raw_idle = data.get("elevation_idle_timeout_seconds")
+            _raw_max_age = data.get("elevation_max_age_seconds")
+
+            # All 3 fields are required. The template uses a hidden fallback
+            # input for elevation_enforcement_enabled so it is always submitted.
+            if _raw_enabled is None or _raw_idle is None or _raw_max_age is None:
+                return _create_config_page_response(
+                    request,
+                    session,
+                    error_message=(
+                        "Missing required field: elevation_enforcement_enabled, "
+                        "elevation_idle_timeout_seconds, or elevation_max_age_seconds"
+                    ),
+                )
+
+            try:
+                _idle = int(str(_raw_idle))
+                _max_age = int(str(_raw_max_age))
+            except (ValueError, TypeError) as _e:
+                return _create_config_page_response(
+                    request, session, error_message=f"Invalid numeric value: {_e}"
+                )
+
+            _enabled = str(_raw_enabled).lower() in _TOTP_TRUTHY_SET
+            config_service.update_totp_elevation_atomic(
+                enabled=_enabled,
+                idle_timeout_seconds=_idle,
+                max_age_seconds=_max_age,
+                session_manager=_esm,
+            )
+            return _create_config_page_response(
+                request,
+                session,
+                success_message=f"{section.title()} configuration saved successfully",
+            )
 
         # Update all settings without validating (batch update)
         for key, value in data.items():
@@ -7647,7 +8017,11 @@ def config_section_partial(
 # =============================================================================
 
 
-@web_router.post("/config/api-keys/{platform}", response_class=HTMLResponse)
+@web_router.post(
+    "/config/api-keys/{platform}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def save_api_key(
     request: Request,
     platform: str,
@@ -7709,7 +8083,11 @@ def save_api_key(
         )
 
 
-@web_router.delete("/config/api-keys/{platform}", response_class=HTMLResponse)
+@web_router.delete(
+    "/config/api-keys/{platform}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def delete_api_key(
     request: Request,
     platform: str,
@@ -7806,164 +8184,6 @@ def git_settings_page(request: Request):
     # Set CSRF cookie
     set_csrf_cookie(response, csrf_token)
 
-    return response
-
-
-# =============================================================================
-# File Content Limits Settings
-# =============================================================================
-
-
-@web_router.get("/settings/file-content-limits", response_class=HTMLResponse)
-def file_content_limits_page(request: Request):
-    """
-    File content limits settings page - view and edit token limits configuration.
-
-    Admin-only page for configuring file content token limits.
-    """
-    session = _require_admin_session(request)
-    if not session:
-        return _create_login_redirect(request)
-
-    from ..services.config_service import get_config_service
-
-    # Get current configuration from ConfigService (Story #3 - Configuration Consolidation)
-    config_service = get_config_service()
-    config = config_service.get_config().file_content_limits_config
-
-    # Generate CSRF token
-    csrf_token = generate_csrf_token()
-
-    # Calculate derived values
-    max_chars = config.max_chars_per_request  # type: ignore[union-attr]
-    estimated_lines = max_chars // 80  # Typical code line length
-
-    response = templates.TemplateResponse(
-        "file_content_limits.html",
-        {
-            "request": request,
-            "username": session.username,
-            "current_page": "file-content-limits",
-            "show_nav": True,
-            "csrf_token": csrf_token,
-            "config": config,
-            "max_chars": max_chars,
-            "estimated_lines": estimated_lines,
-            "success_message": None,
-            "error_message": None,
-        },
-    )
-
-    set_csrf_cookie(response, csrf_token)
-    return response
-
-
-@web_router.post("/settings/file-content-limits", response_class=HTMLResponse)
-def update_file_content_limits(
-    request: Request,
-    max_tokens_per_request: int = Form(...),
-    chars_per_token: int = Form(...),
-    csrf_token: Optional[str] = Form(None),
-):
-    """
-    Update file content limits configuration.
-
-    Validates input and persists changes to database.
-    """
-    session = _require_admin_session(request)
-    if not session:
-        return HTMLResponse(content="", status_code=401)
-
-    # Validate CSRF token
-    if not validate_login_csrf_token(request, csrf_token):
-        return _create_file_content_limits_response(
-            request, session, error_message="Invalid CSRF token"
-        )
-
-    # Validate max_tokens_per_request range (Story #3 AC-M3: 1000-50000)
-    if max_tokens_per_request < 1000 or max_tokens_per_request > 50000:
-        return _create_file_content_limits_response(
-            request,
-            session,
-            error_message="Max tokens per request must be between 1000 and 50000",
-        )
-
-    # Validate chars_per_token range (Story #3 AC-M4: 1-10)
-    if chars_per_token < 1 or chars_per_token > 10:
-        return _create_file_content_limits_response(
-            request,
-            session,
-            error_message="Chars per token must be between 1 and 10",
-        )
-
-    # Update configuration using ConfigService (Story #3 - Configuration Consolidation)
-    try:
-        from ..services.config_service import get_config_service
-
-        config_service = get_config_service()
-        # Update settings individually with validation
-        config_service.update_setting(
-            "file_content_limits", "max_tokens_per_request", max_tokens_per_request
-        )
-        config_service.update_setting(
-            "file_content_limits", "chars_per_token", chars_per_token
-        )
-
-        return _create_file_content_limits_response(
-            request,
-            session,
-            success_message="File content limits updated successfully",
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "SVC-GENERAL-016", f"Failed to update file content limits: {e}"
-            ),
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _create_file_content_limits_response(
-            request,
-            session,
-            error_message=f"Failed to update configuration: {str(e)}",
-        )
-
-
-def _create_file_content_limits_response(
-    request: Request,
-    session: SessionData,
-    success_message: Optional[str] = None,
-    error_message: Optional[str] = None,
-) -> HTMLResponse:
-    """Create file content limits page response with messages."""
-    from ..services.config_service import get_config_service
-
-    # Get configuration from ConfigService (Story #3 - Configuration Consolidation)
-    config_service = get_config_service()
-    config = config_service.get_config().file_content_limits_config
-
-    csrf_token = generate_csrf_token()
-
-    # Calculate derived values
-    max_chars = config.max_chars_per_request  # type: ignore[union-attr]
-    estimated_lines = max_chars // 80
-
-    response = templates.TemplateResponse(
-        "file_content_limits.html",
-        {
-            "request": request,
-            "username": session.username,
-            "current_page": "file-content-limits",
-            "show_nav": True,
-            "csrf_token": csrf_token,
-            "config": config,
-            "max_chars": max_chars,
-            "estimated_lines": estimated_lines,
-            "success_message": success_message,
-            "error_message": error_message,
-        },
-    )
-
-    set_csrf_cookie(response, csrf_token)
     return response
 
 
@@ -8181,7 +8401,10 @@ def admin_git_credentials_list_partial(request: Request):
     return response
 
 
-@web_router.post("/git-credentials")
+@web_router.post(
+    "/git-credentials",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def admin_git_credentials_add(request: Request):
     """Add a new git credential via admin form submission."""
     session = _require_admin_session(request)
@@ -8227,7 +8450,10 @@ async def admin_git_credentials_add(request: Request):
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
-@web_router.delete("/git-credentials/{credential_id}")
+@web_router.delete(
+    "/git-credentials/{credential_id}",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def admin_git_credentials_delete(request: Request, credential_id: str):
     """Delete a git credential from admin interface."""
     session = _require_admin_session(request)
@@ -8543,6 +8769,22 @@ def user_logout(request: Request):
 
     Redirects to unified login page after clearing session.
     """
+    # Story #923 AC8: revoke any elevation window for this session
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+
+    session_key = request.cookies.get("cidx_session")
+    if session_key:
+        try:
+            elevated_session_manager.revoke(session_key)
+        except Exception:
+            logger.warning(
+                "Failed to revoke elevation window on user logout for session=%.8s",
+                session_key,
+                exc_info=True,
+            )
+
     session_manager = get_session_manager()
     response = RedirectResponse(
         url="/login",
@@ -8656,7 +8898,11 @@ def _create_ssh_keys_page_response(
     return response
 
 
-@web_router.post("/ssh-keys/create", response_class=HTMLResponse)
+@web_router.post(
+    "/ssh-keys/create",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def create_ssh_key(
     request: Request,
     key_name: str = Form(...),
@@ -8716,7 +8962,11 @@ def create_ssh_key(
         )
 
 
-@web_router.post("/ssh-keys/delete", response_class=HTMLResponse)
+@web_router.post(
+    "/ssh-keys/delete",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def delete_ssh_key(
     request: Request,
     key_name: str = Form(...),
@@ -8755,7 +9005,11 @@ def delete_ssh_key(
         )
 
 
-@web_router.post("/ssh-keys/assign-host", response_class=HTMLResponse)
+@web_router.post(
+    "/ssh-keys/assign-host",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def assign_host_to_key(
     request: Request,
     key_name: str = Form(...),
@@ -9776,7 +10030,11 @@ def self_monitoring_page(request: Request):
     )
 
 
-@web_router.post("/self-monitoring", response_class=HTMLResponse)
+@web_router.post(
+    "/self-monitoring",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def save_self_monitoring_config(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -9875,7 +10133,11 @@ async def save_self_monitoring_config(
     )
 
 
-@web_router.post("/self-monitoring/run-now", response_class=JSONResponse)
+@web_router.post(
+    "/self-monitoring/run-now",
+    response_class=JSONResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def trigger_manual_scan(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -10147,7 +10409,11 @@ def _schedule_delayed_restart(delay: int = 2) -> None:
     restart_thread.start()
 
 
-@web_router.post("/restart", response_class=JSONResponse)
+@web_router.post(
+    "/restart",
+    response_class=JSONResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def restart_server(request: Request) -> JSONResponse:
     """
     Restart the CIDX server (admin only).

@@ -60,12 +60,38 @@ class ProgressiveMetadata:
         return default_metadata
 
     def _save_metadata(self):
-        """Save metadata to disk."""
+        """Save metadata to disk atomically — temp file + rename prevents corruption on crash."""
+        import os
+        import tempfile
+
         # Ensure parent directory exists
         self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(self.metadata_path, "w") as f:
-            json.dump(self.metadata, f, indent=2)
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.metadata_path.parent), suffix=".tmp"
+        )
+        fd_owned = False
+        try:
+            try:
+                tmp_f = os.fdopen(tmp_fd, "w")
+                fd_owned = True
+                with tmp_f:
+                    json.dump(self.metadata, tmp_f, indent=2)
+                os.replace(tmp_path, str(self.metadata_path))
+            finally:
+                if not fd_owned:
+                    try:
+                        os.close(tmp_fd)
+                    except OSError:
+                        pass  # Already closed or invalid — discard
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                # Best-effort cleanup — temp file may already be gone.
+                # Discard silently; the original exception propagates unmodified.
+                pass
+            raise
 
     def start_indexing(
         self, provider_name: str, model_name: str, git_status: Dict[str, Any]

@@ -8,13 +8,56 @@ TDD Approach: These tests are written FIRST before implementation.
 Tests verify admin credential handler behavior with mocked dependencies.
 """
 
+import contextlib
 import pytest
 import json
 from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 
+from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
 from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 from code_indexer.server.auth.user_manager import User, UserRole
+
+# ---------------------------------------------------------------------------
+# Elevation bypass helpers (Story #925 AC2)
+# Decorated handlers require an active elevation window. Tests that verify
+# handler business logic (not elevation gating) must satisfy the decorator
+# with a real window rather than patching internal auth logic.
+# ---------------------------------------------------------------------------
+_ENFORCEMENT_PATH = (
+    "code_indexer.server.mcp.auth.elevation_decorator._is_elevation_enforcement_enabled"
+)
+_TOTP_PATH = "code_indexer.server.mcp.auth.elevation_decorator.get_totp_service"
+_ESM_PATH = "code_indexer.server.mcp.auth.elevation_decorator.elevated_session_manager"
+_TEST_SESSION_KEY = "test-session-cred-handler-abc"
+_IDLE_SECONDS = 300
+_MAX_AGE_SECONDS = 1800
+_DB_FILENAME = "elev_cred.db"
+_ELEV_SCOPE = "full"
+
+
+@contextlib.contextmanager
+def _active_elevation(username: str, tmp_path):
+    """Open a real elevation window so decorated handlers pass the gate.
+
+    Uses a real ElevatedSessionManager backed by a temp SQLite DB.
+    Only the TOTP external-service boundary is mocked, not internal auth logic.
+    Yields session_key to be passed as positional arg to the handler.
+    """
+    mgr = ElevatedSessionManager(
+        idle_timeout_seconds=_IDLE_SECONDS,
+        max_age_seconds=_MAX_AGE_SECONDS,
+        db_path=str(tmp_path / _DB_FILENAME),
+    )
+    mgr.create(_TEST_SESSION_KEY, username, None, scope=_ELEV_SCOPE)
+    totp_mock = MagicMock()
+    totp_mock.is_mfa_enabled.return_value = True
+    with (
+        patch(_ENFORCEMENT_PATH, return_value=True),
+        patch(_ESM_PATH, mgr),
+        patch(_TOTP_PATH, return_value=totp_mock),
+    ):
+        yield _TEST_SESSION_KEY
 
 
 # =============================================================================
@@ -56,26 +99,34 @@ class TestAdminListUserMCPCredentialsHandler:
         return manager
 
     def test_admin_list_user_mcp_credentials_returns_success(
-        self, admin_user, mock_mcp_credential_manager
+        self, admin_user, mock_mcp_credential_manager, tmp_path
     ):
         """admin_list_user_mcp_credentials returns success for admin user."""
-        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
+        with (
+            _active_elevation(admin_user.username, tmp_path),
+            patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
+        ):
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_list_user_mcp_credentials"]
-            result = handler({"username": "target_user"}, admin_user)
+            result = handler(
+                {"username": "target_user"}, admin_user, session_key=_TEST_SESSION_KEY
+            )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_admin_list_user_mcp_credentials_requires_username(self, admin_user):
+    def test_admin_list_user_mcp_credentials_requires_username(
+        self, admin_user, tmp_path
+    ):
         """admin_list_user_mcp_credentials fails when username missing."""
-        handler = HANDLER_REGISTRY["admin_list_user_mcp_credentials"]
-        result = handler({}, admin_user)
+        with _active_elevation(admin_user.username, tmp_path):
+            handler = HANDLER_REGISTRY["admin_list_user_mcp_credentials"]
+            result = handler({}, admin_user, session_key=_TEST_SESSION_KEY)
 
-        content = json.loads(result["content"][0]["text"])
-        assert content["success"] is False
-        assert "error" in content
+            content = json.loads(result["content"][0]["text"])
+            assert content["success"] is False
+            assert "error" in content
 
 
 # =============================================================================
@@ -101,29 +152,41 @@ class TestAdminCreateUserMCPCredentialHandler:
         return manager
 
     def test_admin_create_user_mcp_credential_returns_success(
-        self, admin_user, mock_mcp_credential_manager
+        self, admin_user, mock_mcp_credential_manager, tmp_path
     ):
         """admin_create_user_mcp_credential returns success for admin user."""
-        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
+        with (
+            _active_elevation(admin_user.username, tmp_path),
+            patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
+        ):
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
             result = handler(
-                {"username": "target_user", "description": "Admin created"}, admin_user
+                {"username": "target_user", "description": "Admin created"},
+                admin_user,
+                session_key=_TEST_SESSION_KEY,
             )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
     def test_admin_create_user_mcp_credential_returns_credential(
-        self, admin_user, mock_mcp_credential_manager
+        self, admin_user, mock_mcp_credential_manager, tmp_path
     ):
         """admin_create_user_mcp_credential returns full credential."""
-        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
+        with (
+            _active_elevation(admin_user.username, tmp_path),
+            patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
+        ):
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
-            result = handler({"username": "target_user"}, admin_user)
+            result = handler(
+                {"username": "target_user"},
+                admin_user,
+                session_key=_TEST_SESSION_KEY,
+            )
 
             content = json.loads(result["content"][0]["text"])
             assert "credential_id" in content
@@ -145,33 +208,45 @@ class TestAdminDeleteUserMCPCredentialHandler:
         return manager
 
     def test_admin_delete_user_mcp_credential_returns_success(
-        self, admin_user, mock_mcp_credential_manager
+        self, admin_user, mock_mcp_credential_manager, tmp_path
     ):
         """admin_delete_user_mcp_credential returns success for admin user."""
-        with patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps:
+        with (
+            _active_elevation(admin_user.username, tmp_path),
+            patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
+        ):
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
             result = handler(
-                {"username": "target_user", "credential_id": "cred-123"}, admin_user
+                {"username": "target_user", "credential_id": "cred-123"},
+                admin_user,
+                session_key=_TEST_SESSION_KEY,
             )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_admin_delete_user_mcp_credential_requires_both_params(self, admin_user):
+    def test_admin_delete_user_mcp_credential_requires_both_params(
+        self, admin_user, tmp_path
+    ):
         """admin_delete_user_mcp_credential fails when params missing."""
-        handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
+        with _active_elevation(admin_user.username, tmp_path):
+            handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
 
-        # Missing credential_id
-        result = handler({"username": "target_user"}, admin_user)
-        content = json.loads(result["content"][0]["text"])
-        assert content["success"] is False
+            # Missing credential_id
+            result = handler(
+                {"username": "target_user"}, admin_user, session_key=_TEST_SESSION_KEY
+            )
+            content = json.loads(result["content"][0]["text"])
+            assert content["success"] is False
 
-        # Missing username
-        result = handler({"credential_id": "cred-123"}, admin_user)
-        content = json.loads(result["content"][0]["text"])
-        assert content["success"] is False
+            # Missing username
+            result = handler(
+                {"credential_id": "cred-123"}, admin_user, session_key=_TEST_SESSION_KEY
+            )
+            content = json.loads(result["content"][0]["text"])
+            assert content["success"] is False
 
 
 # =============================================================================
@@ -218,10 +293,11 @@ class TestAdminListAllMCPCredentialsHandler:
         return manager
 
     def test_admin_list_all_mcp_credentials_returns_success(
-        self, admin_user, mock_user_manager, mock_mcp_credential_manager
+        self, admin_user, mock_user_manager, mock_mcp_credential_manager, tmp_path
     ):
         """admin_list_all_mcp_credentials returns success for admin user."""
         with (
+            _active_elevation(admin_user.username, tmp_path),
             patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
         ):
@@ -229,16 +305,17 @@ class TestAdminListAllMCPCredentialsHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_list_all_mcp_credentials"]
-            result = handler({}, admin_user)
+            result = handler({}, admin_user, session_key=_TEST_SESSION_KEY)
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
     def test_admin_list_all_mcp_credentials_returns_credentials_array(
-        self, admin_user, mock_user_manager, mock_mcp_credential_manager
+        self, admin_user, mock_user_manager, mock_mcp_credential_manager, tmp_path
     ):
         """admin_list_all_mcp_credentials returns credentials array."""
         with (
+            _active_elevation(admin_user.username, tmp_path),
             patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
         ):
@@ -246,17 +323,18 @@ class TestAdminListAllMCPCredentialsHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_list_all_mcp_credentials"]
-            result = handler({}, admin_user)
+            result = handler({}, admin_user, session_key=_TEST_SESSION_KEY)
 
             content = json.loads(result["content"][0]["text"])
             assert "credentials" in content
             assert isinstance(content["credentials"], list)
 
     def test_admin_list_all_mcp_credentials_includes_username(
-        self, admin_user, mock_user_manager, mock_mcp_credential_manager
+        self, admin_user, mock_user_manager, mock_mcp_credential_manager, tmp_path
     ):
         """admin_list_all_mcp_credentials includes username in each credential."""
         with (
+            _active_elevation(admin_user.username, tmp_path),
             patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
         ):
@@ -264,7 +342,7 @@ class TestAdminListAllMCPCredentialsHandler:
             mock_deps.mcp_credential_manager = mock_mcp_credential_manager
 
             handler = HANDLER_REGISTRY["admin_list_all_mcp_credentials"]
-            result = handler({}, admin_user)
+            result = handler({}, admin_user, session_key=_TEST_SESSION_KEY)
 
             content = json.loads(result["content"][0]["text"])
             # Each credential should have a username field

@@ -10,12 +10,15 @@ import logging
 from typing import Dict, Any, Optional
 from pathlib import Path
 
+import httpx
+
 from .base_client import (
     CIDXRemoteAPIClient,
     APIClientError,
     AuthenticationError,
     NetworkError,
 )
+from .elevation import ElevationRequiredError
 from .network_error_handler import (
     NetworkConnectionError,
     NetworkTimeoutError,
@@ -26,6 +29,46 @@ from .network_error_handler import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _check_elevation_required(response: httpx.Response) -> None:
+    """Inspect a 403 response body for elevation error codes.
+
+    FastAPI wraps HTTPException detail as ``{"detail": {"error": "..."}}``.
+    This function unwraps the ``detail`` key before reading the error code.
+
+    If the response body contains ``elevation_required`` or
+    ``totp_setup_required`` inside the detail, raises ``ElevationRequiredError``
+    so the CLI can handle the TOTP step-up flow.
+
+    Args:
+        response: httpx.Response with status_code == 403.
+
+    Raises:
+        ElevationRequiredError: When the 403 body signals elevation is needed.
+    """
+    try:
+        body = response.json()
+    except Exception as exc:
+        logger.warning("Failed to parse 403 response JSON for elevation check: %s", exc)
+        return
+
+    # FastAPI wraps HTTPException detail as {"detail": <value>}.
+    # When detail is a dict, elevation error codes are inside it.
+    # When detail is a plain string (e.g. "Insufficient privileges"), skip.
+    error_data = body.get("detail", {})
+    if not isinstance(error_data, dict):
+        return
+
+    error_code = error_data.get("error", "")
+    if error_code in ("elevation_required", "totp_setup_required"):
+        setup_url = error_data.get("setup_url")
+        message = error_data.get("message", "")
+        raise ElevationRequiredError(
+            error_code=error_code,
+            setup_url=setup_url,
+            message=message,
+        )
 
 
 class AdminAPIClient(CIDXRemoteAPIClient):
@@ -93,7 +136,9 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                     error_detail = "Invalid user data"
                 raise APIClientError(f"Invalid user data: {error_detail}", 400)
             elif response.status_code == 403:
-                # Forbidden - insufficient privileges
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
                 raise AuthenticationError(
                     "Insufficient privileges for user creation (admin role required)"
                 )
@@ -120,6 +165,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                 )
 
         except (
+            ElevationRequiredError,
             APIClientError,
             AuthenticationError,
             NetworkError,
@@ -165,7 +211,9 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             if response.status_code == 200:
                 return dict(response.json())
             elif response.status_code == 403:
-                # Forbidden - insufficient privileges
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
                 raise AuthenticationError(
                     "Insufficient privileges for user listing (admin role required)"
                 )
@@ -184,6 +232,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                 )
 
         except (
+            ElevationRequiredError,
             APIClientError,
             AuthenticationError,
             NetworkError,
@@ -280,7 +329,9 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                     error_detail = "Invalid user data"
                 raise APIClientError(f"Invalid update data: {error_detail}", 400)
             elif response.status_code == 403:
-                # Forbidden - insufficient privileges
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
                 raise AuthenticationError(
                     "Insufficient privileges for user update (admin role required)"
                 )
@@ -302,6 +353,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                 )
 
         except (
+            ElevationRequiredError,
             APIClientError,
             AuthenticationError,
             NetworkError,
@@ -349,7 +401,9 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                     error_detail = "Cannot delete user"
                 raise APIClientError(f"Delete failed: {error_detail}", 400)
             elif response.status_code == 403:
-                # Forbidden - insufficient privileges
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
                 raise AuthenticationError(
                     "Insufficient privileges for user deletion (admin role required)"
                 )
@@ -371,6 +425,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                 )
 
         except (
+            ElevationRequiredError,
             APIClientError,
             AuthenticationError,
             NetworkError,
@@ -426,7 +481,9 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                     error_detail = "Invalid password data"
                 raise APIClientError(f"Invalid password data: {error_detail}", 400)
             elif response.status_code == 403:
-                # Forbidden - insufficient privileges
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
                 raise AuthenticationError(
                     "Insufficient privileges for password change (admin role required)"
                 )
@@ -448,6 +505,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                 )
 
         except (
+            ElevationRequiredError,
             APIClientError,
             AuthenticationError,
             NetworkError,

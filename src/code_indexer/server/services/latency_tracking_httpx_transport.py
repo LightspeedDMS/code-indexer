@@ -186,11 +186,13 @@ class LatencyTrackingHTTPXTransport(httpx.HTTPTransport):
         self._registry = registry
 
     @property
-    def _pool(self) -> Any:
+    def _pool(self) -> Any:  # type: ignore[override]
         """Proxy _pool to the wrapped transport.
 
         pytest_httpx (and some httpx internals) access _pool to detect proxy
         configuration.  Delegating here makes this wrapper transparent.
+        Read-only property intentionally overrides the parent writeable
+        instance attribute — this class uses composition, not inheritance.
         """
         return self._wrapped._pool
 
@@ -232,11 +234,13 @@ class AsyncLatencyTrackingHTTPXTransport(httpx.AsyncHTTPTransport):
         self._registry = registry
 
     @property
-    def _pool(self) -> Any:
+    def _pool(self) -> Any:  # type: ignore[override]
         """Proxy _pool to the wrapped transport.
 
         pytest_httpx (and some httpx internals) access _pool to detect proxy
         configuration.  Delegating here makes this wrapper transparent.
+        Read-only property intentionally overrides the parent writeable
+        instance attribute — this class uses composition, not inheritance.
         """
         return self._wrapped._pool
 

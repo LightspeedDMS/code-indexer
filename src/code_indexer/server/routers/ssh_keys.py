@@ -4,12 +4,15 @@ SSH Keys REST API Router.
 Provides CRUD operations for SSH key management.
 """
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from pathlib import Path
 import os
 
+from ..auth import dependencies
+from ..auth.dependencies import get_current_admin_user_hybrid
+from ..auth.user_manager import User
 from ..services.ssh_key_manager import (
     SSHKeyManager,
     KeyNotFoundError,
@@ -252,31 +255,63 @@ def assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
 
 
 # Register routes with proper decorators
-@router.post("", response_model=CreateKeyResponse, status_code=201)
-def api_create_ssh_key(request: CreateKeyRequest) -> CreateKeyResponse:
+@router.post(
+    "",
+    response_model=CreateKeyResponse,
+    status_code=201,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def api_create_ssh_key(
+    request: CreateKeyRequest,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> CreateKeyResponse:
     """Create a new SSH key pair."""
     return create_ssh_key(request)
 
 
-@router.get("", response_model=KeyListResponse)
-def api_list_ssh_keys() -> KeyListResponse:
+@router.get(
+    "",
+    response_model=KeyListResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def api_list_ssh_keys(
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> KeyListResponse:
     """List all managed and unmanaged SSH keys."""
     return list_ssh_keys()
 
 
-@router.delete("/{name}", response_model=DeleteKeyResponse)
-def api_delete_ssh_key(name: str) -> DeleteKeyResponse:
+@router.delete(
+    "/{name}",
+    response_model=DeleteKeyResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def api_delete_ssh_key(
+    name: str,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> DeleteKeyResponse:
     """Delete an SSH key."""
     return delete_ssh_key(name)
 
 
 @router.get("/{name}/public")
-def api_get_public_key(name: str) -> Response:
+def api_get_public_key(
+    name: str,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Response:
     """Get public key content."""
     return get_public_key(name)
 
 
-@router.post("/{name}/hosts", response_model=KeyWithHostsResponse)
-def api_assign_host(name: str, request: AssignHostRequest) -> KeyWithHostsResponse:
+@router.post(
+    "/{name}/hosts",
+    response_model=KeyWithHostsResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def api_assign_host(
+    name: str,
+    request: AssignHostRequest,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> KeyWithHostsResponse:
     """Assign a host to an SSH key."""
     return assign_host(name, request)

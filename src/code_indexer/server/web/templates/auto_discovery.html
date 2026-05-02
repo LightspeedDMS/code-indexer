@@ -625,9 +625,12 @@ async function showCreateDialog() {
         item.className = 'batch-repo-item';
         item.dataset.key = key;
         item.innerHTML =
-            '<div class="repo-info">' +
-                '<span class="repo-platform">' + escHtml(data.platform.toUpperCase()) + '</span>' +
-                '<span class="repo-name">' + escHtml(data.name) + '</span>' +
+            '<div class="batch-repo-item-header">' +
+                '<div class="repo-info">' +
+                    '<span class="repo-platform">' + escHtml(data.platform.toUpperCase()) + '</span>' +
+                    '<span class="repo-name">' + escHtml(data.name) + '</span>' +
+                '</div>' +
+                '<button type="button" class="remove-repo-btn" aria-label="Remove ' + escHtml(data.name) + '" onclick="removeRepo(\'' + escHtml(key) + '\')">&times;</button>' +
             '</div>' +
             '<div class="branch-select-container">' +
                 '<span class="branch-loading">Loading branches...</span>' +
@@ -637,6 +640,25 @@ async function showCreateDialog() {
 
     modal.showModal();
     await fetchBranchesForSelectedRepos();
+}
+
+function removeRepo(key) {
+    var item = document.querySelector('.batch-repo-item[data-key="' + CSS.escape(key) + '"]');
+    if (item) item.remove();
+    selectedRepos.delete(key);
+
+    var countSpan = document.getElementById('batch-count');
+    if (countSpan) countSpan.textContent = selectedRepos.size;
+
+    var executeBtn = document.getElementById('execute-batch-btn');
+    var list = document.getElementById('batch-repo-list');
+
+    if (selectedRepos.size === 0) {
+        if (list) list.innerHTML = '<p class="batch-empty-msg">No repositories selected.</p>';
+        if (executeBtn) executeBtn.disabled = true;
+    }
+
+    updateSelectionUI();
 }
 
 async function fetchBranchesForSelectedRepos() {
@@ -1197,6 +1219,27 @@ document.addEventListener('DOMContentLoaded', function() {
 
 #batch-create-modal .close-btn:hover {
     color: var(--color);
+}
+
+.remove-repo-btn {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    color: var(--muted-color);
+}
+
+.remove-repo-btn:hover {
+    color: var(--color);
+}
+
+.batch-repo-item-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    width: 100%;
 }
 
 .batch-repo-list {

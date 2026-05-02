@@ -18,6 +18,7 @@ from .base_client import (
     APIClientError,
     AuthenticationError,
 )
+from .elevation import ElevationRequiredError
 from .network_error_handler import (
     NetworkConnectionError,
     NetworkTimeoutError,
@@ -62,6 +63,8 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             Parsed tool response data
 
         Raises:
+            ElevationRequiredError: If MCP tool returns elevation_required or
+                totp_setup_required (signals TOTP step-up is needed).
             APIClientError: If MCP tool returns error
             AuthenticationError: If permission denied
         """
@@ -77,7 +80,18 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             content = mcp_result["content"]
             if content and len(content) > 0:
                 text_content = content[0].get("text", "{}")
-                return dict(json.loads(text_content))
+                parsed = dict(json.loads(text_content))
+                # Detect elevation error codes from the MCP elevation decorator.
+                # These codes are returned as dict content (not HTTP 403) because
+                # require_mcp_elevation returns a dict rather than raising HTTPException.
+                error_code = parsed.get("error", "")
+                if error_code in ("elevation_required", "totp_setup_required"):
+                    raise ElevationRequiredError(
+                        error_code=error_code,
+                        setup_url=parsed.get("setup_url"),
+                        message=parsed.get("message", ""),
+                    )
+                return parsed
 
         return dict(mcp_result)
 
@@ -123,6 +137,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
                 raise APIClientError(f"MCP call failed: {error_detail}")
 
         except (
+            ElevationRequiredError,
             APIClientError,
             AuthenticationError,
             NetworkConnectionError,

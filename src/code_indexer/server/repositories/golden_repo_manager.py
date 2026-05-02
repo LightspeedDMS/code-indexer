@@ -3007,11 +3007,22 @@ class GoldenRepoManager:
 
                     elif index_type == "temporal":
                         # Story #480: Use Popen + line reader for real-time progress
+                        # Bug #945: Only use --clear when no vector_*.json files exist.
+                        # Vectors are expensive (embedding API). HNSW is cheap to rebuild.
+                        # If vectors exist, omit --clear so rebuild_from_vectors is used.
+                        _index_dir = Path(repo_path) / ".code-indexer" / "index"
+                        _temporal_vectors_exist = any(
+                            True
+                            for _coll_dir in _index_dir.glob("code-indexer-temporal*")
+                            if _coll_dir.is_dir()
+                            for _ in _coll_dir.glob("vector_*.json")
+                        )
+                        _clear_flags = [] if _temporal_vectors_exist else ["--clear"]
                         command = [
                             "cidx",
                             "index",
                             "--index-commits",
-                            "--clear",
+                            *_clear_flags,
                             "--progress-json",
                         ]
 

@@ -12,9 +12,19 @@ from functools import wraps
 from datetime import datetime, timezone
 import base64
 
+import logging
+
 from .jwt_manager import JWTManager, TokenExpiredError, InvalidTokenError
 from .user_manager import UserManager, User
 from code_indexer.server.logging_utils import format_error_log
+
+# Module-level singleton for TOTP step-up elevation (Story #923 AC5).
+# Imported here so tests can swap the module attribute for fixture isolation.
+from code_indexer.server.auth.elevated_session_manager import (
+    elevated_session_manager,
+)
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .oauth.oauth_manager import OAuthManager
@@ -35,6 +45,10 @@ server_config: Optional["ServerConfig"] = None
 # Security scheme for bearer token authentication
 # auto_error=False allows us to handle missing credentials manually and return 401 per MCP spec
 security = HTTPBearer(auto_error=False)
+
+# JWT cookie name — used for cookie-based auth (Web UI) and elevation-window lookup.
+# Single source of truth; imported by mfa_routes and tests.
+CIDX_SESSION_COOKIE = "cidx_session"
 
 
 def _build_www_authenticate_header() -> str:
@@ -189,7 +203,7 @@ def _refresh_jwt_cookie(response: Response, payload: Dict[str, Any]) -> None:
     )
 
     response.set_cookie(
-        key="cidx_session",
+        key=CIDX_SESSION_COOKIE,
         value=new_token,
         httponly=True,
         secure=True,
@@ -227,7 +241,7 @@ def get_current_user(
     # Handle missing credentials (per MCP spec RFC 9728, return 401 not 403)
     if credentials is None:
         # No Authorization header - check for JWT cookie
-        token = request.cookies.get("cidx_session")
+        token = request.cookies.get(CIDX_SESSION_COOKIE)
         if token:
             # Validate cookie JWT using same logic as Bearer
             user = _validate_jwt_and_get_user(token)
@@ -526,13 +540,31 @@ async def get_current_user_for_mcp(request: Request) -> User:
     # Priority 2: Fall back to OAuth/JWT (existing auth)
     # Extract credentials from request for get_current_user
     credentials: Optional[HTTPAuthorizationCredentials] = None
+    token: Optional[str] = None
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]  # Remove "Bearer " prefix
         credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
     try:
-        return get_current_user(request, credentials)
+        user = get_current_user(request, credentials)
+        # Extract jti for elevation key — Bearer path or cookie fallback path.
+        # token is only set when Authorization: Bearer ... is present; when the
+        # client authenticates via cidx_session cookie, token is None and we must
+        # fall back to the cookie value so that elevation works for cookie-authed
+        # /mcp clients (Issue: cookie-auth /mcp path never sets user_jti).
+        _jti_token = token or request.cookies.get(CIDX_SESSION_COOKIE)
+        if _jti_token and jwt_manager:
+            try:
+                payload = jwt_manager.validate_token(_jti_token)
+                jti = payload.get("jti")
+                if jti:
+                    request.state.user_jti = str(jti)
+            except (TokenExpiredError, InvalidTokenError) as e:
+                logger.debug(
+                    "MCP jti extraction after auth: %s — elevation unavailable", e
+                )
+        return user
     except HTTPException as exc:
         # Story #563: Let 403 (non-SSO restriction) pass through unchanged
         if exc.status_code == status.HTTP_403_FORBIDDEN:
@@ -634,6 +666,9 @@ def _hybrid_auth_impl(
             logger.info(
                 f"Hybrid auth ({auth_type}): Session auth SUCCESS for {session.username}"
             )
+            request.state.user_jti = (
+                session_cookie_value  # enables elevation session key resolution
+            )
             return user
         else:
             logger.debug(f"Hybrid auth ({auth_type}): Session invalid")
@@ -642,6 +677,22 @@ def _hybrid_auth_impl(
     if not session_cookie_value and credentials:
         try:
             current_user = get_current_user(request, credentials)
+
+            # Set user_jti for elevation session key resolution.
+            # Session-cookie path sets this at the session success block above;
+            # Bearer token path must set it here from the JWT jti claim.
+            if jwt_manager:
+                try:
+                    payload = jwt_manager.validate_token(credentials.credentials)
+                    jti = payload.get("jti")
+                    if jti:
+                        request.state.user_jti = jti
+                except (InvalidTokenError, TokenExpiredError) as exc:
+                    # Non-JWT credentials (OAuth, opaque tokens) and expired tokens
+                    # have no extractable jti; elevation simply won't be available.
+                    logger.debug(
+                        f"Hybrid auth ({auth_type}): jti extraction skipped — {exc}"
+                    )
 
             # Check admin requirement for token auth
             if require_admin and not current_user.has_permission("manage_users"):
@@ -715,3 +766,236 @@ def get_current_admin_user_hybrid(
         HTTPException: If not authenticated or not admin
     """
     return _hybrid_auth_impl(request, credentials, require_admin=True)
+
+
+# Three canonical error codes per Story #923 AC5 and Codex review.
+# _ERROR_ELEVATION_FAILED is reserved for the /auth/elevate endpoint (not used here).
+_ERROR_TOTP_SETUP_REQUIRED = "totp_setup_required"
+_ERROR_ELEVATION_REQUIRED = "elevation_required"
+_ERROR_ELEVATION_FAILED = "elevation_failed"  # reserved; used by /auth/elevate
+
+# Stable internal FastAPI route path for MFA setup — not environment-specific;
+# the router registers this path unconditionally in all deployments.
+_TOTP_SETUP_URL = "/admin/mfa/setup"
+
+# Scope hierarchy: rank 0 = broadest ("full"), rank 1 = narrower ("totp_repair").
+# A session satisfies required_scope R when session_rank <= required_rank.
+# Scopes absent from this dict receive len(_SCOPE_RANK) = least-privileged rank.
+_SCOPE_RANK: Dict[str, int] = {"full": 0, "totp_repair": 1}
+
+# ---------------------------------------------------------------------------
+# Exception builder helpers — one per error kind, no inline construction.
+# ---------------------------------------------------------------------------
+
+
+def _elevation_required_exc(message: Optional[str] = None) -> HTTPException:
+    """403 — no active elevation window, or scope insufficient."""
+    detail: Dict[str, Any] = {"error": _ERROR_ELEVATION_REQUIRED}
+    if message:
+        detail["message"] = message
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def _totp_setup_required_exc() -> HTTPException:
+    """403 — admin has TOTP not yet set up; directs to setup_url."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"error": _ERROR_TOTP_SETUP_REQUIRED, "setup_url": _TOTP_SETUP_URL},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Focused single-responsibility helpers called from _check.
+# ---------------------------------------------------------------------------
+
+
+def _is_elevation_enforcement_enabled() -> bool:
+    """Read kill switch from runtime config (Story #923 AC5, Codex M12).
+
+    Returns False (fails closed) when config service raises, so the 503
+    kill-switch path is taken rather than silently bypassing enforcement.
+    """
+    try:
+        from code_indexer.server.services.config_service import get_config_service
+
+        config = get_config_service().get_config()
+        return bool(getattr(config, "elevation_enforcement_enabled", False))
+    except Exception:
+        logger.warning(
+            "require_elevation: could not read config; treating elevation as disabled",
+            exc_info=True,
+        )
+        return False
+
+
+def _check_totp_setup(user: User) -> None:
+    """Raise 403 totp_setup_required when admin has no TOTP MFA enabled.
+
+    Design: fail-open on non-HTTP exceptions (e.g. TOTPService DB unavailable).
+    TOTPService availability must not block admin access entirely — the elevation
+    window check that follows is the authoritative gate (Story #923 AC5 spec).
+    Logs a warning so operators can detect persistent TOTPService failures.
+    """
+    try:
+        from code_indexer.server.web.mfa_routes import get_totp_service
+
+        totp_service = get_totp_service()
+        if totp_service is None:
+            # Lifespan didn't wire totp service (test/dev). Fail-open per AC5
+            # design: TOTPService availability must not block admin access.
+            return
+        if not totp_service.is_mfa_enabled(user.username):
+            raise _totp_setup_required_exc()
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning(
+            "require_elevation: TOTP setup check failed for %s; skipping setup gate",
+            user.username,
+            exc_info=True,
+        )
+
+
+def _resolve_session_key(request: Request) -> Optional[str]:
+    """Return JTI from request state (Bearer) or cidx_session cookie (Web UI)."""
+    jti = getattr(getattr(request, "state", None), "user_jti", None)
+    if jti:
+        return str(jti)
+    cookie = request.cookies.get(CIDX_SESSION_COOKIE)
+    return str(cookie) if cookie is not None else None
+
+
+def _check_scope(session_scope: Optional[str], required_scope: str) -> None:
+    """Raise 403 elevation_required when session scope is insufficient.
+
+    Unknown/missing session scopes receive least-privileged rank — no fallback
+    to "full" to avoid incorrectly granting broad access on missing metadata.
+    """
+    session_rank = _SCOPE_RANK.get(session_scope or "", len(_SCOPE_RANK))
+    required_rank = _SCOPE_RANK[required_scope]
+    if session_rank > required_rank:
+        raise _elevation_required_exc(
+            f"Scope {required_scope!r} required; current window is scope={session_scope!r}."
+        )
+
+
+def _check_session_window(
+    request: Request,
+    required_scope: str,
+    manager: Any,
+) -> None:
+    """Resolve session key, validate elevation window, and check scope.
+
+    Raises 403 elevation_required when: no session key, window absent/expired,
+    or session scope is insufficient for required_scope.
+    """
+    session_key = _resolve_session_key(request)
+    if not session_key:
+        raise _elevation_required_exc()
+
+    session = manager.touch_atomic(session_key)
+    if session is None:
+        raise _elevation_required_exc()
+
+    _check_scope(getattr(session, "scope", None), required_scope)
+
+
+def require_elevation(required_scope: str = "full"):
+    """Build a FastAPI dependency that enforces an active TOTP elevation window.
+
+    Story #923 AC5. Chains after get_current_admin_user_hybrid (admin gate
+    already enforced). Returns a callable dependency so callers can specify
+    required_scope: 'full' (default) for sensitive admin ops; 'totp_repair' for
+    TOTP-fix endpoints accessible via recovery codes.
+
+    Scope hierarchy (broadest first): full (rank 0) > totp_repair (rank 1).
+    A session with scope S satisfies required_scope R when rank(S) <= rank(R).
+    Unknown/missing session scopes receive the highest rank (least privileged).
+
+    Three canonical error codes:
+      - totp_setup_required (403): admin has no TOTP MFA enabled -> setup_url body
+      - elevation_required  (403): no active elevation window or scope insufficient
+      - elevation_failed    (401): reserved for /auth/elevate endpoint (not raised here)
+
+    Kill switch: returns 503 (per Codex M4/M12) when elevation_enforcement_enabled
+    is False or config service is unavailable.
+
+    Args:
+        required_scope: One of "full" or "totp_repair". ValueError on unknown value
+            (programmer error at call site — not a runtime auth failure).
+    """
+    if required_scope not in _SCOPE_RANK:
+        raise ValueError(
+            f"required_scope must be one of {sorted(_SCOPE_RANK)}, got {required_scope!r}"
+        )
+
+    def _check(
+        request: Request,
+        user: User = Depends(get_current_admin_user_hybrid),
+    ) -> User:
+        # Kill switch: when elevation enforcement is administratively disabled OR
+        # the elevated_session_manager singleton was never initialised (optional
+        # subsystem on this deployment), bypass all elevation checks and let the
+        # request proceed.  The protected endpoint runs as if no elevation gate
+        # existed.  See test_require_elevation_kill_switch_passthrough.py for the
+        # corrected contract.  When enforcement is ON and the manager is present,
+        # normal TOTP-setup + session-window checks apply.
+        if not _is_elevation_enforcement_enabled() or elevated_session_manager is None:
+            return user
+        _check_totp_setup(user)
+        _check_session_window(request, required_scope, elevated_session_manager)
+        return user
+
+    return _check
+
+
+def require_localhost(request: Request) -> None:
+    """Reject requests not originating from loopback (Story #924).
+
+    Story #924 -- maintenance mode enter/exit endpoints are auto-updater
+    driven (system processes, not humans). Restrict to loopback so:
+      - The local auto-updater (running as systemd service) can call them
+      - Network-side admins cannot DoS the server by toggling maintenance
+      - No TOTP elevation needed (auto-updater can't satisfy TOTP prompt)
+
+    Loopback whitelist (validated via ipaddress module):
+      127.0.0.0/8 (IPv4 loopback -- is_loopback is True)
+      ::1 (IPv6 loopback -- is_loopback is True)
+      ::ffff:127.x.x.x (IPv4-mapped IPv6 loopback -- mapped IPv4 is_loopback)
+
+    For reverse-proxied deployments, the proxy must NOT pass X-Forwarded-For
+    or similar headers for these endpoints -- the request.client.host check
+    here only sees the IMMEDIATE peer (which is the proxy, not the original
+    caller). If a proxy fronts these endpoints in production, this control
+    is degraded to "anyone the proxy reaches" -- operator must lock down
+    the proxy's exposure.
+
+    Raises:
+        HTTPException 403: when request.client.host is not a valid loopback address
+    """
+    import ipaddress
+
+    if request.client is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Localhost-only endpoint",
+        )
+    host = request.client.host
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Localhost-only endpoint",
+        )
+    # IPv4-mapped IPv6 addresses (::ffff:127.x.x.x) report is_loopback=False in
+    # Python's ipaddress module, so check the mapped IPv4 address explicitly.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        is_local = addr.ipv4_mapped.is_loopback
+    else:
+        is_local = addr.is_loopback
+    if not is_local:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Localhost-only endpoint; rejected request from {host}",
+        )

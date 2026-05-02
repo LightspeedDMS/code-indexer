@@ -68,6 +68,13 @@ class TestFileServiceSkipTruncation:
         # Reset config service singleton to pick up new environment
         reset_config_service()
 
+        # Set low token limit so the large test file (1000 lines, ~89 chars each)
+        # exceeds the budget and triggers truncation in skip_truncation=False tests.
+        config_service = get_config_service()
+        config = config_service.get_config()
+        config.content_limits_config.file_content_max_tokens = 5000
+        config_service.config_manager.save_config(config)
+
         # Initialize service
         self.service = FileListingService()
 
@@ -89,7 +96,7 @@ class TestFileServiceSkipTruncation:
     def _get_config(self):
         """Get current file content limits config."""
         config_service = get_config_service()
-        return config_service.get_config().file_content_limits_config
+        return config_service.get_config().content_limits_config
 
     def test_large_file_truncated_without_skip_truncation(self):
         """Verify that large files ARE truncated when skip_truncation=False (default)."""
@@ -107,7 +114,7 @@ class TestFileServiceSkipTruncation:
         config = self._get_config()
 
         # Content should be truncated to max_chars_per_request
-        assert len(content) <= config.max_chars_per_request
+        assert len(content) <= config.file_content_max_tokens * config.chars_per_token
         assert metadata["truncated"] is True
         assert metadata["truncated_at_line"] is not None
         assert len(content) < self.full_content_len  # Much smaller than original
@@ -243,7 +250,10 @@ class TestFileServiceSkipTruncation:
 
         # Should behave as skip_truncation=False (content truncated)
         config = self._get_config()
-        assert len(result["content"]) <= config.max_chars_per_request
+        assert (
+            len(result["content"])
+            <= config.file_content_max_tokens * config.chars_per_token
+        )
         # Large file should be truncated
         assert result["metadata"]["truncated"] is True
 

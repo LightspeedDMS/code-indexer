@@ -47,11 +47,7 @@ def yaml_quote_if_unsafe(value: Any) -> str:
     s = str(value)
     if not s:
         return s
-    needs_quote = (
-        _YAML_UNSAFE_START.match(s) is not None
-        or ": " in s
-        or "\n" in s
-    )
+    needs_quote = _YAML_UNSAFE_START.match(s) is not None or ": " in s or "\n" in s
     if not needs_quote:
         return s
     escaped = s.replace("\\", "\\\\").replace('"', '\\"')

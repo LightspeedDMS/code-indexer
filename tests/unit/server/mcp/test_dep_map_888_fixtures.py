@@ -9,7 +9,7 @@ Consumed by test_dep_map_888_ac*.py files.
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List, Optional, cast
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -30,7 +30,8 @@ def _call_handler(handler: Callable, params: dict, root: Path) -> Dict[str, Any]
         state,
     ):
         result = handler(params, user)
-    return json.loads(result["content"][0]["text"])
+    # cast needed: json.loads() returns Any; MCP handlers always return dict envelope
+    return cast(Dict[str, Any], json.loads(result["content"][0]["text"]))
 
 
 def _assert_resolution(
@@ -79,9 +80,9 @@ class _DepMapDir:
 def _write_domain_md(
     dep_map_dir: Path,
     domain: str,
-    roles: Dict[str, str] = None,
-    outgoing: list = None,
-    incoming: list = None,
+    roles: Optional[Dict[str, str]] = None,
+    outgoing: Optional[List] = None,
+    incoming: Optional[List] = None,
 ) -> None:
     """Write a domain markdown file into dep_map_dir.
 

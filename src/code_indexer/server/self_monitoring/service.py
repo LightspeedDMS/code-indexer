@@ -10,7 +10,7 @@ create bug reports, and maintain operational excellence.
 import logging
 import sqlite3
 import threading
-from typing import Optional, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 
 from code_indexer.server.self_monitoring.prompts import get_default_prompt
 
@@ -50,6 +50,7 @@ class SelfMonitoringService:
         github_token: Optional[str] = None,
         server_name: Optional[str] = None,
         storage_backend: Optional["SelfMonitoringBackend"] = None,
+        token_fetcher: Optional[Callable[[], Optional[str]]] = None,
     ):
         """
         Initialize the self-monitoring service.
@@ -66,6 +67,10 @@ class SelfMonitoringService:
             github_token: GitHub token for authentication (optional, Bug #87)
             server_name: Server display name for issue identification (optional, Bug #87)
             storage_backend: Optional SelfMonitoringBackend for DB delegation
+            token_fetcher: Optional callable that returns a fresh GitHub token on
+                each invocation. When provided, _execute_scan calls this instead of
+                reading self._github_token, enabling token rotation without restart
+                (Bug #957).
 
         Note (Story #566): The analysis prompt is no longer configurable at runtime.
         It is always loaded from default_analysis_prompt.md at scan execution time.
@@ -81,6 +86,7 @@ class SelfMonitoringService:
         self._github_token = github_token
         self._server_name = server_name
         self._backend = storage_backend
+        self._token_fetcher = token_fetcher
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -462,6 +468,13 @@ class SelfMonitoringService:
             )
             return {"status": "FAILURE", "error": error_msg}
 
+        # Bug #957: Resolve token fresh on each scan tick so that a rotated
+        # token is picked up without restarting the service.
+        if self._token_fetcher is not None:
+            github_token = self._token_fetcher()
+        else:
+            github_token = self._github_token
+
         logger.debug(
             f"[SELF-MON-DEBUG] _execute_scan: Config validated - model={self._model}, repo_root={self._repo_root}, server_name={self._server_name}"
         )
@@ -490,7 +503,7 @@ class SelfMonitoringService:
             prompt_template=prompt,
             model=self._model,
             repo_root=self._repo_root,
-            github_token=self._github_token,
+            github_token=github_token,
             server_name=self._server_name,
         )
 

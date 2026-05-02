@@ -137,7 +137,7 @@ SCIP_TOOLS: list[tuple[str, str, JsonArgs]] = [
 @pytest.mark.parametrize(
     PARAMETRIZE_FIELDS,
     SCIP_TOOLS,
-    ids=[t[TOOL_LABEL_INDEX] for t in SCIP_TOOLS],
+    ids=[str(t[TOOL_LABEL_INDEX]) for t in SCIP_TOOLS],
 )
 def test_mcp_scip_tool(
     label: str,

@@ -14,7 +14,7 @@ automatically by the CIDX server (e.g. cidx-local-auto, cidx-server-auto).
 
 USE CASES:
 - Admin auditing which system credentials exist and when they were last used
-- Troubleshooting MCPB or automation that relies on system-managed credentials
+- Troubleshooting automation that relies on system-managed credentials
 - Security review to verify no unexpected system credentials were created
 
 RETURNS:

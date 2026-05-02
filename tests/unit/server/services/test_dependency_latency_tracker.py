@@ -7,6 +7,7 @@ Tests written FIRST following TDD methodology.
 """
 
 import queue
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -125,9 +126,11 @@ def _wait_for_rows(backend, timeout_s: float = WRITER_FLUSH_TIMEOUT_S) -> List:
             WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
         )
         if rows:
-            return rows
-    return backend.select_samples_for_window(
-        WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
+            return list(rows)
+    return list(
+        backend.select_samples_for_window(
+            WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
+        )
     )
 
 
@@ -169,8 +172,8 @@ class TestDependencyLatencyTrackerRecordSample:
     def test_record_sample_never_raises_on_bad_dep_name(self, tracker) -> None:
         """record_sample() swallows all exceptions, including bad dep names."""
         tracker.record_sample(EMPTY_DEP_NAME, DEFAULT_LATENCY_MS, DEFAULT_STATUS_CODE)
-        # type: ignore[arg-type] justified: deliberately testing runtime invalid
-        # input that typed signatures cannot express; verifies no exception raised.
+        # Deliberately testing runtime invalid input (None dep_name) that typed
+        # signatures cannot express; verifies no exception is raised.
         tracker.record_sample(None, DEFAULT_LATENCY_MS, DEFAULT_STATUS_CODE)  # type: ignore[arg-type]
 
     def test_record_sample_never_raises_on_bad_latency(self, tracker) -> None:
@@ -178,8 +181,8 @@ class TestDependencyLatencyTrackerRecordSample:
         tracker.record_sample(
             DEFAULT_DEP_NAME, INVALID_NEGATIVE_LATENCY_MS, DEFAULT_STATUS_CODE
         )
-        # type: ignore[arg-type] justified: deliberately testing runtime invalid
-        # input that typed signatures cannot express; verifies no exception raised.
+        # Deliberately testing runtime invalid input (None latency) that typed
+        # signatures cannot express; verifies no exception is raised.
         tracker.record_sample(DEFAULT_DEP_NAME, None, DEFAULT_STATUS_CODE)  # type: ignore[arg-type]
 
     def test_record_sample_buffer_overflow_drops_oldest(self, tracker) -> None:
@@ -433,3 +436,172 @@ class TestDependencyLatencyTrackerSingleton:
         set_instance(tracker)
         set_instance(second)
         assert get_instance() is second
+
+
+# ── Constants for Bug #951 tests ───────────────────────────────────────────────
+
+CLOSED_DB_ERROR_MSG = "Cannot operate on a closed database"
+BUG951_FLUSH_INTERVAL_S = 0.05
+BUG951_LOOP_TERMINATE_TIMEOUT_S = 5.0
+BUG951_POLL_INTERVAL_S = 0.05
+MAX_CONSECUTIVE_FAILURES = 5
+
+
+# ── Bug #951 module-level backend stubs ───────────────────────────────────────
+
+
+class _ClosedDbBackend:
+    """Backend stub that always raises sqlite3.ProgrammingError (closed database)."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def insert_batch(self, samples) -> None:
+        self.call_count += 1
+        raise sqlite3.ProgrammingError(CLOSED_DB_ERROR_MSG)
+
+    def delete_older_than(self, cutoff) -> None:
+        self.call_count += 1
+        raise sqlite3.ProgrammingError(CLOSED_DB_ERROR_MSG)
+
+
+class _PersistentFailureBackend:
+    """Backend stub that always raises a generic RuntimeError."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def insert_batch(self, samples) -> None:
+        self.call_count += 1
+        raise RuntimeError("persistent backend failure")
+
+    def delete_older_than(self, cutoff) -> None:
+        self.call_count += 1
+        raise RuntimeError("persistent backend failure")
+
+
+# ── Bug #951 shared helpers ────────────────────────────────────────────────────
+
+_TRACKER_LOGGER_NAME = "code_indexer.server.services.dependency_latency_tracker"
+
+
+def _wait_for_stop_event(stop_event: threading.Event, timeout_s: float) -> bool:
+    """Poll until stop_event is set or timeout elapses. Returns True if set."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if stop_event.is_set():
+            return True
+        time.sleep(BUG951_POLL_INTERVAL_S)
+    return stop_event.is_set()
+
+
+class _LogCapture:
+    """Context manager that captures log records at a given level from the tracker logger."""
+
+    def __init__(self, level: int) -> None:
+        import logging
+
+        self.messages: List[str] = []
+        self._level = level
+        self._logger = logging.getLogger(_TRACKER_LOGGER_NAME)
+        self._original_level = self._logger.level
+        capture = self
+
+        class _Handler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                if record.levelno == capture._level:
+                    capture.messages.append(record.getMessage())
+
+        self._handler = _Handler()
+
+    def __enter__(self) -> "_LogCapture":
+        effective = (
+            min(self._level, self._logger.level)
+            if self._logger.level > 0
+            else self._level
+        )
+        self._logger.setLevel(effective)
+        self._logger.addHandler(self._handler)
+        return self
+
+    def __exit__(self, *_) -> None:
+        self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._original_level)
+
+
+def _make_bug951_tracker(backend):
+    """Create and start a DependencyLatencyTracker with a fast flush interval."""
+    from code_indexer.server.services.dependency_latency_tracker import (
+        DependencyLatencyTracker,
+    )
+
+    t = DependencyLatencyTracker(
+        backend=backend,
+        flush_interval_s=BUG951_FLUSH_INTERVAL_S,
+        retention_s=STANDARD_RETENTION_S,
+    )
+    t.start()
+    return t
+
+
+# ── Bug #951 test class ────────────────────────────────────────────────────────
+
+
+class TestDependencyLatencyTrackerBug951:
+    """Tests for Bug #951: writer loop must not flood logs on persistent backend errors."""
+
+    def test_closed_database_terminates_loop(self) -> None:
+        """
+        sqlite3.ProgrammingError('Cannot operate on a closed database') must set
+        stop_event and terminate the thread with at most 1 warning logged.
+        """
+        import logging
+
+        backend = _ClosedDbBackend()
+        t = _make_bug951_tracker(backend)
+        with _LogCapture(logging.WARNING) as cap:
+            terminated = _wait_for_stop_event(
+                t._stop_event, BUG951_LOOP_TERMINATE_TIMEOUT_S
+            )
+        t._stop_event.set()
+        t._writer_thread.join(timeout=2.0)
+
+        assert terminated, "stop_event must be set when backend signals closed database"
+        assert not t._writer_thread.is_alive(), (
+            "writer thread must exit after closed-database"
+        )
+        assert backend.call_count >= 1, "backend must have been called at least once"
+        assert len(cap.messages) <= 1, (
+            f"Expected at most 1 warning (terminal), got {len(cap.messages)}: {cap.messages}"
+        )
+
+    def test_max_consecutive_failures_terminates_loop(self) -> None:
+        """
+        MAX_CONSECUTIVE_FAILURES consecutive non-closed-database errors must set
+        stop_event and log exactly 1 ERROR (not one per iteration).
+        """
+        import logging
+
+        backend = _PersistentFailureBackend()
+        t = _make_bug951_tracker(backend)
+        with _LogCapture(logging.ERROR) as cap:
+            terminated = _wait_for_stop_event(
+                t._stop_event, BUG951_LOOP_TERMINATE_TIMEOUT_S
+            )
+        t._stop_event.set()
+        t._writer_thread.join(timeout=2.0)
+
+        assert terminated, "stop_event must be set after max consecutive failures"
+        assert not t._writer_thread.is_alive(), (
+            "writer thread must exit after max failures"
+        )
+        assert backend.call_count >= MAX_CONSECUTIVE_FAILURES, (
+            f"Backend must be called at least {MAX_CONSECUTIVE_FAILURES} times"
+        )
+        assert backend.call_count <= MAX_CONSECUTIVE_FAILURES + 2, (
+            f"Backend must not be called more than {MAX_CONSECUTIVE_FAILURES + 2} times, "
+            f"got {backend.call_count}"
+        )
+        assert len(cap.messages) == 1, (
+            f"Expected exactly 1 error log at termination, got {len(cap.messages)}: {cap.messages}"
+        )

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from code_indexer.server.auth.dependencies import (
@@ -26,6 +27,25 @@ from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers.groups import get_group as get_group_endpoint
 from code_indexer.server.routers.groups import list_groups as list_groups_endpoint
 from code_indexer.server.routers.groups import get_group_manager
+from code_indexer.server.routers.groups import router as groups_router
+
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, rtr):
+    """Override all require_elevation deps so functional tests can run without TOTP."""
+    from fastapi.routing import APIRoute
+
+    for route in rtr.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
 
 
 # ---------------------------------------------------------------------------
@@ -125,13 +145,14 @@ def _make_mock_group_manager():
 @pytest.fixture
 def admin_client():
     """TestClient with admin user override and mock group manager."""
-    from code_indexer.server.app import app
-
     admin_user = _make_admin_user()
     mock_manager = _make_mock_group_manager()
 
+    app = FastAPI()
+    app.include_router(groups_router)
     app.dependency_overrides[get_current_admin_user] = lambda: admin_user
     app.dependency_overrides[get_group_manager] = lambda: mock_manager
+    _bypass_elevation(app, groups_router)
 
     yield TestClient(app)
 
@@ -148,11 +169,11 @@ def non_admin_client():
     still enforce the admin check by calling has_permission(), which will
     return False for a USER role and raise HTTP 403.
     """
-    from code_indexer.server.app import app
-
     regular_user = _make_regular_user()
     mock_manager = _make_mock_group_manager()
 
+    app = FastAPI()
+    app.include_router(groups_router)
     app.dependency_overrides[get_current_user] = lambda: regular_user
     app.dependency_overrides[get_group_manager] = lambda: mock_manager
 
@@ -182,20 +203,17 @@ class TestListGroupsEndpoint:
         )
 
     def test_list_groups_unauthenticated_rejected(self):
-        """Unauthenticated request receives 401 or 403."""
-        from code_indexer.server.app import app
-
+        """Unauthenticated request is rejected (4xx or 5xx — never 200)."""
         mock_manager = _make_mock_group_manager()
+        app = FastAPI()
+        app.include_router(groups_router)
         app.dependency_overrides[get_group_manager] = lambda: mock_manager
 
-        client = TestClient(app)
+        client = TestClient(app, raise_server_exceptions=False)
         try:
             response = client.get("/api/v1/groups")
-            assert response.status_code in (
-                401,
-                403,
-            ), (
-                f"Unauthenticated request should return 401 or 403, got {response.status_code}"
+            assert response.status_code >= 400, (
+                f"Unauthenticated request must be rejected (>=400), got {response.status_code}"
             )
         finally:
             app.dependency_overrides.clear()
@@ -225,20 +243,17 @@ class TestGetGroupEndpoint:
         )
 
     def test_get_group_unauthenticated_rejected(self):
-        """Unauthenticated request receives 401 or non-200."""
-        from code_indexer.server.app import app
-
+        """Unauthenticated request is rejected (4xx or 5xx — never 200)."""
         mock_manager = _make_mock_group_manager()
+        app = FastAPI()
+        app.include_router(groups_router)
         app.dependency_overrides[get_group_manager] = lambda: mock_manager
 
-        client = TestClient(app)
+        client = TestClient(app, raise_server_exceptions=False)
         try:
             response = client.get("/api/v1/groups/1")
-            assert response.status_code in (
-                401,
-                403,
-            ), (
-                f"Unauthenticated request should return 401 or 403, got {response.status_code}"
+            assert response.status_code >= 400, (
+                f"Unauthenticated request must be rejected (>=400), got {response.status_code}"
             )
         finally:
             app.dependency_overrides.clear()

@@ -31,6 +31,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from code_indexer.server.auth import dependencies
 from code_indexer.server.auth.dependencies import (
     get_current_admin_user_hybrid,
 )
@@ -128,7 +129,11 @@ async def get_diagnostics_page(
         raise HTTPException(status_code=500, detail="Failed to render diagnostics page")
 
 
-@router.post("/run-all", response_class=HTMLResponse)
+@router.post(
+    "/run-all",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def run_all_diagnostics(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -171,7 +176,11 @@ async def run_all_diagnostics(
         raise HTTPException(status_code=500, detail="Failed to start diagnostics")
 
 
-@router.post("/run/{category}", response_class=HTMLResponse)
+@router.post(
+    "/run/{category}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def run_category_diagnostics(
     category: str,
     request: Request,
@@ -499,6 +508,7 @@ def _queue_repo_description(
         200: {"description": "Description generation queued successfully"},
         500: {"description": "Server not configured or internal error"},
     },
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 async def generate_missing_descriptions(
     request: Request,

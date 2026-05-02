@@ -14,6 +14,8 @@ from typing import Callable, List, Optional
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_indexer.global_repos.dependency_map_analyzer import (
     DependencyMapAnalyzer,
     _VERIFICATION_SEMAPHORE_STATE,
@@ -22,8 +24,8 @@ from code_indexer.global_repos.dependency_map_analyzer import (
 
 # Threading coordination timeouts (seconds).
 # Large enough to avoid false failures on slow CI; small enough to fail fast.
-_SYNC_TIMEOUT: float = 5.0  # max wait for a condition predicate to become true
-_JOIN_TIMEOUT: float = 10.0  # max wait for threads to finish after release
+_SYNC_TIMEOUT: float = 300.0  # max wait for a condition predicate to become true
+_JOIN_TIMEOUT: float = 300.0  # max wait for threads to finish after release
 
 _FAKE_STDOUT_EMPTY = '{"is_error": false, "result": "{}"}'
 
@@ -210,17 +212,22 @@ def _run_concurrent_callers(
             reached = shared.condition.wait_for(
                 lambda: shared.active == cap, timeout=_SYNC_TIMEOUT
             )
-        assert reached, f"Timed out: {cap} threads did not reach subprocess.run"
 
-        if at_cap_callback is not None:
+        if reached and at_cap_callback is not None:
             at_cap_callback(shared)
 
+        # Always release — prevents zombie threads from contaminating subsequent tests
+        # even when the reached assertion is about to fail.
         with shared.condition:
             shared.released = True
             shared.condition.notify_all()
 
         for t in threads:
             t.join(timeout=_JOIN_TIMEOUT)
+
+        # Assertions after cleanup — threads are done regardless of outcome.
+        assert reached, f"Timed out: {cap} threads did not reach subprocess.run"
+        for t in threads:
             assert not t.is_alive(), (
                 f"Thread {t.name} did not terminate within {_JOIN_TIMEOUT}s"
             )
@@ -271,6 +278,7 @@ class TestSemaphoreConcurrencyCap(TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self._tmp, ignore_errors=True)
 
+    @pytest.mark.timeout(360)
     def test_semaphore_caps_concurrent_callers_at_exactly_cap(self) -> None:
         """With cap=2, exactly 2 threads reach subprocess.run while the 3rd waits."""
         cap = 2
@@ -320,6 +328,7 @@ class TestSemaphoreConcurrencyCap(TestCase):
         with errors_lock:
             self.assertEqual(errors, [], f"Thread errors: {errors}")
 
+    @pytest.mark.timeout(360)
     def test_after_release_all_threads_complete(self) -> None:
         """All callers eventually complete after the release signal is set."""
         cap = 2

@@ -172,10 +172,7 @@ class TestLifecycleGateBypass:
         meta_dir = _seed_meta_md(tmp_path, alias)
         scheduler = _make_scheduler(db_file, meta_dir)
 
-        with (
-            patch(f"{_MODULE}.invoke_claude_cli", return_value=(False, "test-skipped")),
-            patch(_REPO_ANALYZER, return_value="refresh prompt"),
-        ):
+        with patch(_REPO_ANALYZER, return_value="refresh prompt"):
             scheduler._run_loop_single_pass()
 
         record = DescriptionRefreshTrackingBackend(db_file).get_tracking_record(alias)
@@ -210,10 +207,7 @@ class TestLifecycleGateBypass:
         meta_dir = _seed_meta_md(tmp_path, alias)
         scheduler = _make_scheduler(db_file, meta_dir)
 
-        with (
-            patch(f"{_MODULE}.invoke_claude_cli", return_value=(False, "test-skipped")),
-            patch(_REPO_ANALYZER, return_value="refresh prompt"),
-        ):
+        with patch(_REPO_ANALYZER, return_value="refresh prompt"):
             scheduler._run_loop_single_pass()
 
         record = DescriptionRefreshTrackingBackend(db_file).get_tracking_record(alias)

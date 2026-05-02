@@ -154,7 +154,7 @@ class TestDependencyHealthEvaluatorValidation:
         with pytest.raises((TypeError, ValueError)):
             evaluator.evaluate(
                 existing_health_status=STATUS_HEALTHY,
-                # type: ignore[arg-type] justified: deliberately passing None to verify
-                # that runtime validation rejects non-dict input before iteration.
+                # Deliberately passing None to verify that runtime validation
+                # rejects non-dict input before iteration.
                 all_dependency_stats=None,  # type: ignore[arg-type]
             )

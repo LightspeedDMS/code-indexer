@@ -29,7 +29,9 @@ from code_indexer.global_repos.dependency_map_analyzer import (
 _SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
 _TEST_TIMEOUT = 60
 _TEST_MAX_TURNS = 5
-_MTIME_TICK_S = 0.02  # Same value as existing delta tests — ensures mtime advances
+_MTIME_TICK_S = (
+    0.1  # Sleep duration to ensure mtime advances even under heavy system load
+)
 
 
 def _make_subprocess_result(stdout: str = "FILE_EDIT_COMPLETE") -> object:

@@ -18,14 +18,15 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, Tuple
 from urllib.parse import quote
 
 from code_indexer import __version__ as _cidx_version
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from code_indexer.server.auth import dependencies
 from .routes import (
     _require_admin_session,
     _create_login_redirect,
@@ -255,6 +256,19 @@ _DASHBOARD_CACHE_TTL_DEFAULT = 600
 
 # Operation type registered with BackgroundJobManager for dashboard analysis jobs
 _DASHBOARD_OP_TYPE = "dep_map_dashboard"
+
+
+def _get_repair_journal_dir() -> Path:
+    """Return the repair activity journal directory.
+
+    Honors CIDX_DATA_DIR env var (Bug #879 IPC alignment).
+    Falls back to ~/.tmp when CIDX_DATA_DIR is unset.
+    """
+    import os as _os
+
+    raw = _os.environ.get("CIDX_DATA_DIR", "").strip()
+    base = Path(raw) if raw else Path.home() / ".tmp"
+    return base / "depmap-repair-journal"
 
 
 class _NullJobTracker:
@@ -706,7 +720,9 @@ def depmap_job_status_partial(request: Request):
 
 
 @dependency_map_router.post(
-    "/partials/depmap-job-status/retry", response_class=HTMLResponse
+    "/partials/depmap-job-status/retry",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
 )
 def depmap_job_status_retry(request: Request):
     """
@@ -1177,9 +1193,16 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
     Returns:
         Configured DepMapRepairExecutor instance.
     """
+    from ..services.config_service import get_config_service
+    from ..services.dep_map_dispatcher_factory import build_dep_map_dispatcher
     from ..services.dep_map_health_detector import DepMapHealthDetector
     from ..services.dep_map_index_regenerator import IndexRegenerator
     from ..services.dep_map_repair_executor import DepMapRepairExecutor
+    from .routes import _get_golden_repo_manager
+
+    # Read bootstrap flags from ServerConfig (bootstrap-only, never DB).
+    _cfg = get_config_service().get_config()
+    enable_graph_channel_repair: bool = bool(_cfg.enable_graph_channel_repair)
 
     detector = DepMapHealthDetector()
     regenerator = IndexRegenerator()
@@ -1204,13 +1227,101 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
         except Exception as e:
             logger.debug("progress_cb failed to update job tracker: %s", e)
 
+    golden_repo_manager = _get_golden_repo_manager()
+
+    _dispatcher = build_dep_map_dispatcher(_cfg)
+
+    def _invoke_llm_fn(
+        repo_path: str, prompt: str, shell_timeout: int, outer_timeout: int
+    ) -> Tuple[bool, str]:
+        result = _dispatcher.dispatch(
+            flow="dep_map_repair",
+            cwd=repo_path,
+            prompt=prompt,
+            timeout=outer_timeout,
+        )
+        return result.success, result.output
+
     return DepMapRepairExecutor(
         health_detector=detector,
         index_regenerator=regenerator,
         domain_analyzer=domain_analyzer,
         journal_callback=journal_cb,
         progress_callback=_progress_cb,
+        enable_graph_channel_repair=enable_graph_channel_repair,
+        invoke_llm_fn=_invoke_llm_fn,
+        repo_path_resolver=golden_repo_manager.get_actual_repo_path,
+        graph_repair_self_loop=_cfg.graph_repair_self_loop,
+        graph_repair_malformed_yaml=_cfg.graph_repair_malformed_yaml,
+        graph_repair_garbage_domain=_cfg.graph_repair_garbage_domain,
+        graph_repair_bidirectional_mismatch=_cfg.graph_repair_bidirectional_mismatch,
     )
+
+
+def _repair_execute(dep_map_service, output_dir: Path, activity_journal) -> bool:
+    """Run repair executor against the health report. Returns True on success."""
+    try:
+        executor = _build_repair_executor(dep_map_service, output_dir, activity_journal)
+        from ..services.dep_map_health_detector import DepMapHealthDetector
+
+        detector = DepMapHealthDetector()
+        health_report = detector.detect(output_dir, known_repos=_get_known_repo_names())
+        result = executor.execute(output_dir, health_report)
+        logger.info("Repair completed: %s", result.status)
+        return True
+    except Exception as e:
+        logger.error("Repair with feedback failed: %s", e)
+        return False
+
+
+def _execute_repair_body(
+    job_id: str,
+    output_dir: Path,
+    tracking_backend,
+    job_tracker,
+    activity_journal,
+    dep_map_service=None,
+) -> None:
+    """Run repair for a pre-claimed job_id (Story #927).
+
+    Does NOT call register_job — caller must have already claimed job_id.
+    Used by _run_repair_with_feedback and the auto-repair path via repair_invoker_fn.
+    """
+    if job_tracker is not None:
+        try:
+            job_tracker.update_status(job_id, status="running")
+        except Exception as e:
+            logger.warning("Failed to transition repair job to running: %s", e)
+    if tracking_backend is not None:
+        try:
+            tracking_backend.update_tracking(status="running", error_message=None)
+        except Exception as e:
+            logger.warning("Failed to update tracking backend to running: %s", e)
+    success = _repair_execute(dep_map_service, output_dir, activity_journal)
+    terminal_status = "completed" if success else "failed"
+    if tracking_backend is not None:
+        try:
+            tracking_backend.update_tracking(
+                status=terminal_status,
+                error_message=None if success else "Repair failed",
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to update tracking backend to %s: %s", terminal_status, e
+            )
+    if job_tracker is not None:
+        try:
+            if success:
+                job_tracker.complete_job(job_id)
+            else:
+                job_tracker.fail_job(job_id, error="Repair failed")
+        except Exception as e:
+            logger.warning("Failed to update job tracker on %s: %s", terminal_status, e)
+    if activity_journal is not None:
+        try:
+            activity_journal.clear()
+        except Exception as e:
+            logger.warning("Failed to finalize repair activity journal: %s", e)
 
 
 def _run_repair_with_feedback(
@@ -1220,28 +1331,16 @@ def _run_repair_with_feedback(
     activity_journal,
     dep_map_service=None,
 ) -> None:
-    """
-    Execute repair with full job feedback (Story #352).
+    """Execute repair with full job feedback (Story #352, AC1-AC5).
 
-    Implements AC1-AC5:
-      AC1: tracking_backend.update_tracking(status=...) for running/completed/failed
-      AC2: activity_journal.init() called with repair-specific journal directory
-      AC3: job_tracker.register_job() with operation_type='dependency_map_repair'
-           and progress milestones via progress_callback
-      AC4: journal_path propagated to domain analyzer (via _build_domain_analyzer)
-      AC5: tracking_backend update and journal.finalize() in finally block
-
-    Args:
-        output_dir: Dependency map output directory.
-        tracking_backend: DependencyMapTrackingBackend instance.
-        job_tracker: JobTracker instance.
-        activity_journal: ActivityJournalService instance.
-        dep_map_service: Optional DependencyMapService for domain analyzer wiring.
+    AC2: activity journal initialized in repair-specific directory.
+    AC3: job registered then delegated to _execute_repair_body (Story #927).
+    AC1/AC4/AC5: handled inside _execute_repair_body.
     """
     import uuid as _uuid
 
     # AC2: Initialize journal in a repair-specific directory
-    journal_dir = Path.home() / ".tmp" / "depmap-repair-journal"
+    journal_dir = _get_repair_journal_dir()
     if activity_journal is not None:
         try:
             journal_dir.mkdir(parents=True, exist_ok=True)
@@ -1262,69 +1361,20 @@ def _run_repair_with_feedback(
         except Exception as e:
             logger.warning("Failed to register repair job in job tracker: %s", e)
 
-    # Bug #381: Transition job from pending to running (matches full/delta/refinement pattern)
-    if job_tracker is not None:
-        try:
-            job_tracker.update_status(job_id, status="running")
-        except Exception as e:
-            logger.warning("Failed to transition repair job to running: %s", e)
-
-    # AC1: Mark tracking backend as running
-    if tracking_backend is not None:
-        try:
-            tracking_backend.update_tracking(status="running", error_message=None)
-        except Exception as e:
-            logger.warning("Failed to update tracking backend to running: %s", e)
-
-    success = False
-    try:
-        # Build executor (AC4: journal_path propagated via _build_domain_analyzer)
-        executor = _build_repair_executor(dep_map_service, output_dir, activity_journal)
-
-        from ..services.dep_map_health_detector import DepMapHealthDetector
-
-        detector = DepMapHealthDetector()
-        known_repos = _get_known_repo_names()
-        health_report = detector.detect(output_dir, known_repos=known_repos)
-        result = executor.execute(output_dir, health_report)
-        logger.info("Repair completed: %s", result.status)
-        success = True
-    except Exception as e:
-        logger.error("Repair with feedback failed: %s", e)
-    finally:
-        # AC1 + AC5: Update tracking and finalize journal regardless of outcome
-        terminal_status = "completed" if success else "failed"
-        if tracking_backend is not None:
-            try:
-                tracking_backend.update_tracking(
-                    status=terminal_status,
-                    error_message=None if success else "Repair failed",
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to update tracking backend to %s: %s", terminal_status, e
-                )
-
-        if job_tracker is not None:
-            try:
-                if success:
-                    job_tracker.complete_job(job_id)
-                else:
-                    job_tracker.fail_job(job_id, error="Repair failed")
-            except Exception as e:
-                logger.warning(
-                    "Failed to update job tracker on %s: %s", terminal_status, e
-                )
-
-        # AC5: Finalize journal
-        if activity_journal is not None:
-            try:
-                activity_journal.clear()
-            except Exception as e:
-                logger.warning("Failed to finalize repair activity journal: %s", e)
+    _execute_repair_body(
+        job_id=job_id,
+        output_dir=output_dir,
+        tracking_backend=tracking_backend,
+        job_tracker=job_tracker,
+        activity_journal=activity_journal,
+        dep_map_service=dep_map_service,
+    )
 
 
-@dependency_map_router.post("/dependency-map/repair")
+@dependency_map_router.post(
+    "/dependency-map/repair",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def trigger_dependency_map_repair(request: Request):
     """
     Trigger dependency map repair (Story #342, #352).
@@ -1393,7 +1443,10 @@ def trigger_dependency_map_repair(request: Request):
     )
 
 
-@dependency_map_router.post("/dependency-map/trigger")
+@dependency_map_router.post(
+    "/dependency-map/trigger",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def trigger_dependency_map(
     request: Request,
     mode: Optional[str] = Form(None),
@@ -1470,7 +1523,10 @@ def trigger_dependency_map(
         )
 
 
-@dependency_map_router.post("/dependency-map/trigger-refinement")
+@dependency_map_router.post(
+    "/dependency-map/trigger-refinement",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 def trigger_refinement(request: Request):
     """
     Trigger a manual refinement cycle (Bug #371).

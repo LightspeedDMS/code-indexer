@@ -512,8 +512,25 @@ class FilesystemVectorStore:
         hnsw_skipped = False
 
         # HNSW-002: Auto-detection for incremental vs full rebuild
-        incremental_update_result = None
-        if (
+        incremental_update_result: Optional[Dict[str, Any]] = None
+
+        # #941: When branch isolation already performed a filtered HNSW rebuild,
+        # skip the incremental path entirely so it cannot undo the filtered result.
+        if self._branch_isolation_did_filtered_rebuild:
+            self._branch_isolation_did_filtered_rebuild = False
+            self.logger.info(
+                f"Incremental HNSW update skipped for '{collection_name}' "
+                f"(filtered rebuild already performed during branch isolation)"
+            )
+            # Clear stale session change tracking so the fallback path is also skipped.
+            if (
+                hasattr(self, "_indexing_session_changes")
+                and collection_name in self._indexing_session_changes
+            ):
+                del self._indexing_session_changes[collection_name]
+            # Signal "handled" so the fallback full-rebuild path (line ~559) is skipped.
+            incremental_update_result = {}  # sentinel: filtered rebuild already handled
+        elif (
             hasattr(self, "_indexing_session_changes")
             and collection_name in self._indexing_session_changes
         ):
@@ -3772,13 +3789,17 @@ class FilesystemVectorStore:
             )
             return None
 
-        # Process additions and updates
-        total_changes = (
-            len(changes["added"]) + len(changes["updated"]) + len(changes["deleted"])
-        )
+        # Process additions and updates.
+        # #941: Points that appear in both added/updated and deleted were added then
+        # immediately removed in the same session — treat them as no-ops so they don't
+        # trigger "Vector file not found" warnings.
+        deleted_set = changes["deleted"]
+        effective_added = changes["added"] - deleted_set
+        effective_updated = changes["updated"] - deleted_set
+        total_changes = len(effective_added) + len(effective_updated) + len(deleted_set)
         processed = 0
 
-        for point_id in changes["added"] | changes["updated"]:
+        for point_id in effective_added | effective_updated:
             # Load vector from disk
             try:
                 vector_file = self._id_index[collection_name].get(point_id)

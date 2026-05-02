@@ -14,9 +14,11 @@ from rpyc import Service
 
 from .cache import CacheEntry, TTLEvictionThread
 from .watch_manager import DaemonWatchManager
+from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
 
 if TYPE_CHECKING:
-    pass
+    from code_indexer.services.cli_rerank_config_shim import CliRerankConfigService
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,12 @@ class CIDXDaemonService(Service):
         - cache_lock: Protects cache entry loading/replacement
         - CacheEntry.rw_lock: ReaderWriterLock for concurrent reads and exclusive writes
     """
+
+    # Class-level type declarations for rerank attributes (wired in __init__).
+    # Declared here so mypy resolves their types from the class body rather than
+    # from inline annotations inside the untyped __init__ body.
+    _health_monitor: "ProviderHealthMonitor"
+    _rerank_config: "CliRerankConfigService"
 
     def __init__(self):
         """Initialize daemon service with cache and eviction thread."""
@@ -81,6 +89,22 @@ class CIDXDaemonService(Service):
         self.vector_store: Optional[Any] = None
         self.embedding_provider: Optional[Any] = None
 
+        # Rerank support — created once at startup for the long-lived daemon process
+        import os as _os
+        from code_indexer.config_global import load_global_config
+        from code_indexer.services.cli_rerank_config_shim import CliRerankConfigService
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        _xdg = _os.environ.get("XDG_CONFIG_HOME")
+        _xdg_base = Path(_xdg) if _xdg else Path.home() / ".config"
+        _xdg_persistence_path = _xdg_base / "cidx" / "reranker_state.json"
+        self._health_monitor: ProviderHealthMonitor = (
+            ProviderHealthMonitor.get_instance(persistence_path=_xdg_persistence_path)
+        )
+        self._rerank_config: CliRerankConfigService = CliRerankConfigService(
+            load_global_config()
+        )
+
         # Start TTL eviction thread
         self.eviction_thread = TTLEvictionThread(self, check_interval=60)
         self.eviction_thread.start()
@@ -91,157 +115,215 @@ class CIDXDaemonService(Service):
     # Query Operations (3 methods)
     # =============================================================================
 
+    def _apply_staleness_metadata(
+        self,
+        results: List[Dict[str, Any]],
+        project_path: str,
+    ) -> None:
+        """Enrich results in-place with staleness metadata (best-effort, non-fatal).
+
+        Matches StalenessDetector output to results by file path so that sort-order
+        changes inside apply_staleness_detection cannot cause index-position mismatches.
+
+        Args:
+            results: Semantic search result dicts (mutated in-place).
+            project_path: Absolute path to the project root (used by StalenessDetector).
+        """
+        try:
+            from code_indexer.remote.staleness_detector import StalenessDetector
+            from code_indexer.api_clients.remote_query_client import QueryResultItem
+            from datetime import datetime
+
+            query_result_items = []
+            for result in results:
+                payload = result.get("payload", {})
+                file_last_modified = payload.get("file_last_modified")
+                indexed_at = payload.get("indexed_at")
+                indexed_timestamp = None
+                if indexed_at:
+                    try:
+                        if isinstance(indexed_at, str):
+                            dt = datetime.fromisoformat(indexed_at.rstrip("Z"))
+                            indexed_timestamp = dt.timestamp()
+                        else:
+                            indexed_timestamp = indexed_at
+                    except (ValueError, AttributeError):
+                        indexed_timestamp = indexed_at
+                query_result_items.append(
+                    QueryResultItem(
+                        similarity_score=result.get("score", 0.0),
+                        file_path=payload.get("path", "unknown"),
+                        line_number=payload.get("line_start", 1),
+                        code_snippet=payload.get("content", ""),
+                        repository_alias=Path(project_path).name,
+                        file_last_modified=file_last_modified,
+                        indexed_timestamp=indexed_timestamp,
+                    )
+                )
+
+            detector = StalenessDetector()
+            enhanced_items = detector.apply_staleness_detection(
+                query_result_items, Path(project_path), mode="local"
+            )
+            staleness_map = {
+                e.file_path: {
+                    "is_stale": e.is_stale,
+                    "staleness_indicator": e.staleness_indicator,
+                    "staleness_delta_seconds": e.staleness_delta_seconds,
+                }
+                for e in enhanced_items
+            }
+            for result in results:
+                file_path = result.get("payload", {}).get("path")
+                if file_path and file_path in staleness_map:
+                    result["staleness"] = staleness_map[file_path]
+
+        except Exception as e:
+            logger.debug(f"Staleness detection failed in daemon mode: {e}")
+
+    def _apply_rerank_or_truncate(
+        self,
+        results: List[Dict[str, Any]],
+        rerank_query: Optional[str],
+        rerank_instruction: Optional[str],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Apply rerank funnel when requested, or truncate to limit.
+
+        Args:
+            results: Raw result list from search backend.
+            rerank_query: Reranker query text; None or "" skips reranking.
+            rerank_instruction: Optional instruction prefix for the reranker.
+            limit: Maximum number of results to return.
+
+        Returns:
+            Reranked-and-truncated or plain-truncated result list.
+        """
+        if rerank_query:
+            # _apply_cli_rerank_and_filter returns List[Dict[str, Any]] at runtime,
+            # but mypy infers Any through the cross-module call boundary.
+            # cast() narrows without changing runtime behavior.
+            return cast(
+                List[Dict[str, Any]],
+                _apply_cli_rerank_and_filter(
+                    results=results,
+                    rerank_query=rerank_query,
+                    rerank_instruction=rerank_instruction,
+                    config=self._rerank_config,
+                    user_limit=limit,
+                    health_monitor=self._health_monitor,
+                ),
+            )
+        return results[:limit]
+
     def exposed_query(
-        self, project_path: str, query: str, limit: int = 10, **kwargs
+        self,
+        project_path: str,
+        query: str,
+        limit: int = 10,
+        rerank_query: Optional[str] = None,
+        rerank_instruction: Optional[str] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Execute semantic search with caching and timing information.
+        """Execute semantic search with caching, staleness detection, and optional reranking.
 
         Args:
             project_path: Path to project root
             query: Search query
-            limit: Maximum number of results
+            limit: Maximum number of results (clamped to >= 1)
+            rerank_query: Optional query text for reranking; None or "" skips rerank.
+            rerank_instruction: Optional instruction prefix for the reranker.
             **kwargs: Additional search parameters
 
         Returns:
             Dictionary with 'results' and 'timing' keys
         """
+        limit = max(1, int(limit))
         logger.debug(f"exposed_query: project={project_path}, query={query[:50]}...")
 
         # FIX Race Condition #1: Hold cache_lock during entire query execution
-        # This prevents cache invalidation from occurring mid-query
         with self.cache_lock:
-            # Ensure cache is loaded
             self._ensure_cache_loaded(project_path)
-
-            # Update access tracking
             if self.cache_entry:
                 self.cache_entry.update_access()
-
-            # Execute semantic search (protected by cache_lock)
             results, timing_info = self._execute_semantic_search(
                 project_path, query, limit, **kwargs
             )
-
-            # Apply staleness detection to results (like standalone mode)
             if results:
-                try:
-                    from code_indexer.remote.staleness_detector import StalenessDetector
-                    from code_indexer.api_clients.remote_query_client import (
-                        QueryResultItem,
-                    )
-                    from datetime import datetime
+                self._apply_staleness_metadata(results, project_path)
 
-                    # Convert results to QueryResultItem format
-                    query_result_items = []
-                    for result in results:
-                        payload = result.get("payload", {})
+        results = self._apply_rerank_or_truncate(
+            results, rerank_query, rerank_instruction, limit
+        )
 
-                        # Extract timestamps
-                        file_last_modified = payload.get("file_last_modified")
-                        indexed_at = payload.get("indexed_at")
-
-                        # Convert indexed_at to timestamp if it's ISO format
-                        indexed_timestamp = None
-                        if indexed_at:
-                            try:
-                                if isinstance(indexed_at, str):
-                                    dt = datetime.fromisoformat(indexed_at.rstrip("Z"))
-                                    indexed_timestamp = dt.timestamp()
-                                else:
-                                    indexed_timestamp = indexed_at
-                            except (ValueError, AttributeError):
-                                indexed_timestamp = indexed_at
-
-                        query_item = QueryResultItem(
-                            similarity_score=result.get("score", 0.0),
-                            file_path=payload.get("path", "unknown"),
-                            line_number=payload.get("line_start", 1),
-                            code_snippet=payload.get("content", ""),
-                            repository_alias=Path(project_path).name,
-                            file_last_modified=file_last_modified,
-                            indexed_timestamp=indexed_timestamp,
-                        )
-                        query_result_items.append(query_item)
-
-                    # Apply staleness detection
-                    detector = StalenessDetector()
-                    enhanced_items = detector.apply_staleness_detection(
-                        query_result_items, Path(project_path), mode="local"
-                    )
-
-                    # Create staleness lookup map by file path
-                    # CRITICAL: apply_staleness_detection() sorts results, so we cannot
-                    # assign staleness metadata by index position. We must match by file path.
-                    staleness_map = {
-                        enhanced.file_path: {
-                            "is_stale": enhanced.is_stale,
-                            "staleness_indicator": enhanced.staleness_indicator,
-                            "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-                        }
-                        for enhanced in enhanced_items
-                    }
-
-                    # Add staleness metadata to results by matching file path
-                    for result in results:
-                        file_path = result.get("payload", {}).get("path")
-                        if file_path and file_path in staleness_map:
-                            result["staleness"] = staleness_map[file_path]
-
-                except Exception as e:
-                    # Graceful fallback - log but continue with results without staleness
-                    logger.debug(f"Staleness detection failed in daemon mode: {e}")
-                    # Results returned without staleness metadata
-
-        # Convert to plain dict for RPyC serialization (avoid netref issues)
         response = dict(
             results=list(results) if results else [],
             timing=dict(timing_info) if timing_info else {},
         )
-        # Propagate error to CLI if present in timing_info
         if timing_info and "error" in timing_info:
             response["error"] = timing_info["error"]
         return response
 
     def exposed_query_fts(
-        self, project_path: str, query: str, **kwargs
+        self,
+        project_path: str,
+        query: str,
+        limit: int = 10,
+        rerank_query: Optional[str] = None,
+        rerank_instruction: Optional[str] = None,
+        **kwargs: Any,
     ) -> List[Dict[str, Any]]:
-        """Execute FTS search with caching.
+        """Execute FTS search with caching and optional reranking.
 
         Args:
             project_path: Path to project root
             query: Search query
+            limit: Maximum number of results (must be >= 1)
+            rerank_query: Optional query text for reranking; None or "" skips rerank.
+            rerank_instruction: Optional instruction prefix for the reranker.
             **kwargs: Additional search parameters (fuzzy, case_sensitive, etc.)
 
         Returns:
             List of FTS search results with snippets
+
+        Raises:
+            ValueError: If limit is not a positive integer.
         """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit!r}")
         logger.debug(
             f"exposed_query_fts: project={project_path}, query={query[:50]}..."
         )
 
         # FIX Race Condition #1: Hold cache_lock during entire query execution
-        # This prevents cache invalidation from occurring mid-query
         with self.cache_lock:
-            # Ensure cache is loaded
             self._ensure_cache_loaded(project_path)
-
-            # Update access tracking
             if self.cache_entry:
                 self.cache_entry.update_access()
-
-            # Execute FTS search (protected by cache_lock)
             results = self._execute_fts_search(project_path, query, **kwargs)
 
-        return results
+        return self._apply_rerank_or_truncate(
+            results,
+            rerank_query=rerank_query,
+            rerank_instruction=rerank_instruction,
+            limit=limit,
+        )
 
     def exposed_query_hybrid(
-        self, project_path: str, query: str, **kwargs
+        self,
+        project_path: str,
+        query: str,
+        rerank_query: Optional[str] = None,
+        rerank_instruction: Optional[str] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Execute parallel semantic + FTS search.
+        """Execute parallel semantic + FTS search with independent reranking per sub-list.
 
         Args:
             project_path: Path to project root
             query: Search query
+            rerank_query: Optional query text for reranking; None or "" skips rerank.
+            rerank_instruction: Optional instruction prefix for the reranker.
             **kwargs: Additional search parameters
 
         Returns:
@@ -251,9 +333,21 @@ class CIDXDaemonService(Service):
             f"exposed_query_hybrid: project={project_path}, query={query[:50]}..."
         )
 
-        # Execute both searches (they share cache loading internally)
-        semantic_results = self.exposed_query(project_path, query, **kwargs)
-        fts_results = self.exposed_query_fts(project_path, query, **kwargs)
+        # Execute both searches independently; rerank is applied per sub-list
+        semantic_results = self.exposed_query(
+            project_path,
+            query,
+            rerank_query=rerank_query,
+            rerank_instruction=rerank_instruction,
+            **kwargs,
+        )
+        fts_results = self.exposed_query_fts(
+            project_path,
+            query,
+            rerank_query=rerank_query,
+            rerank_instruction=rerank_instruction,
+            **kwargs,
+        )
 
         return {
             "semantic": semantic_results,

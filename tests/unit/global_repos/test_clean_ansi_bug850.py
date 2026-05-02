@@ -15,7 +15,7 @@ Tests:
    — invoke_claude_cli must set NO_COLOR=1 in the subprocess environment
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import yaml
 
@@ -72,18 +72,32 @@ class TestInvokeClaudeCliNoColor:
     """Tests for Bug #850: NO_COLOR=1 must be set to prevent ANSI at source."""
 
     def test_invoke_claude_cli_sets_no_color_env(self, tmp_path):
-        """invoke_claude_cli must pass NO_COLOR=1 in the subprocess env dict."""
-        captured_env = {}
+        """invoke_claude_cli must pass NO_COLOR=1 in the subprocess env dict.
 
-        def fake_subprocess_run(cmd, **kwargs):
-            captured_env.update(kwargs.get("env", {}))
-            mock_result = MagicMock()
-            mock_result.returncode = 0
-            mock_result.stdout = "---\nlifecycle:\n  status: active\n"
-            mock_result.stderr = ""
-            return mock_result
+        invoke_claude_cli uses subprocess.Popen; the env dict is passed to the
+        Popen constructor.  We capture it from mock_popen.call_args[1]["env"].
 
-        with patch("subprocess.run", side_effect=fake_subprocess_run):
+        MCPSelfRegistrationService.get_instance is patched to a no-op so that
+        any prior-test singleton state (requiring HTTP/file IO) does not prevent
+        execution from reaching the mocked Popen — fixing the order-dependent
+        failure when this test runs as part of the full suite.
+        """
+        with (
+            patch(
+                "code_indexer.server.services.mcp_self_registration_service"
+                ".MCPSelfRegistrationService.get_instance",
+                return_value=Mock(ensure_registered=Mock()),
+            ),
+            patch("subprocess.Popen") as mock_popen,
+        ):
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                "---\nlifecycle:\n  status: active\n",
+                "",
+            )
+            mock_popen.return_value = mock_proc
+
             invoke_claude_cli(
                 repo_path=str(tmp_path),
                 prompt="describe this repo",
@@ -91,8 +105,9 @@ class TestInvokeClaudeCliNoColor:
                 outer_timeout_seconds=_OUTER_TIMEOUT_SECONDS,
             )
 
-        assert captured_env.get("NO_COLOR") == "1", (
-            f"NO_COLOR=1 not found in subprocess env. Got: {captured_env.get('NO_COLOR')!r}"
+        called_env = mock_popen.call_args[1]["env"]
+        assert called_env.get("NO_COLOR") == "1", (
+            f"NO_COLOR=1 not found in subprocess env. Got: {called_env.get('NO_COLOR')!r}"
         )
 
 

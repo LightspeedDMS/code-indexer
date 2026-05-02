@@ -269,20 +269,3 @@ class TestResearchAssistantClaude:
         assert second_user["content"] == "Second question", (
             "Stored messages must be ONLY user's original input (no guardrails)"
         )
-
-    def test_security_guardrails_stored_as_constant(self, research_service):
-        """Test AC5: Security guardrails are defined as service constant."""
-        # The guardrails should be accessible as a class or module constant
-        # Not hardcoded in templates
-        from src.code_indexer.server.services.research_assistant_service import (
-            SECURITY_GUARDRAILS,
-        )
-
-        assert SECURITY_GUARDRAILS is not None, (
-            "SECURITY_GUARDRAILS constant must exist"
-        )
-        assert isinstance(SECURITY_GUARDRAILS, str), "Must be string constant"
-        assert len(SECURITY_GUARDRAILS) > 100, "Must contain substantial content"
-        assert "MANDATORY SECURITY CONSTRAINTS" in SECURITY_GUARDRAILS, (
-            "Must include expected header"
-        )

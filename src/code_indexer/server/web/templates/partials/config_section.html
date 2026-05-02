@@ -808,11 +808,6 @@ function saveLlmCredsConfig() {
                         <td class="config-note"><small>Maximum results from each repository (default: 100)</small></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Omni Max Total Results Before Aggregation</td>
-                        <td class="config-value">{{ config.multi_search.omni_max_total_results_before_aggregation }}</td>
-                        <td class="config-note"><small>Maximum total results before aggregation (default: 10000)</small></td>
-                    </tr>
-                    <tr>
                         <td class="config-label">Omni Pattern Metacharacters</td>
                         <td class="config-value">{{ config.multi_search.omni_pattern_metacharacters }}</td>
                         <td class="config-note"><small>Characters treated as glob pattern metacharacters (default: *?[]^$+|)</small></td>
@@ -897,11 +892,6 @@ function saveLlmCredsConfig() {
                     <input type="number" id="omni-max-results-per-repo" name="omni_max_results_per_repo" value="{{ config.multi_search.omni_max_results_per_repo }}" min="1" max="10000">
                     <small>Range: 1-10000 results (default: 100). Maximum results from each repository.</small>
                 </label>
-                <label for="omni-max-total-results-before-aggregation">
-                    Omni Max Total Results Before Aggregation
-                    <input type="number" id="omni-max-total-results-before-aggregation" name="omni_max_total_results_before_aggregation" value="{{ config.multi_search.omni_max_total_results_before_aggregation }}" min="1" max="100000">
-                    <small>Range: 1-100000 results (default: 10000). Maximum total results before aggregation.</small>
-                </label>
                 <label for="omni-pattern-metacharacters">
                     Omni Pattern Metacharacters
                     <input type="text" id="omni-pattern-metacharacters" name="omni_pattern_metacharacters" value="{{ config.multi_search.omni_pattern_metacharacters }}">
@@ -930,7 +920,7 @@ function saveLlmCredsConfig() {
 
 <details class="config-section" id="section-content_limits">
     <summary>
-        <h2>Search Result Truncation</h2>
+        <h2>Content Limits</h2>
     </summary>
     <p class="section-description">
         Unified content truncation limits for AI/LLM integrations. All limits use tokens as the primary unit for consistency with LLM context windows. The chars_per_token setting determines how character counts are converted to token estimates (typical code ratio is 4 characters per token).
@@ -969,11 +959,6 @@ function saveLlmCredsConfig() {
                         <td class="config-label">Cache TTL (seconds)</td>
                         <td class="config-value">{{ config.content_limits.cache_ttl_seconds }}</td>
                         <td class="config-note"><small>Time-to-live for cached content</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Cache Max Entries</td>
-                        <td class="config-value">{{ config.content_limits.cache_max_entries }}</td>
-                        <td class="config-note"><small>Maximum cache entries before cleanup</small></td>
                     </tr>
                 </tbody>
             </table>
@@ -1018,11 +1003,6 @@ function saveLlmCredsConfig() {
                     <input type="number" id="content-limits-cache-ttl-seconds" name="cache_ttl_seconds" value="{{ config.content_limits.cache_ttl_seconds }}" min="60">
                     <small>Minimum 60 seconds</small>
                 </label>
-                <label for="content-limits-cache-max-entries">
-                    Cache Max Entries
-                    <input type="number" id="content-limits-cache-max-entries" name="cache_max_entries" value="{{ config.content_limits.cache_max_entries }}" min="100" max="100000">
-                    <small>100-100000 entries</small>
-                </label>
             </div>
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
@@ -1032,61 +1012,6 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
-
-<!-- File Content Limits Settings Section -->
-<details class="config-section" id="section-file_content_limits">
-    <summary>
-        <h2>File Retrieval Limits</h2>
-    </summary>
-    <p class="section-description">
-        Sets limits for file content retrieval operations, especially important for AI/LLM integrations. Max tokens per request prevents overwhelming context windows of LLM clients. Characters per token is an estimation factor for converting byte counts to token counts, typically around 4 characters per token for code.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-file_content_limits">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Max Tokens per Request</td>
-                        <td class="config-value">{{ config.file_content_limits.max_tokens_per_request }}</td>
-                        <td class="config-note"><small>Maximum tokens for file content retrieval</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Characters per Token</td>
-                        <td class="config-value">{{ config.file_content_limits.chars_per_token }}</td>
-                        <td class="config-note"><small>Estimated characters per token</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('file_content_limits')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-file_content_limits" method="post" action="/admin/config/file_content_limits" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.file_content_limits %}
-            <div class="validation-error">{{ validation_errors.file_content_limits }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="file-content-limits-max-tokens">
-                    Max Tokens per Request
-                    <input type="number" id="file-content-limits-max-tokens" name="max_tokens_per_request" value="{{ config.file_content_limits.max_tokens_per_request }}" min="1000" max="50000">
-                    <small>1000-50000 tokens</small>
-                </label>
-                <label for="file-content-limits-chars-per-token">
-                    Characters per Token
-                    <input type="number" id="file-content-limits-chars-per-token" name="chars_per_token" value="{{ config.file_content_limits.chars_per_token }}" min="1" max="10">
-                    <small>1-10 characters</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('file_content_limits')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
 
 <!-- Content Limits Settings Section (Story #32 - Unified Content Limits Configuration) -->
 
@@ -1743,12 +1668,6 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.health.cpu_sustained_threshold_percent }}</td>
                         <td class="config-note"><small>Sustained CPU usage alert level (default: 95%)</small></td>
                     </tr>
-                    <!-- P3 Metrics Cache TTL (AC37) -->
-                    <tr>
-                        <td class="config-label">System Metrics Cache TTL (seconds)</td>
-                        <td class="config-value">{{ config.health.system_metrics_cache_ttl_seconds }}</td>
-                        <td class="config-note"><small>Cache duration for system metrics (default: 5s, range: 1-60s)</small></td>
-                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1786,12 +1705,6 @@ function saveLlmCredsConfig() {
                     CPU Sustained Threshold (%)
                     <input type="number" id="health-cpu-sustained" name="cpu_sustained_threshold_percent" value="{{ config.health.cpu_sustained_threshold_percent }}" min="0" max="100" step="0.1">
                     <small>0-100%</small>
-                </label>
-                <!-- P3 Metrics Cache TTL (AC37) -->
-                <label for="health-metrics-cache-ttl">
-                    System Metrics Cache TTL (seconds)
-                    <input type="number" id="health-metrics-cache-ttl" name="system_metrics_cache_ttl_seconds" value="{{ config.health.system_metrics_cache_ttl_seconds }}" min="1" max="60" step="0.1">
-                    <small>Range: 1-60 seconds</small>
                 </label>
             </div>
             <div class="form-actions">
@@ -2078,6 +1991,83 @@ function saveLlmCredsConfig() {
 </details>
 
 
+<!-- TOTP Step-Up Elevation Settings Section -->
+<details class="config-section" id="section-totp_elevation">
+    <summary>
+        <h2>TOTP Step-Up Elevation</h2>
+    </summary>
+    <p class="section-description">
+        Controls TOTP step-up enforcement on protected admin operations. The kill switch globally
+        enables or disables elevation enforcement: OFF means protected operations pass through
+        without a TOTP prompt; ON requires operators to complete a TOTP challenge before executing
+        sensitive actions. The two timeout knobs control how long an active elevation window
+        remains valid — idle timeout expires the window after inactivity, absolute max age caps
+        the window regardless of activity.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-totp_elevation">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enforcement Enabled</td>
+                        <td class="config-value">{{ config.totp_elevation.elevation_enforcement_enabled }}</td>
+                        <td class="config-note"><small>OFF = passthru (no TOTP prompt). ON = require TOTP step-up on protected operations.</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Idle Timeout (seconds)</td>
+                        <td class="config-value">{{ config.totp_elevation.elevation_idle_timeout_seconds }}</td>
+                        <td class="config-note"><small>1-60 minutes — window expires after this much idle time.</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Max Age (seconds)</td>
+                        <td class="config-value">{{ config.totp_elevation.elevation_max_age_seconds }}</td>
+                        <td class="config-note"><small>5-120 minutes — absolute window cap regardless of activity.</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('totp_elevation')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-totp_elevation" method="post" action="/admin/config/totp_elevation" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="elevation_enforcement_enabled" value="false">
+            {% if validation_errors.totp_elevation %}
+            <div class="validation-error">{{ validation_errors.totp_elevation }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="totp-enforcement-enabled">
+                    <input type="checkbox" id="totp-enforcement-enabled" name="elevation_enforcement_enabled" value="true"
+                        {% if config.totp_elevation.elevation_enforcement_enabled %}checked{% endif %}>
+                    Enforcement Enabled
+                    <small>OFF = passthru (no TOTP prompt). ON = require TOTP step-up on protected operations.</small>
+                </label>
+                <label for="totp-idle-timeout">
+                    Idle Timeout (seconds)
+                    <input type="number" id="totp-idle-timeout" name="elevation_idle_timeout_seconds"
+                        value="{{ config.totp_elevation.elevation_idle_timeout_seconds }}"
+                        min="60" max="3600">
+                    <small>1-60 minutes — window expires after this much idle time.</small>
+                </label>
+                <label for="totp-max-age">
+                    Max Age (seconds)
+                    <input type="number" id="totp-max-age" name="elevation_max_age_seconds"
+                        value="{{ config.totp_elevation.elevation_max_age_seconds }}"
+                        min="300" max="7200">
+                    <small>5-120 minutes — absolute window cap regardless of activity.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('totp_elevation')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -2190,6 +2180,13 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.claude_cli.fact_check_timeout_seconds }}</td>
                         <td class="config-note"><small>Per-invocation timeout for the verification Claude CLI call. Retries once after 30s delay; falls back to original on double timeout. Default: 600.</small></td>
                     </tr>
+                    <!-- Auto-repair Settings (Story #927) -->
+                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Scheduled Auto-repair</strong></td></tr>
+                    <tr>
+                        <td class="config-label">Auto-repair after scheduled jobs</td>
+                        <td class="config-value">{{ 'Yes' if config.claude_cli.dep_map_auto_repair_enabled else 'No' }}</td>
+                        <td class="config-note"><small>When enabled, scheduled delta and refinement jobs automatically run a repair pass once if anomalies are detected. Anomalies that don't resolve will be retried on the next scheduled cycle. Default: off.</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -2293,10 +2290,227 @@ function saveLlmCredsConfig() {
                     <input type="number" id="fact-check-timeout" name="fact_check_timeout_seconds" value="{{ config.claude_cli.fact_check_timeout_seconds }}" min="60" max="3600">
                     <small>Per-invocation timeout for the verification Claude CLI call. Retries once after a 30s delay; falls back to original content on double timeout. Default: 600.</small>
                 </label>
+                <label for="dep-map-auto-repair-enabled">
+                    Auto-repair after scheduled jobs
+                    <select id="dep-map-auto-repair-enabled" name="dep_map_auto_repair_enabled">
+                        <option value="true" {% if config.claude_cli.dep_map_auto_repair_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.claude_cli.dep_map_auto_repair_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>When enabled, scheduled delta and refinement jobs automatically run a repair pass once if anomalies are detected. Anomalies that don't resolve will be retried on the next scheduled cycle.</small>
+                </label>
             </div>
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('claude-integration')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Story #844: Codex CLI Integration -->
+<details class="config-section" id="section-codex-integration">
+    <summary>
+        <h2>Codex CLI Integration</h2>
+    </summary>
+    <p class="section-description">
+        Configures Codex CLI integration for AI-assisted repository analysis. Enable Codex and select a credential mode to activate. The weight controls how much Codex results influence hybrid search scoring.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-codex-integration">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.codex_integration.enabled else 'No' }}</td>
+                        <td class="config-note"><small>Whether Codex CLI integration is active (default: No)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Credential Mode</td>
+                        <td class="config-value">{{ config.codex_integration.credential_mode }}</td>
+                        <td class="config-note"><small>How credentials are supplied: none, api_key, or subscription</small></td>
+                    </tr>
+                    {% if config.codex_integration.credential_mode == 'api_key' %}
+                    <tr>
+                        <td class="config-label">API Key</td>
+                        <td class="config-value">{% if config.codex_integration.api_key %}***{% else %}(not set){% endif %}</td>
+                        <td class="config-note"><small>API key for direct OpenAI/Codex access</small></td>
+                    </tr>
+                    {% endif %}
+                    {% if config.codex_integration.credential_mode == 'subscription' %}
+                    <tr>
+                        <td class="config-label">LCP URL</td>
+                        <td class="config-value">{{ config.codex_integration.lcp_url or '(not set)' }}</td>
+                        <td class="config-note"><small>URL of the LCP credential provider</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">LCP Vendor</td>
+                        <td class="config-value">{{ config.codex_integration.lcp_vendor }}</td>
+                        <td class="config-note"><small>Vendor identifier sent to the LCP provider (default: openai)</small></td>
+                    </tr>
+                    {% endif %}
+                    <tr>
+                        <td class="config-label">Codex Weight</td>
+                        <td class="config-value">{{ config.codex_integration.codex_weight }}</td>
+                        <td class="config-note"><small>Influence of Codex results in hybrid scoring (0.0 - 1.0, default: 0.5)</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('codex-integration')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-codex-integration" method="post" action="/admin/config/codex_integration" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.codex_integration %}
+            <div class="validation-error">{{ validation_errors.codex_integration }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="codex-enabled">
+                    Enabled
+                    <select id="codex-enabled" name="enabled" onchange="toggleCodexIntegration()">
+                        <option value="true" {% if config.codex_integration.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.codex_integration.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Enable Codex CLI integration</small>
+                </label>
+                <label for="codex-credential-mode">
+                    Credential Mode
+                    <select id="codex-credential-mode" name="credential_mode"
+                            onchange="toggleCodexCredentialFields()">
+                        <option value="none" {% if config.codex_integration.credential_mode == 'none' %}selected{% endif %}>None</option>
+                        <option value="api_key" {% if config.codex_integration.credential_mode == 'api_key' %}selected{% endif %}>API Key</option>
+                        <option value="subscription" {% if config.codex_integration.credential_mode == 'subscription' %}selected{% endif %}>Subscription</option>
+                    </select>
+                    <small>How credentials are supplied to Codex</small>
+                </label>
+                <div id="codex-api-key-wrap">
+                <label for="codex-api-key">
+                    API Key
+                    <input type="password" id="codex-api-key" name="api_key"
+                           value=""
+                           placeholder="Enter Codex/OpenAI API key"
+                           {% if not config.codex_integration.enabled %}disabled{% endif %}>
+                    <small>API key for Codex (used when credential_mode is api_key)</small>
+                </label>
+                </div>
+                <div id="codex-lcp-wrap">
+                <label for="codex-lcp-url">
+                    LCP URL
+                    <input type="url" id="codex-lcp-url" name="lcp_url"
+                           value="{{ config.codex_integration.lcp_url or '' }}"
+                           placeholder="https://lcp-provider/api"
+                           {% if not config.codex_integration.enabled %}disabled{% endif %}>
+                    <small>LCP credential provider URL (used when credential_mode is subscription)</small>
+                </label>
+                <label for="codex-lcp-vendor">
+                    LCP Vendor
+                    <input type="text" id="codex-lcp-vendor" name="lcp_vendor"
+                           value="{{ config.codex_integration.lcp_vendor }}"
+                           {% if not config.codex_integration.enabled %}disabled{% endif %}>
+                    <small>Vendor identifier sent to the LCP provider (default: openai)</small>
+                </label>
+                </div>
+                <label for="codex-weight">
+                    Codex Weight
+                    <input type="number" id="codex-weight" name="codex_weight"
+                           value="{{ config.codex_integration.codex_weight }}"
+                           min="0" max="1" step="0.01"
+                           {% if not config.codex_integration.enabled %}disabled{% endif %}>
+                    <small>Influence of Codex results in hybrid scoring (0.0 - 1.0)</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('codex-integration')">Cancel</button>
+            </div>
+        </form>
+    </article>
+    <script>
+    function toggleCodexIntegration() {
+        var enabled = document.getElementById('codex-enabled').value === 'true';
+        var fields = [
+            document.getElementById('codex-api-key'),
+            document.getElementById('codex-lcp-url'),
+            document.getElementById('codex-lcp-vendor'),
+            document.getElementById('codex-weight'),
+        ];
+        for (var i = 0; i < fields.length; i++) {
+            if (fields[i]) {
+                fields[i].disabled = !enabled;
+            }
+        }
+    }
+
+    function toggleCodexCredentialFields() {
+        var mode = document.getElementById('codex-credential-mode').value;
+        var apiKeyWrap = document.getElementById('codex-api-key-wrap');
+        var lcpWrap = document.getElementById('codex-lcp-wrap');
+        if (apiKeyWrap) {
+            apiKeyWrap.style.display = (mode === 'api_key') ? '' : 'none';
+        }
+        if (lcpWrap) {
+            lcpWrap.style.display = (mode === 'subscription') ? '' : 'none';
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        toggleCodexCredentialFields();
+    });
+    </script>
+</details>
+
+<details class="config-section" id="section-cidx-meta-backup">
+    <summary>
+        <h2>cidx-meta Backup</h2>
+    </summary>
+    <p class="section-description">
+        Configures bidirectional git backup for the mutable cidx-meta golden repository.
+    </p>
+    <article>
+        <div id="display-cidx-meta-backup">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.cidx_meta_backup.enabled else 'No' }}</td>
+                        <td class="config-note"><small>Enable backup sync during each cidx-meta refresh</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Remote URL</td>
+                        <td class="config-value">{{ config.cidx_meta_backup.remote_url or '(not set)' }}</td>
+                        <td class="config-note"><small>SSH, https://, or file:// git remote</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('cidx-meta-backup')">Edit</button>
+            </div>
+        </div>
+        <form id="edit-form-cidx-meta-backup" method="post" action="/admin/config/cidx_meta_backup" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.cidx_meta_backup %}
+            <div class="validation-error">{{ validation_errors.cidx_meta_backup }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="cidx-meta-backup-enabled">
+                    Enabled
+                    <select id="cidx-meta-backup-enabled" name="enabled">
+                        <option value="true" {% if config.cidx_meta_backup.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.cidx_meta_backup.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Run git sync before cidx-meta indexing</small>
+                </label>
+                <label for="cidx-meta-backup-remote-url">
+                    Remote URL
+                    <input type="text" id="cidx-meta-backup-remote-url" name="remote_url" value="{{ config.cidx_meta_backup.remote_url }}">
+                    <small>Use file:// or https:// directly; SSH URLs require a configured host key</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('cidx-meta-backup')">Cancel</button>
             </div>
         </form>
     </article>
@@ -2702,11 +2916,6 @@ function saveLlmCredsConfig() {
                         <td class="config-note"></td>
                     </tr>
                     <tr>
-                        <td class="config-label">Export Logs</td>
-                        <td class="config-value">{{ 'Yes' if config.telemetry.export_logs else 'No' }}</td>
-                        <td class="config-note"></td>
-                    </tr>
-                    <tr>
                         <td class="config-label">Machine Metrics Enabled</td>
                         <td class="config-value">{{ 'Yes' if config.telemetry.machine_metrics_enabled else 'No' }}</td>
                         <td class="config-note"><small>CPU, memory, disk metrics</small></td>
@@ -2715,11 +2924,6 @@ function saveLlmCredsConfig() {
                         <td class="config-label">Machine Metrics Interval (sec)</td>
                         <td class="config-value">{{ config.telemetry.machine_metrics_interval_seconds }}</td>
                         <td class="config-note"></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Trace Sample Rate</td>
-                        <td class="config-value">{{ config.telemetry.trace_sample_rate }}</td>
-                        <td class="config-note"><small>0.0 to 1.0 (1.0 = 100%)</small></td>
                     </tr>
                     <tr>
                         <td class="config-label">Deployment Environment</td>
@@ -2782,13 +2986,6 @@ function saveLlmCredsConfig() {
                         <option value="false" {% if not config.telemetry.export_metrics %}selected{% endif %}>No</option>
                     </select>
                 </label>
-                <label for="telemetry-export-logs">
-                    Export Logs
-                    <select id="telemetry-export-logs" name="export_logs">
-                        <option value="true" {% if config.telemetry.export_logs %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.telemetry.export_logs %}selected{% endif %}>No</option>
-                    </select>
-                </label>
                 <label for="telemetry-machine-metrics-enabled">
                     Machine Metrics Enabled
                     <select id="telemetry-machine-metrics-enabled" name="machine_metrics_enabled">
@@ -2801,12 +2998,6 @@ function saveLlmCredsConfig() {
                     Machine Metrics Interval (sec)
                     <input type="number" id="telemetry-machine-metrics-interval" name="machine_metrics_interval_seconds"
                            value="{{ config.telemetry.machine_metrics_interval_seconds }}" min="1">
-                </label>
-                <label for="telemetry-trace-sample-rate">
-                    Trace Sample Rate
-                    <input type="number" id="telemetry-trace-sample-rate" name="trace_sample_rate"
-                           value="{{ config.telemetry.trace_sample_rate }}" min="0" max="1" step="0.01">
-                    <small>0.0 to 1.0 (1.0 = sample all requests)</small>
                 </label>
                 <label for="telemetry-deployment-environment">
                     Deployment Environment
@@ -3170,6 +3361,7 @@ function saveLlmCredsConfig() {
         </form>
     </article>
 </details>
+
 
 </div>
 

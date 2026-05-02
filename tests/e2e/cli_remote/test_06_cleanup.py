@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from tests.e2e.helpers import run_cidx
 
@@ -43,14 +42,21 @@ def test_repos_deactivate(
     the git and file operation tests have a chance to run.
     """
     activate_result = run_cidx(
-        "repos", "activate", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "activate",
+        MARKUPSAFE_ALIAS,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(activate_result, "cidx repos activate (pre-deactivate setup)")
 
     result = run_cidx(
-        "repos", "deactivate", MARKUPSAFE_ALIAS, "--force",
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "deactivate",
+        MARKUPSAFE_ALIAS,
+        "--force",
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
         stdin_input="y\n",
     )
     _assert_ok(result, "cidx repos deactivate")

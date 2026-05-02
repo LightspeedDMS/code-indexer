@@ -78,4 +78,4 @@ def daemon_repo(
         f"stdout: {config_result.stdout}\nstderr: {config_result.stderr}"
     )
 
-    return dest
+    return Path(dest)

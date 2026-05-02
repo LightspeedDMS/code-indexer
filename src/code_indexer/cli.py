@@ -15,6 +15,7 @@ from typing import Optional, Union, Callable, Dict, Any, List, Literal, cast
 
 import click
 from rich.console import Console
+from rich.logging import RichHandler
 from rich.table import Table
 
 # Rich progress imports removed - using MultiThreadedProgressManager instead
@@ -48,6 +49,21 @@ from .remote.credential_manager import ProjectCredentialManager  # noqa: F401
 # Daemon delegation imports (lazy loaded when daemon enabled)
 from . import cli_daemon_delegation  # noqa: F401
 from . import cli_daemon_lifecycle  # noqa: F401
+
+
+def setup_logging() -> None:
+    """Configure root logger to use RichHandler for Rich Live compatibility.
+
+    Installs RichHandler instead of the default stdlib StreamHandler so that
+    WARNING/ERROR output is coordinated with the Rich Live progress widget:
+    RichHandler pauses the Live region during emission, preventing the cursor
+    collision that caused truncated log lines (issue #942).
+    """
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(message)s",  # RichHandler renders level/name itself
+        handlers=[RichHandler(rich_tracebacks=False, show_time=False, show_path=False)],
+    )
 
 
 def run_async(coro):
@@ -174,6 +190,36 @@ logger = logging.getLogger(__name__)
 
 # Indexing safety buffer: time (seconds) reserved before token/rate-limit cutoff.
 _INDEX_SAFETY_BUFFER_SECONDS = 60
+
+# Multiplier applied to the user-requested limit when over-fetching candidates for
+# a rerank stage.  Gives the reranker enough documents to meaningfully re-order before
+# we truncate back to the original limit.
+_RERANK_OVERFETCH_MULTIPLIER = 4
+
+
+def _parse_file_extensions(raw: Optional[str]) -> List[str]:
+    """Parse --file-extensions CLI flag into a normalized list (Story #906).
+
+    Comma-separated input. Each token is whitespace-stripped, then any leading
+    dots are stripped (so '.py' and 'py' are equivalent). Tokens that are empty
+    after BOTH normalization steps are skipped (handles inputs like '.' or
+    '.,py' that would otherwise produce empty entries). Returns [] when input
+    is None, empty, or whitespace-only.
+
+    Examples:
+      _parse_file_extensions(None)           == []
+      _parse_file_extensions("")             == []
+      _parse_file_extensions("py")           == ["py"]
+      _parse_file_extensions("py,js")        == ["py", "js"]
+      _parse_file_extensions(".py,.js")      == ["py", "js"]
+      _parse_file_extensions("py, js, ts")   == ["py", "js", "ts"]
+      _parse_file_extensions(".")            == []
+      _parse_file_extensions(".,py")         == ["py"]
+    """
+    if not raw:
+        return []
+    normalized = (ext.strip().lstrip(".") for ext in raw.split(","))
+    return [ext for ext in normalized if ext]
 
 
 def _log_skipped_provider_warning(provider_name: str) -> None:
@@ -590,6 +636,18 @@ class GracefulInterruptHandler:
 
 # Global console for rich output
 console = Console()
+
+
+def _get_reranker_sinbin_path() -> Path:
+    """Return the XDG-compliant sinbin persistence path for CLI reranker state.
+
+    Respects XDG_CONFIG_HOME if set; falls back to ~/.config/cidx/reranker_state.json.
+    Single source of truth used by both the temporal rerank path (Story #905) and
+    the Bundle 4 hoisted init block.
+    """
+    _xdg = os.environ.get("XDG_CONFIG_HOME")
+    _base = Path(_xdg) if _xdg else Path.home() / ".config"
+    return _base / "cidx" / "reranker_state.json"
 
 
 def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None:
@@ -1112,6 +1170,7 @@ def _execute_semantic_search(
     project_root: Path,
     config_manager,
     console: Console,
+    file_extensions: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Execute semantic search - extracted for parallel execution in hybrid mode.
 
@@ -1333,6 +1392,17 @@ def _execute_semantic_search(
                         {"key": "path", "match": {"text": path_filter[0]}}
                     )
 
+            # Story #906: --file-extensions wiring into filter_conditions_list.
+            # The "language" field IS cidx's file-extension field (test helper
+            # _must_extension_conditions matches c.get("key") == "language").
+            # Multiple extensions appended as DIRECT must-entries (cidx
+            # vector_store OR-merges multiple direct entries with same key).
+            # Composes with --language as INTERSECTION.
+            for ext in _parse_file_extensions(file_extensions):
+                filter_conditions_list.append(
+                    {"key": "language", "match": {"value": ext}}
+                )
+
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
                 {"must": filter_conditions_list} if filter_conditions_list else {}
@@ -1441,39 +1511,25 @@ def _execute_semantic_search(
                     time.time() - staleness_start
                 ) * 1000
 
-                # Convert enhanced results back to local format
-                enhanced_local_results = []
-                for enhanced in enhanced_results:
-                    # Find corresponding original result
-                    original = next(
-                        r
-                        for r in results
-                        if r["payload"].get("path") == enhanced.file_path
-                    )
+                # Annotate results with staleness detection metadata.
+                # No reranker in this function — use preserve_order=False so
+                # fresh results sort before stale ones (staleness-first ordering).
+                results = _annotate_staleness(
+                    results, enhanced_results, preserve_order=False
+                )
 
-                    # Add staleness metadata to the result
-                    enhanced_result = original.copy()
-                    enhanced_result["staleness"] = {
-                        "is_stale": enhanced.is_stale,
-                        "staleness_indicator": enhanced.staleness_indicator,
-                        "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-                    }
-                    enhanced_local_results.append(enhanced_result)
-
-                # Replace results with staleness-enhanced results
-                results = enhanced_local_results
-
-            except Exception:
-                # Graceful fallback - continue with original results
-                pass
+            except Exception as _staleness_exc:
+                # Staleness detection is best-effort; continue with original results.
+                # Log at debug so failures are visible without spamming users.
+                logging.getLogger(__name__).debug(
+                    "Staleness detection skipped: %s", _staleness_exc, exc_info=True
+                )
 
         return results
 
     except Exception as e:
         if not quiet:
             console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
-        import logging
-
         logger = logging.getLogger(__name__)
         logger.error(f"Semantic search error: {e}", exc_info=True)
         return []
@@ -1827,19 +1883,17 @@ def cli(
     exception_logger = ExceptionLogger.initialize(project_root=Path.cwd(), mode="cli")
     exception_logger.install_thread_exception_hook()
 
-    # Configure logging at WARNING level for clean CLI output
-    logging.basicConfig(
-        level=logging.WARNING, format="%(levelname)s:%(name)s:%(message)s"
-    )
+    # Configure logging with RichHandler for Rich Live compatibility (issue #942).
+    # setup_logging() installs RichHandler so WARNING/ERROR output coordinates
+    # with the Live progress widget and appears complete above the progress bar.
+    setup_logging()
 
     # Configure logging to suppress noisy third-party messages
     if not verbose:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("root").setLevel(logging.WARNING)
-        # Suppress provider health warnings during CLI — they break Rich's live display
-        logging.getLogger("code_indexer.services.provider_health_monitor").setLevel(
-            logging.ERROR
-        )
+        # Note: the per-logger mute for provider_health_monitor is no longer needed
+        # because the systemic RichHandler fix above coordinates all loggers with Rich.
 
     # Handle --use-cidx-prompt flag (early return)
     if use_cidx_prompt:
@@ -4662,6 +4716,80 @@ def display_temporal_results(results, temporal_service):
         index += 1
 
 
+def _annotate_staleness(
+    results: List[Dict[str, Any]],
+    enhanced_results: Any,
+    preserve_order: bool = False,
+) -> List[Dict[str, Any]]:
+    """Annotate raw results with staleness metadata.
+
+    When ``preserve_order=True``, iterates ``results`` in input order (e.g.
+    reranked order) and looks up staleness data by file path.  This preserves
+    the caller's ordering instead of the staleness-sort order that
+    ``apply_staleness_detection`` applies internally (bug #965 fix).
+
+    When ``preserve_order=False`` (default), iterates ``enhanced_results``
+    which is already sorted by (is_stale, -score) so fresh results appear
+    first.  Use this for non-reranked queries.
+
+    Args:
+        results: Raw result dicts in display order (reranked or original).
+        enhanced_results: EnhancedQueryResultItem objects from StalenessDetector.
+        preserve_order: When True, keep ``results`` iteration order (reranked).
+            When False, use ``enhanced_results`` iteration order (fresh-first).
+
+    Returns:
+        New list of result dicts with a ``staleness`` key on each entry that
+        had a matching enhanced result.  Entries with no match are included
+        unchanged (no ``staleness`` key).
+    """
+    if preserve_order:
+        # Reranked path: iterate results in caller order, look up staleness by
+        # (path, line_number) composite key so sibling chunks from the same file
+        # are not silently overwritten by a path-only dict key.
+        enhanced_by_chunk = {(e.file_path, e.line_number): e for e in enhanced_results}
+        annotated = []
+        for original in results:
+            path = original["payload"].get("path", "")
+            line_start = original["payload"].get("line_start", 1)
+            enhanced = enhanced_by_chunk.get((path, line_start))
+            result_copy = original.copy()
+            if enhanced:
+                result_copy["staleness"] = {
+                    "is_stale": enhanced.is_stale,
+                    "staleness_indicator": enhanced.staleness_indicator,
+                    "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+                }
+            annotated.append(result_copy)
+        return annotated
+    else:
+        # Non-reranked path: annotate each result with staleness metadata, then
+        # sort fresh-first (is_stale ascending) with score-descending tie-break.
+        # Explicit sort ensures correct ordering regardless of enhanced_results
+        # input order.  Use (path, line_start) composite key so sibling chunks
+        # from the same file are each reachable.
+        results_by_chunk = {
+            (r["payload"].get("path", ""), r["payload"].get("line_start", 1)): r
+            for r in results
+        }
+        annotated = []
+        for enhanced in enhanced_results:
+            matched: Optional[Dict[str, Any]] = results_by_chunk.get(
+                (enhanced.file_path, enhanced.line_number)
+            )
+            if matched is None:
+                continue
+            result_copy = matched.copy()
+            result_copy["staleness"] = {
+                "is_stale": enhanced.is_stale,
+                "staleness_indicator": enhanced.staleness_indicator,
+                "staleness_delta_seconds": enhanced.staleness_delta_seconds,
+            }
+            annotated.append(result_copy)
+        annotated.sort(key=lambda r: (r["staleness"]["is_stale"], -r.get("score", 0.0)))
+        return annotated
+
+
 @cli.command()
 @click.argument("query")
 @click.option(
@@ -4786,7 +4914,44 @@ def display_temporal_results(results, temporal_service):
     type=str,
     help="Query multiple repositories (comma-separated aliases, e.g., 'repo1,repo2,repo3'). Remote mode only. Mutually exclusive with --repo.",
 )
+@click.option(
+    "--file-extensions",
+    "file_extensions",
+    default=None,
+    type=str,
+    help=(
+        'Comma-separated list of file extensions to include (e.g., "py,js,ts"). '
+        "Leading dot optional (.py and py both work). "
+        "Whitespace around commas is tolerated. "
+        "Composes with --language as intersection (both filters must match). "
+        "Empty string is treated as no filter."
+    ),
+)
 # --show-unchanged removed: Story 2 - all temporal results are changes now
+@click.option(
+    "--rerank-query",
+    "rerank_query",
+    default=None,
+    type=str,
+    help=(
+        "Apply reranker stage after retrieval using this query text. "
+        "If omitted and auto_populate_rerank_query is true in global config, "
+        "the search query is used automatically. "
+        "Pass an empty string ('') to explicitly disable reranking. "
+        "Requires VOYAGE_API_KEY or CO_API_KEY."
+    ),
+)
+@click.option(
+    "--rerank-instruction",
+    "rerank_instruction",
+    default=None,
+    type=str,
+    help=(
+        "Optional instruction prepended to the reranker query to guide ranking. "
+        "Passed to the reranker vendor as-is. "
+        "Only meaningful when --rerank-query is also provided."
+    ),
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
 def query(
@@ -4815,6 +4980,9 @@ def query(
     chunk_type: Optional[str],
     repo: Optional[str],
     repos: Optional[str],
+    rerank_query: Optional[str],
+    rerank_instruction: Optional[str],
+    file_extensions: Optional[str] = None,
 ):
     """Search the indexed codebase using semantic similarity.
 
@@ -5281,6 +5449,64 @@ def query(
                 chunk_type=chunk_type,
             )
 
+            # Story #905: Apply unified rerank funnel to temporal results.
+            # All imports are inside this guard so they load only when results exist.
+            if temporal_results.results:
+                from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+                from code_indexer.config_global import load_global_config
+                from code_indexer.services.cli_rerank_config_shim import (
+                    CliRerankConfigService,
+                )
+                from code_indexer.services.provider_health_monitor import (
+                    ProviderHealthMonitor,
+                )
+
+                _global_config = load_global_config()
+
+                # Resolve effective rerank query: explicit flag > auto-populate > None.
+                # Empty string is treated as "not provided" so auto-populate can fire.
+                _temporal_effective_rerank_query: Optional[str]
+                if rerank_query:
+                    _temporal_effective_rerank_query = rerank_query
+                elif _global_config.rerank.auto_populate_rerank_query:
+                    _temporal_effective_rerank_query = query
+                else:
+                    _temporal_effective_rerank_query = None
+
+                if _temporal_effective_rerank_query:
+                    _temporal_monitor = ProviderHealthMonitor.get_instance(
+                        persistence_path=_get_reranker_sinbin_path()
+                    )
+                    _temporal_shim = CliRerankConfigService(_global_config)
+
+                    # Convert TemporalSearchResult objects to FTS-shaped dicts so the
+                    # funnel's content extractor can read result text.  The original
+                    # object is stored under "_temporal_obj" for round-trip
+                    # reconstruction after reranking so no data is lost.
+                    _funnel_inputs = [
+                        {
+                            "snippet": r.content,
+                            "file_path": r.file_path,
+                            "score": r.score,
+                            "_temporal_obj": r,
+                        }
+                        for r in temporal_results.results
+                    ]
+
+                    _reranked_dicts = _apply_cli_rerank_and_filter(
+                        results=_funnel_inputs,
+                        rerank_query=_temporal_effective_rerank_query,
+                        rerank_instruction=rerank_instruction,
+                        config=_temporal_shim,
+                        user_limit=limit,
+                        health_monitor=_temporal_monitor,
+                    )
+
+                    # Reconstruct TemporalSearchResult list in reranked order.
+                    temporal_results.results = [
+                        d["_temporal_obj"] for d in _reranked_dicts
+                    ]
+
             # Keep a reference for display helpers that expect a temporal_service param
             temporal_service = TemporalSearchService(
                 config_manager=config_manager,
@@ -5383,6 +5609,43 @@ def query(
         search_mode = "fts"
     else:
         search_mode = "semantic"  # Default behavior
+
+    # Bundle 4 (Stories #694 + #904): hoisted init for rerank + embedder chain.
+    # Defined BEFORE search_mode dispatch so all sub-paths (FTS, hybrid, regex,
+    # semantic, temporal) reference the same global_config / cli_rerank_config /
+    # health_monitor / effective_rerank_query / primary_embedder / secondary_embedder.
+    from code_indexer.config_global import load_global_config
+    from code_indexer.services.cli_rerank_config_shim import CliRerankConfigService
+    from code_indexer.services.embedder_chain import (
+        EmbedderUnavailableError,
+        _run_embedder_chain,
+    )
+    from code_indexer.services.embedder_provider_resolver import (
+        _resolve_embedder_providers,
+    )
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+    global_config = load_global_config()
+
+    # Persistence path for sin-bin state: delegate to shared helper.
+    health_monitor = ProviderHealthMonitor.get_instance(
+        persistence_path=_get_reranker_sinbin_path()
+    )
+    cli_rerank_config = CliRerankConfigService(global_config)
+
+    # Resolve effective rerank_query (precedence: explicit flag > auto_populate > None).
+    # Empty string disables reranking explicitly (mirrors server guard).
+    effective_rerank_query: Optional[str]
+    if rerank_query is not None:
+        effective_rerank_query = rerank_query if rerank_query != "" else None
+    elif global_config.rerank.auto_populate_rerank_query:
+        effective_rerank_query = query
+    else:
+        effective_rerank_query = None
+
+    # Resolve embedder providers (primary, secondary) from environment.
+    # No-provider guard fires at the embedding call sites where the chain is invoked.
+    primary_embedder, secondary_embedder = _resolve_embedder_providers()
 
     # Validate --regex flag compatibility
     if regex:
@@ -5528,6 +5791,13 @@ def query(
             language_filter = languages[0] if languages else None
 
             # Define FTS search function for parallel execution
+            # Over-fetch when reranking so reranker has enough candidates.
+            _hybrid_fetch_limit = (
+                (limit * _RERANK_OVERFETCH_MULTIPLIER)
+                if effective_rerank_query
+                else limit
+            )
+
             def execute_fts():
                 try:
                     tantivy_manager = TantivyIndexManager(fts_index_dir)
@@ -5537,7 +5807,7 @@ def query(
                         case_sensitive=case_sensitive,
                         edit_distance=edit_distance,
                         snippet_lines=snippet_lines,
-                        limit=limit,
+                        limit=_hybrid_fetch_limit,
                         language_filter=language_filter,
                         path_filters=list(path_filter) if path_filter else None,
                         exclude_paths=list(exclude_paths) if exclude_paths else None,
@@ -5555,7 +5825,7 @@ def query(
                 semantic_future = executor.submit(
                     _execute_semantic_search,
                     query=query,
-                    limit=limit,
+                    limit=_hybrid_fetch_limit,
                     languages=languages,
                     exclude_languages=exclude_languages,
                     path_filter=path_filter,
@@ -5566,6 +5836,7 @@ def query(
                     project_root=project_root,
                     config_manager=ctx.obj["config_manager"],
                     console=console,
+                    file_extensions=file_extensions,
                 )
 
                 # Wait for BOTH to complete (parallel execution)
@@ -5580,6 +5851,27 @@ def query(
                 except Exception as e:
                     console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
                     semantic_results = []
+
+            # Story #694: apply reranker stage to each sub-list independently.
+            if effective_rerank_query:
+                from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+
+                fts_results = _apply_cli_rerank_and_filter(
+                    results=fts_results,
+                    rerank_query=effective_rerank_query,
+                    rerank_instruction=rerank_instruction,
+                    config=cli_rerank_config,
+                    user_limit=limit,
+                    health_monitor=health_monitor,
+                )
+                semantic_results = _apply_cli_rerank_and_filter(
+                    results=semantic_results,
+                    rerank_query=effective_rerank_query,
+                    rerank_instruction=rerank_instruction,
+                    config=cli_rerank_config,
+                    user_limit=limit,
+                    health_monitor=health_monitor,
+                )
 
             # Display hybrid results with clear separation (AC#2)
             _display_hybrid_results(
@@ -5607,12 +5899,18 @@ def query(
             try:
                 tantivy_manager = TantivyIndexManager(fts_index_dir)
                 tantivy_manager.initialize_index(create_new=False)
+                # Over-fetch when reranking so reranker has enough candidates.
+                _fts_fetch_limit = (
+                    (limit * _RERANK_OVERFETCH_MULTIPLIER)
+                    if effective_rerank_query
+                    else limit
+                )
                 fts_results = tantivy_manager.search(
                     query_text=query,
                     case_sensitive=case_sensitive,
                     edit_distance=edit_distance,
                     snippet_lines=snippet_lines,
-                    limit=limit,
+                    limit=_fts_fetch_limit,
                     languages=language_extensions,
                     path_filters=list(path_filter) if path_filter else None,
                     exclude_paths=list(exclude_paths) if exclude_paths else None,
@@ -5621,6 +5919,21 @@ def query(
                     ),
                     use_regex=regex,  # Pass regex flag
                 )
+
+                # Story #694: apply reranker stage if effective_rerank_query is set.
+                if effective_rerank_query:
+                    from code_indexer.cli_search_funnel import (
+                        _apply_cli_rerank_and_filter,
+                    )
+
+                    fts_results = _apply_cli_rerank_and_filter(
+                        results=fts_results,
+                        rerank_query=effective_rerank_query,
+                        rerank_instruction=rerank_instruction,
+                        config=cli_rerank_config,
+                        user_limit=limit,
+                        health_monitor=health_monitor,
+                    )
 
                 # Display results
                 _display_fts_results(fts_results, quiet=quiet, console=console)
@@ -6216,6 +6529,17 @@ def query(
                         {"key": "path", "match": {"text": path_filter[0]}}
                     )
 
+            # Story #906: --file-extensions wiring into filter_conditions_list.
+            # The "language" field IS cidx's file-extension field (test helper
+            # _must_extension_conditions matches c.get("key") == "language").
+            # Multiple extensions appended as DIRECT must-entries (cidx
+            # vector_store OR-merges multiple direct entries with same key).
+            # Composes with --language as INTERSECTION.
+            for ext in _parse_file_extensions(file_extensions):
+                filter_conditions_list.append(
+                    {"key": "language", "match": {"value": ext}}
+                )
+
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
                 {"must": filter_conditions_list} if filter_conditions_list else {}
@@ -6233,24 +6557,59 @@ def query(
             )
 
             if isinstance(vector_store_client, FilesystemVectorStore):
+                # Over-fetch when reranking so reranker has enough candidates (SHOULD-FIX 3).
+                _semantic_fetch_limit = (
+                    limit * _RERANK_OVERFETCH_MULTIPLIER
+                    if effective_rerank_query
+                    else limit * 2
+                )
                 # Use MultiIndexQueryService for unified query interface (supports multimodal)
                 raw_results, multi_index_timing = multi_index_service.query(
                     query_text=query,
-                    limit=limit * 2,  # Get more to account for post-filtering
+                    limit=_semantic_fetch_limit,
                     collection_name=collection_name,
                     filter_conditions=query_filter_conditions,
                 )
                 # Use multi-index timing from service
                 search_timing: Dict[str, Any] = multi_index_timing
             else:
-                # FilesystemVectorStore: pre-compute embedding (no parallel support yet)
-                query_embedding = embedding_provider.get_embedding(
-                    query, embedding_purpose="query"
+                # FilesystemVectorStore: pre-compute embedding via chain (Story #904).
+                if primary_embedder is None and secondary_embedder is None:
+                    console.print(
+                        "No embedding provider configured. "
+                        "Set VOYAGE_API_KEY or CO_API_KEY.",
+                        style="red",
+                    )
+                    sys.exit(1)
+                (
+                    _embed_vec,
+                    _embed_provider,
+                    _embed_failure,
+                    _embed_ms,
+                    _embed_outcomes,
+                ) = _run_embedder_chain(
+                    text=query,
+                    embedding_purpose="query",
+                    primary_provider=primary_embedder,
+                    secondary_provider=secondary_embedder,
+                    health_monitor=health_monitor,
+                )
+                if _embed_vec is None:
+                    raise EmbedderUnavailableError(
+                        f"Both embedding providers unavailable: {_embed_failure}",
+                        providers_attempted=_embed_outcomes,
+                    )
+                query_embedding = _embed_vec
+                # Over-fetch when reranking so reranker has enough candidates (SHOULD-FIX 3).
+                _semantic_fetch_limit2 = (
+                    limit * _RERANK_OVERFETCH_MULTIPLIER
+                    if effective_rerank_query
+                    else limit * 2
                 )
                 raw_results_list = vector_store_client.search(
                     query_vector=query_embedding,
                     filter_conditions=query_filter_conditions,
-                    limit=limit * 2,
+                    limit=_semantic_fetch_limit2,
                     collection_name=collection_name,
                 )
                 raw_results = raw_results_list  # Type compatibility
@@ -6304,11 +6663,34 @@ def query(
                 search_timing = multi_index_timing
                 timing_info.update(search_timing)
             else:
-                # Filesystem backend: pre-compute embedding
+                # Filesystem backend: pre-compute embedding via chain (Story #904).
+                if primary_embedder is None and secondary_embedder is None:
+                    console.print(
+                        "No embedding provider configured. "
+                        "Set VOYAGE_API_KEY or CO_API_KEY.",
+                        style="red",
+                    )
+                    sys.exit(1)
                 search_start = time.time()
-                query_embedding = embedding_provider.get_embedding(
-                    query, embedding_purpose="query"
+                (
+                    _embed_vec2,
+                    _embed_provider2,
+                    _embed_failure2,
+                    _embed_ms2,
+                    _embed_outcomes2,
+                ) = _run_embedder_chain(
+                    text=query,
+                    embedding_purpose="query",
+                    primary_provider=primary_embedder,
+                    secondary_provider=secondary_embedder,
+                    health_monitor=health_monitor,
                 )
+                if _embed_vec2 is None:
+                    raise EmbedderUnavailableError(
+                        f"Both embedding providers unavailable: {_embed_failure2}",
+                        providers_attempted=_embed_outcomes2,
+                    )
+                query_embedding = _embed_vec2
                 raw_results_list = vector_store_client.search_with_model_filter(
                     query_vector=query_embedding,
                     embedding_model=current_model,
@@ -6328,8 +6710,21 @@ def query(
             git_results = query_service.filter_results_by_current_branch(raw_results)  # type: ignore[arg-type]
             timing_info["git_filter_ms"] = (time.time() - git_filter_start) * 1000
 
-        # Limit to requested number after filtering
+        # Limit to requested number after filtering (over-fetched earlier for rerank)
         results = git_results[:limit]
+
+        # Story #694: apply reranker stage if effective_rerank_query is set.
+        if effective_rerank_query:
+            from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+
+            results = _apply_cli_rerank_and_filter(
+                results=results,
+                rerank_query=effective_rerank_query,
+                rerank_instruction=rerank_instruction,
+                config=cli_rerank_config,
+                user_limit=limit,
+                health_monitor=health_monitor,
+            )
 
         # Apply staleness detection to local query results
         if results:
@@ -6378,27 +6773,17 @@ def query(
                     time.time() - staleness_start
                 ) * 1000
 
-                # Convert enhanced results back to local format but preserve staleness info
-                enhanced_local_results = []
-                for enhanced in enhanced_results:
-                    # Find corresponding original result
-                    original = next(
-                        r
-                        for r in results
-                        if r["payload"].get("path") == enhanced.file_path
-                    )
-
-                    # Add staleness metadata to the result
-                    enhanced_result = original.copy()
-                    enhanced_result["staleness"] = {
-                        "is_stale": enhanced.is_stale,
-                        "staleness_indicator": enhanced.staleness_indicator,
-                        "staleness_delta_seconds": enhanced.staleness_delta_seconds,
-                    }
-                    enhanced_local_results.append(enhanced_result)
-
-                # Replace results with staleness-enhanced results
-                results = enhanced_local_results
+                # Annotate results with staleness detection metadata.
+                # When a reranker was applied (effective_rerank_query is set),
+                # pass preserve_order=True so _annotate_staleness iterates
+                # `results` (reranked order) and does not clobber it with the
+                # staleness-sort that apply_staleness_detection uses internally
+                # (bug #965).  Without a reranker, fresh results sort first.
+                results = _annotate_staleness(
+                    results,
+                    enhanced_results,
+                    preserve_order=bool(effective_rerank_query),
+                )
 
             except Exception as e:
                 # Graceful fallback - continue with original results if staleness detection fails
@@ -6415,6 +6800,15 @@ def query(
             timing_info=timing_info,
             current_display_branch=current_display_branch,
         )
+
+    except EmbedderUnavailableError as e:
+        # Story #904: clean user-facing message when all embedding providers are down.
+        console.print(
+            f"❌ Embedding unavailable: {e}",
+            style="red",
+            markup=False,
+        )
+        sys.exit(1)
 
     except Exception as e:
         console.print(f"❌ Search failed: {e}", style="red", markup=False)
@@ -14075,16 +14469,23 @@ def admin_users_create(
 
         # Create admin client and create user
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
         with console.status("👤 Creating user account..."):
-            user_response = run_async(
-                admin_client.create_user(
-                    username=username, password=password, role=role
-                )
+            user_response = with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.create_user(
+                        username=username, password=password, role=role
+                    )
+                ),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
             )
 
         # Close the client
@@ -14233,14 +14634,21 @@ def admin_users_list(ctx, limit: int, offset: int, json_output: bool):
 
         # Create admin client and list users
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
         with console.status("👥 Retrieving user list..."):
-            users_response = run_async(
-                admin_client.list_users(limit=limit, offset=offset)
+            users_response = with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.list_users(limit=limit, offset=offset)
+                ),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
             )
 
         # Close the client
@@ -14420,13 +14828,20 @@ def admin_users_show(ctx, username: str, json_output: bool):
 
         # Create admin client and get user
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
         with console.status(f"👤 Retrieving user '{username}'..."):
-            user_response = run_async(admin_client.get_user(username))
+            user_response = with_elevation_retry(
+                fn=lambda: run_async(admin_client.get_user(username)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
         # Close the client
         admin_client.close()
@@ -14572,6 +14987,7 @@ def admin_users_update(ctx, username: str, role: str, json_output: bool):
 
         # Create admin client
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
@@ -14612,7 +15028,13 @@ def admin_users_update(ctx, username: str, role: str, json_output: bool):
             pass
 
         with console.status(f"🔄 Updating user '{username}' role to '{role}'..."):
-            run_async(admin_client.update_user(username, role))
+            with_elevation_retry(
+                fn=lambda: run_async(admin_client.update_user(username, role)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
         # Close the client
         admin_client.close()
@@ -14790,13 +15212,20 @@ def admin_users_delete(ctx, username: str, force: bool, json_output: bool):
 
         # Create admin client and delete user
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=server_url, credentials=credentials, project_root=project_root
         )
 
         with console.status(f"🗑️  Deleting user '{username}'..."):
-            run_async(admin_client.delete_user(username))
+            with_elevation_retry(
+                fn=lambda: run_async(admin_client.delete_user(username)),
+                session=admin_client.session,
+                server_url=server_url,
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
         # Close the client
         admin_client.close()
@@ -14958,6 +15387,7 @@ def admin_users_change_password(
 
         # Create admin client
         from .api_clients.admin_client import AdminAPIClient
+        from .api_clients.elevation import with_elevation_retry
 
         admin_client = AdminAPIClient(
             server_url=remote_config["server_url"],
@@ -14986,7 +15416,15 @@ def admin_users_change_password(
                     sys.exit(0)
 
             # Change the password
-            run_async(admin_client.change_user_password(username, password))
+            with_elevation_retry(
+                fn=lambda: run_async(
+                    admin_client.change_user_password(username, password)
+                ),
+                session=admin_client.session,
+                server_url=remote_config["server_url"],
+                token=admin_client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             # Handle JSON output
             if json_output:
@@ -17079,6 +17517,7 @@ def admin_groups_list(ctx, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17111,7 +17550,13 @@ def admin_groups_list(ctx, json_output: bool):
         )
 
         try:
-            result = run_async(client.list_groups())
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.list_groups()),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
             groups = result.get("groups", [])
 
             if json_output:
@@ -17159,6 +17604,7 @@ def admin_groups_create(ctx, name: str, description: str, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17191,7 +17637,15 @@ def admin_groups_create(ctx, name: str, description: str, json_output: bool):
         )
 
         try:
-            result = run_async(client.create_group(name=name, description=description))
+            result = with_elevation_retry(
+                fn=lambda: run_async(
+                    client.create_group(name=name, description=description)
+                ),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True, **result}, indent=2))
@@ -17224,6 +17678,7 @@ def admin_groups_show(ctx, group_id: int, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17256,7 +17711,13 @@ def admin_groups_show(ctx, group_id: int, json_output: bool):
         )
 
         try:
-            result = run_async(client.get_group(group_id))
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.get_group(group_id)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True, **result}, indent=2))
@@ -17298,6 +17759,7 @@ def admin_groups_update(
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17341,7 +17803,15 @@ def admin_groups_update(
         )
 
         try:
-            run_async(client.update_group(group_id, name=name, description=description))
+            with_elevation_retry(
+                fn=lambda: run_async(
+                    client.update_group(group_id, name=name, description=description)
+                ),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True}, indent=2))
@@ -17374,6 +17844,7 @@ def admin_groups_delete(ctx, group_id: int, confirm: bool, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17406,7 +17877,13 @@ def admin_groups_delete(ctx, group_id: int, confirm: bool, json_output: bool):
         )
 
         try:
-            run_async(client.delete_group(group_id))
+            with_elevation_retry(
+                fn=lambda: run_async(client.delete_group(group_id)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True}, indent=2))
@@ -17437,6 +17914,7 @@ def admin_groups_add_member(ctx, group_id: int, user: str, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17469,7 +17947,13 @@ def admin_groups_add_member(ctx, group_id: int, user: str, json_output: bool):
         )
 
         try:
-            run_async(client.add_member(group_id, user_id=user))
+            with_elevation_retry(
+                fn=lambda: run_async(client.add_member(group_id, user_id=user)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True}, indent=2))
@@ -17500,6 +17984,7 @@ def admin_groups_add_repos(ctx, group_id: int, repos: str, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17540,7 +18025,13 @@ def admin_groups_add_repos(ctx, group_id: int, repos: str, json_output: bool):
         )
 
         try:
-            result = run_async(client.add_repos(group_id, repo_names=repo_names))
+            result = with_elevation_retry(
+                fn=lambda: run_async(client.add_repos(group_id, repo_names=repo_names)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
             added = result.get("added_count", 0)
 
             if json_output:
@@ -17576,6 +18067,7 @@ def admin_groups_remove_repo(ctx, group_id: int, repo: str, json_output: bool):
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17608,7 +18100,13 @@ def admin_groups_remove_repo(ctx, group_id: int, repo: str, json_output: bool):
         )
 
         try:
-            run_async(client.remove_repo(group_id, repo_name=repo))
+            with_elevation_retry(
+                fn=lambda: run_async(client.remove_repo(group_id, repo_name=repo)),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
 
             if json_output:
                 print(json_module.dumps({"success": True}, indent=2))
@@ -17641,6 +18139,7 @@ def admin_groups_remove_repos(ctx, group_id: int, repos: str, json_output: bool)
     from .remote.config import load_remote_configuration
     from .remote.sync_execution import _load_and_decrypt_credentials
     from .api_clients.group_client import GroupAPIClient
+    from .api_clients.elevation import with_elevation_retry
 
     console = Console()
     project_root = find_project_root(Path.cwd())
@@ -17681,7 +18180,15 @@ def admin_groups_remove_repos(ctx, group_id: int, repos: str, json_output: bool)
         )
 
         try:
-            result = run_async(client.remove_repos(group_id, repo_names=repo_names))
+            result = with_elevation_retry(
+                fn=lambda: run_async(
+                    client.remove_repos(group_id, repo_names=repo_names)
+                ),
+                session=client.session,
+                server_url=server_url,
+                token=client._get_valid_token(),
+                prompt_totp=lambda: click.prompt("Enter your TOTP code to elevate"),
+            )
             removed = result.get("removed_count", 0)
 
             if json_output:

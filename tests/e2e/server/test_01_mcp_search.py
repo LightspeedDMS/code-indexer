@@ -119,7 +119,7 @@ SEARCH_TOOLS: list[tuple[str, str, JsonArgs]] = [
 @pytest.mark.parametrize(
     PARAMETRIZE_FIELDS,
     SEARCH_TOOLS,
-    ids=[t[TOOL_LABEL_INDEX] for t in SEARCH_TOOLS],
+    ids=[str(t[TOOL_LABEL_INDEX]) for t in SEARCH_TOOLS],
 )
 def test_mcp_search_tool(
     label: str,

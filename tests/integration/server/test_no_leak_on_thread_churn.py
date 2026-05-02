@@ -196,9 +196,9 @@ def _wait_until(
     while True:
         result = predicate()
         if result:
-            return result
+            return bool(result)
         if time.monotonic() >= deadline:
-            return result
+            return bool(result)
         time.sleep(interval)
 
 

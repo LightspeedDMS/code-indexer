@@ -777,28 +777,41 @@ class TestEmbeddingPurposeQueryBug598:
     def test_cli_git_aware_non_filesystem_path_passes_embedding_purpose_query(
         self, tmp_path
     ):
-        """cli.py ~line 6417: git-aware non-FilesystemVectorStore branch must pass embedding_purpose='query'.
+        """cli.py ~line 6516: git-aware non-FilesystemVectorStore branch must pass embedding_purpose='query'.
 
-        When is_git_available()=True and vector_store is not a FilesystemVectorStore,
-        the else branch calls embedding_provider.get_embedding(query) — which must
-        include embedding_purpose='query'.
+        Production (Story #904) now calls _run_embedder_chain(text=query,
+        embedding_purpose='query', primary_provider=..., secondary_provider=...,
+        health_monitor=...) instead of embedding_provider.get_embedding(query).
+        We patch _resolve_embedder_providers and _run_embedder_chain to intercept
+        the chain call and verify embedding_purpose='query' is forwarded.
         """
         from click.testing import CliRunner
         from code_indexer.cli import cli
 
-        embed_mock, captured_calls = _make_capturing_embed_mock()
+        embed_mock, _unused_captured = _make_capturing_embed_mock()
         vector_store = _build_non_filesystem_vector_store()
         mocks = _make_cli_mocks(
             is_git=True, vector_store=vector_store, codebase_dir=tmp_path
         )
+
+        chain_calls: list = []
+
+        def capturing_chain(**kwargs):
+            chain_calls.append(kwargs)
+            # Return a valid 5-tuple: (vector, provider_name, failure, elapsed_ms, outcomes)
+            return (_DUMMY_EMBED_VECTOR, "cohere", None, 10, [])
 
         runner = CliRunner()
         with (
             patch("code_indexer.cli.ConfigManager") as mock_cfg_cls,
             patch("code_indexer.cli.BackendFactory.create") as mock_backend_cls,
             patch(
-                "code_indexer.cli.EmbeddingProviderFactory.create",
-                return_value=embed_mock,
+                "code_indexer.services.embedder_provider_resolver._resolve_embedder_providers",
+                return_value=(embed_mock, None),
+            ),
+            patch(
+                "code_indexer.services.embedder_chain._run_embedder_chain",
+                side_effect=capturing_chain,
             ),
             patch(
                 "code_indexer.services.git_topology_service.GitTopologyService",
@@ -813,15 +826,13 @@ class TestEmbeddingPurposeQueryBug598:
             mock_backend_cls.return_value = mocks["backend_instance"]
             runner.invoke(cli, ["query", "find auth code", "--quiet"])
 
-        query_calls = [c for c in captured_calls if c["text"] == "find auth code"]
+        query_calls = [c for c in chain_calls if c.get("text") == "find auth code"]
         assert len(query_calls) >= 1, (
-            f"get_embedding must be called with the query text. "
-            f"All captured calls: {captured_calls}"
+            f"_run_embedder_chain must be called with the query text. "
+            f"All captured chain calls: {chain_calls}"
         )
-        assert all(
-            c["kwargs"].get("embedding_purpose") == "query" for c in query_calls
-        ), (
-            f"Expected embedding_purpose='query' in all query calls. "
+        assert all(c.get("embedding_purpose") == "query" for c in query_calls), (
+            f"Expected embedding_purpose='query' in all chain calls. "
             f"Actual: {query_calls}. "
             "Bug #598: cli.py git-aware non-FilesystemVectorStore path must pass embedding_purpose='query'."
         )
@@ -829,28 +840,41 @@ class TestEmbeddingPurposeQueryBug598:
     def test_cli_non_git_non_filesystem_path_passes_embedding_purpose_query(
         self, tmp_path
     ):
-        """cli.py ~line 6485: non-git non-FilesystemVectorStore branch must pass embedding_purpose='query'.
+        """cli.py ~line 6607: non-git non-FilesystemVectorStore branch must pass embedding_purpose='query'.
 
-        When is_git_available()=False and vector_store is not a FilesystemVectorStore,
-        the else branch calls embedding_provider.get_embedding(query) — which must
-        include embedding_purpose='query'.
+        Production (Story #904) now calls _run_embedder_chain(text=query,
+        embedding_purpose='query', primary_provider=..., secondary_provider=...,
+        health_monitor=...) instead of embedding_provider.get_embedding(query).
+        We patch _resolve_embedder_providers and _run_embedder_chain to intercept
+        the chain call and verify embedding_purpose='query' is forwarded.
         """
         from click.testing import CliRunner
         from code_indexer.cli import cli
 
-        embed_mock, captured_calls = _make_capturing_embed_mock()
+        embed_mock, _unused_captured = _make_capturing_embed_mock()
         vector_store = _build_non_filesystem_vector_store()
         mocks = _make_cli_mocks(
             is_git=False, vector_store=vector_store, codebase_dir=tmp_path
         )
+
+        chain_calls: list = []
+
+        def capturing_chain(**kwargs):
+            chain_calls.append(kwargs)
+            # Return a valid 5-tuple: (vector, provider_name, failure, elapsed_ms, outcomes)
+            return (_DUMMY_EMBED_VECTOR, "cohere", None, 10, [])
 
         runner = CliRunner()
         with (
             patch("code_indexer.cli.ConfigManager") as mock_cfg_cls,
             patch("code_indexer.cli.BackendFactory.create") as mock_backend_cls,
             patch(
-                "code_indexer.cli.EmbeddingProviderFactory.create",
-                return_value=embed_mock,
+                "code_indexer.services.embedder_provider_resolver._resolve_embedder_providers",
+                return_value=(embed_mock, None),
+            ),
+            patch(
+                "code_indexer.services.embedder_chain._run_embedder_chain",
+                side_effect=capturing_chain,
             ),
             patch(
                 "code_indexer.services.git_topology_service.GitTopologyService",
@@ -865,15 +889,13 @@ class TestEmbeddingPurposeQueryBug598:
             mock_backend_cls.return_value = mocks["backend_instance"]
             runner.invoke(cli, ["query", "find auth code", "--quiet"])
 
-        query_calls = [c for c in captured_calls if c["text"] == "find auth code"]
+        query_calls = [c for c in chain_calls if c.get("text") == "find auth code"]
         assert len(query_calls) >= 1, (
-            f"get_embedding must be called with the query text. "
-            f"All captured calls: {captured_calls}"
+            f"_run_embedder_chain must be called with the query text. "
+            f"All captured chain calls: {chain_calls}"
         )
-        assert all(
-            c["kwargs"].get("embedding_purpose") == "query" for c in query_calls
-        ), (
-            f"Expected embedding_purpose='query' in all query calls. "
+        assert all(c.get("embedding_purpose") == "query" for c in query_calls), (
+            f"Expected embedding_purpose='query' in all chain calls. "
             f"Actual: {query_calls}. "
             "Bug #598: cli.py non-git non-FilesystemVectorStore path must pass embedding_purpose='query'."
         )
@@ -965,6 +987,7 @@ class TestCohereExponentialBackoffFlagBug603:
 
     def test_exponential_backoff_false_uses_flat_delay_on_5xx(self, cohere_provider):
         """When exponential_backoff=False, all 5xx retry sleeps must use the same fixed delay."""
+        import threading
         from unittest.mock import MagicMock, patch
 
         cohere_provider.config.exponential_backoff = False
@@ -986,9 +1009,17 @@ class TestCohereExponentialBackoffFlagBug603:
             mock_response_ok,
         ]
 
+        # Filter sleep_calls to this thread only — leaked daemons (e.g. daemon/cache.py
+        # check loop with time.sleep(60)) would otherwise pollute the captures.
+        test_tid = threading.get_ident()
         sleep_calls = []
+
+        def _capture_if_test_thread(s):
+            if threading.get_ident() == test_tid:
+                sleep_calls.append(s)
+
         with patch("httpx.Client", mock_client_cls):
-            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("time.sleep", side_effect=_capture_if_test_thread):
                 cohere_provider._make_sync_request(["test"])
 
         assert len(sleep_calls) >= 2, (
@@ -1004,6 +1035,7 @@ class TestCohereExponentialBackoffFlagBug603:
         self, cohere_provider
     ):
         """When exponential_backoff=True, successive 5xx retry sleeps must increase."""
+        import threading
         from unittest.mock import MagicMock, patch
 
         cohere_provider.config.exponential_backoff = True
@@ -1025,9 +1057,17 @@ class TestCohereExponentialBackoffFlagBug603:
             mock_response_ok,
         ]
 
+        # Filter sleep_calls to this thread only — leaked daemons (e.g. daemon/cache.py
+        # check loop with time.sleep(60)) would otherwise pollute the captures.
+        test_tid = threading.get_ident()
         sleep_calls = []
+
+        def _capture_if_test_thread(s):
+            if threading.get_ident() == test_tid:
+                sleep_calls.append(s)
+
         with patch("httpx.Client", mock_client_cls):
-            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+            with patch("time.sleep", side_effect=_capture_if_test_thread):
                 cohere_provider._make_sync_request(["test"])
 
         assert len(sleep_calls) >= 2, (

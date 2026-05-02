@@ -99,6 +99,7 @@ class TestIDIndexManagerBinary:
             == self.temp_dir / "vectors" / "αρχείο.json"
         )
 
+    @pytest.mark.slow
     def test_large_index_performance(self):
         """Test performance with large index (1000+ entries)."""
         # Given: Large ID index

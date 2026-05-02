@@ -25,13 +25,22 @@ def client():
 
 @pytest.fixture
 def authenticated_client():
-    """Create test client with mocked admin authentication."""
+    """Create test client with mocked admin authentication and localhost bypass.
+
+    Story #924 added require_localhost to the enter/exit endpoints so they can
+    only be called from loopback (auto-updater driven). TestClient does not
+    originate from a loopback address, so the dependency is overridden with a
+    no-op to allow unit tests to reach the handler.
+    """
     from datetime import datetime, timezone
     from code_indexer.server.services.maintenance_service import (
         _reset_maintenance_state,
     )
     from code_indexer.server.auth.user_manager import User, UserRole
-    from code_indexer.server.auth.dependencies import get_current_admin_user
+    from code_indexer.server.auth.dependencies import (
+        get_current_admin_user,
+        require_localhost,
+    )
     from code_indexer.server.app import app
 
     _reset_maintenance_state()
@@ -44,6 +53,9 @@ def authenticated_client():
     )
 
     app.dependency_overrides[get_current_admin_user] = lambda: admin_user
+    # Override the loopback restriction — TestClient is not loopback and these
+    # unit tests cover handler logic, not the network restriction policy.
+    app.dependency_overrides[require_localhost] = lambda: None
 
     yield TestClient(app)
 

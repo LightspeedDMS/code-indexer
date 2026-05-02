@@ -17,6 +17,11 @@ Cleanup paths explicitly handle ``run_cidx`` return values: they assert
 success or accept only the documented "already gone" failure mode to avoid
 silent discard of unexpected errors.
 
+NOTE (Story #980): All tests in this module are active. The CLI supports
+TOTP step-up elevation via with_elevation_retry(). In the E2E test environment
+elevation_enforcement_enabled is typically False, so admin user endpoints
+are accessible without TOTP challenge (server returns 503-disabled passthrough).
+
 Test functions (6):
   test_admin_users_create          -- create a new user account (self-contained)
   test_admin_users_list            -- list users, verify created user visible
@@ -45,7 +50,7 @@ def _make_policy_password(length: int = 16) -> str:
 
     Policy requires at least one uppercase, lowercase, digit, and special
     character, with minimum length 12. uuid.uuid4().hex produces only
-    lowercase hex — rejected. Bug #752 follow-up.
+    lowercase hex -- rejected. Bug #752 follow-up.
     """
     if length < 12:
         raise ValueError(f"length must be at least 12 per server policy, got {length}")
@@ -112,7 +117,7 @@ def _delete_user_best_effort(
 
 
 # ---------------------------------------------------------------------------
-# Module-scoped fixture: creates a test user and yields (username, password)
+# Module-scoped fixture: skipped pending Story #925 CLI elevation support
 # ---------------------------------------------------------------------------
 
 
@@ -121,16 +126,11 @@ def created_user(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
 ) -> Generator[tuple[str, str], None, None]:
-    """Create a test user, yield (username, password), then delete on teardown.
-
-    Passwords are generated at runtime to avoid hardcoding credentials in source.
-    Teardown uses ``_delete_user_best_effort`` to handle explicit error modes
-    rather than silently ignoring the cleanup result.
-    """
+    """Create a test user and yield (username, password). Delete on teardown."""
     username = f"e2euser_{uuid.uuid4().hex[:8]}"
-    password = _make_policy_password()  # random, satisfies basic length requirements
+    password = _make_policy_password()
 
-    create_result = run_cidx(
+    result = run_cidx(
         "admin",
         "users",
         "create",
@@ -140,15 +140,13 @@ def created_user(
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
-    assert create_result.returncode == 0, (
-        f"created_user fixture: cidx admin users create failed "
-        f"(rc={create_result.returncode}):\n"
-        f"stdout: {create_result.stdout}\nstderr: {create_result.stderr}"
+    assert result.returncode == 0, (
+        f"created_user fixture: cidx admin users create {username} failed "
+        f"(rc={result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
     yield username, password
 
-    # Teardown: delete the user with explicit error handling (not silent discard)
     _delete_user_best_effort(
         username,
         authenticated_workspace,
@@ -158,7 +156,7 @@ def created_user(
 
 
 # ---------------------------------------------------------------------------
-# Admin user tests
+# Admin user tests (all skipped pending Story #925 CLI elevation support)
 # ---------------------------------------------------------------------------
 
 
@@ -185,7 +183,6 @@ def test_admin_users_create(
     )
     _assert_ok(result, f"cidx admin users create {username}")
 
-    # Cleanup: explicitly handle return value, not silent discard
     _delete_user_best_effort(
         username,
         authenticated_workspace,
@@ -210,11 +207,9 @@ def test_admin_users_list(
     )
     _assert_ok(result, "cidx admin users list")
     assert result.stdout.strip(), "cidx admin users list returned empty output"
-    # The fixture-created username must appear in the listing
     assert username in result.stdout, (
         f"Expected '{username}' in users list output but got:\n{result.stdout}"
     )
-    # The admin user is always present
     assert "admin" in result.stdout.lower(), (
         f"Expected 'admin' in users list output but got:\n{result.stdout}"
     )
@@ -268,7 +263,7 @@ def test_admin_users_change_password(
 ) -> None:
     """cidx admin users change-password <username> --password <new> exits 0."""
     username, _ = created_user
-    new_password = _make_policy_password()  # policy-compliant; no hardcoded credentials
+    new_password = _make_policy_password()
 
     result = run_cidx(
         "admin",

@@ -31,7 +31,34 @@ from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
 
+# Story #848: lazy server imports for Pass 2 CliDispatcher wiring.
+# These are None in pure CLI contexts (no server package) and populated when
+# the server package is available.  Importing at module level (not inside the
+# method) makes them patchable by unit tests via
+#   patch("code_indexer.global_repos.dependency_map_analyzer.get_config_service")
+try:
+    from code_indexer.server.services.config_service import get_config_service
+    from code_indexer.server.services.cli_dispatcher import CliDispatcher
+    from code_indexer.server.services.claude_invoker import ClaudeInvoker
+    from code_indexer.server.services.codex_invoker import CodexInvoker
+    from code_indexer.server.services.codex_mcp_auth_header_provider import (
+        build_codex_mcp_auth_header_provider,
+    )
+    from code_indexer.server.services.dep_map_dispatcher_factory import (
+        build_dep_map_dispatcher,
+    )
+except ImportError:  # pragma: no cover — server package absent in pure CLI context
+    # Caller guards against None before any of these are used; CLI paths never reach
+    # the Codex/server integration code below.
+    get_config_service = None  # type: ignore[assignment]
+    CliDispatcher = None  # type: ignore[assignment]
+    ClaudeInvoker = None  # type: ignore[assignment]
+    CodexInvoker = None  # type: ignore[assignment]
+    build_codex_mcp_auth_header_provider = None  # type: ignore[assignment]  # Callable[[], str] | None; CLI paths never call this
+    build_dep_map_dispatcher = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
 
 # Bug #838: journal hook constants.
 # Maximum characters for the tool-input preview appended to **claude-tool** entries.
@@ -215,6 +242,7 @@ class DependencyMapAnalyzer:
         pass_timeout: int,
         mcp_registration_service=None,
         analysis_model: str = "opus",
+        cli_dispatcher=None,
     ):
         """
         Initialize dependency map analyzer.
@@ -225,12 +253,31 @@ class DependencyMapAnalyzer:
             pass_timeout: Timeout in seconds for each pass (Pass 2 uses full, others use half)
             mcp_registration_service: MCPSelfRegistrationService for auto-registering CIDX as MCP server
             analysis_model: Claude model to use ("opus" or "sonnet", default: "opus")
+            cli_dispatcher: Optional CliDispatcher instance (Story #848).
+                When provided, Pass 2 routes through this dispatcher instead of
+                building one from config. Primarily used to inject a mock dispatcher
+                for deterministic behaviour in tests.
         """
         self.golden_repos_root = Path(golden_repos_root)
         self.cidx_meta_path = Path(cidx_meta_path)
         self.pass_timeout = pass_timeout
         self._mcp_registration_service = mcp_registration_service
         self.analysis_model = analysis_model
+        self._cli_dispatcher = cli_dispatcher
+        # HIGH #3 (Story #848): lazy cache for the built dispatcher so
+        # _invoke_pass2_dispatcher constructs CliDispatcher only once per
+        # analyzer instance lifetime instead of on every Pass 2 call.
+        self._cached_pass2_dispatcher = None
+        # Bug #936: same lazy-cache pattern for Pass 1 dispatcher.
+        self._cached_pass1_dispatcher = None
+        # Bug #936: lazy-cache for Pass 3 dispatcher.
+        self._cached_pass3_dispatcher = None
+        # Bug #936: lazy-cache for remaining per-method dispatchers.
+        self._cached_delta_merge_dispatcher = None
+        self._cached_new_domain_dispatcher = None
+        self._cached_domain_discovery_dispatcher = None
+        self._cached_refinement_dispatcher = None
+        self._cached_verification_dispatcher = None
 
     def generate_claude_md(self, repo_list: List[Dict[str, Any]]) -> None:
         """
@@ -452,16 +499,16 @@ class DependencyMapAnalyzer:
         prompt += "\nAny domain containing repos not in this list will be rejected by validation.\n"
         prompt += f"\nCOMPLETENESS CHECK: Your output must contain exactly {len(repo_list)} repos total across all domains.\n\n"
 
-        # Invoke Claude CLI (Pass 1 explores all repos to identify domains and outputs JSON)
+        # Invoke via dispatcher (Bug #936: routes through CliDispatcher so
+        # codex_weight governs CLI selection for Pass 1, same as Pass 2).
         timeout = (
             self.pass_timeout
         )  # Pass 1 uses full timeout (heaviest phase: explores all repos)
-        result = self._invoke_claude_cli(
+        result = self._invoke_pass1_dispatcher(
             prompt,
             timeout,
-            max_turns,
-            allowed_tools=None,
             dangerously_skip_permissions=True,
+            max_turns=max_turns,
         )
 
         # ── Canary failure fast-path ──
@@ -528,12 +575,11 @@ class DependencyMapAnalyzer:
                 "Fix any errors and re-validate until the file contains valid JSON.\n\n"
                 + prompt
             )
-            result = self._invoke_claude_cli(
+            result = self._invoke_pass1_dispatcher(
                 retry_prompt,
                 timeout,
-                max_turns,
-                allowed_tools=None,
                 dangerously_skip_permissions=True,
+                max_turns=max_turns,
             )
 
             if pass1_file.exists():
@@ -1123,6 +1169,331 @@ Rules:
 
         return prompt
 
+    # ========================================================================
+    # Bug #936: CliDispatcher wiring for Pass 1 (Domain Discovery)
+    # ========================================================================
+
+    def _build_pass1_dispatcher(self):
+        """Build a CliDispatcher for Pass 1 from current ServerConfig (Bug #936).
+
+        Delegates to build_dep_map_dispatcher, passing analysis_model as keyword.
+        Returns a fully initialised CliDispatcher (Claude-only when Codex unavailable).
+        """
+        from code_indexer.server.services.dep_map_dispatcher_factory import (
+            build_dep_map_dispatcher,
+        )
+
+        config = get_config_service().get_config()
+        return build_dep_map_dispatcher(config, analysis_model=self.analysis_model)
+
+    def _get_pass1_dispatcher(self):
+        """Return the active Pass 1 CliDispatcher, building and caching lazily."""
+        if self._cli_dispatcher is not None:
+            return self._cli_dispatcher
+        if self._cached_pass1_dispatcher is None:
+            self._cached_pass1_dispatcher = self._build_pass1_dispatcher()
+        return self._cached_pass1_dispatcher
+
+    def _invoke_pass1_dispatcher(
+        self,
+        prompt: str,
+        timeout: int,
+        dangerously_skip_permissions: bool = False,
+        max_turns: int = 0,
+    ) -> str:
+        """Invoke CliDispatcher for Pass 1 domain discovery (Bug #936).
+
+        Validates prompt (non-empty str), timeout (positive int), and
+        max_turns (int >= 0).
+        dangerously_skip_permissions accepted for API parity; not forwarded to Codex.
+        Logs INFO when failover fires. Returns result.output as str.
+
+        Args:
+            prompt:                        Prompt text (non-empty str).
+            timeout:                       Hard timeout seconds (positive int).
+            dangerously_skip_permissions:  Accepted for API parity; not forwarded.
+            max_turns:                     When > 0, passed to dispatcher to enable
+                                           agentic mode.  Must be int >= 0.
+                                           Default 0 = single-shot.
+
+        Raises:
+            ValueError: If prompt is empty/non-str, timeout is not a positive int,
+                        or max_turns is not a non-negative int.
+        """
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError(
+                f"_invoke_pass1_dispatcher: prompt must be non-empty str, got {prompt!r}"
+            )
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError(
+                f"_invoke_pass1_dispatcher: timeout must be positive int, got {timeout!r}"
+            )
+        if (
+            not isinstance(max_turns, int)
+            or isinstance(max_turns, bool)
+            or max_turns < 0
+        ):
+            raise ValueError(
+                f"_invoke_pass1_dispatcher: max_turns must be int >= 0, got {max_turns!r}"
+            )
+        result = self._get_pass1_dispatcher().dispatch(
+            flow="dependency_map_pass_1",
+            cwd=str(self.golden_repos_root),
+            prompt=prompt,
+            timeout=timeout,
+            max_turns=max_turns,
+        )
+        if result.was_failover:
+            logger.info(
+                "Pass 1 CLI failover fired: cli_used=%s was_failover=True",
+                result.cli_used,
+            )
+        return str(result.output)
+
+    # Story #848: CliDispatcher wiring for Pass 2 (Domain Refinement)
+    # ========================================================================
+
+    def _build_pass2_dispatcher(self):
+        """Build a CliDispatcher for Pass 2 from current ServerConfig (Story #848).
+
+        Delegates to build_dep_map_dispatcher, passing analysis_model as keyword.
+        Returns a fully initialised CliDispatcher (Claude-only when Codex unavailable).
+        """
+        config = get_config_service().get_config()
+        return build_dep_map_dispatcher(config, analysis_model=self.analysis_model)
+
+    def _invoke_pass2_dispatcher(self, prompt: str, timeout: int) -> str:
+        """
+        Invoke the CliDispatcher for Pass 2 domain refinement (Story #848).
+
+        Uses the injected CliDispatcher when available; otherwise builds one
+        from the current ServerConfig on each call.  Logs an INFO record when
+        failover fired so operators can see which CLI handled the job.
+
+        # PostToolUse hooks fire only for the Bash tool in Codex, not for MCP tools.
+        # The turn-count escalation logic (--settings PostToolUse JSON) is therefore
+        # not supported on the Codex path. This is a known degradation accepted by
+        # the user. See: https://github.com/openai/codex/issues/16732
+
+        Args:
+            prompt: Full prompt text for Pass 2 domain analysis.
+            timeout: Hard timeout seconds for the subprocess. Must be > 0.
+
+        Returns:
+            Output string from the CLI (result.output; empty string when dispatch fails).
+
+        Raises:
+            ValueError: If timeout is not a positive integer.
+        """
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError(
+                f"_invoke_pass2_dispatcher: timeout must be a positive int, got {timeout!r}"
+            )
+
+        if self._cli_dispatcher is not None:
+            dispatcher = self._cli_dispatcher
+        else:
+            if self._cached_pass2_dispatcher is None:
+                self._cached_pass2_dispatcher = self._build_pass2_dispatcher()
+            dispatcher = self._cached_pass2_dispatcher
+
+        result = dispatcher.dispatch(
+            flow="dependency_map_pass_2",
+            cwd=str(self.golden_repos_root),
+            prompt=prompt,
+            timeout=timeout,
+        )
+
+        if result.was_failover:
+            logger.info(
+                "Pass 2 CLI failover fired: cli_used=%s was_failover=True",
+                result.cli_used,
+            )
+
+        return str(result.output)
+
+    # ========================================================================
+    # Bug #936: CliDispatcher wiring for Pass 3 (Index Generation)
+    # ========================================================================
+
+    def _build_pass3_dispatcher(self):
+        """Build a CliDispatcher for Pass 3 from current ServerConfig (Bug #936).
+
+        Delegates to build_dep_map_dispatcher, passing analysis_model as keyword.
+        Returns a fully initialised CliDispatcher (Claude-only when Codex unavailable).
+        """
+        from code_indexer.server.services.dep_map_dispatcher_factory import (
+            build_dep_map_dispatcher,
+        )
+
+        config = get_config_service().get_config()
+        return build_dep_map_dispatcher(config, analysis_model=self.analysis_model)
+
+    def _get_pass3_dispatcher(self):
+        """Return the active Pass 3 CliDispatcher, building and caching lazily."""
+        if self._cli_dispatcher is not None:
+            return self._cli_dispatcher
+        if self._cached_pass3_dispatcher is None:
+            self._cached_pass3_dispatcher = self._build_pass3_dispatcher()
+        return self._cached_pass3_dispatcher
+
+    def _invoke_pass3_dispatcher(
+        self, prompt: str, timeout: int, max_turns: int = 0
+    ) -> str:
+        """Invoke CliDispatcher for Pass 3 index generation (Bug #936).
+
+        Validates timeout (positive int) and max_turns (int >= 0).
+        Logs INFO when failover fires. Returns result.output as str.
+
+        Args:
+            prompt:    Prompt text.
+            timeout:   Hard timeout seconds (positive int).
+            max_turns: When > 0, passed to dispatcher to enable agentic mode.
+                       Must be int >= 0.  Default 0 = single-shot.
+
+        Raises:
+            ValueError: If timeout is not a positive int or max_turns is not
+                        a non-negative int.
+        """
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError(
+                f"_invoke_pass3_dispatcher: timeout must be a positive int, got {timeout!r}"
+            )
+        if (
+            not isinstance(max_turns, int)
+            or isinstance(max_turns, bool)
+            or max_turns < 0
+        ):
+            raise ValueError(
+                f"_invoke_pass3_dispatcher: max_turns must be int >= 0, got {max_turns!r}"
+            )
+        result = self._get_pass3_dispatcher().dispatch(
+            flow="dependency_map_pass_3",
+            cwd=str(self.golden_repos_root),
+            prompt=prompt,
+            timeout=timeout,
+            max_turns=max_turns,
+        )
+        if result.was_failover:
+            logger.info(
+                "Pass 3 CLI failover fired: cli_used=%s was_failover=True",
+                result.cli_used,
+            )
+        return str(result.output)
+
+    # ========================================================================
+    # Bug #936: Shared dispatcher factory helpers — eliminate boilerplate across
+    # delta_merge, new_domain, domain_discovery, refinement, verification groups.
+    # ========================================================================
+
+    def _build_shared_dispatcher(self):
+        """Build a CliDispatcher from current ServerConfig (Bug #936).
+
+        Shared factory used by all per-method dispatcher builder wrappers.
+        Delegates to build_dep_map_dispatcher with self.analysis_model.
+        Returns a fully initialised CliDispatcher (Claude-only when Codex unavailable).
+        """
+        from code_indexer.server.services.dep_map_dispatcher_factory import (
+            build_dep_map_dispatcher,
+        )
+
+        config = get_config_service().get_config()
+        return build_dep_map_dispatcher(config, analysis_model=self.analysis_model)
+
+    def _get_cached_dispatcher(self, cache_attr: str):
+        """Return the injected dispatcher or the lazily-built cached one.
+
+        Args:
+            cache_attr: Name of the instance attribute used to cache the dispatcher
+                        (e.g. '_cached_delta_merge_dispatcher').
+        """
+        if self._cli_dispatcher is not None:
+            return self._cli_dispatcher
+        if getattr(self, cache_attr) is None:
+            setattr(self, cache_attr, self._build_shared_dispatcher())
+        return getattr(self, cache_attr)
+
+    # ------------------------------------------------------------------
+    # Bug #936: per-flow dispatcher builder methods (aliasing _build_shared_dispatcher)
+    # ------------------------------------------------------------------
+
+    def _build_delta_merge_dispatcher(self):
+        """Build a CliDispatcher for delta-merge LLM calls (Bug #936).
+
+        One-line delegation to _build_shared_dispatcher so per-flow builder
+        wrappers have stable, test-patchable names.
+        """
+        return self._build_shared_dispatcher()
+
+    def _build_new_domain_dispatcher(self):
+        """Build a CliDispatcher for new-domain generation LLM calls (Bug #936).
+
+        One-line delegation to _build_shared_dispatcher so per-flow builder
+        wrappers have stable, test-patchable names.
+        """
+        return self._build_shared_dispatcher()
+
+    def _build_domain_discovery_dispatcher(self):
+        """Build a CliDispatcher for domain-discovery LLM calls (Bug #936).
+
+        One-line delegation to _build_shared_dispatcher so per-flow builder
+        wrappers have stable, test-patchable names.
+        """
+        return self._build_shared_dispatcher()
+
+    def _build_refinement_dispatcher(self):
+        """Build a CliDispatcher for refinement LLM calls (Bug #936).
+
+        One-line delegation to _build_shared_dispatcher so per-flow builder
+        wrappers have stable, test-patchable names.
+        """
+        return self._build_shared_dispatcher()
+
+    def _build_verification_dispatcher(self):
+        """Build a CliDispatcher for verification-pass LLM calls (Bug #936).
+
+        One-line delegation to _build_shared_dispatcher so per-flow builder
+        wrappers have stable, test-patchable names.
+        """
+        return self._build_shared_dispatcher()
+
+    def _dispatch_via_flow(
+        self, cache_attr: str, flow: str, prompt: str, timeout: int, log_label: str
+    ) -> str:
+        """Dispatch a prompt through the cached dispatcher for *flow* (Bug #936).
+
+        Validates timeout (positive int). Logs INFO when failover fires.
+        Returns result.output as str.
+
+        Args:
+            cache_attr: Instance attribute name for the per-method dispatcher cache.
+            flow: CliDispatcher flow identifier (e.g. 'dependency_map_delta_merge').
+            prompt: Full prompt text.
+            timeout: Hard timeout in seconds (must be a positive int).
+            log_label: Human-readable label for failover log messages.
+
+        Raises:
+            ValueError: If timeout is not a positive int.
+        """
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError(
+                f"_dispatch_via_flow({flow!r}): timeout must be a positive int, got {timeout!r}"
+            )
+        dispatcher = self._get_cached_dispatcher(cache_attr)
+        result = dispatcher.dispatch(
+            flow=flow,
+            cwd=str(self.golden_repos_root),
+            prompt=prompt,
+            timeout=timeout,
+        )
+        if result.was_failover:
+            logger.info(
+                "%s CLI failover fired: cli_used=%s was_failover=True",
+                log_label,
+                result.cli_used,
+            )
+        return str(result.output)
+
     def run_pass_2_per_domain(
         self,
         staging_dir: Path,
@@ -1182,12 +1553,6 @@ Rules:
             "Your output MUST begin with # Domain Analysis heading."
         )
 
-        # Iteration 13: Use earlier hook thresholds for large domains
-        if is_large_domain:
-            hook_thresh = (max(3, int(max_turns * 0.15)), max(8, int(max_turns * 0.35)))
-        else:
-            hook_thresh = None
-
         # Story #715: File-based output — Claude writes body to temp file
         safe_name = self._sanitize_domain_name_for_path(domain_name)
         body_file = staging_dir / f"_pass2_body_{safe_name}.md"
@@ -1212,17 +1577,19 @@ Rules:
 
         prompt = prompt + file_write_instructions
 
-        # Invoke Claude CLI (Pass 2 needs MCP search_code tool for source code analysis)
-        # Story #715: dangerously_skip_permissions enables Write tool for file output
-        result = self._invoke_claude_cli(
-            prompt,
-            self.pass_timeout,
-            max_turns,
-            allowed_tools="mcp__cidx-local__search_code",
-            post_tool_hook=hook_reminder,
-            hook_thresholds=hook_thresh,
-            dangerously_skip_permissions=True,
-        )
+        # Story #848: Route Pass 2 primary invocation through CliDispatcher so
+        # Codex CLI can participate in domain refinement alongside Claude.
+        # The dispatcher selects Claude or Codex based on codex_weight and
+        # handles failover automatically.  Retry paths below remain Claude-only
+        # because they use --settings PostToolUse hooks not supported by Codex.
+        #
+        # IMPORTANT: ALL retries (whether triggered by max-turn errors OR
+        # insufficient output below _MIN_PASS2_OUTPUT_CHARS) execute on the
+        # Claude path with full --settings PostToolUse hook support. This is
+        # broader than AC5 of Story #848 (which only specifies Claude failover
+        # on non-retryable errors). The Codex primary attempt is one-shot; if
+        # it produces a short result, we retry on Claude.
+        result = self._invoke_pass2_dispatcher(prompt, self.pass_timeout)
 
         # Story #715: Read from file if Claude wrote it, else fall back to stdout
         result = self._read_pass2_file_or_strip(body_file, result)
@@ -1403,9 +1770,10 @@ Rules:
         prompt += "Generate markdown with domain catalog and matrix tables.\n"
         prompt += "Output ONLY the content (no markdown code blocks, no preamble).\n"
 
-        # Invoke Claude CLI (Pass 3 does not need MCP tools - just reads domain files and generates index)
+        # Bug #936: Route Pass 3 through CliDispatcher so Codex can participate.
+        # Pass 3 does not need MCP tools — pure text generation from domain files.
         timeout = self.pass_timeout // 2  # Pass 3 uses half timeout (lighter workload)
-        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
+        result = self._invoke_pass3_dispatcher(prompt, timeout, max_turns=max_turns)
 
         # Strip meta-commentary from output (Fix 3: same as Pass 2)
         result = self._strip_meta_commentary(result)
@@ -2907,12 +3275,16 @@ Rules:
             original_mtime = temp_file.stat().st_mtime
             prompt = merge_prompt + self._build_file_based_instructions(temp_file)
             try:
-                result = self._invoke_claude_cli(
+                # Bug #936: route through dispatcher (Claude or Codex) instead of
+                # calling _invoke_claude_cli directly.  allowed_tools is not
+                # forwarded — IntelligenceCliInvoker protocol has no tool-restriction
+                # param; Codex likewise has no --allowedTools equivalent.
+                result = self._dispatch_via_flow(
+                    "_cached_delta_merge_dispatcher",
+                    "dependency_map_delta_merge",
                     prompt,
                     timeout,
-                    max_turns,
-                    allowed_tools="mcp__cidx-local__search_code",
-                    dangerously_skip_permissions=True,
+                    "Delta merge",
                 )
             except Exception as e:
                 logger.error(
@@ -2966,7 +3338,14 @@ Rules:
         Returns:
             Claude CLI stdout output (new domain document body)
         """
-        return self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
+        # Bug #936: route through dispatcher (Claude or Codex).
+        return self._dispatch_via_flow(
+            "_cached_new_domain_dispatcher",
+            "dependency_map_new_domain",
+            prompt,
+            timeout,
+            "New domain generation",
+        )
 
     def invoke_domain_discovery(self, prompt: str, timeout: int, max_turns: int) -> str:
         """
@@ -2988,7 +3367,14 @@ Rules:
             subprocess.CalledProcessError: If Claude CLI fails
             subprocess.TimeoutExpired: If timeout is exceeded
         """
-        return self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
+        # Bug #936: route through dispatcher (Claude or Codex).
+        return self._dispatch_via_flow(
+            "_cached_domain_discovery_dispatcher",
+            "dependency_map_domain_discovery",
+            prompt,
+            timeout,
+            "Domain discovery",
+        )
 
     def build_refinement_prompt(
         self,
@@ -3089,12 +3475,14 @@ Rules:
             original_mtime = temp_file.stat().st_mtime
             prompt = refinement_prompt + self._build_file_based_instructions(temp_file)
             try:
-                result = self._invoke_claude_cli(
+                # Bug #936: route through dispatcher (Claude or Codex) instead of
+                # calling _invoke_claude_cli directly.
+                result = self._dispatch_via_flow(
+                    "_cached_refinement_dispatcher",
+                    "dependency_map_refinement",
                     prompt,
                     timeout,
-                    max_turns,
-                    allowed_tools=None,
-                    dangerously_skip_permissions=True,
+                    "Refinement file",
                 )
             except Exception as e:
                 logger.error(
@@ -3200,23 +3588,26 @@ Rules:
         Returns None on full success, or a short failure-reason string on any failure.
         Logs WARNING for each failure; the caller (invoke_verification_pass) retries or raises.
         """
-        try:
-            stdout = self._invoke_claude_cli(
-                prompt,
-                config.fact_check_timeout_seconds,
-                config.dependency_map_delta_max_turns,
-                dangerously_skip_permissions=True,
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("invoke_verification_pass: attempt %d timed out", attempt)
-            return "timeout"
-        except subprocess.CalledProcessError as exc:
+        # Bug #936: route through dispatcher (Claude or Codex) instead of
+        # calling _invoke_claude_cli directly.
+        dispatcher = self._get_cached_dispatcher("_cached_verification_dispatcher")
+        result = dispatcher.dispatch(
+            flow="dependency_map_verification",
+            cwd=str(self.golden_repos_root),
+            prompt=prompt,
+            timeout=config.fact_check_timeout_seconds,
+        )
+        if not result.success:
             logger.warning(
-                "invoke_verification_pass: attempt %d exit=%d", attempt, exc.returncode
+                "invoke_verification_pass: attempt %d dispatcher reported failure: %s",
+                attempt,
+                result.error or result.output,
             )
             return "cli_error"
 
-        return self._check_verification_postconditions(document_path, stdout, attempt)
+        return self._check_verification_postconditions(
+            document_path, result.output, attempt
+        )
 
     def _check_verification_postconditions(
         self,

@@ -20,6 +20,24 @@ from fastapi.testclient import TestClient
 
 from code_indexer.server.services.group_access_manager import GroupAccessManager
 
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, rtr):
+    """Override all require_elevation deps so functional tests can run without TOTP."""
+    from fastapi.routing import APIRoute
+
+    for route in rtr.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
+
 
 @pytest.fixture
 def temp_db_path():
@@ -69,6 +87,7 @@ def test_client(group_manager, mock_admin_user):
     app.dependency_overrides[get_current_admin_user] = lambda: mock_admin_user
     app.dependency_overrides[get_current_user] = lambda: mock_admin_user
     app.dependency_overrides[get_group_manager] = lambda: group_manager
+    _bypass_elevation(app, groups_router)
 
     yield TestClient(app)
 

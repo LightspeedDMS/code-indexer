@@ -82,3 +82,27 @@ E2E_TRIES_TAG=HEAD
 # ---------------------------------------------------------------------------
 E2E_SERVER_READINESS_TIMEOUT=30   # seconds total
 E2E_SERVER_READINESS_POLL=1       # seconds between polls
+
+# ---------------------------------------------------------------------------
+# Phase 5: Fault-injection resiliency tests
+# Phase 5 starts a separate uvicorn instance with fault_injection_enabled=true.
+# It uses a dedicated port and data directory so it never conflicts with the
+# Phase 4 server running on E2E_SERVER_PORT.
+# ---------------------------------------------------------------------------
+
+# Cohere API key for Phase 5 dual-provider indexing (VoyageAI + Cohere).
+# Falls back to CO_API_KEY if unset. Phase 5 tests will fail if neither is set.
+E2E_COHERE_API_KEY=
+
+# Port for the Phase 5 fault-injection server subprocess (default: 8900).
+# Must not conflict with E2E_SERVER_PORT (default 8899) or your regular CIDX server.
+E2E_FAULT_SERVER_PORT=8900
+
+# Data directory for the Phase 5 fault server bootstrap config and logs.
+# Created and wiped automatically at the start of each Phase 5 run.
+E2E_FAULT_SERVER_DATA_DIR=$HOME/.tmp/cidx-e2e-fault-server-data
+
+# Seconds to wait for the dual-provider golden repo indexing job to complete
+# in Phase 5 (default: 300). Longer than the Phase 4 equivalent because Cohere
+# reranking adds latency on top of VoyageAI embedding.
+E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT=300

@@ -288,7 +288,9 @@ class WriteLockManager:
         # Validate ttl_seconds explicitly; non-numeric values fall back to default
         raw_ttl = content.get("ttl_seconds")
         try:
-            ttl_seconds = int(raw_ttl) if raw_ttl is not None else DEFAULT_LOCK_TTL_SECONDS
+            ttl_seconds = (
+                int(raw_ttl) if raw_ttl is not None else DEFAULT_LOCK_TTL_SECONDS
+            )
         except (TypeError, ValueError):
             ttl_seconds = DEFAULT_LOCK_TTL_SECONDS
 

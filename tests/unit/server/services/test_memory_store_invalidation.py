@@ -98,7 +98,7 @@ def _build_service(
         coarse_lock_ttl_seconds=60,
     )
     scheduler = MagicMock()
-    scheduler.is_write_lock_held.return_value = False
+    scheduler.is_write_locked.return_value = False
     scheduler.acquire_write_lock.return_value = True
     scheduler.release_write_lock.return_value = True
     debouncer = MagicMock()

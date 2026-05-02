@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.web.auth import require_admin_session, SessionData
+from code_indexer.server.auth import dependencies
 from code_indexer.server.services.research_assistant_service import (
     ResearchAssistantService,
 )
@@ -173,6 +174,7 @@ async def send_message(
     user_prompt: str = Form(...),
     session_id: str = Form(None),
     session_data: SessionData = Depends(require_admin_session),
+    _elevation_user: dependencies.User = Depends(dependencies.require_elevation()),
 ) -> HTMLResponse:
     """
     Send user message and start Claude execution (AC2, AC4).
@@ -302,7 +304,11 @@ async def poll_job(
 # Story #143: Session Management CRUD Endpoints
 
 
-@router.post("/sessions", response_class=HTMLResponse)
+@router.post(
+    "/sessions",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def create_session(
     request: Request,
     session_data: SessionData = Depends(require_admin_session),
@@ -337,7 +343,11 @@ async def create_session(
     )
 
 
-@router.put("/sessions/{session_id}", response_class=HTMLResponse)
+@router.put(
+    "/sessions/{session_id}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def rename_session(
     request: Request,
     session_id: str,
@@ -387,7 +397,11 @@ async def rename_session(
     )
 
 
-@router.delete("/sessions/{session_id}", response_class=HTMLResponse)
+@router.delete(
+    "/sessions/{session_id}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def delete_session(
     request: Request,
     session_id: str,
@@ -542,6 +556,7 @@ async def upload_file(
     session_id: str,
     file: UploadFile = File(...),
     session_data: SessionData = Depends(require_admin_session),
+    _elevation_user: dependencies.User = Depends(dependencies.require_elevation()),
 ) -> JSONResponse:
     """
     Upload file to session (AC2 - Story #144).
@@ -593,7 +608,10 @@ async def list_files(
     return JSONResponse(content={"files": files}, status_code=200)
 
 
-@router.delete("/sessions/{session_id}/files/{filename}")
+@router.delete(
+    "/sessions/{session_id}/files/{filename}",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def delete_file(
     request: Request,
     session_id: str,

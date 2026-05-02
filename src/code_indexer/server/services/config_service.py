@@ -12,17 +12,33 @@ import logging
 import threading
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from ..utils.config_manager import (
     ServerConfigManager,
     ServerConfig,
     RerankConfig,
     LifecycleAnalysisConfig,
+    CidxMetaBackupConfig,
 )
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class ElevationManagerProtocol(Protocol):
+    """Structural protocol for the ElevatedSessionManager hot-reload interface.
+
+    Allows update_totp_elevation_atomic to accept the real singleton without
+    importing ElevatedSessionManager (avoids circular import) and without
+    weakening type safety via Any.
+    """
+
+    def update_timeouts(
+        self, idle_timeout_seconds: int, max_age_seconds: int
+    ) -> None: ...
+
 
 # Story #578: Keys that must stay in local config.json (chicken-and-egg: needed
 # before PG pool exists).  Everything else is "runtime" and lives in PG in
@@ -40,6 +56,11 @@ BOOTSTRAP_KEYS = frozenset(
         "cluster",
         "enable_malloc_arena_max",  # Bug #897
         "enable_malloc_trim",  # Bug #897
+        "enable_graph_channel_repair",  # Story #908 / Epic #907
+        "graph_repair_self_loop",  # Story #920
+        "graph_repair_malformed_yaml",  # Story #920
+        "graph_repair_garbage_domain",  # Story #920
+        "graph_repair_bidirectional_mismatch",  # Story #920
         "fault_injection_enabled",  # Story #746
         "fault_injection_nonprod_ack",  # Story #746
     }
@@ -56,6 +77,14 @@ _MIN_SCHEDULED_CATCHUP_INTERVAL_MINUTES = 1
 def _parse_bool(value: Any) -> bool:
     """Return True when value is the string 'true', 'True', or the boolean True."""
     return value in ["true", True, "True"]
+
+
+# Bug #943: module-level exports so routes.py can coerce the
+# elevation_enforcement_enabled form field without importing ConfigService.
+# The ConfigService class defines identically-valued class attributes; those
+# shadow these names for self._ access (standard Python class scoping).
+_TOTP_TRUTHY: frozenset = frozenset({"true", "on", "1"})
+_TOTP_FALSY: frozenset = frozenset({"false", "off", "0"})
 
 
 class ConfigService:
@@ -237,7 +266,6 @@ class ConfigService:
         assert config.telemetry_config is not None
         # Story #3 - Configuration Consolidation: Assert new config objects
         assert config.search_limits_config is not None
-        assert config.file_content_limits_config is not None
         assert config.golden_repos_config is not None
         # Story #3 - Phase 2: Assert P0/P1 config objects
         assert config.mcp_session_config is not None
@@ -305,6 +333,12 @@ class ConfigService:
                 "required_char_classes": config.password_security.required_char_classes,
                 "min_entropy_bits": config.password_security.min_entropy_bits,
             },
+            # Bug #943: TOTP step-up elevation runtime config
+            "totp_elevation": {
+                "elevation_enforcement_enabled": config.elevation_enforcement_enabled,
+                "elevation_idle_timeout_seconds": config.elevation_idle_timeout_seconds,
+                "elevation_max_age_seconds": config.elevation_max_age_seconds,
+            },
             # Claude CLI integration (Story #15 AC3, Story #20: moved to claude_integration_config)
             "claude_cli": {
                 "anthropic_api_key": (
@@ -344,6 +378,8 @@ class ConfigService:
                     else None
                 ),
                 "llm_creds_provider_consumer_id": config.claude_integration_config.llm_creds_provider_consumer_id,
+                "dep_map_fact_check_enabled": config.claude_integration_config.dep_map_fact_check_enabled,
+                "dep_map_auto_repair_enabled": config.claude_integration_config.dep_map_auto_repair_enabled,
             },
             # OIDC/SSO authentication
             "oidc": {
@@ -373,10 +409,8 @@ class ConfigService:
                 "service_name": config.telemetry_config.service_name,
                 "export_traces": config.telemetry_config.export_traces,
                 "export_metrics": config.telemetry_config.export_metrics,
-                "export_logs": config.telemetry_config.export_logs,
                 "machine_metrics_enabled": config.telemetry_config.machine_metrics_enabled,
                 "machine_metrics_interval_seconds": config.telemetry_config.machine_metrics_interval_seconds,
-                "trace_sample_rate": config.telemetry_config.trace_sample_rate,
                 "deployment_environment": config.telemetry_config.deployment_environment,
             },
             # Langfuse configuration (Story #136, Story #164)
@@ -439,10 +473,6 @@ class ConfigService:
                 "max_result_size_mb": config.search_limits_config.max_result_size_mb,
                 "timeout_seconds": config.search_limits_config.timeout_seconds,
             },
-            "file_content_limits": {
-                "max_tokens_per_request": config.file_content_limits_config.max_tokens_per_request,
-                "chars_per_token": config.file_content_limits_config.chars_per_token,
-            },
             "golden_repos": {
                 "refresh_interval_seconds": config.golden_repos_config.refresh_interval_seconds,
                 "analysis_model": config.golden_repos_config.analysis_model,
@@ -458,8 +488,6 @@ class ConfigService:
                 "disk_warning_threshold_percent": config.health_config.disk_warning_threshold_percent,
                 "disk_critical_threshold_percent": config.health_config.disk_critical_threshold_percent,
                 "cpu_sustained_threshold_percent": config.health_config.cpu_sustained_threshold_percent,
-                # P3 settings (AC37)
-                "system_metrics_cache_ttl_seconds": config.health_config.system_metrics_cache_ttl_seconds,
             },
             "scip": {
                 "indexing_timeout_seconds": config.scip_config.indexing_timeout_seconds,
@@ -515,7 +543,6 @@ class ConfigService:
                 "omni_max_limit": config.multi_search_limits_config.omni_max_limit,
                 "omni_default_aggregation_mode": config.multi_search_limits_config.omni_default_aggregation_mode,
                 "omni_max_results_per_repo": config.multi_search_limits_config.omni_max_results_per_repo,
-                "omni_max_total_results_before_aggregation": config.multi_search_limits_config.omni_max_total_results_before_aggregation,
                 "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
                 # Bug #881 Phase 3: wildcard fan-out cap
                 "omni_wildcard_expansion_cap": config.multi_search_limits_config.omni_wildcard_expansion_cap,
@@ -603,6 +630,24 @@ class ConfigService:
             "outer_timeout_seconds": config.lifecycle_analysis_config.outer_timeout_seconds,  # type: ignore[union-attr]
         }
 
+        # Story #844: Codex CLI integration configuration
+        # codex_integration_config is guaranteed non-None by ServerConfig.__post_init__
+        assert config.codex_integration_config is not None
+        cx_cfg = config.codex_integration_config
+        settings["codex_integration"] = {
+            "enabled": cx_cfg.enabled,
+            "credential_mode": cx_cfg.credential_mode,
+            "api_key": (cx_cfg.api_key[:6] + "***" if cx_cfg.api_key else None),
+            "lcp_url": cx_cfg.lcp_url,
+            "lcp_vendor": cx_cfg.lcp_vendor,
+            "codex_weight": cx_cfg.codex_weight,
+        }
+        backup_cfg = config.cidx_meta_backup_config or CidxMetaBackupConfig()
+        settings["cidx_meta_backup"] = {
+            "enabled": backup_cfg.enabled,
+            "remote_url": backup_cfg.remote_url,
+        }
+
         return settings
 
     def _get_delegation_settings(self) -> Dict[str, Any]:
@@ -650,6 +695,8 @@ class ConfigService:
             self._update_timeout_setting(config, key, value)
         elif category == "password_security":
             self._update_password_security_setting(config, key, value)
+        elif category == "totp_elevation":
+            self._update_totp_elevation_setting(config, key, value)
         elif category == "claude_cli":
             self._update_claude_cli_setting(config, key, value)
         elif category == "oidc":
@@ -663,8 +710,6 @@ class ConfigService:
         # Story #3 - Configuration Consolidation: New categories
         elif category == "search_limits":
             self._update_search_limits_setting(config, key, value)
-        elif category == "file_content_limits":
-            self._update_file_content_limits_setting(config, key, value)
         elif category == "golden_repos":
             self._update_golden_repos_setting(config, key, value)
         # Story #3 - Phase 2: P0/P1 categories
@@ -710,6 +755,11 @@ class ConfigService:
         # Story #885 - Lifecycle analysis timeouts
         elif category == "lifecycle_analysis":
             self._update_lifecycle_analysis_setting(config, key, value)
+        # Story #844 - Codex CLI integration
+        elif category == "codex_integration":
+            self._update_codex_integration_setting(config, key, value)
+        elif category == "cidx_meta_backup":
+            self._update_cidx_meta_backup_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -915,6 +965,172 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown password security setting: {key}")
 
+    # Bug #943: TOTP elevation setting bounds
+    _TOTP_IDLE_MIN: int = 60
+    _TOTP_IDLE_MAX: int = 3600
+    _TOTP_MAX_AGE_MIN: int = 300
+    _TOTP_MAX_AGE_MAX: int = 7200
+    _TOTP_TRUTHY: frozenset = frozenset({"true", "on", "1"})
+    _TOTP_FALSY: frozenset = frozenset({"false", "off", "0"})
+
+    def _update_totp_elevation_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a TOTP step-up elevation setting (Bug #943).
+
+        Validation rules:
+        - elevation_enforcement_enabled: coerce to bool; raise ValueError on unknown string.
+        - elevation_idle_timeout_seconds: int in [_TOTP_IDLE_MIN, _TOTP_IDLE_MAX];
+          also verify current max_age >= new idle (bidirectional cross-field).
+        - elevation_max_age_seconds: int in [_TOTP_MAX_AGE_MIN, _TOTP_MAX_AGE_MAX]
+          and >= current idle_timeout.
+        """
+        if key == "elevation_enforcement_enabled":
+            if isinstance(value, bool):
+                config.elevation_enforcement_enabled = value
+            else:
+                str_val = str(value).lower()
+                if str_val in self._TOTP_TRUTHY:
+                    config.elevation_enforcement_enabled = True
+                elif str_val in self._TOTP_FALSY:
+                    config.elevation_enforcement_enabled = False
+                else:
+                    raise ValueError(
+                        f"Invalid value for elevation_enforcement_enabled: {value!r}. "
+                        "Accepted: true/on/1 or false/off/0."
+                    )
+        elif key == "elevation_idle_timeout_seconds":
+            int_val = int(value)
+            if not (self._TOTP_IDLE_MIN <= int_val <= self._TOTP_IDLE_MAX):
+                raise ValueError(
+                    f"elevation_idle_timeout_seconds must be between "
+                    f"{self._TOTP_IDLE_MIN} and {self._TOTP_IDLE_MAX}, got {int_val}"
+                )
+            if config.elevation_max_age_seconds < int_val:
+                raise ValueError(
+                    f"elevation_idle_timeout_seconds ({int_val}) must not exceed "
+                    f"elevation_max_age_seconds ({config.elevation_max_age_seconds})"
+                )
+            config.elevation_idle_timeout_seconds = int_val
+        elif key == "elevation_max_age_seconds":
+            int_val = int(value)
+            if not (self._TOTP_MAX_AGE_MIN <= int_val <= self._TOTP_MAX_AGE_MAX):
+                raise ValueError(
+                    f"elevation_max_age_seconds must be between "
+                    f"{self._TOTP_MAX_AGE_MIN} and {self._TOTP_MAX_AGE_MAX}, got {int_val}"
+                )
+            if int_val < config.elevation_idle_timeout_seconds:
+                raise ValueError(
+                    f"elevation_max_age_seconds ({int_val}) must be >= "
+                    f"elevation_idle_timeout_seconds ({config.elevation_idle_timeout_seconds})"
+                )
+            config.elevation_max_age_seconds = int_val
+        else:
+            raise ValueError(f"Unknown totp_elevation setting: {key}")
+
+    def _validate_totp_elevation_tuple(
+        self, enabled: bool, idle: int, max_age: int
+    ) -> None:
+        """Validate the final (enabled, idle, max_age) tuple for atomic saves.
+
+        Called by update_totp_elevation_atomic so the whole batch is checked
+        against the *new* values rather than field-by-field against on-disk state.
+        Raises ValueError on any out-of-range value or cross-field violation.
+        """
+        if not isinstance(enabled, bool):
+            raise ValueError(
+                f"elevation_enforcement_enabled must be bool, got {enabled!r}"
+            )
+        if not (self._TOTP_IDLE_MIN <= idle <= self._TOTP_IDLE_MAX):
+            raise ValueError(
+                f"elevation_idle_timeout_seconds must be between "
+                f"{self._TOTP_IDLE_MIN} and {self._TOTP_IDLE_MAX}, got {idle}"
+            )
+        if not (self._TOTP_MAX_AGE_MIN <= max_age <= self._TOTP_MAX_AGE_MAX):
+            raise ValueError(
+                f"elevation_max_age_seconds must be between "
+                f"{self._TOTP_MAX_AGE_MIN} and {self._TOTP_MAX_AGE_MAX}, got {max_age}"
+            )
+        if max_age < idle:
+            raise ValueError(
+                f"elevation_max_age_seconds ({max_age}) must be >= "
+                f"elevation_idle_timeout_seconds ({idle})"
+            )
+
+    def _apply_totp_elevation_to_config(
+        self,
+        config: "ServerConfig",
+        enabled: bool,
+        idle: int,
+        max_age: int,
+    ) -> tuple:
+        """Stage new totp_elevation values on config; return original snapshot."""
+        original = (
+            config.elevation_enforcement_enabled,
+            config.elevation_idle_timeout_seconds,
+            config.elevation_max_age_seconds,
+        )
+        config.elevation_enforcement_enabled = enabled
+        config.elevation_idle_timeout_seconds = idle
+        config.elevation_max_age_seconds = max_age
+        return original
+
+    def _rollback_totp_elevation(
+        self,
+        config: "ServerConfig",
+        original: tuple,
+        exc: Exception,
+    ) -> None:
+        """Restore original totp_elevation values and log the failure."""
+        config.elevation_enforcement_enabled = original[0]
+        config.elevation_idle_timeout_seconds = original[1]
+        config.elevation_max_age_seconds = original[2]
+        logger.error(
+            "totp_elevation atomic save failed; rolled back to "
+            "enabled=%s idle=%ds max_age=%ds. Error: %s",
+            original[0],
+            original[1],
+            original[2],
+            exc,
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    def update_totp_elevation_atomic(
+        self,
+        enabled: bool,
+        idle_timeout_seconds: int,
+        max_age_seconds: int,
+        session_manager: Optional["ElevationManagerProtocol"] = None,
+    ) -> None:
+        """Atomically validate, save, and hot-reload totp_elevation (Bug #943).
+
+        Fix #1: validates the final tuple so idle > old_max_age is not rejected.
+        Fix #3: rolls back all 3 in-memory fields on save failure.
+        Fix #2: calls session_manager.update_timeouts() only when provided.
+        Logs INFO on success so operators can confirm hot-reload occurred.
+        """
+        self._validate_totp_elevation_tuple(
+            enabled, idle_timeout_seconds, max_age_seconds
+        )
+        config = self.get_config()
+        original = self._apply_totp_elevation_to_config(
+            config, enabled, idle_timeout_seconds, max_age_seconds
+        )
+        try:
+            self.save_config(config)
+        except Exception as exc:
+            self._rollback_totp_elevation(config, original, exc)
+            raise  # MESSI Rule 13 — propagate, never swallow
+        if session_manager is not None:
+            session_manager.update_timeouts(idle_timeout_seconds, max_age_seconds)
+        logger.info(
+            "totp_elevation atomic save: enabled=%s idle=%ds max_age=%ds",
+            enabled,
+            idle_timeout_seconds,
+            max_age_seconds,
+            extra={"correlation_id": get_correlation_id()},
+        )
+
     def _update_claude_cli_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -965,6 +1181,8 @@ class ConfigService:
             claude_config.llm_creds_provider_consumer_id = str(value) if value else ""
         elif key == "dep_map_fact_check_enabled":
             claude_config.dep_map_fact_check_enabled = _parse_bool(value)
+        elif key == "dep_map_auto_repair_enabled":
+            claude_config.dep_map_auto_repair_enabled = _parse_bool(value)
         elif key == "fact_check_timeout_seconds":
             claude_config.fact_check_timeout_seconds = max(
                 _MIN_FACT_CHECK_TIMEOUT_SECONDS, int(value)
@@ -1067,14 +1285,10 @@ class ConfigService:
             telemetry.export_traces = value in ["true", True, "True", "1"]
         elif key == "export_metrics":
             telemetry.export_metrics = value in ["true", True, "True", "1"]
-        elif key == "export_logs":
-            telemetry.export_logs = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_enabled":
             telemetry.machine_metrics_enabled = value in ["true", True, "True", "1"]
         elif key == "machine_metrics_interval_seconds":
             telemetry.machine_metrics_interval_seconds = int(value)
-        elif key == "trace_sample_rate":
-            telemetry.trace_sample_rate = float(value)
         elif key == "deployment_environment":
             telemetry.deployment_environment = str(value)
         else:
@@ -1200,6 +1414,65 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown lifecycle_analysis setting: {key}")
 
+    def _update_codex_integration_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a Codex CLI integration setting (Story #844).
+
+        Mirrors _update_claude_cli_setting but scoped to CodexIntegrationConfig.
+        api_key is preserved when the submitted value is a masked placeholder
+        (contains '***') to prevent UI re-saves from wiping the stored key.
+        """
+        from code_indexer.server.utils.config_manager import CodexIntegrationConfig
+
+        if config.codex_integration_config is None:
+            config.codex_integration_config = CodexIntegrationConfig()
+        cx = config.codex_integration_config
+
+        if key == "enabled":
+            cx.enabled = _parse_bool(value)
+        elif key == "credential_mode":
+            allowed = {"none", "api_key", "subscription"}
+            str_val = str(value)
+            if str_val not in allowed:
+                raise ValueError(
+                    f"Invalid credential_mode '{value}': must be one of {sorted(allowed)}"
+                )
+            cx.credential_mode = str_val
+        elif key == "api_key":
+            # Preserve existing key when the submitted value is a masked placeholder
+            str_val = str(value) if value else ""
+            if "***" not in str_val:
+                cx.api_key = str_val if str_val else None
+            # else: placeholder submitted — do not overwrite the stored key
+        elif key == "lcp_url":
+            cx.lcp_url = str(value) if value else None
+        elif key == "lcp_vendor":
+            cx.lcp_vendor = str(value)
+        elif key == "codex_weight":
+            weight = float(value)
+            if not (0.0 <= weight <= 1.0):
+                raise ValueError(
+                    f"Invalid codex_weight {weight}: must be in [0.0, 1.0]"
+                )
+            cx.codex_weight = weight
+        else:
+            raise ValueError(f"Unknown codex_integration setting: {key}")
+
+    def _update_cidx_meta_backup_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update cidx-meta backup runtime settings."""
+        if config.cidx_meta_backup_config is None:
+            config.cidx_meta_backup_config = CidxMetaBackupConfig()
+        backup = config.cidx_meta_backup_config
+        if key == "enabled":
+            backup.enabled = _parse_bool(value)
+        elif key == "remote_url":
+            backup.remote_url = str(value).strip()
+        else:
+            raise ValueError(f"Unknown cidx_meta_backup setting: {key}")
+
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -1212,21 +1485,6 @@ class ConfigService:
             search_limits.timeout_seconds = int(value)
         else:
             raise ValueError(f"Unknown search limits setting: {key}")
-
-    def _update_file_content_limits_setting(
-        self, config: ServerConfig, key: str, value: Any
-    ) -> None:
-        """Update a file content limits setting (Story #3 - Configuration Consolidation)."""
-        file_content_limits = config.file_content_limits_config
-        assert (
-            file_content_limits is not None
-        )  # Guaranteed by ServerConfig.__post_init__
-        if key == "max_tokens_per_request":
-            file_content_limits.max_tokens_per_request = int(value)
-        elif key == "chars_per_token":
-            file_content_limits.chars_per_token = int(value)
-        else:
-            raise ValueError(f"Unknown file content limits setting: {key}")
 
     def _update_golden_repos_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -1272,9 +1530,6 @@ class ConfigService:
             health.disk_critical_threshold_percent = float(value)
         elif key == "cpu_sustained_threshold_percent":
             health.cpu_sustained_threshold_percent = float(value)
-        # P3 settings (AC37)
-        elif key == "system_metrics_cache_ttl_seconds":
-            health.system_metrics_cache_ttl_seconds = int(value)
         else:
             raise ValueError(f"Unknown health setting: {key}")
 
@@ -1405,8 +1660,6 @@ class ConfigService:
             multi_search.omni_default_aggregation_mode = str(value)
         elif key == "omni_max_results_per_repo":
             multi_search.omni_max_results_per_repo = int(value)
-        elif key == "omni_max_total_results_before_aggregation":
-            multi_search.omni_max_total_results_before_aggregation = int(value)
         elif key == "omni_pattern_metacharacters":
             multi_search.omni_pattern_metacharacters = str(value)
         # Bug #881 Phase 3: wildcard fan-out cap
@@ -1475,6 +1728,8 @@ class ConfigService:
                     self._update_timeout_setting(config, key, value)
                 elif category == "password_security":
                     self._update_password_security_setting(config, key, value)
+                elif category == "totp_elevation":
+                    self._update_totp_elevation_setting(config, key, value)
                 elif category == "claude_cli":
                     self._update_claude_cli_setting(config, key, value)
 

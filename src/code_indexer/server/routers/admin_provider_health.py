@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from ..auth import dependencies
 from ..auth.dependencies import get_current_admin_user_hybrid
 from ..auth.user_manager import User
 from ...services.provider_health_monitor import ProviderHealthMonitor
@@ -29,6 +30,66 @@ class ProviderHealthEntry(BaseModel):
 
 class ProviderHealthResponse(BaseModel):
     providers: List[ProviderHealthEntry]
+
+
+class ClearSinbinRequest(BaseModel):
+    """Optional body for POST /admin/provider-health/clear-sinbin (Bug #902).
+
+    target: provider name to clear (e.g. 'voyage-ai', 'cohere').
+            Omit or pass null to clear ALL providers at once.
+    """
+
+    target: Optional[str] = None
+
+
+@router.post(
+    "/clear-sinbin",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def clear_sinbin(
+    body: ClearSinbinRequest,
+    current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Dict[str, Any]:
+    """Force-clear ProviderHealthMonitor sinbin state (Bug #902).
+
+    Clears the named provider when 'target' is supplied, otherwise clears ALL
+    providers.  Designed for use by the Phase 5 E2E test fixture clear_all_faults
+    to break the chicken-and-egg where sinbinned providers are skipped by dispatch
+    so they can never self-heal via record_call(success=True).
+    """
+    monitor = ProviderHealthMonitor.get_instance()
+    if body.target is not None:
+        monitor.clear_sinbin(body.target)
+        return {"cleared": body.target}
+    monitor.clear_sinbin_all()
+    return {"cleared": "all"}
+
+
+@router.post(
+    "/reset-state",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def reset_health_state(
+    current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Dict[str, Any]:
+    """Wipe ALL rolling health state for all providers (Bug #902, test isolation).
+
+    Distinct from /clear-sinbin which only clears sinbin cooldown timers.
+    This endpoint clears metrics, consecutive-failure counters, windowed failure
+    deques, last-known status, sinbin timers, sinbin rounds, and stops any active
+    recovery probe threads.
+
+    Required for Phase 5 E2E test isolation: the pre-skip gate in
+    semantic_query_manager checks BOTH is_sinbinned() AND _compute_status().status.
+    clear-sinbin alone is insufficient because _metrics with error_rate=1.0 keeps
+    _compute_status() returning 'down' even after sinbin timers are cleared.
+
+    DO NOT call this from operational/runtime code. It obliterates the rolling-window
+    observability contract used by health-gated dispatch.
+    """
+    monitor = ProviderHealthMonitor.get_instance()
+    monitor.clear_health_state_all()
+    return {"reset": "all"}
 
 
 @router.get("", response_model=ProviderHealthResponse)

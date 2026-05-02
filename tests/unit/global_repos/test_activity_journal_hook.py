@@ -26,6 +26,7 @@ import re
 import shlex
 import subprocess
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
@@ -61,9 +62,13 @@ def _capture_post_tool_hooks(
     analyzer = _make_analyzer(tmp_path)
     captured: list = []
 
+    def _capture_and_return(cmd: list, **k: object) -> object:
+        captured.extend(cmd)
+        return _ok_result()
+
     with patch(
         _SUBPROCESS_PATH,
-        side_effect=lambda *a, **k: (captured.extend(a[0]), _ok_result())[1],
+        side_effect=_capture_and_return,
     ):
         analyzer._invoke_claude_cli(
             prompt="test",
@@ -75,7 +80,10 @@ def _capture_post_tool_hooks(
 
     for i, arg in enumerate(captured):
         if arg == "--settings" and i + 1 < len(captured):
-            return json.loads(captured[i + 1]).get("hooks", {}).get("PostToolUse", [])
+            return cast(
+                list,
+                json.loads(captured[i + 1]).get("hooks", {}).get("PostToolUse", []),
+            )
     return []
 
 
@@ -175,9 +183,13 @@ class TestHookScriptNoJournalLogicWhenPathNone:
         analyzer = _make_analyzer(tmp_path)
         captured: list = []
 
+        def _cap_and_ret(cmd: list, **k: object) -> object:
+            captured.extend(cmd)
+            return _ok_result()
+
         with patch(
             _SUBPROCESS_PATH,
-            side_effect=lambda *a, **k: (captured.extend(a[0]), _ok_result())[1],
+            side_effect=_cap_and_ret,
         ):
             analyzer._invoke_claude_cli(
                 prompt="test",

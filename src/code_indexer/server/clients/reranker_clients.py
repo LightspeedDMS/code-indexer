@@ -11,6 +11,7 @@ Provides:
 """
 
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -86,9 +87,10 @@ class VoyageRerankerClient(RerankerClient):
     """
     Sync httpx client for Voyage AI rerank-2.5.
 
-    API key is read exclusively from the config service
-    (code_indexer.server.services.config_service.get_config_service).
-    Reading VOYAGE_API_KEY from the environment is explicitly prohibited.
+    API key lookup order (Bug #928):
+      1. config_service().claude_integration_config.voyageai_api_key
+         (server mode — Web UI / DB; wins when both are set).
+      2. os.environ.get("VOYAGE_API_KEY") (CLI mode — fallback).
 
     Registers a health probe with ProviderHealthMonitor on construction.
     All API errors propagate to the caller — no exception swallowing.
@@ -236,14 +238,28 @@ class VoyageRerankerClient(RerankerClient):
         return self._parse_response(response)
 
     def _get_api_key(self) -> Optional[str]:
-        """Return voyageai_api_key from the config service only (never from env vars).
+        """Return the VoyageAI API key, preferring config over the VOYAGE_API_KEY env var.
 
-        The return type annotation is Optional[str].  The ignore below suppresses
-        a mypy "Returning Any" warning caused by the dynamically-typed config
-        dataclass attribute; the runtime type is always str | None.
+        Lookup order:
+          1. config_service().get_config().claude_integration_config.voyageai_api_key
+             (server mode — Web UI / DB populates this; wins when both are set).
+          2. os.environ.get("VOYAGE_API_KEY") (CLI mode — matches the env-var
+             pattern used elsewhere in the codebase: services/voyage_ai.py,
+             services/embedder_provider_resolver.py, services/cli_rerank_config_shim.py).
+          3. None (caller raises with actionable error message).
+
+        The type ignore below suppresses a mypy "Returning Any" warning caused
+        by the dynamically-typed config dataclass attribute; the runtime type
+        is always str | None.
         """
         config = get_config_service().get_config()
-        return config.claude_integration_config.voyageai_api_key  # type: ignore[no-any-return]
+        configured = config.claude_integration_config.voyageai_api_key
+        if configured:
+            return configured  # type: ignore[no-any-return]
+        env_key = os.environ.get("VOYAGE_API_KEY")
+        if env_key:
+            return env_key
+        return None
 
     def _get_model(self) -> str:
         """Return the Voyage reranker model from config, falling back to the built-in default.
@@ -295,8 +311,8 @@ class VoyageRerankerClient(RerankerClient):
         api_key = self._get_api_key()
         if not api_key or not api_key.strip():
             raise ValueError(
-                "VoyageAI API key is missing or empty. "
-                "Configure it via the server Web UI under API Keys."
+                "VoyageAI API key not found. "
+                "Set VOYAGE_API_KEY env var (CLI mode) or configure via Web UI (server mode)."
             )
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -369,9 +385,11 @@ class CohereRerankerClient(RerankerClient):
     """
     Sync httpx client for Cohere rerank-v3.5.
 
-    API key is read exclusively from the config service
-    (code_indexer.server.services.config_service.get_config_service).
-    Reading CO_API_KEY from the environment is explicitly prohibited.
+    API key lookup order (Bug #928):
+      1. config_service().claude_integration_config.cohere_api_key
+         (server mode — Web UI / DB; wins when both are set).
+      2. os.environ.get("CO_API_KEY") (CLI mode — fallback;
+         matches services/embedder_provider_resolver.py:45 pattern).
 
     Key differences from VoyageRerankerClient:
       - Endpoint: https://api.cohere.com/v2/rerank
@@ -533,14 +551,27 @@ class CohereRerankerClient(RerankerClient):
         return self._parse_response(response)
 
     def _get_api_key(self) -> Optional[str]:
-        """Return cohere_api_key from the config service only (never from env vars).
+        """Return the Cohere API key, preferring config over the CO_API_KEY env var.
 
-        The return type annotation is Optional[str].  The ignore below suppresses
-        a mypy "Returning Any" warning caused by the dynamically-typed config
-        dataclass attribute; the runtime type is always str | None.
+        Lookup order (Bug #928):
+          1. config_service().get_config().claude_integration_config.cohere_api_key
+             (server mode — Web UI / DB populates this; wins when both are set).
+          2. os.environ.get("CO_API_KEY") (CLI mode — matches the env-var
+             pattern in services/embedder_provider_resolver.py:45).
+          3. None (caller raises with actionable error message).
+
+        The type ignore below suppresses a mypy "Returning Any" warning caused
+        by the dynamically-typed config dataclass attribute; the runtime type
+        is always str | None.
         """
         config = get_config_service().get_config()
-        return config.claude_integration_config.cohere_api_key  # type: ignore[no-any-return]
+        configured = config.claude_integration_config.cohere_api_key
+        if configured:
+            return configured  # type: ignore[no-any-return]
+        env_key = os.environ.get("CO_API_KEY")
+        if env_key:
+            return env_key
+        return None
 
     def _get_model(self) -> str:
         """Return the Cohere reranker model from config, falling back to the built-in default.
@@ -614,8 +645,8 @@ class CohereRerankerClient(RerankerClient):
         api_key = self._get_api_key()
         if not api_key or not api_key.strip():
             raise ValueError(
-                "Cohere API key is missing or empty. "
-                "Configure it via the server Web UI under API Keys."
+                "Cohere API key not found. "
+                "Set CO_API_KEY env var (CLI mode) or configure via Web UI (server mode)."
             )
         headers = {
             "Authorization": f"Bearer {api_key}",

@@ -54,6 +54,7 @@ class ClaudeCliManager:
         max_workers: int = 2,
         mcp_registration_service=None,
         job_tracker=None,
+        cli_dispatcher=None,
     ):
         """
         Initialize ClaudeCliManager with worker pool.
@@ -63,6 +64,10 @@ class ClaudeCliManager:
             max_workers: Number of worker threads (default 2, Story #24)
             mcp_registration_service: MCPSelfRegistrationService for auto-registering CIDX as MCP server
             job_tracker: Optional JobTracker instance for unified job tracking (Story #313)
+            cli_dispatcher: Optional CliDispatcher instance (Story #847).
+                When provided, _process_work routes through this dispatcher
+                instead of the legacy direct-Claude placeholder.  Used by tests
+                to inject a mock dispatcher for deterministic behaviour.
         """
         self._api_key = api_key
         self._max_workers = max_workers
@@ -80,6 +85,8 @@ class ClaudeCliManager:
             False  # Flag to ensure registration only attempted once per manager
         )
         self._job_tracker = job_tracker  # Unified job tracking (Story #313)
+        # Story #847: injectable CliDispatcher for testing; None means legacy path.
+        self._cli_dispatcher = cli_dispatcher
 
         # Start worker threads
         for i in range(max_workers):
@@ -686,7 +693,20 @@ class ClaudeCliManager:
             # Pre-use sync trigger: ensure API key is synced (Story #20)
             self._ensure_api_key_synced()
 
-            # Check CLI availability
+            # Story #847: route through CliDispatcher when one is wired.
+            if self._cli_dispatcher is not None:
+                result = self._cli_dispatcher.dispatch(
+                    flow="description_gen",
+                    cwd=str(repo_path),
+                    prompt=str(repo_path),
+                    timeout=120,
+                )
+                callback(result.success, result.output)
+                if result.success:
+                    self._on_cli_success()
+                return
+
+            # Legacy path: direct CLI availability check + placeholder invocation.
             if not self.check_cli_available():
                 logger.warning(
                     format_error_log(

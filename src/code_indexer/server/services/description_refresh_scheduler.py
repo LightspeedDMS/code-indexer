@@ -12,15 +12,22 @@ import logging
 import random
 import re
 import threading
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
+from code_indexer.server.services.dep_map_dispatcher_factory import (
+    build_dep_map_dispatcher,
+)
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
 )
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -31,32 +38,10 @@ logger = logging.getLogger(__name__)
 _CLAUDE_CLI_SOFT_TIMEOUT_SECONDS = 90  # inner shell ``timeout`` budget
 _CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 120  # Python subprocess.run cap
 
-
-def _build_claude_command(prompt: str, analysis_model: str) -> list:
-    """
-    Build the shell command list for invoking Claude CLI via ``script``.
-
-    Wraps the Claude CLI in ``script -q -c ... <null-device>`` to provide a
-    pseudo-TTY.  Uses ``os.devnull`` for the null device path so the call
-    is portable across Unix-like platforms.
-
-    Args:
-        prompt: Prompt string to pass to Claude.
-        analysis_model: Model name (e.g. "opus", "sonnet").
-
-    Returns:
-        Command list suitable for ``subprocess.run``.
-    """
-    import os
-    import shlex
-
-    claude_cmd = (
-        f"timeout {_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS}"
-        f" claude --model {shlex.quote(analysis_model)}"
-        f" -p {shlex.quote(prompt)}"
-        f" --print --dangerously-skip-permissions"
-    )
-    return ["script", "-q", "-c", claude_cmd, os.devnull]
+# Bug #953: circuit-breaker threshold for consecutive prompt-generation failures.
+# After this many consecutive None-prompt results for the same repo, the scheduler
+# stops rescheduling (quarantines) and logs one ERROR.  Reset to 0 on success.
+PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3
 
 
 def _build_claude_env() -> dict:
@@ -117,78 +102,6 @@ def _normalize_claude_output(raw: str) -> str:
     return output
 
 
-def invoke_claude_cli(
-    repo_path: str,
-    prompt: str,
-    cli_manager=None,
-    analysis_model: str = "opus",
-) -> tuple:
-    """
-    Module-level Claude CLI invocation, patchable by unit tests.
-
-    Validates inputs, optionally syncs the API key via *cli_manager*, builds
-    the subprocess command via :func:`_build_claude_command`, runs it, and
-    normalises the output via :func:`_normalize_claude_output`.
-
-    Args:
-        repo_path: Absolute path to the repository (subprocess cwd).
-        prompt: Prompt string sent to Claude CLI.
-        cli_manager: Optional ClaudeCliManager for API-key sync before call.
-        analysis_model: Claude model name (default "opus").
-
-    Returns:
-        Tuple of (success: bool, output: str).
-    """
-    import subprocess
-
-    if not repo_path:
-        error_msg = "invoke_claude_cli: repo_path must not be empty"
-        logger.error(error_msg)
-        return False, error_msg
-    if not prompt:
-        error_msg = "invoke_claude_cli: prompt must not be empty"
-        logger.error(error_msg)
-        return False, error_msg
-    if not analysis_model:
-        error_msg = "invoke_claude_cli: analysis_model must not be empty"
-        logger.error(error_msg)
-        return False, error_msg
-
-    if cli_manager is not None:
-        try:
-            cli_manager.sync_api_key()
-        except Exception as sync_exc:
-            logger.warning("invoke_claude_cli: API key sync failed: %s", sync_exc)
-
-    try:
-        result = subprocess.run(
-            _build_claude_command(prompt, analysis_model),
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS,
-            env=_build_claude_env(),
-        )
-    except subprocess.TimeoutExpired:
-        error_msg = f"Claude CLI timed out after {_CLAUDE_CLI_HARD_TIMEOUT_SECONDS}s"
-        logger.warning(error_msg)
-        return False, error_msg
-    except Exception as exc:
-        error_msg = f"Unexpected error during Claude CLI execution: {exc}"
-        logger.error(error_msg, exc_info=True)
-        return False, error_msg
-
-    if result.returncode != 0:
-        error_msg = (
-            f"Claude CLI returned non-zero: {result.returncode},"
-            f" stderr: {result.stderr}"
-        )
-        logger.warning(error_msg)
-        return False, error_msg
-
-    return True, _normalize_claude_output(result.stdout)
-
-
 class DescriptionRefreshScheduler:
     """
     Scheduler for periodic repository description refresh.
@@ -212,6 +125,7 @@ class DescriptionRefreshScheduler:
         golden_repos_dir: Optional[Path] = None,
         lifecycle_debouncer=None,
         refresh_scheduler=None,
+        cli_dispatcher=None,
     ) -> None:
         """
         Initialize the scheduler.
@@ -243,6 +157,10 @@ class DescriptionRefreshScheduler:
             refresh_scheduler: Optional global RefreshScheduler instance (Story #876 D3).
                 Provides the write-lock acquire/release interface the batch runner
                 uses to serialise cidx-meta updates across the fleet.
+            cli_dispatcher: Optional CliDispatcher instance (Story #847).
+                When provided, _invoke_claude_cli routes through this dispatcher
+                instead of building one from config on each call.  Used by tests
+                to inject a mock dispatcher for deterministic behaviour.
         """
         if db_path is None and (tracking_backend is None or golden_backend is None):
             raise ValueError(
@@ -262,6 +180,8 @@ class DescriptionRefreshScheduler:
         self._golden_repos_dir = golden_repos_dir
         self._lifecycle_debouncer = lifecycle_debouncer
         self._refresh_scheduler = refresh_scheduler
+        # Story #847: injectable CliDispatcher for testing; None means build from config.
+        self._cli_dispatcher = cli_dispatcher
         if tracking_backend is not None:
             self._tracking_backend = tracking_backend
         else:
@@ -274,6 +194,12 @@ class DescriptionRefreshScheduler:
             self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Bug #953: per-repo consecutive prompt-failure counter.
+        # Incremented each time _get_refresh_prompt() returns None.
+        # Reset to 0 by on_refresh_complete(success=True).
+        # When the count reaches PROMPT_FAILURE_QUARANTINE_THRESHOLD the repo is
+        # quarantined (not rescheduled) and one ERROR log is emitted.
+        self._prompt_failure_counts: Dict[str, int] = defaultdict(int)
 
         # Story #728 AC5: Bounded thread pool sized by max_concurrent_claude_cli config.
         # Prevents mass backfill from spawning N unbounded concurrent Claude CLI processes.
@@ -620,11 +546,13 @@ class DescriptionRefreshScheduler:
                 LifecycleFleetScanner,
             )
 
-            scanner = LifecycleFleetScanner(
+            scanner: LifecycleFleetScanner = LifecycleFleetScanner(
                 golden_repos_dir=self._golden_repos_dir,
                 repo_aliases=aliases,
             )
-            return scanner.find_broken_or_missing()
+            # cast needed: LifecycleFleetScanner is imported inside try block so mypy
+            # infers scanner as Any; find_broken_or_missing() is declared -> List[str].
+            return cast(List[str], scanner.find_broken_or_missing())
         except Exception:
             logger.error(
                 "Lifecycle backfill: fleet scan failed — skipping startup sweep",
@@ -742,6 +670,8 @@ class DescriptionRefreshScheduler:
 
         # Update tracking record
         if success:
+            # Bug #953: reset circuit-breaker counter on any successful refresh.
+            self._prompt_failure_counts[repo_alias] = 0
             self._tracking_backend.upsert_tracking(
                 repo_alias=repo_alias,
                 status="completed",
@@ -828,8 +758,29 @@ class DescriptionRefreshScheduler:
                 # Get refresh prompt using RepoAnalyzer
                 prompt = self._get_refresh_prompt(alias, clone_path)
                 if prompt is None:
+                    # Bug #953: circuit-breaker — count consecutive prompt failures.
+                    self._prompt_failure_counts[alias] += 1
+                    failure_count = self._prompt_failure_counts[alias]
+                    if failure_count >= PROMPT_FAILURE_QUARANTINE_THRESHOLD:
+                        # Log exactly once at the quarantine boundary; subsequent
+                        # passes are silently skipped to avoid log spam.
+                        if failure_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD:
+                            logger.error(
+                                "Repo %s entered quarantine after %d consecutive "
+                                "prompt-generation failures — will not reschedule until "
+                                "a successful refresh resets the counter.",
+                                alias,
+                                failure_count,
+                            )
+                        # Do NOT call upsert_tracking — leave next_run stale so the
+                        # repo stays quarantined until the counter is reset externally.
+                        continue
                     logger.warning(
-                        f"Cannot refresh {alias}: failed to generate prompt, rescheduling"
+                        "Cannot refresh %s: failed to generate prompt, rescheduling"
+                        " (failure %d/%d)",
+                        alias,
+                        failure_count,
+                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
                     )
                     # Reschedule to next cycle to avoid infinite retry loop (Finding N3)
                     now = datetime.now(timezone.utc).isoformat()
@@ -1094,40 +1045,76 @@ class DescriptionRefreshScheduler:
             repo_path_obj,
         )
 
-    def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
+    def _build_cli_dispatcher(self, config) -> "CliDispatcher":  # noqa: F821
         """
-        Invoke Claude CLI with the given prompt.
+        Build a CliDispatcher from *config* (Story #847).
 
-        Delegates to the module-level :func:`invoke_claude_cli` helper for the
-        subprocess mechanics, then validates the returned output via
-        :meth:`_validate_cli_output`.
+        Delegates to build_dep_map_dispatcher (the single source of truth for
+        CliDispatcher construction — Bug #936 consolidation), forwarding
+        analysis_model and the per-scheduler soft-timeout constant.
 
         Args:
-            repo_path: Path to repository
-            prompt: Prompt to send to Claude
+            config: ServerConfig returned by config_manager.load_config().
 
         Returns:
-            Tuple of (success: bool, result: str) where result is the output or error message
+            A fully initialised CliDispatcher.
         """
-        success, output = invoke_claude_cli(
-            repo_path=repo_path,
-            prompt=prompt,
-            cli_manager=self._claude_cli_manager,
+        return build_dep_map_dispatcher(
+            config,
             analysis_model=self._analysis_model,
+            claude_soft_timeout_seconds=_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS,
         )
-        if not success:
-            return False, output
+
+    def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
+        """
+        Invoke the CLI dispatcher with the given prompt (Story #847).
+
+        Uses the injected CliDispatcher when available; otherwise builds one
+        from the current ServerConfig on each call.  Logs an INFO record when
+        failover fired so operators can see which CLI handled the job.
+
+        Args:
+            repo_path: Path to repository (used as subprocess cwd).
+            prompt: Prompt to send to the CLI.
+
+        Returns:
+            Tuple of (success: bool, result: str) where result is the output
+            or error message — identical shape to the pre-wiring behaviour.
+        """
+        if self._cli_dispatcher is not None:
+            dispatcher = self._cli_dispatcher
+        else:
+            config = (
+                self._config_manager.load_config() if self._config_manager else None
+            )
+            dispatcher = self._build_cli_dispatcher(config)
+
+        result = dispatcher.dispatch(
+            flow="description_refresh",
+            cwd=repo_path,
+            prompt=prompt,
+            timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS,
+        )
+
+        if result.was_failover:
+            logger.info(
+                "CLI failover fired: cli_used=%s was_failover=True",
+                result.cli_used,
+            )
+
+        if not result.success:
+            return False, result.error
 
         # Validate output quality (detect error messages masquerading as content)
-        if not self._validate_cli_output(output):
+        if not self._validate_cli_output(result.output):
             error_msg = (
-                f"Claude CLI output appears to be an error message"
-                f" (length={len(output)}): {output[:200]}"
+                f"CLI output appears to be an error message"
+                f" (length={len(result.output)}): {result.output[:200]}"
             )
             logger.warning(error_msg)
             return False, error_msg
 
-        return True, output
+        return True, result.output
 
     def _validate_cli_output(self, output: str) -> bool:
         """

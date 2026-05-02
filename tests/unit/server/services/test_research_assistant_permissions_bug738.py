@@ -36,9 +36,7 @@ REMOVED_DENY_RULES = [
     # Process control — unblocked for SIGTERM on stuck processes
     "Bash(kill *)",
     "Bash(pkill *)",
-    # Network — localhost curl allowed for admin API diagnostics
-    "Bash(curl *)",
-    # Blanket systemctl restart * — replaced by a specific allow rule
+    # Blanket systemctl restart * — removed in #929 Item #17 (curl re-added to deny)
     "Bash(systemctl restart *)",
 ]
 
@@ -220,17 +218,6 @@ class TestToolLevelDenyRules:
     def test_tool_level_rule_in_deny(self, deny_list, rule):
         assert rule in deny_list, (
             f"Tool-level deny {rule!r} must remain. Got deny: {deny_list}"
-        )
-
-
-class TestNewAllowRules:
-    """New allow rules added by Story #738."""
-
-    def test_systemctl_restart_cidx_server_in_allow(self, allow_list):
-        """The one specific systemctl restart rule must be explicitly allowed."""
-        assert "Bash(systemctl restart cidx-server)" in allow_list, (
-            "Bash(systemctl restart cidx-server) must be in allow list. "
-            f"Got: {allow_list}"
         )
 
 

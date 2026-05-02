@@ -100,9 +100,33 @@ class FileListingService:
         )
 
     def _get_file_content_limits_config(self):
-        """Get file content limits config from ConfigService."""
+        """Get file content limits config from ConfigService (Bug #939: unified ContentLimitsConfig).
+
+        Returns an adapter exposing .max_tokens_per_request and .chars_per_token
+        backed by ContentLimitsConfig so all call sites continue to work unchanged.
+        """
         config_service = get_config_service()
-        return config_service.get_config().file_content_limits_config
+        content_limits = config_service.get_config().content_limits_config
+
+        class _Adapter:
+            """Thin adapter mapping ContentLimitsConfig fields to the legacy attribute names."""
+
+            def __init__(self, cl):
+                self._cl = cl
+
+            @property
+            def max_tokens_per_request(self):
+                return self._cl.file_content_max_tokens
+
+            @property
+            def file_content_max_tokens(self):
+                return self._cl.file_content_max_tokens
+
+            @property
+            def chars_per_token(self):
+                return self._cl.chars_per_token
+
+        return _Adapter(content_limits)
 
     def list_files(
         self, repo_id: str, username: str, query_params: FileListQueryParams
@@ -502,7 +526,10 @@ class FileListingService:
             Tuple of (possibly truncated content, metadata dict with token info)
         """
         file_content_limits = self._get_file_content_limits_config()
-        max_chars = file_content_limits.max_chars_per_request
+        max_chars = (
+            file_content_limits.file_content_max_tokens
+            * file_content_limits.chars_per_token
+        )
 
         # Calculate estimated tokens from content length
         estimated_tokens = len(content) // file_content_limits.chars_per_token
@@ -552,7 +579,7 @@ class FileListingService:
         # Build token enforcement metadata
         token_metadata = {
             "estimated_tokens": estimated_tokens,
-            "max_tokens_per_request": file_content_limits.max_tokens_per_request,
+            "max_tokens_per_request": file_content_limits.file_content_max_tokens,
             "truncated": truncated,
             "truncated_at_line": truncated_at_line,
             "requires_pagination": requires_pagination,
@@ -848,11 +875,11 @@ class FileListingService:
         else:
             # Original behavior: Apply line-based limits and token truncation
 
-            # Story #686: Apply line-based limits IN ADDITION to token limits
-            # The stricter of (line limit, token limit) wins
+            # Bug #939: When limit=None, use MAX_ALLOWED_LIMIT so that token
+            # truncation is the authoritative constraint (not line truncation).
+            # Story #686 DEFAULT_MAX_LINES applies only to get_file_content (alias-based).
             if limit is None:
-                # No user-specified limit: apply default max lines
-                effective_limit = self.DEFAULT_MAX_LINES
+                effective_limit = self.MAX_ALLOWED_LIMIT
             else:
                 # User specified limit: cap at max allowed
                 effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
