@@ -107,6 +107,10 @@ class LangfuseTraceSyncService:
         # Reset at the start of each sync_project() call; populated during _sync_project_inner().
         # Format: {repo_folder_name: set_of_session_ids}
         self._last_modified_sessions_by_repo: Dict[str, set] = {}
+        # Bug #964 Fix 3: tracks repo folder names written in the last sync cycle.
+        # Used by on_sync_complete short-circuit: skip register_langfuse_golden_repos()
+        # when no new repos appeared since the previous cycle.
+        self._last_modified_repos: set = set()
 
     def start(self) -> None:
         """Start background sync thread."""
@@ -324,7 +328,7 @@ class LangfuseTraceSyncService:
     ) -> None:
         """Sync a single project (Story #174: parallel observation fetches)."""
         # 1. Create API client
-        api_client = LangfuseApiClient(host, creds)
+        api_client = LangfuseApiClient(host, creds, stop_event=self._stop_event)
 
         # 2. Discover project name via GET /api/public/projects
         project_info = api_client.discover_project()
@@ -338,6 +342,9 @@ class LangfuseTraceSyncService:
         )
         # Story #592: expose session IDs for README generation via on_sync_complete callback
         self._last_modified_sessions_by_repo = sessions_by_repo
+        # Bug #964 Fix 3: expose modified repos so on_sync_complete can short-circuit
+        # when no new repos were discovered compared to the previous sync cycle.
+        self._last_modified_repos = modified_repos
 
         # 4. Trigger refresh for each per-user repo that received writes (Story #227).
         #    Each per-user repo has its own entry in RefreshScheduler's registry.
@@ -436,19 +443,20 @@ class LangfuseTraceSyncService:
         modified_sessions_by_repo: Dict[str, set] = {}
 
         page = 1
-        while True:
-            traces = api_client.fetch_traces_page(page, from_time)
-            if not traces:
-                break
+        # Bug #964 Fix 1: Create ThreadPoolExecutor ONCE per project sync (outside page loop).
+        # Previously created per-page, causing O(pages) executor constructions with associated
+        # thread pool teardown/rebuild overhead on every page iteration.
+        with ThreadPoolExecutor(max_workers=max_concurrent_observations) as executor:
+            while True:
+                traces = api_client.fetch_traces_page(page, from_time)
+                if not traces:
+                    break
 
-            # Phase A: Submit all traces in page to thread pool (parallel execution)
-            # Thread safety: Each worker reads only its own trace_id's entry from trace_hashes.
-            # Main thread writes to trace_hashes only in the as_completed loop after the
-            # corresponding future completes. No cross-thread contention on the same key.
-            # Safe under CPython GIL for dict operations.
-            with ThreadPoolExecutor(
-                max_workers=max_concurrent_observations
-            ) as executor:
+                # Phase A: Submit all traces in page to thread pool (parallel execution)
+                # Thread safety: Each worker reads only its own trace_id's entry from trace_hashes.
+                # Main thread writes to trace_hashes only in the as_completed loop after the
+                # corresponding future completes. No cross-thread contention on the same key.
+                # Safe under CPython GIL for dict operations.
                 futures = {}
                 for trace in traces:
                     trace_id = trace.get("id")
@@ -494,9 +502,9 @@ class LangfuseTraceSyncService:
                         metrics.errors_count += 1
                         logger.error(f"Error processing trace {trace_id}: {e}")
 
-            page += 1
-            if self._stop_event.is_set():
-                break
+                page += 1
+                if self._stop_event.is_set():
+                    break
 
         # Phase 2: Finalize trace files (move from staging to destination with sequential names)
         if pending_renames:
