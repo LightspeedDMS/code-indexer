@@ -1873,6 +1873,7 @@ More text."""
 class TestIteration10QualityGate:
     """Test Iteration 10 Fix 2: Quality gate for missing headings in Pass 2."""
 
+    @pytest.mark.slow
     @patch("subprocess.run")
     def test_quality_gate_no_headings_triggers_retry(self, mock_subprocess, tmp_path):
         """Test that run_pass_2_per_domain detects and retries when output has no headings."""

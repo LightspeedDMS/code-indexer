@@ -140,7 +140,9 @@ def _verify_hnsw_write_atomic(
     original_bytes = index_file.read_bytes()
     assert len(original_bytes) > 0, "Precondition: index file must exist with content"
 
-    with patch.object(hnswlib.Index, "save_index", side_effect=_partial_write_then_raise):
+    with patch.object(
+        hnswlib.Index, "save_index", side_effect=_partial_write_then_raise
+    ):
         with pytest.raises(OSError, match="Simulated kill"):
             invoke_write()
 
@@ -397,7 +399,9 @@ class TestBuildIndexHNSWBinaryAtomic:
         new_vectors = rng.random((5, VECTOR_DIM)).astype(np.float32)
         new_ids = [f"new-{i}" for i in range(5)]
 
-        with patch.object(hnswlib.Index, "save_index", side_effect=_partial_write_then_raise):
+        with patch.object(
+            hnswlib.Index, "save_index", side_effect=_partial_write_then_raise
+        ):
             with pytest.raises(OSError, match="Simulated kill"):
                 manager.build_index(
                     collection_path=col,

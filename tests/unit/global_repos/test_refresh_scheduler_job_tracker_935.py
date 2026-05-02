@@ -181,9 +181,7 @@ class TestJobRegisteredAtRefreshStart:
             job_tracker=mock_job_tracker,
         )
 
-        with patch.object(
-            scheduler.alias_manager, "read_alias", return_value=None
-        ):
+        with patch.object(scheduler.alias_manager, "read_alias", return_value=None):
             scheduler._execute_refresh("my-repo-global")
 
         # Extract the names of all calls made on mock_job_tracker in order.
@@ -231,9 +229,7 @@ class TestJobUnregisteredOnSuccess:
             job_tracker=mock_job_tracker,
         )
 
-        with patch.object(
-            scheduler.alias_manager, "read_alias", return_value=None
-        ):
+        with patch.object(scheduler.alias_manager, "read_alias", return_value=None):
             result = scheduler._execute_refresh("ok-repo-global")
 
         assert result["success"] is True
@@ -296,9 +292,7 @@ class TestNoJobTrackerInCliMode:
             job_tracker=None,
         )
 
-        with patch.object(
-            scheduler.alias_manager, "read_alias", return_value=None
-        ):
+        with patch.object(scheduler.alias_manager, "read_alias", return_value=None):
             result = scheduler._execute_refresh("cli-repo-global")
 
         assert result["success"] is True  # normal early return

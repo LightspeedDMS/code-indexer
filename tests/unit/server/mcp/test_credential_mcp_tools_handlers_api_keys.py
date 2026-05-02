@@ -139,37 +139,52 @@ class TestCreateAPIKeyHandler:
         manager.generate_key.return_value = ("cidx_sk_full_key_value", "key-uuid-123")
         return manager
 
-    def test_create_api_key_returns_success(self, normal_user, mock_api_key_manager):
+    def test_create_api_key_returns_success(
+        self, normal_user, mock_api_key_manager, tmp_path
+    ):
         """create_api_key handler returns success on valid creation."""
-        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
+        with (
+            _active_elevation(normal_user.username, tmp_path),
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
+        ):
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
-            result = handler({"description": "Test key"}, normal_user)
+            result = handler(
+                {"description": "Test key"}, normal_user, session_key=_TEST_SESSION_KEY
+            )
 
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_create_api_key_returns_key_id(self, normal_user, mock_api_key_manager):
+    def test_create_api_key_returns_key_id(
+        self, normal_user, mock_api_key_manager, tmp_path
+    ):
         """create_api_key handler returns key_id."""
-        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
+        with (
+            _active_elevation(normal_user.username, tmp_path),
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
+        ):
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
-            result = handler({}, normal_user)
+            result = handler({}, normal_user, session_key=_TEST_SESSION_KEY)
 
             content = json.loads(result["content"][0]["text"])
             assert "key_id" in content
 
     def test_create_api_key_returns_full_api_key(
-        self, normal_user, mock_api_key_manager
+        self, normal_user, mock_api_key_manager, tmp_path
     ):
         """create_api_key handler returns full api_key (one-time display)."""
-        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
+        with (
+            _active_elevation(normal_user.username, tmp_path),
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
+        ):
             mock_app.api_key_manager = mock_api_key_manager
 
             handler = HANDLER_REGISTRY["create_api_key"]
-            result = handler({}, normal_user)
+            result = handler({}, normal_user, session_key=_TEST_SESSION_KEY)
 
             content = json.loads(result["content"][0]["text"])
             assert "api_key" in content

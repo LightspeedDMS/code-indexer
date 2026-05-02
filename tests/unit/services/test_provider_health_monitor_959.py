@@ -35,8 +35,8 @@ _PROVIDER = "voyage-ai"
 _LOGGER_NAME = "code_indexer.services.provider_health_monitor"
 
 # Monitor configuration thresholds
-_ERROR_RATE_THRESHOLD = 0.1       # 10% error rate -> degraded
-_LATENCY_P95_MS = 5000.0          # 5 s p95 latency threshold
+_ERROR_RATE_THRESHOLD = 0.1  # 10% error rate -> degraded
+_LATENCY_P95_MS = 5000.0  # 5 s p95 latency threshold
 
 # Failure count well above DEFAULT_DOWN_CONSECUTIVE_FAILURES (5) -> "down"
 _DOWN_FAILURE_COUNT = 10
@@ -67,16 +67,16 @@ _PARTIAL_RECOVERY_SUCCESS_COUNT = 40
 _PARTIAL_RECOVERY_FAILURE_COUNT = 4
 
 # get_health poll counts for the single-status-entry tests
-_GET_HEALTH_CALLS = 3          # repeated polls in the degraded-entry test
-_DOWN_GET_HEALTH_CALLS = 5     # repeated polls in the down-entry test
+_GET_HEALTH_CALLS = 3  # repeated polls in the degraded-entry test
+_DOWN_GET_HEALTH_CALLS = 5  # repeated polls in the down-entry test
 
 # How many times to call get_health in the "repeated same status" scenario
 _REPEATED_GET_HEALTH_CALLS = 4
 
 # Expected log counts used in assertions (no raw literals in test bodies)
-_EXPECTED_SINGLE_WARNING = 1    # exactly one WARNING per status transition
-_EXPECTED_SINGLE_INFO = 1       # exactly one INFO on recovery to healthy
-_EXPECTED_NO_WARNINGS = 0       # no WARNINGs when status has not changed
+_EXPECTED_SINGLE_WARNING = 1  # exactly one WARNING per status transition
+_EXPECTED_SINGLE_INFO = 1  # exactly one INFO on recovery to healthy
+_EXPECTED_NO_WARNINGS = 0  # no WARNINGs when status has not changed
 
 
 # ---------------------------------------------------------------------------
@@ -100,10 +100,9 @@ def _count_logs(
     provider: str = _PROVIDER,
 ) -> int:
     """Count log records at *level* whose message contains *provider*."""
-    return len([
-        r for r in caplog.records
-        if r.levelno == level and provider in r.getMessage()
-    ])
+    return len(
+        [r for r in caplog.records if r.levelno == level and provider in r.getMessage()]
+    )
 
 
 def _count_health_transition_logs(
@@ -113,18 +112,23 @@ def _count_health_transition_logs(
     provider: str = _PROVIDER,
 ) -> int:
     """Count health-state transition logs, excluding sin-bin circuit-breaker messages."""
-    return len([
-        r for r in caplog.records
-        if r.levelno == level
-        and provider in r.getMessage()
-        and "sin-binned" not in r.getMessage()
-    ])
+    return len(
+        [
+            r
+            for r in caplog.records
+            if r.levelno == level
+            and provider in r.getMessage()
+            and "sin-binned" not in r.getMessage()
+        ]
+    )
 
 
 def _drive_down(monitor: ProviderHealthMonitor, n: int = _DOWN_FAILURE_COUNT) -> None:
     """Record n consecutive failures to push provider into 'down' state."""
     for _ in range(n):
-        monitor.record_call(_PROVIDER, latency_ms=_FAILURE_CALL_LATENCY_MS, success=False)
+        monitor.record_call(
+            _PROVIDER, latency_ms=_FAILURE_CALL_LATENCY_MS, success=False
+        )
 
 
 def _drive_degraded(monitor: ProviderHealthMonitor) -> None:
@@ -137,16 +141,22 @@ def _drive_degraded(monitor: ProviderHealthMonitor) -> None:
     """
     for _ in range(_DEGRADED_ROUNDS):
         for _ in range(_DEGRADED_SUCCESS_PER_ROUND):
-            monitor.record_call(_PROVIDER, latency_ms=_DEGRADED_CALL_LATENCY_MS, success=True)
+            monitor.record_call(
+                _PROVIDER, latency_ms=_DEGRADED_CALL_LATENCY_MS, success=True
+            )
         monitor.record_call(
             _PROVIDER, latency_ms=_DEGRADED_CALL_LATENCY_MS, success=False
         )
 
 
-def _drive_healthy(monitor: ProviderHealthMonitor, n: int = _RECOVERY_SUCCESS_COUNT) -> None:
+def _drive_healthy(
+    monitor: ProviderHealthMonitor, n: int = _RECOVERY_SUCCESS_COUNT
+) -> None:
     """Record n consecutive successes to return provider to 'healthy' state."""
     for _ in range(n):
-        monitor.record_call(_PROVIDER, latency_ms=_DEGRADED_CALL_LATENCY_MS, success=True)
+        monitor.record_call(
+            _PROVIDER, latency_ms=_DEGRADED_CALL_LATENCY_MS, success=True
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +285,9 @@ class TestTransitionBasedLogging:
             _drive_degraded(monitor)
             monitor.get_health(_PROVIDER)
 
-        warning_count_after_reset = _count_health_transition_logs(caplog, logging.WARNING)
+        warning_count_after_reset = _count_health_transition_logs(
+            caplog, logging.WARNING
+        )
         assert warning_count_after_reset == _EXPECTED_SINGLE_WARNING, (
             f"Expected {_EXPECTED_SINGLE_WARNING} WARNING after recovery reset, "
             f"got {warning_count_after_reset}"

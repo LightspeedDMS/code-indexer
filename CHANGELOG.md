@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.0.13 — 2026-05-02
+
+### Fixed
+
+- **Bug A — elevation_decorator session_key leak when enforcement disabled** — `require_mcp_elevation` wrapper popped `session_key` from `**kwargs` only AFTER the Gate 1 kill-switch check, so when `elevation_enforcement_enabled=false` the raw session_key was forwarded to the inner handler. Handlers that do not declare `session_key` (or `**kwargs`) would receive a `TypeError`; handlers that do accept `**kwargs` received a credential they were never meant to see. Fix: `session_key` is now popped as the very first statement in `wrapper()`, before any gate, consuming it in the decorator regardless of which gate exits first. Unit tests added in `test_elevation_decorator_gate1_kwargs.py`.
+- **29 pre-existing unit test failures resolved** — Handlers decorated with `@require_mcp_elevation()` were called in unit tests without an active elevation window. With `elevation_enforcement_enabled=true` in the local dev config, Gate 3 (TOTP service unavailable in test context) fired and returned a raw error dict instead of an MCP `{"content": [...]}` response, causing `KeyError: 'content'`. Fixed by adding `_active_elevation` context managers to 5 test files: `test_credential_mcp_tools_handlers_api_keys.py`, `test_credential_mcp_tools_handlers_mcp_creds.py`, `test_credential_mcp_tools_handlers_admin.py`, `test_group_mcp_tools.py`, and `test_credential_handlers_no_mock.py`.
+- **Langfuse test mock `stop_event` kwarg mismatch** — `TestChronologicalTraceOrdering._mock_langfuse_api` patched `LangfuseApiClient.__init__` without the `stop_event` kwarg added by Bug #964, causing 3 tests to raise `TypeError`. Fixed by adding `**kwargs` to the mock signature.
+- **AC3/AC7 session_key injection test assertions corrected** — After Bug A fix, `inner_handler` no longer receives `session_key` via `**kwargs` (the decorator consumes it). Assertions in `test_session_key_injection_protocol.py` updated to `is None` with explanatory comments.
+- **8 flaky load-sensitive tests marked `@pytest.mark.slow`** — Tests failing under parallel load due to SQLite lock contention, TestClient app startup timeouts, or wall-clock timing assertions: `TestCleanupDaemon` class (test_cleanup_daemon.py), `TestUsersPageShell` class and `test_users_list_partial_allowed_when_elevated` (test_users_elevation_gate.py), `test_first_boot_logs_migration_event` (test_lifecycle_timeout_validation.py), `test_recovery_scope_insufficient_for_full_required` (test_elevation_decorator.py), and `test_concurrent_execution_with_timing_verification` (test_concurrent_execution.py).
+
 ## v10.0.12 — 2026-05-02
 
 ### Fixed

@@ -645,9 +645,7 @@ class TestTemporalVectorExistenceCheck:
         rebuild from them. Omitting --clear triggers rebuild_from_vectors path.
         """
         # Create a temporal collection directory with a vector file
-        temporal_dir = (
-            repo_path / ".code-indexer" / "index" / "code-indexer-temporal"
-        )
+        temporal_dir = repo_path / ".code-indexer" / "index" / "code-indexer-temporal"
         temporal_dir.mkdir(parents=True)
         (temporal_dir / "vector_abc123.json").write_text('{"id": "test"}')
 

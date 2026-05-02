@@ -1445,7 +1445,7 @@ class TestChronologicalTraceOrdering:
 
         original_init = LangfuseApiClient.__init__
 
-        def mock_init(self, host, creds):
+        def mock_init(self, host, creds, **kwargs):
             self.host = host
             self.creds = creds
 

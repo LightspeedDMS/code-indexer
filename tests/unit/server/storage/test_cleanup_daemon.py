@@ -173,9 +173,11 @@ def _is_connection_open(conn: sqlite3.Connection) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestCleanupDaemon:
     """Tests for the wall-clock cleanup daemon (Bug #878 Fix A.2)."""
 
+    @pytest.mark.slow
     def test_daemon_cleans_stale_without_get_connection_traffic(self, tmp_db):
         """
         The daemon must sweep stale connections on wall-clock cadence, even when

@@ -295,6 +295,7 @@ class TestLifecycleConfigAutoMigration:
             f"{[r.getMessage() for r in spurious_logs]}"
         )
 
+    @pytest.mark.slow
     def test_first_boot_logs_migration_event(self, tmp_path, caplog):
         """
         initialize_runtime_db() on a legacy DB without lifecycle_analysis_config

@@ -353,7 +353,9 @@ class TestStopEventWiringProduction:
                 "discover_project",
                 return_value={"name": "test-project"},
             ):
-                with patch.object(LangfuseApiClient, "fetch_traces_page", return_value=[]):
+                with patch.object(
+                    LangfuseApiClient, "fetch_traces_page", return_value=[]
+                ):
                     service.sync_project(
                         "https://cloud.langfuse.com",
                         creds,
