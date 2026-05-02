@@ -18181,7 +18181,9 @@ def admin_groups_remove_repos(ctx, group_id: int, repos: str, json_output: bool)
 
         try:
             result = with_elevation_retry(
-                fn=lambda: run_async(client.remove_repos(group_id, repo_names=repo_names)),
+                fn=lambda: run_async(
+                    client.remove_repos(group_id, repo_names=repo_names)
+                ),
                 session=client.session,
                 server_url=server_url,
                 token=client._get_valid_token(),

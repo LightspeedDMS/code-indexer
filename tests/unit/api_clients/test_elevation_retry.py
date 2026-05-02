@@ -464,7 +464,12 @@ class TestAdminClientElevationDetection:
             "_authenticated_request",
             return_value=self._make_mock_response(
                 403,
-                {"detail": {"error": "elevation_required", "message": "Elevation required"}},
+                {
+                    "detail": {
+                        "error": "elevation_required",
+                        "message": "Elevation required",
+                    }
+                },
             ),
         ):
             with pytest.raises(ElevationRequiredError) as exc_info:
@@ -517,7 +522,12 @@ class TestAdminClientElevationDetection:
             "_authenticated_request",
             return_value=self._make_mock_response(
                 403,
-                {"detail": {"error": "elevation_required", "message": "Elevation required"}},
+                {
+                    "detail": {
+                        "error": "elevation_required",
+                        "message": "Elevation required",
+                    }
+                },
             ),
         ):
             with pytest.raises(ElevationRequiredError):
@@ -692,9 +702,7 @@ class TestGroupClientElevationDetection:
             "jsonrpc": "2.0",
             "id": 1,
             "result": {
-                "content": [
-                    {"type": "text", "text": json_module.dumps(content_dict)}
-                ]
+                "content": [{"type": "text", "text": json_module.dumps(content_dict)}]
             },
         }
         return mock_resp
@@ -715,7 +723,10 @@ class TestGroupClientElevationDetection:
             credentials={"username": "admin", "password": "admin"},
         )
 
-        mcp_elevation_response = {"error": "elevation_required", "message": "No elevation window"}
+        mcp_elevation_response = {
+            "error": "elevation_required",
+            "message": "No elevation window",
+        }
 
         with patch.object(
             client,
@@ -739,7 +750,10 @@ class TestGroupClientElevationDetection:
             credentials={"username": "admin", "password": "admin"},
         )
 
-        mcp_elevation_response = {"error": "elevation_required", "message": "No elevation window"}
+        mcp_elevation_response = {
+            "error": "elevation_required",
+            "message": "No elevation window",
+        }
 
         with patch.object(
             client,
