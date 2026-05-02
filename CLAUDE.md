@@ -188,6 +188,18 @@ Query capability is the core product value. NEVER remove or break: query functio
 
 Files: `src/code_indexer/server/auth/elevated_session_manager.py`, `src/code_indexer/server/auth/elevation_routes.py`, `src/code_indexer/server/web/elevation_web_routes.py`, `src/code_indexer/server/auth/dependencies.py::require_elevation`.
 
+### CLI Elevation Retry (Story #980)
+
+CLI admin commands in remote mode auto-elevate when the server returns 403 `elevation_required`. The retry helper is in `src/code_indexer/api_clients/elevation.py`.
+
+**Pattern** (`with_elevation_retry`): try API call → on `ElevationRequiredError` → prompt user for TOTP → call `POST /auth/elevate` → single retry. On `totp_setup_required` or `elevation_failed`: print clear error and `sys.exit(1)` (no retry loop).
+
+**Error detection**: `AdminAPIClient` and `GroupAPIClient` both raise `ElevationRequiredError` when they see `{"detail": {"error": "elevation_required"}}` or `{"detail": {"error": "totp_setup_required"}}` in a 403 response. FastAPI wraps `HTTPException(detail={...})` as `{"detail": {...}}` — always unwrap via `body.get("detail", {})`.
+
+**Scope**: All `cidx admin users` commands (create, list, show, update, delete, change-password) and all `cidx admin groups` commands are wrapped with `with_elevation_retry`.
+
+Files: `src/code_indexer/api_clients/elevation.py`, `src/code_indexer/api_clients/admin_client.py`, `src/code_indexer/api_clients/group_client.py`, `src/code_indexer/cli.py` (admin users + groups sections).
+
 ### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
 
 Maintenance mode write endpoints (`POST /api/admin/maintenance/enter` and `POST /api/admin/maintenance/exit`) are restricted to loopback callers via the `require_localhost` FastAPI dependency in `src/code_indexer/server/auth/dependencies.py`. These endpoints are auto-updater driven (system processes, not humans) so TOTP step-up elevation does not apply — a system process cannot satisfy a TOTP prompt.
