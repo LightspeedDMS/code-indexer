@@ -24,6 +24,84 @@ When users ask questions about LightspeedDMS products, use Neo to systematically
 
 **Skip reranking only when:** doing an exact single-identifier FTS lookup, result set ≤ 3, or chronological/positional order matters more than relevance.
 
+## Context Discovery Phase (MANDATORY — Run Before Any Search)
+
+**Always complete this phase before performing any `search_code` calls.** Skipping it risks searching the wrong branch and returning results that do not match what is running in the environment being investigated.
+
+### Step 0a: Ask Environment and Repo Context
+
+Before searching any code, ask the user:
+
+> "Are you investigating a production issue, a staging issue, or exploring current development? Which system or repository is involved?"
+
+Wait for the answer. Do not guess. Do not proceed to search until you know:
+1. The environment (production / staging / development / other)
+2. The system or repository being investigated
+
+### Step 0b: Identify the Target Branch
+
+Once you know the environment and repo, look up the branch-to-environment mapping:
+
+```
+search_code(
+    query_text="branch_environment_map",
+    repository_alias="cidx-meta-global",
+    search_mode="fts",
+    limit=3
+)
+```
+
+Also call `get_branches` on the relevant golden repo alias to see what branches are available:
+
+```
+get_branches(repo_alias="<repo-name>-global")
+```
+
+Match the user's environment to a branch (e.g., production → `release/x.y.z`, staging → `staging`, development → `development`). Present the recommendation to the user and confirm before activating.
+
+### Step 0c: Activate the Correct Workspace
+
+**Never search `*-global` aliases when the user is investigating a specific environment.** Global aliases are pinned to the golden repo's default branch, which is typically `development`. Searching them for a production issue returns wrong-branch results.
+
+Instead, activate a personal workspace on the correct branch:
+
+```
+activate_repository(
+    golden_repo_alias="<repo-name>",
+    branch_name="<target-branch>",
+    user_alias="<repo-name>-<env>-workspace"
+)
+```
+
+This returns a `job_id`. Poll until the workspace is ready:
+
+```
+get_job_details(job_id="<job_id>")
+```
+
+Repeat every few seconds until `status == "completed"`. Then use `<repo-name>-<env>-workspace` (not `<repo-name>-global`) for all subsequent searches.
+
+### Step 0d: Wrong-Branch Safety Net
+
+Before the first `search_code`, verify the workspace is on the correct branch:
+
+```
+get_repository_status(user_alias="<repo-name>-<env>-workspace")
+```
+
+Confirm the `current_branch` field matches the target branch. If it does not match, warn the user and offer to re-activate on the correct branch before searching.
+
+**If the user explicitly confirms they want to search the default branch** (e.g., "I just want to explore current development"), it is acceptable to use the `*-global` alias — but state clearly which branch that alias is pinned to.
+
+### Step 0e: Session Lifecycle
+
+- **Check before creating**: Before activating, call `get_repository_status` with the intended alias to see if a workspace already exists from a prior session. If it exists on the correct branch, reuse it.
+- **Composite repos**: If the investigation spans multiple repos, use `manage_composite_repository` to create a multi-repo workspace rather than activating each separately.
+- **Cleanup**: When the investigation is complete, offer to `deactivate_repository` to free resources. Do not deactivate mid-session.
+- **Tags and commits as branch targets**: `branch_name` in `activate_repository` also accepts git tags (e.g., `v10.2.1`) and full commit SHAs for pinning to an exact release.
+
+---
+
 ## Discovery Workflow
 
 ### Step 1: Start with the Knowledge Base

@@ -1,7 +1,7 @@
 ---
 name: cidx_ssh_key_delete
 category: ssh
-required_permission: activate_repos
+required_permission: repository:admin
 tl_dr: Delete CIDX-managed SSH key and remove from SSH config.
 inputSchema:
   type: object

@@ -1,7 +1,7 @@
 ---
 name: cidx_ssh_key_list
 category: ssh
-required_permission: activate_repos
+required_permission: repository:admin
 tl_dr: List all SSH keys (CIDX-managed and unmanaged).
 inputSchema:
   type: object
