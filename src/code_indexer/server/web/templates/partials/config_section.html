@@ -664,6 +664,60 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Activated Repository Reaper Settings Section (Story #967) -->
+<details class="config-section" id="section-activated-reaper">
+    <summary>
+        <h2>Activated Repository Reaper</h2>
+    </summary>
+    <p class="section-description">
+        Configures automatic deactivation of idle activated repositories. Repos not accessed
+        within the TTL window are automatically deactivated to reclaim disk space and memory.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-activated-reaper">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">TTL (days)</td>
+                    <td class="config-value">{{ config.activated_reaper.ttl_days }}</td>
+                    <td class="config-description">Repos idle for this many days are deactivated (default: 30)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Cadence (hours)</td>
+                    <td class="config-value">{{ config.activated_reaper.cadence_hours }}</td>
+                    <td class="config-description">How often the reaper cycle runs (default: 24)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('activated-reaper')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-activated-reaper" method="post" action="/admin/config/activated_reaper" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.activated_reaper %}
+            <div class="validation-error">{{ validation_errors.activated_reaper }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label>
+                    TTL Days
+                    <input type="number" id="activated-reaper-ttl-days" name="ttl_days" value="{{ config.activated_reaper.ttl_days }}" min="1" max="3650">
+                    <small>Range: 1-3650 days (default: 30). Repos not accessed within this window are deactivated.</small>
+                </label>
+                <label>
+                    Cadence Hours
+                    <input type="number" id="activated-reaper-cadence-hours" name="cadence_hours" value="{{ config.activated_reaper.cadence_hours }}" min="1" max="168">
+                    <small>Range: 1-168 hours (default: 24). How often the reaper cycle runs.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('activated-reaper')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->

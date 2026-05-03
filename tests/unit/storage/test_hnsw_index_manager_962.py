@@ -298,7 +298,9 @@ class TestReloadCycleDoubleDeleteBug962:
             f"Expected WARNING mentioning point or label, got: {warning_messages}"
         )
 
-    def test_warning_log_emitted_on_already_deleted_in_add_or_update_vector(self, caplog):
+    def test_warning_log_emitted_on_already_deleted_in_add_or_update_vector(
+        self, caplog
+    ):
         """A WARNING-level log is emitted when already-deleted is swallowed in add_or_update_vector."""
         manager = _make_manager()
         mock_index = _make_mock_index()

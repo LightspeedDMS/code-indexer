@@ -481,13 +481,18 @@ class TestDocumentTruncation:
 
         assert _get_request_body(httpx_mock)["documents"][0] == "short doc"
 
-    def test_empty_document_sent_as_is(self, httpx_mock: HTTPXMock, patched_client):
-        """Empty documents are sent without modification."""
+    def test_empty_document_replaced_with_single_space(
+        self, httpx_mock: HTTPXMock, patched_client
+    ):
+        """Empty documents are replaced with a single space to satisfy Voyage API constraints.
+
+        Voyage AI rejects payloads containing empty strings (HTTP 400, Bug #963).
+        """
         _add_rerank_response(httpx_mock)
 
         patched_client.rerank(query="q", documents=[""], top_k=1)
 
-        assert _get_request_body(httpx_mock)["documents"][0] == ""
+        assert _get_request_body(httpx_mock)["documents"][0] == " "
 
     def test_truncation_flag_always_set_in_request_body(
         self, httpx_mock: HTTPXMock, patched_client
@@ -1113,15 +1118,18 @@ class TestCohereRerankerClientDocumentTruncation:
 
         assert _get_cohere_request_body(httpx_mock)["documents"][0] == "short doc"
 
-    def test_empty_document_sent_as_is(
+    def test_empty_document_replaced_with_single_space(
         self, httpx_mock: HTTPXMock, patched_cohere_client
     ):
-        """Empty documents are sent without modification."""
+        """Empty documents are replaced with a single space to prevent API rejections.
+
+        Consistent with VoyageRerankerClient fix (Bug #963).
+        """
         _add_cohere_rerank_response(httpx_mock)
 
         patched_cohere_client.rerank(query="q", documents=[""], top_k=1)
 
-        assert _get_cohere_request_body(httpx_mock)["documents"][0] == ""
+        assert _get_cohere_request_body(httpx_mock)["documents"][0] == " "
 
 
 # ---------------------------------------------------------------------------

@@ -1032,6 +1032,54 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize Activated Repository Reaper Scheduler (Story #967)
+        activated_reaper_scheduler = None
+        logger.info(
+            "Server startup: Initializing activated reaper scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.activated_reaper_service import (
+                ActivatedReaperService as _ActivatedReaperService,
+            )
+            from code_indexer.server.services.activated_reaper_scheduler import (
+                ActivatedReaperScheduler as _ActivatedReaperScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if not (
+                hasattr(golden_repo_manager, "activated_repo_manager")
+                and golden_repo_manager.activated_repo_manager is not None
+            ):
+                raise RuntimeError(
+                    "golden_repo_manager.activated_repo_manager is not available"
+                )
+            _reaper_config_service = get_config_service()
+            _reaper_service = _ActivatedReaperService(
+                activated_repo_manager=golden_repo_manager.activated_repo_manager,
+                background_job_manager=background_job_manager,
+                config_service=_reaper_config_service,
+            )
+            activated_reaper_scheduler = _ActivatedReaperScheduler(
+                service=_reaper_service,
+                background_job_manager=background_job_manager,
+                config_service=_reaper_config_service,
+            )
+            activated_reaper_scheduler.start()
+            app.state.activated_reaper_scheduler = activated_reaper_scheduler
+            logger.info(
+                "Activated reaper scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-036",
+                    f"Failed to initialize activated reaper scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Dependency Map Scheduler (Story #193)
         dependency_map_service = None
         logger.info(
@@ -2402,6 +2450,27 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-034",
                         f"Error stopping data retention scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop activated reaper scheduler (Story #967)
+        activated_reaper_scheduler_state = getattr(
+            app.state, "activated_reaper_scheduler", None
+        )
+        if activated_reaper_scheduler_state is not None:
+            try:
+                activated_reaper_scheduler_state.stop()
+                logger.info(
+                    "Activated reaper scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-037",
+                        f"Error stopping activated reaper scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

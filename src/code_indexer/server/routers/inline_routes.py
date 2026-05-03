@@ -71,6 +71,7 @@ from ..routers.groups import (
 from ..routers.repo_categories import router as repo_categories_router
 from ..routes.multi_query_routes import router as multi_query_router
 from ..routes.scip_multi_routes import router as scip_multi_router
+from ..routes.reaper_routes import router as reaper_router  # Story #967
 from ..web import (
     web_router,
     user_router,
@@ -272,6 +273,7 @@ def register_inline_routes(
     app.include_router(provider_indexes_router)
     app.include_router(admin_provider_health_router)
     app.include_router(debug_router)
+    app.include_router(reaper_router, prefix="/api/admin")  # Story #967
 
     # Mount Web Admin UI routes and static files
     from fastapi.staticfiles import StaticFiles

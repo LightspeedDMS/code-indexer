@@ -712,6 +712,21 @@ class DataRetentionConfig:
 
 
 @dataclass
+class ActivatedReaperConfig:
+    """
+    Configuration for the Activated Repository Reaper (Story #967).
+
+    Controls automatic deactivation of idle activated repositories.
+    """
+
+    # TTL in days after which an idle activated repo is deactivated (default: 30 days)
+    ttl_days: int = 30
+
+    # How often the reaper cycle runs in hours (default: every 24 hours)
+    cadence_hours: int = 24
+
+
+@dataclass
 class ContentLimitsConfig:
     """
     Unified content limits configuration (Story #32).
@@ -1053,6 +1068,10 @@ class ServerConfig:
 
     # Story #400 - Unified data retention configuration
     data_retention_config: Optional[DataRetentionConfig] = None
+
+    # Story #967 - Activated repository reaper configuration
+    activated_reaper_config: Optional[ActivatedReaperConfig] = None
+
     password_expiry_config: Optional[PasswordExpiryConfig] = None  # Story #565
 
     # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
@@ -1183,6 +1202,9 @@ class ServerConfig:
         # Story #400 - Initialize data retention config
         if self.data_retention_config is None:
             self.data_retention_config = DataRetentionConfig()
+        # Story #967 - Initialize activated reaper config
+        if self.activated_reaper_config is None:
+            self.activated_reaper_config = ActivatedReaperConfig()
         # Story #565 - Initialize password expiry config
         if self.password_expiry_config is None:
             self.password_expiry_config = PasswordExpiryConfig()
@@ -1765,6 +1787,14 @@ class ServerConfigManager:
         ):
             config_dict["data_retention_config"] = DataRetentionConfig(
                 **config_dict["data_retention_config"]
+            )
+
+        # Story #967: Convert activated_reaper_config dict to ActivatedReaperConfig
+        if "activated_reaper_config" in config_dict and isinstance(
+            config_dict["activated_reaper_config"], dict
+        ):
+            config_dict["activated_reaper_config"] = ActivatedReaperConfig(
+                **config_dict["activated_reaper_config"]
             )
 
         # Epic #408: Convert ontap dict to OntapConfig

@@ -15,15 +15,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from ..utils.config_manager import (
-    ServerConfigManager,
-    ServerConfig,
-    RerankConfig,
-    LifecycleAnalysisConfig,
     CidxMetaBackupConfig,
+    LifecycleAnalysisConfig,
+    RerankConfig,
+    ServerConfig,
+    ServerConfigManager,
 )
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _activated_reaper_settings(config: ServerConfig) -> Dict[str, Any]:
+    """Return activated_reaper settings dict from ServerConfig (Story #967)."""
+    reaper = config.activated_reaper_config
+    assert reaper is not None  # Guaranteed by ServerConfig.__post_init__
+    return {
+        "ttl_days": reaper.ttl_days,
+        "cadence_hours": reaper.cadence_hours,
+    }
 
 
 @runtime_checkable
@@ -564,6 +574,8 @@ class ConfigService:
                 "background_jobs_retention_hours": config.data_retention_config.background_jobs_retention_hours,  # type: ignore[union-attr]
                 "cleanup_interval_hours": config.data_retention_config.cleanup_interval_hours,  # type: ignore[union-attr]
             },
+            # Story #967 - Activated repository reaper configuration
+            "activated_reaper": _activated_reaper_settings(config),
             # Story #223 - AC4: Indexing configuration
             "indexing": {
                 "indexable_extensions": (
@@ -738,6 +750,9 @@ class ConfigService:
         # Story #400 - Data retention configuration
         elif category == "data_retention":
             self._update_data_retention_setting(config, key, value)
+        # Story #967 - Activated repository reaper configuration
+        elif category == "activated_reaper":
+            self._update_activated_reaper_setting(config, key, value)
         # Story #223 - AC4: Indexing configuration
         elif category == "indexing":
             self._update_indexing_setting(key, value)
@@ -1705,6 +1720,19 @@ class ConfigService:
             data_retention.cleanup_interval_hours = int(value)
         else:
             raise ValueError(f"Unknown data retention setting: {key}")
+
+    def _update_activated_reaper_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update an activated_reaper setting (Story #967)."""
+        reaper = config.activated_reaper_config
+        assert reaper is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "ttl_days":
+            reaper.ttl_days = int(value)
+        elif key == "cadence_hours":
+            reaper.cadence_hours = int(value)
+        else:
+            raise ValueError(f"Unknown activated_reaper setting: {key}")
 
     def save_all_settings(self, settings: Dict[str, Dict[str, Any]]) -> None:
         """
