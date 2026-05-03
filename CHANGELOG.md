@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.1.0 — 2026-05-02
+
+### Added
+
+- **Story #967 — Activated Repository Reaper** — New background service that periodically scans activated repositories and auto-deactivates those that have been idle beyond a configurable TTL. `ActivatedReaperService` reads `last_accessed` timestamps from activated repos and submits `deactivate_repository` background jobs for any repo whose last-accessed time is older than `activated_reaper_config.ttl_days` (default 30 days); repos with a missing or null `last_accessed` are treated as never-accessed and always eligible for reaping (AC5). `ActivatedReaperScheduler` runs as a daemon thread, submits reap cycles via `BackgroundJobManager` so they appear in the job dashboard (AC3), and re-reads cadence and TTL from config on every cycle so Web UI changes take effect without a server restart (AC4). Manual trigger available via `POST /api/admin/reaper/trigger` (admin-only). New `activated_reaper_config` block in `ServerConfig` with `ttl_days: int = 30` and `cadence_hours: int = 24` configurable from the Web UI Config Screen.
+- **Story #981 — Branch-aware exploration for normal users** — `UserRole.NORMAL_USER` now includes the `activate_repos` permission, allowing normal users to activate, deactivate, switch branches on, and sync their own workspace repositories without requiring admin access (AC1). The `switch_branch` route now enforces a guard preventing normal users from switching branches on `*-global` aliases — only admins may mutate global repositories (AC2). The Lightspeed Neo Exploration skill was extended with a Context Discovery Phase (Steps 0a–0e) that guides normal users through asking context questions, listing available branches from `cidx-meta-global`, activating their workspace with the correct branch, waiting for the activation job to complete, and scoping all searches to their workspace alias.
+
+### Fixed
+
+- **Bug #962 — HNSW double-delete crash on reload cycle** — `HNSWIndexManager.remove_vector` and `add_or_update_vector` raised `RuntimeError: "The requested to delete element is already deleted"` when `temporal_indexer.close()` triggered `_apply_incremental_hnsw_batch_update` on a point whose HNSW label had already been soft-deleted in a previous batch. The `load_for_incremental_update` path rebuilds `id_to_label` from persisted metadata which carries no soft-delete state, so a reload after a delete would silently re-expose the deleted label and cause the second `mark_deleted` call to raise. Fix: both `mark_deleted` call sites now wrap the call in a narrow `try/except RuntimeError` that re-raises if the message does not contain "already deleted" and logs a WARNING otherwise. Mapping cleanup (`id_to_label`, `label_to_id` eviction) proceeds regardless. Regression tests cover the exact Bug #962 stack trace path (delete → reload → delete again) plus add/update path and re-raise behavior for unrelated errors.
+- **Bug #963 — Empty document strings crash FTS indexer** — The FTS (Tantivy) indexer raised during indexing when a document's `content` field was an empty string. Fix: the chunker now replaces empty string content with a single-space placeholder (`" "`) before writing to the FTS index. Regression tests verify both the empty-string and whitespace-only cases.
+
+### Security
+
+- **SSH key tool docs re-gated to `repository:admin`** — Five SSH key management MCP tools (`cidx_ssh_key_create`, `cidx_ssh_key_delete`, `cidx_ssh_key_list`, `cidx_ssh_key_show_public`, `cidx_ssh_key_assign_host`) had their `required_permission` set to `activate_repos`. Granting `activate_repos` to `NORMAL_USER` (Story #981) would have exposed these server-wide credential-management tools to all authenticated users. Permission gate updated to `repository:admin` (requires admin role) before the normal-user grant was applied.
+
 ## v10.0.16 — 2026-05-02
 
 ### Fixed
