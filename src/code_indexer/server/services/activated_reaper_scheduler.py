@@ -91,6 +91,7 @@ class ActivatedReaperScheduler:
             self._service.run_reap_cycle,
             submitter_username="system",
             is_admin=True,
+            repo_alias="server",
         )
         logger.info(
             "ActivatedReaperScheduler: triggered reap cycle (job_id=%s)", job_id
