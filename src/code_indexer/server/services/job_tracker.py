@@ -118,6 +118,34 @@ def _dt_to_iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat()
 
 
+def _serialize_progress_info(value: Optional[Any]) -> Optional[str]:
+    """
+    Serialize progress_info for SQLite binding.
+
+    SQLite accepts only int, float, str, bytes, and None.  When progress_info
+    is a dict (type contract violation or future API change), json.dumps it.
+    When it is already a str or None, pass through unchanged.
+
+    Raises:
+        TypeError: If the value is a dict containing non-JSON-serializable
+            objects (re-raised with a descriptive message), or if the value
+            is an unexpected type.  No silent fallback — fail fast
+            (Messi Rule #2 anti-fallback).
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value)
+        except TypeError as exc:
+            raise TypeError(
+                f"progress_info dict contains non-JSON-serializable value: {exc}"
+            ) from exc
+    raise TypeError(
+        f"progress_info must be None, str, or dict; got {type(value).__name__}"
+    )
+
+
 def _iso_to_dt(s: Optional[str]) -> Optional[datetime]:
     """Parse ISO-8601 string to aware datetime, or None."""
     if not s:
@@ -408,7 +436,7 @@ class JobTracker:
         with self._lock:
             job = self._active_jobs.get(job_id)
             if job is None:
-                logger.warning(f"JobTracker.update_status: job {job_id} not in memory")
+                logger.debug(f"JobTracker.update_status: job {job_id} not in memory")
                 return
 
             if status is not None:
@@ -917,6 +945,22 @@ class JobTracker:
         with self._lock:
             return sum(1 for j in self._active_jobs.values() if j.status == "pending")
 
+    def get_running_jobs_count(self) -> int:
+        """Return the count of running jobs.
+
+        Alias for get_active_job_count() using the plural-form name expected by
+        MaintenanceState.register_job_tracker() interface (drain-status monitoring).
+        """
+        return self.get_active_job_count()
+
+    def get_queued_jobs_count(self) -> int:
+        """Return the count of pending (queued) jobs.
+
+        Alias for get_pending_job_count() using the plural-form name expected by
+        MaintenanceState.register_job_tracker() interface (drain-status monitoring).
+        """
+        return self.get_pending_job_count()
+
     # ------------------------------------------------------------------
     # Private SQLite helpers
     # ------------------------------------------------------------------
@@ -1016,7 +1060,7 @@ class JobTracker:
                     job.progress,
                     job.username,
                     job.repo_alias,
-                    job.progress_info,
+                    _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
                 ),
             )
@@ -1103,7 +1147,7 @@ class JobTracker:
                     job.progress,
                     job.username,
                     job.repo_alias,
-                    job.progress_info,
+                    _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
                 ),
             )
@@ -1145,7 +1189,7 @@ class JobTracker:
                     json.dumps(job.result) if job.result is not None else None,
                     job.error,
                     job.progress,
-                    job.progress_info,
+                    _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
                     job.job_id,
                 ),

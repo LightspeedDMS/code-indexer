@@ -8,6 +8,8 @@ import threading
 import time
 import unittest
 
+import pytest
+
 from code_indexer.services.provider_health_monitor import (
     DEFAULT_DOWN_CONSECUTIVE_FAILURES,
     DEFAULT_DOWN_ERROR_RATE,
@@ -126,7 +128,12 @@ class TestProviderHealthMonitor(unittest.TestCase):
     # -------------------------------------------------------------------------
 
     def test_latency_percentiles(self) -> None:
-        """Verify p50/p95/p99 calculation matches floor-based index algorithm."""
+        """Verify p50/p95/p99 calculation uses linear interpolation (numpy default).
+
+        Bug #873: floor-based nearest-rank collapsed p95 and p99 onto the same
+        sample slot for N < 25 (the common operating condition). Linear
+        interpolation produces distinct, ordered values for any N with variance.
+        """
         monitor = ProviderHealthMonitor()
         # Record 10 successful calls with latencies 10, 20, ..., 100 ms
         latencies = [float(i * 10) for i in range(1, 11)]  # [10, 20, ..., 100]
@@ -136,13 +143,43 @@ class TestProviderHealthMonitor(unittest.TestCase):
         health = monitor.get_health("voyage")
         status = health["voyage"]
 
-        # Floor-based percentile: idx = int(10 * pct / 100), clamped to 0..9
-        # p50: idx = int(10 * 50 / 100) = 5 → sorted[5] = 60
-        # p95: idx = int(10 * 95 / 100) = 9 → sorted[9] = 100
-        # p99: idx = int(10 * 99 / 100) = 9 → sorted[9] = 100 (clamped)
-        assert status.p50_latency_ms == 60.0
-        assert status.p95_latency_ms == 100.0
-        assert status.p99_latency_ms == 100.0
+        # Linear interpolation (numpy default / NIST):
+        # np.percentile([10..100], 50) == 55.0
+        # np.percentile([10..100], 95) == 95.5
+        # np.percentile([10..100], 99) == 99.1
+        assert status.p50_latency_ms == 55.0
+        assert status.p95_latency_ms == pytest.approx(95.5, abs=0.01)
+        assert status.p99_latency_ms == pytest.approx(99.1, abs=0.01)
+
+        # Bug #873 regression guard: with any variance in samples, p99 must exceed p95
+        assert status.p99_latency_ms > status.p95_latency_ms, (
+            "Bug #873: p95 and p99 collapsed (floor-based percentile regression)"
+        )
+
+    # -------------------------------------------------------------------------
+    # Test 6b: percentiles_distinct_at_small_N  (Bug #873 regression guard)
+    # -------------------------------------------------------------------------
+
+    def test_percentiles_distinct_at_small_N(self) -> None:
+        """Bug #873: p95 and p99 must be distinct for any N with variance.
+
+        Floor-based nearest-rank collapsed p95 and p99 onto the same slot
+        for N < 25. Linear interpolation (numpy default) produces distinct
+        values for any N >= 2 when the input has variance.
+        """
+        for n in (5, 10, 15, 20, 25):
+            # Generate non-uniform samples with increasing spread
+            latencies = [float(i * 10 + i * i) for i in range(1, n + 1)]
+            monitor = ProviderHealthMonitor(rolling_window_minutes=60)
+            for lat in latencies:
+                monitor.record_call("test", success=True, latency_ms=lat)
+            status = monitor.get_health("test")["test"]
+            assert status.p95_latency_ms < status.p99_latency_ms, (
+                f"N={n}: p95={status.p95_latency_ms} p99={status.p99_latency_ms} collapsed"
+            )
+            assert status.p50_latency_ms < status.p95_latency_ms, (
+                f"N={n}: p50 >= p95 (ordering regression)"
+            )
 
     # -------------------------------------------------------------------------
     # Test 7: rolling_window_prunes_old
@@ -605,6 +642,29 @@ class TestRegisterProbe(unittest.TestCase):
         # The recorded success matches probe return value (True)
         health = monitor.get_health("voyage-ai")
         assert health["voyage-ai"].successful_requests > 0
+
+
+class TestGetSinbinConfigEmbedderKeys:
+    """Story #691 BLOCKER 2 (codex): embedder key variants must map to the same
+    sinbin config branch as their canonical provider names."""
+
+    def test_get_sinbin_config_voyage_embedder_key(self) -> None:
+        """voyage-embedder must map to voyage_ai_sinbin, same as voyage-ai."""
+        monitor = ProviderHealthMonitor()
+        cfg_ai = monitor._get_sinbin_config("voyage-ai")
+        cfg_embedder = monitor._get_sinbin_config("voyage-embedder")
+        assert cfg_ai == cfg_embedder, (
+            "voyage-embedder must map to the same sinbin config as voyage-ai (codex BLOCKER 2)"
+        )
+
+    def test_get_sinbin_config_cohere_embedder_key(self) -> None:
+        """cohere-embedder must map to cohere_sinbin, same as cohere."""
+        monitor = ProviderHealthMonitor()
+        cfg_cohere = monitor._get_sinbin_config("cohere")
+        cfg_embedder = monitor._get_sinbin_config("cohere-embedder")
+        assert cfg_cohere == cfg_embedder, (
+            "cohere-embedder must map to the same sinbin config as cohere (codex BLOCKER 2)"
+        )
 
 
 if __name__ == "__main__":

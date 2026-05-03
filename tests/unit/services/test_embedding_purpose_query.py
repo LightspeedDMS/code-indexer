@@ -97,12 +97,16 @@ class TestFilesystemVectorStorePassesEmbeddingPurpose:
 class TestCLIQueryFunctionPassesEmbeddingPurpose:
     """AST tests: both get_embedding calls inside the cli.py 'query' function use embedding_purpose='query'."""
 
-    def _get_get_embedding_calls_in_query_func(
+    def _get_run_embedder_chain_calls_in_query_func(
         self,
     ) -> tuple[list[int], list[int]]:
         """
-        Parse cli.py and return lines of get_embedding() calls inside the 'query' function,
-        separated into (calls_with_query_purpose, calls_without_purpose).
+        Parse cli.py and return lines of _run_embedder_chain() calls inside the 'query'
+        function, separated into (calls_with_query_purpose, calls_without_purpose).
+
+        Production was refactored from direct provider.get_embedding() calls to
+        _run_embedder_chain(text=..., embedding_purpose="query", ...) so this helper
+        scans for ast.Name nodes with id="_run_embedder_chain".
         """
         cli_path = Path("src/code_indexer/cli.py")
         source = cli_path.read_text()
@@ -124,8 +128,8 @@ class TestCLIQueryFunctionPassesEmbeddingPurpose:
             if not isinstance(node, ast.Call):
                 continue
             if not (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get_embedding"
+                isinstance(node.func, ast.Name)
+                and node.func.id == "_run_embedder_chain"
             ):
                 continue
             has_query_purpose = any(
@@ -142,24 +146,28 @@ class TestCLIQueryFunctionPassesEmbeddingPurpose:
         return with_purpose, without_purpose
 
     def test_git_aware_path_passes_embedding_purpose_query(self):
-        """CLI git-aware search path (~line 5969) must call get_embedding with embedding_purpose='query'."""
-        with_purpose, without_purpose = self._get_get_embedding_calls_in_query_func()
+        """CLI git-aware search path must call _run_embedder_chain with embedding_purpose='query'."""
+        with_purpose, without_purpose = (
+            self._get_run_embedder_chain_calls_in_query_func()
+        )
 
         assert len(with_purpose) >= 1, (
-            "The 'query' function in cli.py must have at least 1 get_embedding() call "
+            "The 'query' function in cli.py must have at least 1 _run_embedder_chain() call "
             "with embedding_purpose='query' (git-aware path). "
             f"Found {len(with_purpose)} with purpose='query' at lines: {with_purpose}. "
             f"Calls without embedding_purpose at lines: {without_purpose}"
         )
 
     def test_both_query_paths_pass_embedding_purpose_query(self):
-        """Both CLI search paths (~lines 5969 and 6029) must pass embedding_purpose='query'."""
-        with_purpose, without_purpose = self._get_get_embedding_calls_in_query_func()
+        """Both CLI search paths must call _run_embedder_chain with embedding_purpose='query'."""
+        with_purpose, without_purpose = (
+            self._get_run_embedder_chain_calls_in_query_func()
+        )
 
         assert len(with_purpose) >= 2, (
-            "The 'query' function in cli.py must have at least 2 get_embedding() calls "
-            "with embedding_purpose='query', covering both the git-aware path (~line 5969) "
-            "and the non-git path (~line 6029). "
+            "The 'query' function in cli.py must have at least 2 _run_embedder_chain() calls "
+            "with embedding_purpose='query', covering both the git-aware path and the non-git "
+            "path. "
             f"Found only {len(with_purpose)} at lines: {with_purpose}. "
             f"Calls without embedding_purpose at lines: {without_purpose}"
         )

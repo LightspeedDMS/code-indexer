@@ -12,7 +12,7 @@ promotion, row cap, and status field integration.
 """
 
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pytest
 
@@ -101,7 +101,7 @@ MIN_ROW_COUNT = 1
 
 
 def _make_samples(
-    dep_name: str, latencies: List[float], base_time: float = None
+    dep_name: str, latencies: List[float], base_time: Optional[float] = None
 ) -> List[Dict]:
     """Build a list of sample dicts for a dependency."""
     if base_time is None:

@@ -287,6 +287,7 @@ class _PgStyleSqlitePool:
                 key_id INTEGER DEFAULT 1,
                 mfa_enabled BOOLEAN DEFAULT 0,
                 last_used_counter INTEGER,
+                last_used_otp_counter INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -519,3 +520,130 @@ class TestClusterMFAOperations:
         assert totp_service_with_pool._get_secret("unknown") is None
         assert totp_service_with_pool.is_mfa_enabled("unknown") is False
         assert totp_service_with_pool.verify_code("unknown", "123456") is False
+
+
+# ------------------------------------------------------------------
+# Story #923 AC9: verify_enabled_code() with timestamp-based CAS replay
+# ------------------------------------------------------------------
+
+import time as _time  # noqa: E402
+
+# TOTP codes rotate every 30 s; sleep 31 s to guarantee a new window.
+_TOTP_WINDOW_ADVANCE_SECONDS = 31
+_VEC_USERNAME = "vec_user"
+_VEC_BAD_CODE = "000000"
+
+
+@pytest.fixture
+def _activated_service(totp_service):
+    """Service with MFA activated; positioned one window past activation."""
+    secret = totp_service.generate_secret(_VEC_USERNAME)
+    totp = pyotp.TOTP(secret)
+    totp_service.activate_mfa(_VEC_USERNAME, totp.now())
+    _time.sleep(_TOTP_WINDOW_ADVANCE_SECONDS)
+    return totp_service, totp
+
+
+@pytest.fixture
+def _activated_service_with_pool(totp_service_with_pool):
+    """Pool-mode service with MFA activated; positioned one window past activation."""
+    secret = totp_service_with_pool.generate_secret(_VEC_USERNAME)
+    totp = pyotp.TOTP(secret)
+    totp_service_with_pool.activate_mfa(_VEC_USERNAME, totp.now())
+    _time.sleep(_TOTP_WINDOW_ADVANCE_SECONDS)
+    return totp_service_with_pool, totp
+
+
+@pytest.mark.slow
+class TestVerifyEnabledCodeWithPool:
+    """verify_enabled_code() via PostgreSQL pool path (_cas_otp_counter_pg)."""
+
+    def test_returns_true_for_valid_code_via_pool(self, _activated_service_with_pool):
+        """Must return True for a fresh valid code when MFA is active (pool path)."""
+        svc, totp = _activated_service_with_pool
+        assert svc.verify_enabled_code(_VEC_USERNAME, totp.now()) is True
+
+    def test_returns_false_on_replay_via_pool(self, _activated_service_with_pool):
+        """Same OTP must be rejected on second call via pool (replay prevention)."""
+        svc, totp = _activated_service_with_pool
+        fresh_code = totp.now()
+        assert svc.verify_enabled_code(_VEC_USERNAME, fresh_code) is True
+        assert svc.verify_enabled_code(_VEC_USERNAME, fresh_code) is False
+
+
+@pytest.mark.slow
+class TestVerifyEnabledCode:
+    """verify_enabled_code() requires MFA enabled; blocks replay via timestamp CAS."""
+
+    def test_raises_on_non_digit_code(self, totp_service):
+        """Must raise ValueError when code contains non-digit characters."""
+        with pytest.raises(ValueError, match="6 decimal digits"):
+            totp_service.verify_enabled_code(_VEC_USERNAME, "abc123")
+
+    def test_raises_on_wrong_length_code(self, totp_service):
+        """Must raise ValueError when code is not exactly 6 digits."""
+        with pytest.raises(ValueError, match="6 decimal digits"):
+            totp_service.verify_enabled_code(_VEC_USERNAME, "12345")
+
+    def test_returns_false_when_mfa_not_enabled(self, totp_service):
+        """Must return False when MFA is not yet activated."""
+        totp_service.generate_secret(_VEC_USERNAME)
+        assert totp_service.verify_enabled_code(_VEC_USERNAME, "123456") is False
+
+    def test_returns_false_for_wrong_code_when_enabled(self, totp_service):
+        """Must return False for invalid code even when MFA is active."""
+        secret = totp_service.generate_secret(_VEC_USERNAME)
+        totp = pyotp.TOTP(secret)
+        totp_service.activate_mfa(_VEC_USERNAME, totp.now())
+        assert totp_service.verify_enabled_code(_VEC_USERNAME, _VEC_BAD_CODE) is False
+
+    def test_returns_true_for_valid_code_when_enabled(self, _activated_service):
+        """Must return True for a fresh valid code when MFA is active."""
+        svc, totp = _activated_service
+        assert svc.verify_enabled_code(_VEC_USERNAME, totp.now()) is True
+
+    def test_returns_false_on_replay(self, _activated_service):
+        """Same OTP must be rejected on second call (replay prevention)."""
+        svc, totp = _activated_service
+        fresh_code = totp.now()
+        assert svc.verify_enabled_code(_VEC_USERNAME, fresh_code) is True
+        assert svc.verify_enabled_code(_VEC_USERNAME, fresh_code) is False
+
+
+# ------------------------------------------------------------------
+# Codex M1: Atomic CAS concurrency test for verify_recovery_code
+# ------------------------------------------------------------------
+
+
+def test_verify_recovery_code_concurrent_consumption_only_one_succeeds(tmp_path):
+    """Atomic CAS — 20 threads consuming the same code → exactly 1 succeeds.
+
+    Verifies that the single conditional UPDATE prevents TOCTOU race where two
+    concurrent requests could both observe the same unused code and both succeed.
+    """
+    import threading
+
+    db = str(tmp_path / "totp.db")
+    svc = TOTPService(db_path=db)
+    svc.generate_secret("admin")
+    codes = svc.generate_recovery_codes("admin")
+    code = codes[0]
+
+    results = []
+    lock = threading.Lock()
+
+    def attempt():
+        result = svc.verify_recovery_code("admin", code)
+        with lock:
+            results.append(result)
+
+    threads = [threading.Thread(target=attempt) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    successes = sum(1 for r in results if r)
+    assert successes == 1, (
+        f"Expected exactly 1 success under concurrency, got {successes}"
+    )

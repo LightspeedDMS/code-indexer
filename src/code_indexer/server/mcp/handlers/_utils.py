@@ -29,16 +29,22 @@ HTTP_STATUS_BAD_REQUEST = 400
 
 @dataclass
 class CapBreach:
-    """Carries the fields of a wildcard expansion cap violation.
+    """Carries the fields of a cap violation (wildcard expansion or total fan-out).
 
-    Returned by _check_wildcard_cap when expanded alias count exceeds the
-    configured omni_wildcard_expansion_cap. Callers convert to the format
-    appropriate for their transport: MCP envelope or HTTP 400.
+    Returned by _check_wildcard_cap (per-pattern wildcard breach) and
+    _enforce_repo_count_cap (per-search total alias count breach).
+    Callers convert to the format appropriate for their transport:
+    MCP envelope or HTTP 400.
+
+    error_code distinguishes breach type in the MCP envelope:
+      - "wildcard_cap_exceeded"   — per-pattern wildcard expansion cap (Bug #881)
+      - "repo_count_cap_exceeded" — total alias fan-out cap (Bug #894)
     """
 
     pattern: str
     observed_count: int
     configured_cap: int
+    error_code: str = "wildcard_cap_exceeded"
 
 
 def _cap_breach_message(breach: CapBreach) -> str:
@@ -84,12 +90,15 @@ def _check_wildcard_cap(
 
 
 def cap_breach_response(breach: CapBreach) -> "Dict[str, Any]":
-    """Build an MCP envelope dict for a wildcard cap breach."""
+    """Build an MCP envelope dict for a cap breach (wildcard or total fan-out).
+
+    Uses breach.error_code to distinguish wildcard vs repo-count breaches.
+    """
     if breach is None:
         raise ValueError("breach must not be None")
     payload = {
         "success": False,
-        "error": "wildcard_cap_exceeded",
+        "error": breach.error_code,
         "pattern": breach.pattern,
         "observed": breach.observed_count,
         "cap": breach.configured_cap,
@@ -983,6 +992,48 @@ def _enforce_wildcard_cap(
                 )
             )
             return breach
+    return None
+
+
+def _enforce_repo_count_cap(aliases: List[str]) -> "Optional[CapBreach]":
+    """Bug #894: cap total repositories in a single omni search fan-out.
+
+    Enforces omni_max_repos_per_search AFTER wildcard expansion + literal union.
+    Returns CapBreach if len(aliases) exceeds the configured cap; None otherwise.
+
+    Analog of _enforce_wildcard_cap, but per-search-total rather than per-pattern.
+    Reads cap fresh from config on each call so hot-reload takes effect without
+    a server restart.
+
+    Args:
+        aliases: Final merged alias list (post-expansion, post-dedup).
+
+    Returns:
+        CapBreach with error_code="repo_count_cap_exceeded" if count exceeds cap,
+        None otherwise.
+    """
+    if not aliases:
+        return None
+    cap = (
+        get_config_service()
+        .get_config()
+        .multi_search_limits_config.omni_max_repos_per_search
+    )
+    count = len(aliases)
+    if count > cap:
+        logger.warning(
+            format_error_log(
+                "MCP-GENERAL-033",
+                f"Total repo count cap exceeded: count={count} cap={cap}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return CapBreach(
+            pattern=f"<{count} aliases>",
+            observed_count=count,
+            configured_cap=cap,
+            error_code="repo_count_cap_exceeded",
+        )
     return None
 
 

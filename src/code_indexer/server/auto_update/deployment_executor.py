@@ -65,6 +65,9 @@ HNSWLIB_REPO_URL = "https://github.com/LightspeedDMS/hnswlib.git"
 # Bug #839: Claude CLI auto-update timeout constants
 NPM_VERSION_TIMEOUT_SECONDS = 5  # How long to wait for `npm --version` probe
 CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS = 180  # How long to wait for npm global install
+# Story #845: Codex CLI install timeout constants
+CODEX_CLI_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
+CODEX_VERSION_PROBE_TIMEOUT_SECONDS = 10  # Quick binary probe after install
 
 
 class DeploymentExecutor:
@@ -1490,6 +1493,129 @@ class DeploymentExecutor:
             )
             return False
 
+    # ------------------------------------------------------------------
+    # Bug #897 mitigation 2: MALLOC_ARENA_MAX=2 in the server unit file
+    # ------------------------------------------------------------------
+
+    _MALLOC_ARENA_ENV_LINE = "Environment=MALLOC_ARENA_MAX=2"
+
+    def _render_malloc_arena_max_content(self, content: str, inject: bool) -> str:
+        """Return updated service file content with MALLOC_ARENA_MAX=2 added or removed.
+
+        inject=True: line is inserted after the last existing Environment= line,
+            or after [Service] if none exist, or appended when neither anchor exists.
+        inject=False: all lines whose stripped form equals _MALLOC_ARENA_ENV_LINE
+            are removed.
+
+        Args:
+            content: Current service file text.
+            inject: True to add the line, False to remove it.
+
+        Returns:
+            Updated service file content (newline-terminated).
+        """
+        if not inject:
+            filtered = [
+                line
+                for line in content.splitlines()
+                if line.strip() != self._MALLOC_ARENA_ENV_LINE
+            ]
+            return "\n".join(filtered) + "\n"
+
+        lines = content.splitlines()
+        env_indices = [
+            i for i, line in enumerate(lines) if line.strip().startswith("Environment=")
+        ]
+        service_indices = [
+            i for i, line in enumerate(lines) if line.strip() == "[Service]"
+        ]
+
+        if env_indices:
+            insert_after = env_indices[-1]
+        elif service_indices:
+            insert_after = service_indices[-1]
+        else:
+            # No usable anchor: append to the end of the file.
+            return "\n".join(lines) + "\n" + self._MALLOC_ARENA_ENV_LINE + "\n"
+
+        new_lines: list = []
+        for i, line in enumerate(lines):
+            new_lines.append(line)
+            if i == insert_after:
+                new_lines.append(self._MALLOC_ARENA_ENV_LINE)
+        return "\n".join(new_lines) + "\n"
+
+    def _ensure_malloc_arena_max(self) -> bool:
+        """Bug #897 mitigation 2: idempotently manage MALLOC_ARENA_MAX=2 in the
+        cidx-server systemd service file.
+
+        Reads the `enable_malloc_arena_max` bootstrap flag from config.json and
+        ensures the service file matches: inject when True, remove when False.
+        Calls `sudo systemctl daemon-reload` after any write.
+
+        Returns:
+            True if service file is in the correct state or was corrected,
+            False on read/write error (execute() logs DEPLOY-GENERAL-143).
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+            flag_enabled = bool(
+                config and getattr(config, "enable_malloc_arena_max", False)
+            )
+
+            service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+            current_content = self._read_service_file(service_path)
+            if current_content is None:
+                return False
+
+            # Use line-level match to avoid false positives from comments/partial text.
+            line_present = any(
+                line.strip() == self._MALLOC_ARENA_ENV_LINE
+                for line in current_content.splitlines()
+            )
+            if flag_enabled == line_present:
+                logger.debug(
+                    "MALLOC_ARENA_MAX already in correct state (flag=%s)",
+                    flag_enabled,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            action = "Injecting" if flag_enabled else "Removing"
+            logger.info(
+                "%s MALLOC_ARENA_MAX=2 in %s",
+                action,
+                service_path,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            new_content = self._render_malloc_arena_max_content(
+                current_content, flag_enabled
+            )
+            if not self._write_service_file_and_reload(service_path, new_content):
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-143",
+                        f"Failed to write MALLOC_ARENA_MAX change to {service_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+            return True
+
+        except Exception as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-143",
+                    f"Error managing MALLOC_ARENA_MAX in service file: {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
     def pip_install(self) -> bool:
         """Execute pip install to update dependencies.
 
@@ -2573,6 +2699,47 @@ class DeploymentExecutor:
                 "Auto-updater code changed, initiating self-restart",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Bug #884: Smoke-test the new auto-updater code before self-restarting.
+            # If the updated run_once.py has an import-time error, restarting the
+            # service would crash-loop it.  Run a quick import check first.
+            try:
+                smoke = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "from code_indexer.server.auto_update.run_once import main",
+                    ],
+                    timeout=10,
+                    capture_output=True,
+                    env=os.environ.copy(),
+                )
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-141",
+                        "Self-restart smoke-test timed out (>10s) — aborting self-restart "
+                        "(Bug #884): new auto-updater code may have import-time side effect.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                self._write_status_file("failed", "self-restart smoke-test timed out")
+                return False
+            if smoke.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-142",
+                        f"Self-restart smoke-test failed (rc={smoke.returncode}) — aborting "
+                        f"self-restart (Bug #884). stderr: "
+                        f"{smoke.stderr.decode('utf-8', errors='replace')}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                self._write_status_file(
+                    "failed",
+                    f"self-restart smoke-test failed rc={smoke.returncode}",
+                )
+                return False
+            # Smoke passed — proceed with pending_restart + marker + systemctl restart
             self._write_status_file(
                 "pending_restart", "Auto-updater code updated, restarting service"
             )
@@ -2648,6 +2815,27 @@ class DeploymentExecutor:
                     "restart signal and redeploy marker paths may diverge",
                 ),
                 extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Step 6.6: Bug #897 - Idempotently inject or remove MALLOC_ARENA_MAX=2
+        # from the cidx-server systemd unit file based on bootstrap config flag.
+        if not self._ensure_malloc_arena_max():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-143",
+                    "MALLOC_ARENA_MAX could not be verified — glibc arena cap not enforced",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Step 6.7: Story #845 - Idempotently install/update Codex CLI (optional feature)
+        if not self._ensure_codex_cli_installed():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-144",
+                    "Codex CLI could not be verified/installed — feature effectively disabled",
+                    extra={"correlation_id": get_correlation_id()},
+                )
             )
 
         # Step 7: Ensure ripgrep is installed (Bug #157: log result)
@@ -2797,3 +2985,120 @@ class DeploymentExecutor:
                 )
             )
             return False
+
+    def _run_codex_npm_install(self) -> bool:
+        """Run `npm install -g @openai/codex` and return True on success.
+
+        Handles nonzero returncode, TimeoutExpired, and OSError as
+        WARNING + return False. Never raises.
+        """
+        try:
+            result = subprocess.run(
+                ["npm", "install", "-g", "@openai/codex"],
+                capture_output=True,
+                text=True,
+                timeout=CODEX_CLI_INSTALL_TIMEOUT_SECONDS,
+                shell=False,
+            )
+            logger.debug(
+                "npm install @openai/codex stdout: %s",
+                result.stdout,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-144",
+                        f"npm install @openai/codex failed (exit {result.returncode}): "
+                        f"{result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-144",
+                    f"npm install @openai/codex timed out after {CODEX_CLI_INSTALL_TIMEOUT_SECONDS}s",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-144",
+                    f"npm install @openai/codex could not be spawned: {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    def _probe_codex_version(self) -> None:
+        """Run `codex --version` and log the result. Never raises.
+
+        Logs INFO on clean exit, WARNING on nonzero returncode,
+        FileNotFoundError, or TimeoutExpired. All outcomes are non-fatal.
+        """
+        try:
+            probe = subprocess.run(
+                ["codex", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=CODEX_VERSION_PROBE_TIMEOUT_SECONDS,
+                shell=False,
+            )
+            if probe.returncode == 0:
+                logger.info(
+                    "Codex CLI installed: %s",
+                    probe.stdout.strip(),
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.warning(
+                    "Codex CLI installed but 'codex --version' returned exit %d — "
+                    "binary may need PATH refresh",
+                    probe.returncode,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except FileNotFoundError:
+            logger.warning(
+                "Codex CLI installed successfully but 'codex' binary not found "
+                "on PATH immediately after install — PATH may need refresh",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Codex CLI version probe timed out after %ds — "
+                "install may have succeeded; binary availability unconfirmed",
+                CODEX_VERSION_PROBE_TIMEOUT_SECONDS,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def _ensure_codex_cli_installed(self) -> bool:
+        """Story #845: idempotently install/update @openai/codex via npm.
+
+        - If npm is not on PATH, logs WARNING and returns True (optional-feature
+          semantics — CIDX must not fail when npm is absent).
+        - Otherwise runs `npm install -g @openai/codex` via _run_codex_npm_install().
+        - On install success, probes `codex --version` via _probe_codex_version()
+          and logs result at INFO. Probe failures are non-fatal.
+        - Never raises. Returns False only when install itself fails or times out.
+
+        Returns:
+            True if npm was absent (optional skip) or install succeeded.
+            False if npm install returned nonzero, timed out, or failed to spawn
+            (DEPLOY-GENERAL-144 logged by _run_codex_npm_install).
+        """
+        if shutil.which("npm") is None:
+            logger.warning(
+                "npm not available on PATH; skipping Codex CLI install — "
+                "feature effectively disabled",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        if not self._run_codex_npm_install():
+            return False
+        self._probe_codex_version()
+        return True

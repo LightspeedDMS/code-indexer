@@ -39,14 +39,20 @@ Failure contract:
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
-from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
+from code_indexer.global_repos.repo_analyzer import invoke_claude_cli  # noqa: F401 — kept for backward-compat test patching
 from code_indexer.global_repos.unified_response_parser import (
     UnifiedResponseParser,
+    UnifiedResponseParseError,
     UnifiedResult,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.dep_map_dispatcher_factory import (
+    build_dep_map_dispatcher,
+)
 
 # Absolute path to the packaged unified prompt.  Resolved once at import
 # time.
@@ -56,6 +62,81 @@ _PROMPT_PATH: Path = (
     / "prompts"
     / "lifecycle_unified.md"
 )
+
+# Optional sections that the parser silently skips when absent.
+# Used by _parse_with_optional_section_fallback to identify which
+# section caused a parse failure so it can be dropped and retried.
+_OPTIONAL_SECTIONS = ("branching", "ci", "release")
+
+# Pattern to extract the optional section name from a parse-error message.
+# UnifiedResponseParser error messages follow the form:
+#   "missing required field: 'lifecycle.<section>.<field>'"
+#   "lifecycle.<section> must be an object, got ..."
+#   "lifecycle.<section>.<field> value '...' not in ..."
+_SECTION_IN_ERROR_RE = re.compile(
+    r"lifecycle\.(" + "|".join(_OPTIONAL_SECTIONS) + r")\b"
+)
+
+
+def _parse_with_optional_section_fallback(raw: str) -> UnifiedResult:
+    """Attempt UnifiedResponseParser.parse(); drop invalid optional sections and retry.
+
+    The parser treats all fields within a present optional section as required.
+    An LLM may emit a section that is structurally partial or contains invalid
+    enum values.  Since optional sections are silently skipped when absent, the
+    safest recovery is to drop the offending section and retry parsing.
+
+    Retry policy:
+      - Maximum 3 retries (one per optional section: branching, ci, release).
+      - Only ``UnifiedResponseParseError`` whose message names one of the three
+        optional sections triggers a retry; all other errors are re-raised
+        immediately.
+      - Each retry removes at most one section; if no section is identified in
+        the error message the error is re-raised rather than looping indefinitely.
+
+    Args:
+        raw: Raw JSON string from the CLI dispatcher.
+
+    Returns:
+        A valid ``UnifiedResult`` from the first successful parse attempt.
+
+    Raises:
+        UnifiedResponseParseError: When all retries are exhausted or the error
+            is not attributable to an optional section.
+    """
+    payload = raw
+    dropped: list = []
+
+    for _attempt in range(len(_OPTIONAL_SECTIONS) + 1):
+        try:
+            return UnifiedResponseParser.parse(payload)
+        except UnifiedResponseParseError as exc:
+            match = _SECTION_IN_ERROR_RE.search(str(exc))
+            if not match:
+                # Error is not from a known optional section — re-raise.
+                raise
+            section = match.group(1)
+            if section in dropped:
+                # Already dropped this section once; error persists — re-raise.
+                raise
+            # Drop the offending optional section and retry.
+            try:
+                obj = json.loads(payload)
+                lifecycle = obj.get("lifecycle")
+                if isinstance(lifecycle, dict) and section in lifecycle:
+                    del lifecycle[section]
+                    payload = json.dumps(obj)
+            except json.JSONDecodeError:
+                # Cannot modify payload — let the original error propagate.
+                raise exc from None
+            dropped.append(section)
+
+    # Unreachable: the loop re-raises before this point; guard for type checkers.
+    raise UnifiedResponseParseError(  # type: ignore[misc]
+        "parse failed after all optional section fallbacks",
+        raw=raw,
+        validation_errors=["exhausted optional section fallbacks"],
+    )
 
 
 def _load_prompt_eager() -> str:
@@ -81,48 +162,32 @@ _PROMPT_TEXT: str = _load_prompt_eager()
 
 class LifecycleClaudeCliInvoker:
     """
-    Callable adapter that runs one Claude CLI invocation per repo and
-    returns a parsed UnifiedResult.
+    Callable adapter that runs one CLI invocation per repo (via CliDispatcher)
+    and returns a parsed UnifiedResult.
 
     Stateless: no instance attributes are mutated after construction,
     so a single adapter instance can be safely shared across all threads
     in LifecycleBatchRunner's pool.
     """
 
-    def __call__(self, alias: str, repo_path: Path) -> UnifiedResult:
+    def _build_dispatcher(self):
+        """Build a CliDispatcher from the current ServerConfig (Bug #936).
+
+        Delegates to build_dep_map_dispatcher so Codex wiring, weight, and
+        Claude fallback are applied consistently with other LLM call sites.
+        Returns a fully initialised CliDispatcher — Claude-only when Codex
+        is unavailable.
         """
-        Run the unified lifecycle + description prompt against *repo_path*
-        and return the parsed result.
+        config = get_config_service().get_config()
+        return build_dep_map_dispatcher(config)
 
-        Defensive input validation (Messi Rule #15 — Defensive-Invariants):
-          alias must be a non-empty string; repo_path must be a Path (or
-          string path) to an existing directory.  A violation here would
-          otherwise surface deep inside the subprocess layer with a
-          generic OSError — unhelpful for diagnosing a fleet-wide batch
-          failure.
-
-        Args:
-            alias: Repository alias (for error-message diagnostics).
-            repo_path: Absolute path to the golden-repo base clone.
-                Used as the subprocess cwd so Claude's Read/Bash/Glob
-                tools resolve against the repo's files.
-
-        Returns:
-            UnifiedResult with validated description and lifecycle.
+    def _validate_repo_inputs(self, alias: str, repo_path: Path) -> Path:
+        """Validate alias and repo_path; return a validated Path on success.
 
         Raises:
-            ValueError: if alias is None / empty, or if repo_path is
-                None, does not exist, or is not a directory.
-            RuntimeError: if the subprocess wrapper reports failure
-                (non-zero exit, timeout, or unexpected exception).
-                The message includes the alias and the upstream error
-                text for operator diagnostics.
-            UnifiedResponseParseError: if the CLI succeeds but returns
-                output that fails schema validation.  Propagates from
-                UnifiedResponseParser.parse — the batch runner logs it
-                and proceeds with other repos.
+            ValueError: if alias is None/empty or repo_path is None,
+                missing, or not a directory.
         """
-        # -- Entry-point validation ----------------------------------------
         if not isinstance(alias, str) or not alias.strip():
             raise ValueError(f"alias must be a non-empty string, got {alias!r}")
         if repo_path is None:
@@ -136,25 +201,32 @@ class LifecycleClaudeCliInvoker:
             raise ValueError(
                 f"repo_path is not a directory for alias {alias!r}: {path_obj}"
             )
+        return path_obj
 
-        # -- Subprocess invocation -----------------------------------------
-        # Read timeouts from ConfigService at call time so Web UI changes
-        # take effect on the next invocation without a server restart
-        # (AC-V4-7, Story #885 Phase 5a).  get_config_service is imported at
-        # module level so tests can patch it via the module namespace.
+    def __call__(self, alias: str, repo_path: Path) -> UnifiedResult:
+        """Run lifecycle + description prompt and return parsed UnifiedResult.
+
+        Routes through CliDispatcher (Claude or Codex) via flow='repo_lifecycle'.
+        Reads timeouts from ConfigService at call time so Web UI changes take
+        effect on the next invocation without a server restart (AC-V4-7, #885).
+
+        Raises:
+            ValueError: invalid alias or repo_path.
+            RuntimeError: dispatcher reports failure.
+            UnifiedResponseParseError: output fails schema validation after all
+                optional-section fallbacks are exhausted.
+        """
+        path_obj = self._validate_repo_inputs(alias, repo_path)
         _lifecycle_cfg = get_config_service().get_config().lifecycle_analysis_config
-        success, raw_output = invoke_claude_cli(
-            str(path_obj),
-            _PROMPT_TEXT,
-            _lifecycle_cfg.shell_timeout_seconds,
-            _lifecycle_cfg.outer_timeout_seconds,
+        result = self._build_dispatcher().dispatch(
+            flow="repo_lifecycle",
+            cwd=str(path_obj),
+            prompt=_PROMPT_TEXT,
+            timeout=_lifecycle_cfg.outer_timeout_seconds,
         )
-
-        if not success:
+        if not result.success:
             raise RuntimeError(
-                f"lifecycle Claude CLI failed for alias {alias!r}: {raw_output}"
+                f"lifecycle dispatcher failed for alias {alias!r}: "
+                f"{result.error or result.output}"
             )
-
-        # Parser raises UnifiedResponseParseError on schema violations;
-        # let that propagate so the batch runner logs the parse error.
-        return UnifiedResponseParser.parse(raw_output)
+        return _parse_with_optional_section_fallback(result.output)

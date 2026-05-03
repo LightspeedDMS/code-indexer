@@ -641,3 +641,67 @@ cidx start
    ```
 
 ---
+
+## Runtime Settings (v9.x to v10.0)
+
+These settings are runtime-configurable via the Web UI Config Screen and persist via the runtime DB (SQLite solo / PostgreSQL cluster). Bootstrap-only settings (those that must live in `config.json` because they are needed before the DB is available) are noted explicitly.
+
+### Research Assistant
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `ra_curl_allowed_cidrs` | List[str] | `[]` | Operator-configured CIDR allowlist for the `cidx-curl.sh` wrapper. Loopback (`127.0.0.0/8` + `::1/128`) is always appended automatically -- operators cannot disable loopback. Empty list = loopback only. Examples: `["10.5.0.0/24"]`, `["10.5.0.0/24", "192.168.100.0/24"]`. **Bootstrap-only** (`config.json` under `claude_integration_config`); restart cidx-server after change. |
+
+### Dep-Map Auto-Repair (Story #927)
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `dep_map_auto_repair_enabled` | bool | `false` | When true, scheduled delta and refinement jobs automatically run a repair pass once if anomalies are detected. Anomalies that don't resolve are retried on the next scheduled cycle. Operator opts in via Web UI. |
+
+### Memory Retrieval (Story #883)
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `memory_retrieval_enabled` | bool | `true` | Kill switch for the memory retrieval pipeline. When false, `search_code` does NOT make a VoyageAI call for memory candidates and the `relevant_memories` field is absent from the response. Effective immediately, no restart required. |
+
+### TOTP Step-Up Elevation (Epic #922)
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `elevation_enforcement_enabled` | bool | `false` | When true, admin endpoints requiring elevation reject without an active elevation window (HTTP 403 `elevation_required`). When false, all elevation checks no-op (HTTP 503 -- feature administratively off). Hot-reload via 30s reload thread; no restart required. |
+
+### Server Memory Mitigations (Bug #897)
+
+These are bootstrap-only flags in `config.json` (defaults ON since v9.23.3):
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `enable_malloc_trim` | bool | `true` | Calls glibc `malloc_trim(0)` at end of each HNSW cache cleanup cycle. Linux+glibc only; silently no-ops elsewhere. |
+| `enable_malloc_arena_max` | bool | `true` | Idempotently injects `MALLOC_ARENA_MAX=2` into cidx-server systemd unit file via auto-updater. |
+| `enable_graph_channel_repair` | bool | `true` | Phase 3.7 dep-map graph-channel repair (bootstrap-only). When false, `_run_phase37` returns immediately. |
+
+### Omni Search Caps (Bug #881, Bug #894)
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `omni_wildcard_expansion_cap` | int | `50` | Per-pattern wildcard expansion cap inside `_expand_wildcard_patterns`. |
+| `omni_max_repos_per_search` | int | `50` | Total alias fan-out cap after wildcard expansion + literal union. |
+| `index_cache_max_size_mb` | int | `4096` | HNSW cache size cap. |
+| `fts_cache_max_size_mb` | int | `4096` | FTS cache size cap. |
+
+### Codex CLI Integration (Epic #843)
+
+Bootstrap-only in `config.json`:
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `enable_codex_cli` | bool | `true` | Auto-install Codex CLI via npm at auto-updater run. Optional-feature semantics: missing npm logs WARNING but doesn't abort. |
+
+### Fault Injection Harness (Bug #864)
+
+Bootstrap-only in `config.json` (NEVER enable in production):
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `fault_injection_enabled` | bool | `false` | Master switch. |
+| `fault_injection_nonprod_ack` | bool | `false` | Operator acknowledgement that this is a non-production environment. Required alongside `fault_injection_enabled`. |

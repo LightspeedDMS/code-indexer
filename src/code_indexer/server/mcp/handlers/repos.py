@@ -15,6 +15,7 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
@@ -29,6 +30,10 @@ from ._utils import (
     _get_available_repos,
     _error_with_suggestions,
 )
+
+# _GLOBAL_SUFFIX is used in _resolve_branch_repo_path to strip the alias-manager
+# suffix before passing the base alias to golden_repo_manager.get_actual_repo_path().
+_GLOBAL_SUFFIX = "-global"
 
 logger = logging.getLogger(__name__)
 
@@ -745,7 +750,6 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 def _resolve_branch_repo_path(repository_alias: str, user: User) -> tuple:
     """Resolve repo path for branch operations. Returns (path, error_response)."""
     if repository_alias.endswith("-global"):
-        golden_repos_dir = _get_golden_repos_dir()
         global_repos = _list_global_repos()
         repo_entry = next(
             (r for r in global_repos if r["alias_name"] == repository_alias), None
@@ -760,8 +764,24 @@ def _resolve_branch_repo_path(repository_alias: str, user: User) -> tuple:
             error_envelope["branches"] = []
             return None, _mcp_response(error_envelope)
 
-        alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-        target_path = alias_manager.read_alias(repository_alias)
+        # Use golden_repo_manager.get_actual_repo_path to obtain the mutable base clone
+        # path rather than AliasManager.read_alias which returns the frozen versioned
+        # snapshot path (Issue #966 - remote refs are only visible on the base clone).
+        # get_actual_repo_path is keyed on the BASE alias (no -global suffix), so strip
+        # the suffix before calling it.
+        base_alias = repository_alias
+        if base_alias.endswith(_GLOBAL_SUFFIX):
+            base_alias = base_alias[: -len(_GLOBAL_SUFFIX)]
+        try:
+            target_path = _utils.app_module.golden_repo_manager.get_actual_repo_path(
+                base_alias
+            )
+        except GoldenRepoNotFoundError:
+            # Fall back to whatever AliasManager recorded for this alias.
+            golden_repos_dir = _get_golden_repos_dir()
+            alias_manager = AliasManager(golden_repos_dir)
+            target_path = alias_manager.read_alias(repository_alias) or ""
+
         if not target_path:
             available_repos = _get_available_repos(user)
             error_envelope = _error_with_suggestions(
@@ -1355,6 +1375,28 @@ def _remove_provider_from_config(repo_path: str, provider_name: str) -> None:
         )
 
 
+def _resolve_provider_api_key(provider_name: str) -> Optional[str]:
+    """Return the API key for the given provider from ClaudeIntegrationConfig.
+
+    Reads from the nested claude_integration_config on the server config, not
+    from the top-level ServerConfig (Bug #895 fix).
+    Returns None for invalid input, missing nested config, or unrecognised
+    provider names.
+    """
+    if not provider_name or not isinstance(provider_name, str):
+        return None
+    ci_config = getattr(
+        get_config_service().get_config(), "claude_integration_config", None
+    )
+    if ci_config is None:
+        return None
+    if provider_name == "cohere":
+        return getattr(ci_config, "cohere_api_key", None)
+    if provider_name == "voyage-ai":
+        return getattr(ci_config, "voyageai_api_key", None)
+    return None
+
+
 def _build_provider_api_key_env(provider_name: str) -> dict:
     """Build a subprocess env dict with the correct API key for a provider."""
     import os
@@ -1364,14 +1406,11 @@ def _build_provider_api_key_env(provider_name: str) -> dict:
         return os.environ.copy()
 
     env = os.environ.copy()
-    server_config = get_config_service().get_config()
-    if provider_name == "cohere":
-        api_key = getattr(server_config, "cohere_api_key", None)
-        if api_key:
+    api_key = _resolve_provider_api_key(provider_name)
+    if api_key:
+        if provider_name == "cohere":
             env["CO_API_KEY"] = api_key
-    elif provider_name == "voyage-ai":
-        api_key = getattr(server_config, "voyageai_api_key", None)
-        if api_key:
+        elif provider_name == "voyage-ai":
             env["VOYAGE_API_KEY"] = api_key
     return env
 
@@ -1731,14 +1770,11 @@ def _provider_index_job(
         return {"success": False, "error": error, "provider": provider_name}
 
     env = os.environ.copy()
-    server_config = get_config_service().get_config()
-    if provider_name == "cohere":
-        api_key = getattr(server_config, "cohere_api_key", None)
-        if api_key:
+    api_key = _resolve_provider_api_key(provider_name)
+    if api_key:
+        if provider_name == "cohere":
             env["CO_API_KEY"] = api_key
-    elif provider_name == "voyage-ai":
-        api_key = getattr(server_config, "voyageai_api_key", None)
-        if api_key:
+        elif provider_name == "voyage-ai":
             env["VOYAGE_API_KEY"] = api_key
 
     cmd = ["cidx", "index", "--progress-json"]

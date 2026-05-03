@@ -17,6 +17,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from ..auth import dependencies
 from ..auth.dependencies import get_current_user, get_current_admin_user
 from ..auth.user_manager import User
 from ..services.repo_category_service import RepoCategoryService
@@ -116,6 +117,7 @@ def list_categories(
     "",
     response_model=CategoryResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         201: {"description": "Category created successfully"},
         409: {"description": "Category name already exists"},
@@ -165,6 +167,7 @@ def create_category(
 @router.put(
     "/{category_id}",
     response_model=CategoryResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         200: {"description": "Category updated successfully"},
         404: {"description": "Category not found"},
@@ -222,6 +225,7 @@ def update_category(
 @router.delete(
     "/{category_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         204: {"description": "Category deleted successfully"},
         404: {"description": "Category not found"},
@@ -252,6 +256,7 @@ def delete_category(
 @router.post(
     "/reorder",
     status_code=status.HTTP_200_OK,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         200: {"description": "Categories reordered successfully"},
         400: {"description": "Invalid reorder list"},
@@ -281,6 +286,7 @@ def reorder_categories(
 @router.post(
     "/re-evaluate",
     response_model=ReEvaluateResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
     responses={
         200: {"description": "Re-evaluation completed"},
     },

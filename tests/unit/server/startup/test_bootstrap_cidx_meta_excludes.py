@@ -28,6 +28,7 @@ Test inventory (9 test methods across 5 scenario classes):
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,7 +41,7 @@ import yaml
 
 _OVERRIDE_FILENAME = ".code-indexer-override.yaml"
 
-_MINIMAL_OVERRIDE = {
+_MINIMAL_OVERRIDE: Dict[str, list] = {
     "add_extensions": [],
     "remove_extensions": [],
     "add_exclude_dirs": [],

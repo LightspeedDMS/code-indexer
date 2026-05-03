@@ -278,9 +278,19 @@ def run_with_popen_progress(
 
     if process.returncode != 0:
         stdout_output = "".join(all_stdout)
-        error_details = (
-            stderr_output or stdout_output or f"Exit code {process.returncode}"
-        )
+        if process.returncode < 0:
+            # Signal-terminated process: always lead with the signal code so that
+            # callers such as refresh_scheduler.py can match "Exit code -15" for
+            # SIGTERM routing.  The banner/stderr text is appended as context.
+            signal_str = f"Exit code {process.returncode}"
+            detail = stderr_output or stdout_output or ""
+            error_details = (
+                f"{signal_str}. {detail}".rstrip(". ") if detail else signal_str
+            )
+        else:
+            error_details = (
+                stderr_output or stdout_output or f"Exit code {process.returncode}"
+            )
         raise IndexingSubprocessError(f"Failed to {error_label}: {error_details}")
 
     return high_water

@@ -1,7 +1,7 @@
 ---
 name: cidx_ssh_key_assign_host
 category: ssh
-required_permission: activate_repos
+required_permission: repository:admin
 tl_dr: Assign SSH key to hostname in SSH config (~/.
 inputSchema:
   type: object

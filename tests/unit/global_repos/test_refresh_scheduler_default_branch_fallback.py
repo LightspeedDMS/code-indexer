@@ -121,7 +121,8 @@ def _refresh_context(scheduler, golden_repos_dir, alias_name: str, updater):
     repo_stem = alias_name.removesuffix("-global")
     with (
         patch.object(
-            scheduler.alias_manager, "read_alias",
+            scheduler.alias_manager,
+            "read_alias",
             return_value=str(golden_repos_dir / ".versioned" / repo_stem / "v_1"),
         ),
         patch.object(scheduler.alias_manager, "swap_alias"),
@@ -129,7 +130,8 @@ def _refresh_context(scheduler, golden_repos_dir, alias_name: str, updater):
         patch.object(scheduler, "_reconcile_registry_with_filesystem"),
         patch.object(scheduler, "_index_source"),
         patch.object(
-            scheduler, "_create_snapshot",
+            scheduler,
+            "_create_snapshot",
             return_value=str(golden_repos_dir / ".versioned" / repo_stem / "v_2"),
         ),
         patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
@@ -142,8 +144,12 @@ def _refresh_context(scheduler, golden_repos_dir, alias_name: str, updater):
 
 
 def _execute_with_patches(
-    scheduler, golden_repos_dir, alias_name, updater,
-    db_get_repo_return, handler,
+    scheduler,
+    golden_repos_dir,
+    alias_name,
+    updater,
+    db_get_repo_return,
+    handler,
 ):
     with (
         _refresh_context(scheduler, golden_repos_dir, alias_name, updater),
@@ -154,7 +160,10 @@ def _execute_with_patches(
 
 
 def _run_scenario(
-    scheduler, golden_repos_dir, mock_registry, *,
+    scheduler,
+    golden_repos_dir,
+    mock_registry,
+    *,
     alias_name: str,
     repo_info_extra: Dict[str, Any],
     current_branch: str,
@@ -178,12 +187,19 @@ def _run_scenario(
         str(golden_repos_dir / repo_stem), has_changes_calls, track_has_changes
     )
     handler = _make_subprocess_handler(
-        current_branch, symbolic_ref_stdout, symbolic_ref_returncode,
-        checkout_calls, symbolic_ref_calls,
+        current_branch,
+        symbolic_ref_stdout,
+        symbolic_ref_returncode,
+        checkout_calls,
+        symbolic_ref_calls,
     )
     _execute_with_patches(
-        scheduler, golden_repos_dir, alias_name, updater,
-        db_get_repo_return, handler,
+        scheduler,
+        golden_repos_dir,
+        alias_name,
+        updater,
+        db_get_repo_return,
+        handler,
     )
     return checkout_calls, symbolic_ref_calls, has_changes_calls
 
@@ -230,33 +246,63 @@ def scheduler(golden_repos_dir, mock_registry):
 
 _SCENARIOS = [
     pytest.param(
-        {"default_branch": "develop"}, None, "origin/main", 0,
-        [["git", "checkout", "develop"]], False, False,
+        {"default_branch": "develop"},
+        None,
+        "origin/main",
+        0,
+        [["git", "checkout", "develop"]],
+        False,
+        False,
         id="1_repo_info_wins",
     ),
     pytest.param(
-        {}, {"default_branch": "trunk"}, "origin/main", 0,
-        [["git", "checkout", "trunk"]], False, False,
+        {},
+        {"default_branch": "trunk"},
+        "origin/main",
+        0,
+        [["git", "checkout", "trunk"]],
+        False,
+        False,
         id="2_db_wins",
     ),
     pytest.param(
-        {}, None, "origin/master\n", 0,
-        [["git", "checkout", "master"]], False, False,
+        {},
+        None,
+        "origin/master\n",
+        0,
+        [["git", "checkout", "master"]],
+        False,
+        False,
         id="3_symbolic_ref_db_none",
     ),
     pytest.param(
-        {}, {"alias": "my-repo"}, "origin/master\n", 0,
-        [["git", "checkout", "master"]], False, False,
+        {},
+        {"alias": "my-repo"},
+        "origin/master\n",
+        0,
+        [["git", "checkout", "master"]],
+        False,
+        False,
         id="4_symbolic_ref_db_no_field",
     ),
     pytest.param(
-        {}, None, "", 128,
-        [], True, True,   # no checkout; refresh must continue (has_changes called)
+        {},
+        None,
+        "",
+        128,
+        [],
+        True,
+        True,  # no checkout; refresh must continue (has_changes called)
         id="5_all_fallbacks_fail",
     ),
     pytest.param(
-        {}, None, "origin/develop\n", 0,
-        [["git", "checkout", "develop"]], False, False,  # NOT "origin/develop"
+        {},
+        None,
+        "origin/develop\n",
+        0,
+        [["git", "checkout", "develop"]],
+        False,
+        False,  # NOT "origin/develop"
         id="6_strips_origin_prefix",
     ),
 ]
@@ -269,14 +315,22 @@ _SCENARIOS = [
     _SCENARIOS,
 )
 def test_default_branch_fallback_scenarios(
-    scheduler, golden_repos_dir, mock_registry,
-    repo_info_extra, db_get_repo_return, symbolic_ref_stdout,
-    symbolic_ref_returncode, expected_checkout_calls,
-    track_has_changes, expected_has_changes_called,
+    scheduler,
+    golden_repos_dir,
+    mock_registry,
+    repo_info_extra,
+    db_get_repo_return,
+    symbolic_ref_stdout,
+    symbolic_ref_returncode,
+    expected_checkout_calls,
+    track_has_changes,
+    expected_has_changes_called,
 ):
     """Parametrized driver for scenarios 1–6.  Exactly 2 unconditional asserts."""
     checkout_calls, _, has_changes_calls = _run_scenario(
-        scheduler, golden_repos_dir, mock_registry,
+        scheduler,
+        golden_repos_dir,
+        mock_registry,
         alias_name="my-repo-global",
         repo_info_extra=repo_info_extra,
         current_branch="feature/x",
@@ -320,7 +374,9 @@ def test_previous_bug_scenario_master_default(
         logger="code_indexer.global_repos.refresh_scheduler",
     ):
         checkout_calls, symbolic_ref_calls, _ = _run_scenario(
-            scheduler, golden_repos_dir, mock_registry,
+            scheduler,
+            golden_repos_dir,
+            mock_registry,
             alias_name="dotnet-playground-global",
             repo_info_extra={},
             current_branch="master",

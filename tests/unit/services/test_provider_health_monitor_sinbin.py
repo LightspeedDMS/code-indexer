@@ -617,3 +617,49 @@ class TestSinBinConfigReading:
         # Metrics should still be there
         health = monitor.get_health("voyage-ai")
         assert health["voyage-ai"].total_requests == 1
+
+
+class TestClearSinBinAll:
+    """clear_sinbin_all() must clear sinbin state for all providers at once."""
+
+    def test_clear_sinbin_all_clears_all_sinbinned_providers(self, monitor):
+        """clear_sinbin_all() removes sinbin for every tracked provider."""
+        monitor.sinbin("voyage-ai")
+        monitor.sinbin("cohere")
+        assert monitor.is_sinbinned("voyage-ai") is True
+        assert monitor.is_sinbinned("cohere") is True
+        monitor.clear_sinbin_all()
+        assert monitor.is_sinbinned("voyage-ai") is False
+        assert monitor.is_sinbinned("cohere") is False
+
+    def test_clear_sinbin_all_resets_rounds_for_all_providers(self, monitor):
+        """clear_sinbin_all() resets backoff rounds to zero for every provider."""
+        monitor.sinbin("voyage-ai")
+        monitor.sinbin("voyage-ai")  # round 2
+        monitor.sinbin("cohere")  # round 1
+        monitor.clear_sinbin_all()
+        assert monitor.get_sinbin_rounds("voyage-ai") == 0
+        assert monitor.get_sinbin_rounds("cohere") == 0
+
+    def test_clear_sinbin_all_on_empty_monitor_is_noop(self, monitor):
+        """clear_sinbin_all() with no sinbinned providers does not raise."""
+        monitor.clear_sinbin_all()  # Should not raise
+        assert monitor.is_sinbinned("voyage-ai") is False
+        assert monitor.is_sinbinned("cohere") is False
+
+    def test_clear_sinbin_all_does_not_corrupt_providers_not_sinbinned(self, monitor):
+        """clear_sinbin_all() does not corrupt providers that were never sinbinned."""
+        monitor.record_call("voyage-ai", 100.0, success=True)
+        monitor.sinbin("cohere")
+        monitor.clear_sinbin_all()
+        assert monitor.is_sinbinned("voyage-ai") is False
+        assert monitor.is_sinbinned("cohere") is False
+
+    def test_single_provider_clear_sinbin_only_clears_named_provider(self, monitor):
+        """Existing clear_sinbin(provider) still only clears the named provider."""
+        monitor.sinbin("voyage-ai")
+        monitor.sinbin("cohere")
+        monitor.clear_sinbin("voyage-ai")
+        assert monitor.is_sinbinned("voyage-ai") is False
+        # cohere must remain sinbinned — single-provider clear does not affect others
+        assert monitor.is_sinbinned("cohere") is True

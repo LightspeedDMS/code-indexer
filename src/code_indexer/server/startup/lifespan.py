@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,6 +15,58 @@ from code_indexer.server.startup.bootstrap import _detect_repo_root
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
+
+
+def _make_dep_map_repair_invoker_fn(
+    dep_map_dir: Path,
+    tracking_backend: Any,
+    job_tracker: Any,
+    dep_map_service: Any,
+) -> Callable[[str], None]:
+    """Build the repair invoker closure for DependencyMapService (Story #927).
+
+    Extracted as a module-level factory so the wiring can be tested directly
+    (Codex Pass 3 regression guard).
+
+    Story #927 Codex Pass 4-5: the lifespan startup must construct
+    DependencyMapService FIRST, then call this factory with the constructed
+    service instance, then bind the returned closure via
+    ``dependency_map_service.set_repair_invoker_fn(...)`` BEFORE
+    ``start_scheduler()``. The full ordering is:
+        1. dependency_map_service = DependencyMapService(...)
+        2. _dep_map_repair_invoker_fn = _make_dep_map_repair_invoker_fn(...)
+        3. dependency_map_service.set_repair_invoker_fn(_dep_map_repair_invoker_fn)
+        4. dependency_map_service.start_scheduler()
+
+    This late-binding pattern is required because the closure captures
+    ``dep_map_service`` by parameter binding (Python by-value), so the service
+    must exist at factory call time.
+
+    Args:
+        dep_map_dir: Path to the dependency-map directory (captured by closure).
+        tracking_backend: DependencyMapTrackingBackend for job status updates.
+        job_tracker: JobTracker for unified job tracking.
+        dep_map_service: DependencyMapService instance (provides repo metadata + analyzer).
+
+    Returns:
+        A callable(job_id: str) -> None that delegates to _execute_repair_body.
+    """
+
+    def _invoker(job_id: str) -> None:
+        from code_indexer.server.web.dependency_map_routes import (
+            _execute_repair_body,
+        )
+
+        _execute_repair_body(
+            job_id=job_id,
+            output_dir=dep_map_dir,
+            tracking_backend=tracking_backend,
+            job_tracker=job_tracker,
+            activity_journal=None,
+            dep_map_service=dep_map_service,  # Story #927 Pass 2: executor needs repo metadata + analyzer
+        )
+
+    return _invoker
 
 
 def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
@@ -690,6 +743,29 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize Codex CLI credential management (Story #846)
+        _codex_shutdown_hook = None
+        try:
+            from code_indexer.server.startup.codex_cli_startup import (
+                initialize_codex_manager_on_startup,
+            )
+
+            _codex_shutdown_hook = initialize_codex_manager_on_startup(
+                server_config=config_service.get_config(),
+                server_data_dir=server_data_dir,
+                return_shutdown_hook=True,
+            )
+            # Hoist to app.state so the shutdown block can reach it (Story #846 CRIT-1).
+            app.state.codex_shutdown_hook = _codex_shutdown_hook
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-050",
+                    f"Failed to initialize Codex CLI credential management on startup: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Scheduled Catch-Up Service (Story #23, AC6)
         scheduled_catchup_service = None
         logger.info(
@@ -956,6 +1032,54 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize Activated Repository Reaper Scheduler (Story #967)
+        activated_reaper_scheduler = None
+        logger.info(
+            "Server startup: Initializing activated reaper scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.activated_reaper_service import (
+                ActivatedReaperService as _ActivatedReaperService,
+            )
+            from code_indexer.server.services.activated_reaper_scheduler import (
+                ActivatedReaperScheduler as _ActivatedReaperScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if not (
+                hasattr(golden_repo_manager, "activated_repo_manager")
+                and golden_repo_manager.activated_repo_manager is not None
+            ):
+                raise RuntimeError(
+                    "golden_repo_manager.activated_repo_manager is not available"
+                )
+            _reaper_config_service = get_config_service()
+            _reaper_service = _ActivatedReaperService(
+                activated_repo_manager=golden_repo_manager.activated_repo_manager,
+                background_job_manager=background_job_manager,
+                config_service=_reaper_config_service,
+            )
+            activated_reaper_scheduler = _ActivatedReaperScheduler(
+                service=_reaper_service,
+                background_job_manager=background_job_manager,
+                config_service=_reaper_config_service,
+            )
+            activated_reaper_scheduler.start()
+            app.state.activated_reaper_scheduler = activated_reaper_scheduler
+            logger.info(
+                "Activated reaper scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-036",
+                    f"Failed to initialize activated reaper scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Dependency Map Scheduler (Story #193)
         dependency_map_service = None
         logger.info(
@@ -1040,7 +1164,28 @@ def make_lifespan(
                 ),
             )
 
-            # Create service
+            # Story #927: cluster dedup pool (None = solo mode)
+            _dep_map_pg_pool = (
+                (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if storage_mode == "postgres" and backend_registry is not None
+                else None
+            )
+
+            # Story #927: closures capture dep_map_dir, tracking_backend, job_tracker
+            _dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
+
+            def _dep_map_health_check_fn():
+                from code_indexer.server.services.dep_map_health_detector import (
+                    DepMapHealthDetector,
+                )
+
+                return DepMapHealthDetector().detect(_dep_map_dir)
+
+            # Story #927 Codex Pass 4: construct service FIRST so the closure can
+            # capture the real instance, not the pre-construction None placeholder.
             dependency_map_service = DependencyMapService(
                 golden_repos_manager=golden_repos_manager,
                 config_manager=config_service,
@@ -1053,9 +1198,24 @@ def make_lifespan(
                 ),
                 job_tracker=job_tracker,  # Story #312: Unified job tracking (Epic #261)
                 description_refresh_tracking_backend=description_refresh_tracking_backend,  # Epic #725
+                pg_pool=_dep_map_pg_pool,  # Story #927: cluster dedup lock
+                health_check_fn=_dep_map_health_check_fn,  # Story #927: anomaly gate
+                repair_invoker_fn=None,  # late-bound below via set_repair_invoker_fn
+                storage_mode=storage_mode,  # Story #927 Pass 2: anti-fallback guard
             )
 
-            # Start scheduler (internally checks if enabled)
+            # Build the closure with the real constructed service instance
+            _dep_map_repair_invoker_fn = _make_dep_map_repair_invoker_fn(
+                dep_map_dir=_dep_map_dir,
+                tracking_backend=tracking_backend,
+                job_tracker=job_tracker,
+                dep_map_service=dependency_map_service,  # Story #927 Pass 4: now the real instance
+            )
+
+            # Late-bind the closure into the service
+            dependency_map_service.set_repair_invoker_fn(_dep_map_repair_invoker_fn)
+
+            # Start scheduler — invoker is bound, safe to start
             dependency_map_service.start_scheduler()
             app.state.dependency_map_service = dependency_map_service
 
@@ -1496,13 +1656,47 @@ def make_lifespan(
             config_service = get_config_service()
 
             # Define callback for auto-registering new Langfuse folders after sync
+            # Bug #964 Fix 3: track repos seen in previous cycle for short-circuit.
+            _previous_sync_repos: set = set()
+
             def _on_langfuse_sync_complete():
-                """Auto-register new Langfuse folders after sync and generate READMEs."""
+                """Auto-register new Langfuse folders after sync and generate READMEs.
+
+                Bug #964 Fix 3: skips registration and README generation when no new
+                repos were discovered compared to the previous sync cycle, avoiding
+                unnecessary work on every cycle when nothing has changed.
+                """
+                nonlocal _previous_sync_repos
+                _callback_start = time.monotonic()
+
+                # langfuse_sync_service is a module-level global assigned after this
+                # closure is defined; mypy cannot infer the type from the global
+                # declaration alone, hence type: ignore[name-defined] is required.
+                current_repos: set = set()
+                if langfuse_sync_service is not None:  # type: ignore[name-defined]
+                    current_repos = set(
+                        langfuse_sync_service._last_modified_repos  # type: ignore[name-defined]
+                    )
+
+                # Short-circuit: skip expensive work when no new repos discovered.
+                # Only activates after the first cycle (_previous_sync_repos non-empty)
+                # so the first run always registers repos even if the set is unchanged.
+                if current_repos == _previous_sync_repos and _previous_sync_repos:
+                    elapsed = time.monotonic() - _callback_start
+                    logger.info(
+                        f"_on_sync_complete took {elapsed:.2f}s (short-circuited: no new repos)"
+                    )
+                    return
+
+                _previous_sync_repos = current_repos
+
                 if golden_repo_manager is not None:
                     register_langfuse_golden_repos(
                         golden_repo_manager, str(golden_repos_dir)
                     )
                 # Generate README files for repos that received new/updated traces
+                # langfuse_sync_service assigned after closure definition; mypy cannot
+                # resolve name from the global declaration, hence type: ignore[name-defined].
                 if langfuse_sync_service is not None:  # type: ignore[name-defined]
                     try:
                         from code_indexer.server.services.langfuse_readme_generator import (
@@ -1526,6 +1720,9 @@ def make_lifespan(
                                 extra={"correlation_id": get_correlation_id()},
                             )
                         )
+
+                elapsed = time.monotonic() - _callback_start
+                logger.info(f"_on_sync_complete took {elapsed:.2f}s")
 
             # Create service with config_getter callable
             langfuse_sync_service = LangfuseTraceSyncService(  # type: ignore[name-defined]
@@ -1761,6 +1958,12 @@ def make_lifespan(
                         )
 
                     mfa_challenge_manager.set_connection_pool(_cluster_pool)
+                    # Story #923: wire ElevatedSessionManager cluster pool
+                    from code_indexer.server.auth.elevated_session_manager import (
+                        elevated_session_manager,
+                    )
+
+                    elevated_session_manager.set_connection_pool(_cluster_pool)
                     _login_rate_limiter_singleton.set_connection_pool(_cluster_pool)
 
                     # Bug #573: Wire cluster pools for password change
@@ -1870,6 +2073,23 @@ def make_lifespan(
                         except Exception:
                             logger.debug(
                                 "Bug #586: API key sync on config change failed",
+                                exc_info=True,
+                            )
+
+                        # Bug #943 Fix #2: hot-reload elevation timeouts into the live
+                        # singleton so PG config-poll changes take effect without restart.
+                        try:
+                            from code_indexer.server.auth.elevated_session_manager import (
+                                elevated_session_manager as _esm,
+                            )
+
+                            _esm.update_timeouts(
+                                new_config.elevation_idle_timeout_seconds,
+                                new_config.elevation_max_age_seconds,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Bug #943: elevation timeout hot-reload on config change failed",
                                 exc_info=True,
                             )
 
@@ -2079,6 +2299,15 @@ def make_lifespan(
 
         yield  # Server is now running
 
+        # Prevent test pollution across repeated TestClient/lifespan cycles:
+        # the FastAPI lifespan instantiates a real TOTPService and stores it in
+        # the mfa_routes._totp_service singleton on startup. Without this clear,
+        # subsequent lifespan cycles in the same Python process would inherit
+        # the stale singleton (db_path may point to a deleted SQLite file).
+        from code_indexer.server.web.mfa_routes import set_totp_service
+
+        set_totp_service(None)
+
         # Story #578: Stop config reload thread before cluster services
         try:
             from code_indexer.server.services.config_service import (
@@ -2226,6 +2455,27 @@ def make_lifespan(
                     )
                 )
 
+        # Shutdown: Stop activated reaper scheduler (Story #967)
+        activated_reaper_scheduler_state = getattr(
+            app.state, "activated_reaper_scheduler", None
+        )
+        if activated_reaper_scheduler_state is not None:
+            try:
+                activated_reaper_scheduler_state.stop()
+                logger.info(
+                    "Activated reaper scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-037",
+                        f"Error stopping activated reaper scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Shutdown: Stop description refresh scheduler (Story #190)
         description_refresh_scheduler_state = getattr(
             app.state, "description_refresh_scheduler", None
@@ -2255,6 +2505,15 @@ def make_lifespan(
                 logger.info("LLM lease lifecycle stopped")
             except Exception as e:
                 logger.error("Error stopping LLM lease lifecycle: %s", e)
+
+        # Codex lease lifecycle shutdown (Story #846 CRIT-1)
+        _codex_hook = getattr(app.state, "codex_shutdown_hook", None)
+        if _codex_hook is not None:
+            try:
+                _codex_hook()
+                logger.info("Codex lease lifecycle stopped")
+            except Exception as exc:
+                logger.error("Error stopping Codex lease lifecycle: %s", exc)
 
         # Shutdown: Stop cidx-meta refresh debouncer (Story #345)
         cidx_meta_debouncer_state = getattr(app.state, "cidx_meta_debouncer", None)

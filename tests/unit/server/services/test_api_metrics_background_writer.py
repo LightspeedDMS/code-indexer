@@ -29,16 +29,18 @@ def _poll_until(
         if condition_fn():
             return True
         time.sleep(interval_secs)
-    return condition_fn()  # Final check
+    return bool(condition_fn())  # Final check
 
 
 def bucket_count(db_file: str, username: str, metric_type: str) -> int:
     """Return total row count in api_metrics_buckets for given username and metric_type."""
     with sqlite3.connect(db_file) as conn:
-        return conn.execute(
-            "SELECT COUNT(*) FROM api_metrics_buckets WHERE username=? AND metric_type=?",
-            (username, metric_type),
-        ).fetchone()[0]
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM api_metrics_buckets WHERE username=? AND metric_type=?",
+                (username, metric_type),
+            ).fetchone()[0]
+        )
 
 
 @pytest.fixture

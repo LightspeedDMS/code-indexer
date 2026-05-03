@@ -16,7 +16,6 @@ from unittest.mock import patch
 
 from code_indexer.server.services.research_assistant_service import (
     ResearchAssistantService,
-    SECURITY_GUARDRAILS,
 )
 
 
@@ -42,29 +41,6 @@ class TestPromptTemplateLoading:
         # Should have variables substituted
         assert "{hostname}" not in prompt
         assert "{server_version}" not in prompt
-
-    def test_fallback_to_hardcoded_when_template_missing(self, tmp_path):
-        """AC3: Falls back to hardcoded prompt if template file missing."""
-        # Point to empty directory
-        service = ResearchAssistantService()
-        with patch.object(service, "_get_config_dir", return_value=str(tmp_path)):
-            prompt = service.load_research_prompt()
-
-        # Should return hardcoded prompt
-        assert prompt == SECURITY_GUARDRAILS
-
-    def test_fallback_to_hardcoded_on_read_error(self, tmp_path):
-        """AC3: Falls back to hardcoded prompt on read errors."""
-        # Create directory without template
-        config_dir = tmp_path / "config"
-        config_dir.mkdir()
-
-        service = ResearchAssistantService()
-        with patch.object(service, "_get_config_dir", return_value=str(config_dir)):
-            prompt = service.load_research_prompt()
-
-        # Should return hardcoded prompt
-        assert prompt == SECURITY_GUARDRAILS
 
 
 class TestVariableSubstitution:

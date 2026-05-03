@@ -80,6 +80,7 @@ class User(BaseModel):
             UserRole.NORMAL_USER: {
                 "query_repos",
                 "repository:read",  # Can read repo status, list branches, etc.
+                "activate_repos",  # AC1 Story #981: Normal users can activate/deactivate/switch/sync their workspace
             },
             UserRole.POWER_USER: {
                 "activate_repos",

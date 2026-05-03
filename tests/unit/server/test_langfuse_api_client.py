@@ -254,13 +254,14 @@ class TestRequestWithRetry:
         ]
 
         with patch("requests.request", side_effect=responses) as mock_request:
-            with patch("time.sleep") as mock_sleep:
+            # Bug #964: retries use stop_event.wait(timeout=N) not time.sleep(N)
+            with patch.object(api_client._stop_event, "wait") as mock_wait:
                 result = api_client._request_with_retry("GET", "https://test.com/api")
 
         assert result.status_code == 200
         assert mock_request.call_count == 2
         # Should wait 2 seconds after first 429
-        mock_sleep.assert_called_once_with(2)
+        mock_wait.assert_called_once_with(timeout=2)
 
     def test_retry_on_429_exhausts_at_max_retries(self, api_client):
         """Test that 429 errors make exactly max_retries requests (not max_retries + 1)."""
@@ -271,7 +272,8 @@ class TestRequestWithRetry:
         )
 
         with patch("requests.request", return_value=error_response) as mock_request:
-            with patch("time.sleep") as mock_sleep:
+            # Bug #964: retries use stop_event.wait(timeout=N) not time.sleep(N)
+            with patch.object(api_client._stop_event, "wait") as mock_wait:
                 with pytest.raises(requests.HTTPError):
                     api_client._request_with_retry(
                         "GET", "https://test.com/api", max_retries=3
@@ -279,8 +281,8 @@ class TestRequestWithRetry:
 
         # Should make exactly 3 requests (not 4)
         assert mock_request.call_count == 3
-        # Should have 2 sleeps (after attempt 0 and 1, but NOT after attempt 2)
-        assert mock_sleep.call_count == 2
+        # Should have 2 waits (after attempt 0 and 1, but NOT after attempt 2)
+        assert mock_wait.call_count == 2
 
     def test_retry_on_502_server_error(self, api_client):
         """Test retry on 502 server error."""
@@ -291,12 +293,13 @@ class TestRequestWithRetry:
         ]
 
         with patch("requests.request", side_effect=responses) as mock_request:
-            with patch("time.sleep") as mock_sleep:
+            # Bug #964: retries use stop_event.wait(timeout=N) not time.sleep(N)
+            with patch.object(api_client._stop_event, "wait") as mock_wait:
                 result = api_client._request_with_retry("GET", "https://test.com/api")
 
         assert result.status_code == 200
         assert mock_request.call_count == 2
-        mock_sleep.assert_called_once()
+        mock_wait.assert_called_once()
 
     def test_retry_on_503_service_unavailable(self, api_client):
         """Test retry on 503 service unavailable."""
@@ -307,12 +310,13 @@ class TestRequestWithRetry:
         ]
 
         with patch("requests.request", side_effect=responses) as mock_request:
-            with patch("time.sleep") as mock_sleep:
+            # Bug #964: retries use stop_event.wait(timeout=N) not time.sleep(N)
+            with patch.object(api_client._stop_event, "wait") as mock_wait:
                 result = api_client._request_with_retry("GET", "https://test.com/api")
 
         assert result.status_code == 200
         assert mock_request.call_count == 2
-        mock_sleep.assert_called_once()
+        mock_wait.assert_called_once()
 
     def test_exponential_backoff(self, api_client):
         """Test exponential backoff timing."""
@@ -323,13 +327,14 @@ class TestRequestWithRetry:
         )
 
         with patch("requests.request", return_value=error_response):
-            with patch("time.sleep") as mock_sleep:
+            # Bug #964: retries use stop_event.wait(timeout=N) not time.sleep(N)
+            with patch.object(api_client._stop_event, "wait") as mock_wait:
                 with pytest.raises(requests.HTTPError):
                     api_client._request_with_retry("GET", "https://test.com/api")
 
         # Should have exponential backoff: 2s, 4s (for attempts 0 and 1)
-        # Attempt 2 (last) should fall through without sleep
-        calls = [call[0][0] for call in mock_sleep.call_args_list]
+        # Attempt 2 (last) should fall through without wait
+        calls = [c[1]["timeout"] for c in mock_wait.call_args_list]
         assert calls == [2, 4]
 
     def test_max_backoff_30_seconds(self, api_client):
@@ -341,16 +346,17 @@ class TestRequestWithRetry:
         )
 
         with patch("requests.request", return_value=error_response):
-            with patch("time.sleep") as mock_sleep:
+            # Bug #964: retries use stop_event.wait(timeout=N) not time.sleep(N)
+            with patch.object(api_client._stop_event, "wait") as mock_wait:
                 with pytest.raises(requests.HTTPError):
                     api_client._request_with_retry(
                         "GET", "https://test.com/api", max_retries=8
                     )
 
-        # Check that no sleep is > 30 seconds
-        calls = [call[0][0] for call in mock_sleep.call_args_list]
-        assert all(sleep <= 30 for sleep in calls)
-        # Should have 7 sleep calls (attempts 0-6, but NOT attempt 7 which is last)
+        # Check that no wait timeout is > 30 seconds
+        calls = [c[1]["timeout"] for c in mock_wait.call_args_list]
+        assert all(t <= 30 for t in calls)
+        # Should have 7 wait calls (attempts 0-6, but NOT attempt 7 which is last)
         assert len(calls) == 7
 
     def test_retry_on_connection_error(self, api_client):
@@ -366,7 +372,8 @@ class TestRequestWithRetry:
         side_effect.call_count = 0  # type: ignore[attr-defined]
 
         with patch("requests.request", side_effect=side_effect):
-            with patch("time.sleep"):
+            # Bug #964: retries use stop_event.wait(timeout=N) not time.sleep(N)
+            with patch.object(api_client._stop_event, "wait"):
                 result = api_client._request_with_retry("GET", "https://test.com/api")
 
         assert result.status_code == 200
@@ -374,7 +381,8 @@ class TestRequestWithRetry:
     def test_connection_error_exhausts_retries(self, api_client):
         """Test that connection errors eventually raise."""
         with patch("requests.request", side_effect=requests.ConnectionError("Failed")):
-            with patch("time.sleep"):
+            # Bug #964: retries use stop_event.wait(timeout=N) not time.sleep(N)
+            with patch.object(api_client._stop_event, "wait"):
                 with pytest.raises(requests.ConnectionError):
                     api_client._request_with_retry("GET", "https://test.com/api")
 

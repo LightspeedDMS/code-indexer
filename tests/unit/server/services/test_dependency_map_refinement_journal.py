@@ -37,6 +37,10 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
+# Default refinement interval used in test fixtures (must be a real int so
+# timedelta(hours=config.refinement_interval_hours) does not receive MagicMock)
+_DEFAULT_REFINEMENT_INTERVAL_HOURS = 24
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -48,6 +52,7 @@ def _make_config(refinement_enabled: bool = True, domains_per_run: int = 2):
     cfg = MagicMock()
     cfg.refinement_enabled = refinement_enabled
     cfg.refinement_domains_per_run = domains_per_run
+    cfg.refinement_interval_hours = _DEFAULT_REFINEMENT_INTERVAL_HOURS
     return cfg
 
 

@@ -84,7 +84,7 @@ def admin_token(test_client: TestClient) -> str:
     assert resp.status_code == 200, (
         f"Admin login failed: {resp.status_code} — {resp.text[:300]}"
     )
-    return resp.json()["access_token"]
+    return str(resp.json()["access_token"])
 
 
 @pytest.fixture(scope="session")

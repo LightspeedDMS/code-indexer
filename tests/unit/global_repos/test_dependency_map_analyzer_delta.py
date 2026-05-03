@@ -1183,7 +1183,9 @@ class TestInvokeDeltaMergeFile:
         ) as mock_run:
             self._call(analyzer, tmp_path)
         cmd = mock_run.call_args[0][0]
-        assert "--dangerously-skip-permissions" in cmd
+        # cmd is ['script', '-q', '-c', <shell_str>, '/dev/null']; the flag
+        # lives inside the shell string at index 3, not as a direct list element.
+        assert "--dangerously-skip-permissions" in cmd[3]
 
     @pytest.mark.parametrize("exception_cls", [RuntimeError, Exception])
     def test_cli_exception_returns_none_and_cleans_up(
@@ -1258,10 +1260,11 @@ class TestInvokeRefinementFile:
         ) as mock_run:
             self._call(analyzer, tmp_path)
         cmd = mock_run.call_args[0][0]
-        assert "--dangerously-skip-permissions" in cmd
+        # cmd is ['script', '-q', '-c', <shell_str>, '/dev/null']; the flag
+        # lives inside the shell string at index 3, not as a direct list element.
+        assert "--dangerously-skip-permissions" in cmd[3]
         # Refinement uses allowed_tools=None → no MCP tool restriction passed
-        cmd_str = " ".join(cmd)
-        assert "mcp__cidx-local__search_code" not in cmd_str
+        assert "mcp__cidx-local__search_code" not in cmd[3]
 
     def test_mtime_unchanged_returns_none(self, analyzer, tmp_path):
         """When subprocess does not modify the file, returns None."""

@@ -22,10 +22,11 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple
 
 from code_indexer.global_repos.dependency_map_analyzer import (
     _DELTA_NOOP,
@@ -39,6 +40,7 @@ from code_indexer.global_repos.lifecycle_batch_runner import (
 from .activity_journal_service import ActivityJournalService
 from .constants import CIDX_META_REPO
 from .dep_map_health_detector import DepMapHealthDetector
+from .metadata_reader import read_current_commit
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,9 @@ logger = logging.getLogger(__name__)
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
 MAX_DOMAIN_RETRIES = 3  # Bug #849: module-level constant for retry loop
+_AUTO_REPAIR_JOB_ID_SUFFIX_LEN = (
+    8  # Story #927: hex suffix length for auto-repair job IDs
+)
 
 
 class _DomainUpdateResult(Enum):
@@ -75,6 +80,14 @@ class DependencyMapService:
         description_refresh_tracking_backend=None,
         lifecycle_invoker=None,
         lifecycle_debouncer=None,
+        # Story #927: Any is intentional — psycopg2, psycopg3, and asyncpg pool
+        # types all differ and no PG driver is imported at this module level.
+        # The pool is treated as a duck-typed opaque object: only .connection()
+        # context manager and .execute() are called inside _scheduler_decision_lock.
+        pg_pool: Optional[Any] = None,
+        repair_invoker_fn: Optional[Callable[[str], None]] = None,
+        health_check_fn: Optional[Callable[[], Any]] = None,
+        storage_mode: str = "sqlite",  # Story #927 Pass 2: anti-fallback guard
     ):
         """
         Initialize dependency map service.
@@ -98,6 +111,16 @@ class DependencyMapService:
                 Injected into LifecycleBatchRunner so the runner can signal the
                 cidx-meta refresh debouncer once after the pre-flight batch finishes.
                 Pre-flight is skipped when this is None.
+            pg_pool: Optional PostgreSQL connection pool (Story #927). When provided,
+                _scheduler_decision_lock uses PG advisory locks (cluster mode). When
+                None, threading.Lock per key is used (solo mode). Type is Any because
+                the PG driver (psycopg2/psycopg3/asyncpg) is not imported here.
+            repair_invoker_fn: Optional callable(job_id) that starts a repair job
+                (Story #927 Phase 3). Injected at app startup. When None, auto-repair
+                logs an error and marks the job failed.
+            health_check_fn: Optional callable() -> HealthReport-like object
+                (Story #927 Phase 3). Must return an object with .anomalies list.
+                When None, auto-repair is skipped with a WARNING log.
         """
         self._golden_repos_manager = golden_repos_manager
         self._config_manager = config_manager
@@ -121,6 +144,17 @@ class DependencyMapService:
             ActivityJournalService()
         )  # Story #329: activity journal
 
+        # Story #927: cluster-aware decision lock state
+        self._pg_pool = pg_pool  # None = solo mode; not-None = cluster mode
+        self._storage_mode = storage_mode  # Story #927 Pass 2: anti-fallback guard
+        self._repair_invoker_fn = (
+            repair_invoker_fn  # Story #927 Phase 3: repair invoker
+        )
+        self._health_check_fn = health_check_fn  # Story #927 Phase 3: health check fn
+        self._solo_decision_locks: Dict[str, threading.Lock] = {}
+        # Guards _solo_decision_locks dict mutations (per-key lock creation)
+        self._solo_decision_locks_lock = threading.Lock()
+
         # Story #193: Scheduler daemon thread state
         self._daemon_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -129,6 +163,18 @@ class DependencyMapService:
     def activity_journal(self) -> ActivityJournalService:
         """Return the ActivityJournalService instance (Story #329)."""
         return self._activity_journal  # type: ignore[no-any-return]
+
+    def set_repair_invoker_fn(
+        self,
+        fn: Optional[Callable[[str], None]],
+    ) -> None:
+        """Story #927 Codex Pass 4: late-bind the repair invoker after construction.
+
+        Required because the lifespan startup needs to construct DependencyMapService
+        BEFORE building the repair invoker closure (the closure must capture the
+        constructed service instance, not the pre-construction None placeholder).
+        """
+        self._repair_invoker_fn = fn
 
     def _run_verification_pass(
         self,
@@ -174,6 +220,76 @@ class DependencyMapService:
         else:
             # Lock is held by another operation
             return False
+
+    def run_graph_repair_dry_run(self) -> Dict[str, Any]:
+        """Run Phase 3.7 graph-channel repair in dry-run mode (Story #919 AC5).
+
+        Builds a DepMapRepairExecutor against the live dep-map output directory,
+        calls _run_phase37(dry_run=True), and returns the DryRunReport as a plain
+        dict so MCP handlers can JSON-serialize it directly.
+
+        Returns an empty-safe dict when the dep-map output directory does not exist.
+        """
+        from dataclasses import asdict
+        from datetime import datetime, timezone
+
+        from typing import cast
+
+        from .dep_map_health_detector import DepMapHealthDetector
+        from .dep_map_index_regenerator import IndexRegenerator
+        from .dep_map_repair_executor import DepMapRepairExecutor, DryRunReport
+
+        dep_map_dir = (
+            Path(self._golden_repos_manager.golden_repos_dir)
+            / "cidx-meta"
+            / "dependency-map"
+        )
+        if not dep_map_dir.exists():
+            return {
+                "mode": "dry_run",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "total_anomalies": 0,
+                "per_type_counts": {},
+                "per_verdict_counts": {},
+                "per_action_counts": {},
+                "would_be_writes": [],
+                "skipped": [],
+                "errors": [
+                    f"dependency-map output directory does not exist: {dep_map_dir}"
+                ],
+            }
+
+        from code_indexer.server.services.config_service import get_config_service
+        from code_indexer.server.services.dep_map_dispatcher_factory import (
+            build_dep_map_dispatcher,
+        )
+
+        _dispatcher = build_dep_map_dispatcher(get_config_service().get_config())
+
+        def _invoke_llm_fn(
+            repo_path: str, prompt: str, shell_timeout: int, outer_timeout: int
+        ) -> Tuple[bool, str]:
+            result = _dispatcher.dispatch(
+                flow="dep_map_repair",
+                cwd=repo_path,
+                prompt=prompt,
+                timeout=outer_timeout,
+            )
+            return result.success, result.output
+
+        executor = DepMapRepairExecutor(
+            health_detector=DepMapHealthDetector(),
+            index_regenerator=IndexRegenerator(),
+            enable_graph_channel_repair=True,
+            invoke_llm_fn=_invoke_llm_fn,
+        )
+        fixed: List[str] = []
+        errors: List[str] = []
+        report = executor._run_phase37(dep_map_dir, fixed, errors, dry_run=True)
+        # _run_phase37(dry_run=True) with enable_graph_channel_repair=True always returns
+        # DryRunReport — the Optional[DryRunReport] return type covers the False/None path
+        # (enable_graph_channel_repair=False).  cast narrows the type for mypy only.
+        return asdict(cast(DryRunReport, report))
 
     def run_full_analysis(self, job_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -349,7 +465,8 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
-            # Finalize and cleanup
+            # Finalize and cleanup.
+            # Bug #930: finalize_s removed — not a meaningful user-visible phase.
             self._finalize_analysis(
                 config,
                 paths,
@@ -357,6 +474,7 @@ class DependencyMapService:
                 domain_list,
                 pass1_duration_s,
                 pass2_duration_s,
+                run_type="full",
             )
 
             _analysis_succeeded = True
@@ -746,6 +864,8 @@ class DependencyMapService:
         domain_list: List[Dict[str, Any]],
         pass1_duration_s: float = 0.0,
         pass2_duration_s: float = 0.0,
+        run_type: Optional[str] = None,
+        phase_timings_json: Optional[str] = None,
     ) -> None:
         """
         Finalize analysis: swap, reindex, update tracking, cleanup.
@@ -757,6 +877,11 @@ class DependencyMapService:
             domain_list: List of identified domains
             pass1_duration_s: Duration of Pass 1 in seconds
             pass2_duration_s: Duration of Pass 2 in seconds
+            run_type: Run classification for metrics (e.g. "full"). Bug #874 Story C.
+            phase_timings_json: Pre-serialised JSON with per-phase timing breakdown.
+                      Bug #874 Story C. When None and run_type=="full", built here
+                      from pass1_duration_s and pass2_duration_s only.
+                      Bug #930: finalize_s removed — not a meaningful user-visible phase.
         """
         staging_dir = paths["staging_dir"]
         final_dir = paths["final_dir"]
@@ -790,9 +915,24 @@ class DependencyMapService:
             error_message=None,
         )
 
-        # AC9 (Story #216): Record run metrics to run_history table
+        # AC9 (Story #216): Record run metrics to run_history table.
+        # Bug #874 Story C: build phase_timings_json for full runs.
+        # Bug #930: finalize_s removed — not a meaningful user-visible phase.
+        if run_type == "full" and phase_timings_json is None:
+            phase_timings_json = json.dumps(
+                {
+                    "synth_s": pass1_duration_s,
+                    "per_domain_s": pass2_duration_s,
+                }
+            )
         self._record_run_metrics(
-            final_dir, domain_list, repo_list, pass1_duration_s, pass2_duration_s
+            final_dir,
+            domain_list,
+            repo_list,
+            pass1_duration_s,
+            pass2_duration_s,
+            run_type=run_type,
+            phase_timings_json=phase_timings_json,
         )
 
     def _stage_then_swap(self, staging_dir: Path, final_dir: Path) -> None:
@@ -827,6 +967,9 @@ class DependencyMapService:
         repo_list: List[Dict[str, Any]],
         pass1_duration_s: float = 0.0,
         pass2_duration_s: float = 0.0,
+        run_type: Optional[str] = None,
+        phase_timings_json: Optional[str] = None,
+        repos_skipped: int = 0,
     ) -> None:
         """
         Compute and record run metrics to tracking backend (AC9, Story #216).
@@ -841,6 +984,12 @@ class DependencyMapService:
             repo_list: List of repo dicts that were analyzed
             pass1_duration_s: Duration of Pass 1 in seconds
             pass2_duration_s: Duration of Pass 2 in seconds
+            run_type: Optional run classification (e.g. "delta", "full").
+                      Bug #874 Story B. NULL for legacy rows until Story C wires it.
+            phase_timings_json: Optional pre-serialized JSON string with per-phase
+                      timing breakdown. Bug #874 Story B. NULL for legacy rows.
+            repos_skipped: Count of repos not touched by this run. Bug #874 Story C.
+                      Full runs always pass 0; delta/refinement pass honest values.
         """
         try:
             total_chars = 0
@@ -887,13 +1036,17 @@ class DependencyMapService:
                 "edge_count": edge_count,
                 "zero_char_domains": zero_char_domains,
                 "repos_analyzed": len(repo_list),
-                "repos_skipped": 0,  # Full analysis always processes all repos
+                "repos_skipped": repos_skipped,  # Bug #874 Story C: caller-supplied
                 "pass1_duration_s": pass1_duration_s,
                 "pass2_duration_s": pass2_duration_s,
             }
 
             if hasattr(self._tracking_backend, "record_run_metrics"):
-                self._tracking_backend.record_run_metrics(metrics)
+                self._tracking_backend.record_run_metrics(
+                    metrics,
+                    run_type=run_type,
+                    phase_timings_json=phase_timings_json,
+                )
                 logger.info(
                     f"Recorded run metrics: {len(domain_list)} domains, "
                     f"{len(repo_list)} repos, {total_chars} chars"
@@ -1214,13 +1367,17 @@ class DependencyMapService:
 
     def _get_commit_hashes(self, repo_list: List[Dict[str, Any]]) -> Dict[str, str]:
         """
-        Read metadata.json for each repo to get current_commit.
+        Read provider-aware metadata for each repo to get current_commit (Bug #890).
+
+        Prefers metadata-voyage-ai.json, falls back to legacy metadata.json via
+        read_current_commit(). Repos with no readable metadata are omitted from
+        the result — callers must not interpret absence as a sentinel value.
 
         Args:
             repo_list: List of repo dicts with clone_path
 
         Returns:
-            Dict mapping repo alias to commit hash
+            Dict mapping repo alias to real commit SHA (only repos with valid metadata)
         """
         commit_hashes = {}
         for repo in repo_list:
@@ -1230,18 +1387,9 @@ class DependencyMapService:
             if not alias or not clone_path:
                 continue
 
-            metadata_path = Path(clone_path) / ".code-indexer" / "metadata.json"
-            if metadata_path.exists():
-                try:
-                    with open(metadata_path) as f:
-                        metadata = json.load(f)
-                    current_commit = metadata.get("current_commit", "unknown")
-                    commit_hashes[alias] = current_commit
-                except Exception as e:
-                    logger.warning(f"Failed to read metadata for {alias}: {e}")
-                    commit_hashes[alias] = "unknown"
-            else:
-                commit_hashes[alias] = "local"
+            current_commit = read_current_commit(clone_path)
+            if current_commit is not None:
+                commit_hashes[alias] = current_commit
 
         return commit_hashes
 
@@ -1279,12 +1427,386 @@ class DependencyMapService:
         if self._daemon_thread and self._daemon_thread.is_alive():
             self._daemon_thread.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
 
+    def _is_any_dep_map_job_in_flight(self) -> bool:
+        """Story #927: re-entrance guard for the auto-repair scheduler.
+
+        Returns True if any dep-map operation is currently pending or running.
+        Covers all 4 dep-map operation types so the auto-repair logic does not
+        race against an in-flight full/delta/refinement/repair job.
+
+        Used by `_try_fire_scheduled_delta`, `_try_fire_scheduled_refinement`,
+        and `_maybe_run_auto_repair_after_scheduled` (added in phase 2).
+        """
+        if self._job_tracker is None:
+            return False
+        active = self._job_tracker.get_active_jobs()
+        dep_map_types = {
+            "dependency_map_full",
+            "dependency_map_delta",
+            "dependency_map_refinement",
+            "dependency_map_repair",
+        }
+        return any(job.operation_type in dep_map_types for job in active)
+
+    def _is_cluster_mode(self) -> bool:
+        """Story #927: True when a PG pool was injected (cluster deployment).
+
+        Used by `_scheduler_decision_lock` to choose between PG advisory lock
+        (cluster) and threading.Lock (solo) for atomic decision-claim windows.
+        """
+        return self._pg_pool is not None
+
+    def _is_postgres_storage_mode(self) -> bool:
+        """Story #927 Pass 2: True when server is configured for cluster (postgres) deployment.
+
+        Distinct from _is_cluster_mode(): this checks the declared storage_mode
+        parameter, while _is_cluster_mode() checks whether a pg_pool was actually
+        injected. The anti-fallback guard compares the two to detect misconfiguration.
+        """
+        return self._storage_mode == "postgres"
+
+    @contextmanager
+    def _scheduler_decision_lock(self, key: str) -> Generator[bool, None, None]:
+        """Story #927: Cluster-aware non-blocking decision lock for scheduler claims.
+
+        Cluster (PG): pg_try_advisory_xact_lock — auto-released on transaction end.
+        Solo (SQLite): threading.Lock per (instance, key) — process-local.
+
+        Held only for the atomic claim window (in-flight check + register-job).
+        Long-running work runs OUTSIDE the lock; JobTracker entry serves as the
+        cross-node in-flight signal afterwards.
+
+        Yields True if lock acquired, False if contended.
+        """
+        if self._is_cluster_mode():
+            assert (
+                self._pg_pool is not None
+            )  # invariant: _is_cluster_mode() guarantees this
+            with self._pg_pool.connection() as conn:
+                with conn.transaction():
+                    lock_id = self._stable_int_hash(f"dep_map_scheduler_{key}")
+                    cur = conn.execute(
+                        "SELECT pg_try_advisory_xact_lock(%s)", (lock_id,)
+                    )
+                    row = cur.fetchone()
+                    acquired = bool(row[0]) if row else False
+                    yield acquired
+        else:
+            with self._solo_decision_locks_lock:
+                lock = self._solo_decision_locks.setdefault(key, threading.Lock())
+            acquired = lock.acquire(blocking=False)
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    lock.release()
+
+    @staticmethod
+    def _stable_int_hash(s: str) -> int:
+        """Story #927: Deterministic 64-bit hash for PG advisory lock IDs.
+
+        Uses MD5 truncated to 64 bits, converted to a signed integer that fits
+        within PostgreSQL's bigint range [-2^63, 2^63-1]. Process-stable: same
+        input always produces the same result regardless of PYTHONHASHSEED.
+        """
+        import hashlib
+
+        h = hashlib.md5(s.encode()).hexdigest()[:16]
+        val = int(h, 16)
+        if val >= 2**63:
+            val -= 2**64
+        return val
+
+    def _try_fire_scheduled_delta(self) -> None:
+        """Story #927: Atomic claim of the scheduled delta trigger window.
+
+        Acquires the decision lock and checks the in-flight re-entrance guard
+        inside the lock. Releases the lock BEFORE running run_delta_analysis
+        so the long-running work executes outside the atomic claim window.
+        The JobTracker entry created by run_delta_analysis then serves as the
+        cross-node in-flight signal for subsequent scheduler iterations.
+
+        Design choice: run_delta_analysis manages its own JobTracker entry via
+        register_job_if_no_conflict, so this helper does NOT pre-register.
+        The decision lock + in-flight guard together form the atomic claim window.
+        """
+        with self._scheduler_decision_lock("delta") as acquired:
+            if not acquired:
+                logger.info(
+                    "scheduled_delta_skipped_decision_lock_held",
+                    extra={"event": "scheduled_delta_skipped_decision_lock_held"},
+                )
+                return
+            if self._is_any_dep_map_job_in_flight():
+                logger.info(
+                    "scheduled_delta_skipped_reentrance",
+                    extra={"event": "scheduled_delta_skipped_reentrance"},
+                )
+                return
+            logger.info(
+                "scheduled_delta_fired",
+                extra={"event": "scheduled_delta_fired"},
+            )
+        # Lock released — long-running work runs OUTSIDE the atomic claim window
+        self.run_delta_analysis()
+        # Story #927 Phase 3: attempt auto-repair after scheduled delta
+        self._maybe_run_auto_repair_after_scheduled("delta")
+
+    def _try_fire_scheduled_refinement(self) -> None:
+        """Story #927: Atomic claim of the scheduled refinement trigger window.
+
+        Same decision lock + in-flight guard pattern as `_try_fire_scheduled_delta`.
+        Releases the lock BEFORE running run_refinement_cycle so the long-running
+        work executes outside the atomic claim window.
+
+        Design choice: run_refinement_cycle manages its own concurrency via self._lock
+        (non-blocking acquire inside it). This helper adds the cluster-aware decision
+        lock layer on top to prevent duplicate fires across nodes.
+        """
+        with self._scheduler_decision_lock("refinement") as acquired:
+            if not acquired:
+                logger.info(
+                    "scheduled_refinement_skipped_decision_lock_held",
+                    extra={"event": "scheduled_refinement_skipped_decision_lock_held"},
+                )
+                return
+            if self._is_any_dep_map_job_in_flight():
+                logger.info(
+                    "scheduled_refinement_skipped_reentrance",
+                    extra={"event": "scheduled_refinement_skipped_reentrance"},
+                )
+                return
+            logger.info(
+                "scheduled_refinement_fired",
+                extra={"event": "scheduled_refinement_fired"},
+            )
+        # Lock released — long-running work runs OUTSIDE the atomic claim window
+        # Bug #931 Defect 2: delegate to run_tracked_refinement so scheduled runs register with JobTracker.
+        self.run_tracked_refinement()
+        # Story #927 Phase 3: attempt auto-repair after scheduled refinement
+        self._maybe_run_auto_repair_after_scheduled("refinement")
+
+    def _auto_repair_check_health(self, trigger_source: str) -> Optional[List[Any]]:
+        """Story #927 Phase 3: health-check gate for auto-repair.
+
+        Returns the anomalies list from the health report, or None when the
+        gate should block repair (no health_check_fn, None result, or exception).
+        All failure paths log at WARNING level (anti-fallback: never repair
+        against unknown anomaly state).
+        """
+        if self._health_check_fn is None:
+            logger.warning(
+                "scheduled_auto_repair_skipped_no_health_check_fn",
+                extra={"trigger": trigger_source},
+            )
+            return None
+
+        try:
+            health = self._health_check_fn()
+        except Exception as exc:
+            logger.warning(
+                "scheduled_auto_repair_health_check_failed",
+                extra={
+                    "event": "scheduled_auto_repair_health_check_failed",
+                    "trigger": trigger_source,
+                    "error": str(exc),
+                },
+                exc_info=True,
+            )
+            return None
+
+        if health is None:
+            logger.warning(
+                "scheduled_auto_repair_health_check_returned_none",
+                extra={"trigger": trigger_source},
+            )
+            return None
+
+        return getattr(health, "anomalies", None)
+
+    def _auto_repair_fail_job(self, job_id: str, error: str) -> None:
+        """Story #927 Phase 3: safely mark an auto-repair job as failed.
+
+        Wraps fail_job so failures in the secondary error path are logged
+        rather than silently swallowed.
+        """
+        if self._job_tracker is None:
+            return
+        try:
+            self._job_tracker.fail_job(job_id, error=error)
+        except Exception as inner_exc:
+            logger.error(
+                "scheduled_auto_repair_fail_job_error",
+                extra={"job_id": job_id, "error": str(inner_exc)},
+            )
+
+    def _auto_repair_try_claim_job(self, trigger_source: str) -> Optional[str]:
+        """Story #927 Phase 3: in-lock claim sequence for auto-repair.
+
+        Must be called INSIDE _scheduler_decision_lock("auto_repair").
+        Checks in-flight guard, runs health check gate, and registers
+        a job if anomalies are present.
+
+        Returns the registered job_id on success, or None when any gate
+        blocks repair (logs the reason before returning None).
+        """
+        if self._is_any_dep_map_job_in_flight():
+            logger.info(
+                "scheduled_auto_repair_skipped_reentrance",
+                extra={
+                    "event": "scheduled_auto_repair_skipped_reentrance",
+                    "trigger": trigger_source,
+                },
+            )
+            return None
+
+        anomalies = self._auto_repair_check_health(trigger_source)
+        if anomalies is None:
+            # Health gate blocked (no fn, exception, or None result) — already logged
+            return None
+        if not anomalies:
+            logger.info(
+                "scheduled_auto_repair_no_anomalies",
+                extra={
+                    "event": "scheduled_auto_repair_no_anomalies",
+                    "trigger": trigger_source,
+                },
+            )
+            return None
+
+        if self._job_tracker is None:
+            logger.warning("scheduled_auto_repair_skipped_no_job_tracker")
+            return None
+
+        new_job_id = (
+            f"dep-map-auto-repair-{uuid.uuid4().hex[:_AUTO_REPAIR_JOB_ID_SUFFIX_LEN]}"
+        )
+        registered = self._job_tracker.register_job(
+            job_id=new_job_id,
+            operation_type="dependency_map_repair",
+            username="system",
+            metadata={
+                "triggered_by": "scheduler_auto_repair",
+                "trigger_source": trigger_source,
+            },
+        )
+        logger.info(
+            "scheduled_auto_repair_fired",
+            extra={
+                "event": "scheduled_auto_repair_fired",
+                "trigger": trigger_source,
+                "anomaly_count": len(anomalies),
+                "job_id": registered.job_id,
+            },
+        )
+        return str(registered.job_id)
+
+    def _auto_repair_invoke(self, trigger_source: str, job_id: str) -> None:
+        """Story #927 Phase 3: invoke repair fn outside the decision lock.
+
+        Calls repair_invoker_fn(job_id). On missing fn or exception, marks
+        the job failed via _auto_repair_fail_job and logs ERROR.
+        """
+        if self._repair_invoker_fn is None:
+            logger.error(
+                "scheduled_auto_repair_skipped_no_repair_invoker_fn",
+                extra={"job_id": job_id},
+            )
+            self._auto_repair_fail_job(job_id, error="No repair invoker fn injected")
+            return
+
+        try:
+            self._repair_invoker_fn(job_id)
+            logger.info(
+                "scheduled_auto_repair_started",
+                extra={
+                    "event": "scheduled_auto_repair_started",
+                    "trigger": trigger_source,
+                    "job_id": job_id,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "scheduled_auto_repair_start_failed",
+                extra={
+                    "event": "scheduled_auto_repair_start_failed",
+                    "trigger": trigger_source,
+                    "error": str(exc),
+                },
+                exc_info=True,
+            )
+            self._auto_repair_fail_job(job_id, error=str(exc))
+
+    def _maybe_run_auto_repair_after_scheduled(self, trigger_source: str) -> None:
+        """Story #927 Phase 3: 4-gate auto-repair after scheduled delta/refinement.
+
+        Gates (order):
+          1. Feature flag (dep_map_auto_repair_enabled) — opt-in, default False
+          2. Decision lock ("auto_repair" key) — non-blocking, cluster-aware
+          3. In-flight guard (no dep-map job pending/running) — inside lock
+          4. Health check — non-empty anomalies list — inside lock
+
+        Job is registered atomically inside the lock. Repair invocation runs
+        outside the lock via _auto_repair_invoke. Manual triggers bypass this
+        helper entirely — only the scheduler calls it.
+        """
+        config = self._config_manager.get_claude_integration_config()
+        if not config or not getattr(config, "dep_map_auto_repair_enabled", False):
+            logger.info(
+                "scheduled_auto_repair_disabled",
+                extra={
+                    "event": "scheduled_auto_repair_disabled",
+                    "trigger": trigger_source,
+                },
+            )
+            return
+
+        # Story #927 Pass 2: anti-fallback guard — cluster mode without pg_pool means
+        # the decision lock silently degrades to a per-node threading.Lock, allowing
+        # duplicate auto-repair jobs across nodes. Refuse loudly instead.
+        if self._is_postgres_storage_mode() and self._pg_pool is None:
+            logger.error(
+                "scheduled_auto_repair_misconfigured_cluster_no_pg_pool",
+                extra={
+                    "trigger": trigger_source,
+                    "reason": (
+                        "Cluster deployment (storage_mode=postgres) has "
+                        "dep_map_auto_repair_enabled=True but no pg_pool injected. "
+                        "Decision lock would silently degrade to per-node solo lock, "
+                        "allowing duplicate auto-repair jobs across nodes. Refusing to fire."
+                    ),
+                },
+            )
+            return
+
+        job_id: Optional[str] = None
+
+        with self._scheduler_decision_lock("auto_repair") as acquired:
+            if not acquired:
+                logger.info(
+                    "scheduled_auto_repair_skipped_decision_lock_held",
+                    extra={
+                        "event": "scheduled_auto_repair_skipped_decision_lock_held",
+                        "trigger": trigger_source,
+                    },
+                )
+                return
+            job_id = self._auto_repair_try_claim_job(trigger_source)
+
+        # Lock released — run repair OUTSIDE the atomic claim window
+        if job_id is not None:
+            self._auto_repair_invoke(trigger_source, job_id)
+
     def _scheduler_loop(self) -> None:
         """
-        Main scheduler loop for delta refresh (Story #193, AC1).
+        Main scheduler loop for delta refresh (Story #193, AC1; refactored Story #927).
 
         Polls every 60 seconds, checks if delta refresh should run based
         on next_run timestamp and dependency_map_enabled config.
+
+        Story #927: Inline trigger calls replaced with _try_fire_scheduled_delta()
+        and _try_fire_scheduled_refinement() which add cluster-aware decision locks
+        and re-entrance guards around the actual analysis invocations.
         """
         while not self._stop_event.is_set():
             try:
@@ -1306,8 +1828,7 @@ class DependencyMapService:
                     now = datetime.now(timezone.utc)
 
                     if now >= next_run:
-                        logger.info("Scheduled delta refresh triggered")
-                        self.run_delta_analysis()
+                        self._try_fire_scheduled_delta()
 
                 else:
                     # No next_run set yet — wait for user to trigger manually
@@ -1327,20 +1848,14 @@ class DependencyMapService:
                         if refinement_next:
                             ref_next_dt = datetime.fromisoformat(refinement_next)
                             if now >= ref_next_dt:
-                                logger.info("Scheduled refinement cycle triggered")
-                                self.run_refinement_cycle()
-                                next_refinement = (
-                                    now
-                                    + timedelta(
-                                        hours=ref_config.refinement_interval_hours
-                                    )
-                                ).isoformat()
-                                self._tracking_backend.update_tracking(
-                                    refinement_next_run=next_refinement
-                                )
+                                # Bug #931: duplicate update_tracking(refinement_next_run=...)
+                                # removed here. run_refinement_cycle (called via
+                                # run_tracked_refinement inside _try_fire_scheduled_refinement)
+                                # now owns the stamp unconditionally on success.
+                                self._try_fire_scheduled_refinement()
                         else:
-                            # No refinement_next_run set yet — wait for user to
-                            # trigger manually or for a completed cycle to schedule next.
+                            # No refinement_next_run set yet. Bug #931 fix: any successful
+                            # run_refinement_cycle (manual or scheduled) now seeds the schedule.
                             logger.debug(
                                 "Refinement: no refinement_next_run scheduled, waiting for manual trigger"
                             )
@@ -1411,19 +1926,16 @@ class DependencyMapService:
             if not alias or not clone_path:
                 continue
 
-            # Read current commit hash from metadata.json
-            metadata_path = Path(clone_path) / ".code-indexer" / "metadata.json"
-            current_hash = None
+            # Read current commit hash from provider-aware metadata (Bug #890)
+            current_hash = read_current_commit(clone_path)
 
-            if metadata_path.exists():
-                try:
-                    with open(metadata_path) as f:
-                        metadata = json.load(f)
-                    current_hash = metadata.get("current_commit")
-                except Exception as e:
-                    logger.warning(f"Failed to read metadata for {alias}: {e}")
-
-            # Compare with stored hash
+            # Bug #890 post-deploy note: on the first delta run after this fix
+            # lands, every repo will flip to CHANGED because stored_hashes may
+            # still carry "local"/"unknown" sentinels from the pre-fix period
+            # while current_hash will now hold real SHAs. This is expected and
+            # self-healing — the tracking table gets rewritten with real SHAs
+            # on that run, and normal behavior resumes thereafter. Rate-limiting
+            # in ClaudeCliManager protects against stampede.
             if alias not in stored_hashes:
                 # New repo (not in previous analysis)
                 new_repos.append(repo)
@@ -2060,6 +2572,8 @@ class DependencyMapService:
         all_repos: List[Dict[str, Any]],
         output_dir: Optional[Path] = None,
         affected_domains: Optional[Set[str]] = None,
+        detect_s: float = 0.0,
+        merge_s: float = 0.0,
     ) -> None:
         """
         Finalize delta analysis tracking updates (Story #193, AC8).
@@ -2067,11 +2581,20 @@ class DependencyMapService:
         Bug #572: Now also records run metrics so delta runs appear in the
         Recent Run Metrics dashboard table.
 
+        Bug #874 Story A: detect_s and merge_s carry real wall-clock timings from
+        run_delta_analysis so the Recent Run Metrics dashboard shows honest numbers.
+        Column mapping (no schema change — Story B adds phase_timings_json):
+          detect_s  -> pass1_duration_s  (change-detection phase)
+          merge_s   -> pass2_duration_s  (per-domain Claude-CLI merge phase)
+
         Args:
             config: Claude integration config
             all_repos: List of all current repos
             output_dir: Dependency map output directory (for metric computation)
             affected_domains: Set of domain names updated in this delta run
+            detect_s: Wall-clock seconds spent in detect_changes() (P1-equivalent)
+            merge_s: Wall-clock seconds spent in _update_affected_domains() (P2-equivalent);
+                     legitimately 0.0 on the no-affected-domains early-return branch
         """
         commit_hashes = self._get_commit_hashes(all_repos) if all_repos else {}
         next_run = (
@@ -2088,9 +2611,28 @@ class DependencyMapService:
 
         # Bug #572: Record run metrics for delta analysis so they appear
         # in the Recent Run Metrics dashboard table.
+        # Bug #874 Story A: pass real detect_s/merge_s instead of hardcoded 0.0/0.0.
+        # Bug #874 Story C: add run_type="delta", phase_timings_json, and repos_skipped.
+        # Bug #930: finalize_s removed — not a meaningful user-visible phase.
         if output_dir is not None and affected_domains is not None:
             domain_list = [{"name": d} for d in affected_domains]
-            self._record_run_metrics(output_dir, domain_list, all_repos, 0.0, 0.0)
+            # TODO #874: repos_skipped could be derived by walking the domains-to-repos
+            # mapping; deferred — 0 is a non-None, non-negative int (FR6 contract met).
+            self._record_run_metrics(
+                output_dir,
+                domain_list,
+                all_repos,
+                detect_s,
+                merge_s,
+                run_type="delta",
+                phase_timings_json=json.dumps(
+                    {
+                        "detect_s": detect_s,
+                        "merge_s": merge_s,
+                    }
+                ),
+                repos_skipped=0,
+            )
 
     def run_delta_analysis(
         self, job_id: Optional[str] = None
@@ -2233,7 +2775,11 @@ class DependencyMapService:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
             # Detect changes (AC2: Change Detection)
+            # Bug #874 Story A: time the detect phase so the dashboard shows real numbers.
+            # detect_s maps to pass1_duration_s column (Story B will add phase_timings_json).
+            t_detect_start = time.time()
             changed_repos, new_repos, removed_repos = self.detect_changes()
+            detect_s = time.time() - t_detect_start
 
             total_changes = len(changed_repos) + len(new_repos) + len(removed_repos)
             try:
@@ -2332,7 +2878,10 @@ class DependencyMapService:
                         dependency_map_dir=dependency_map_dir,
                     )
                 all_repos = self._get_activated_repos()
-                self._finalize_delta_tracking(config, all_repos)
+                # Bug #874 Story A: pass detect_s (merge never ran on this branch).
+                self._finalize_delta_tracking(
+                    config, all_repos, detect_s=detect_s, merge_s=0.0
+                )
                 _delta_succeeded = True
                 return {
                     "status": "completed",
@@ -2422,6 +2971,9 @@ class DependencyMapService:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
             # Update affected domains (AC5: In-Place Updates)
+            # Bug #874 Story A: time the merge phase so the dashboard shows real numbers.
+            # merge_s maps to pass2_duration_s column (Story B will add phase_timings_json).
+            t_merge_start = time.time()
             errors = self._update_affected_domains(
                 affected_domains,
                 dependency_map_dir,
@@ -2430,6 +2982,7 @@ class DependencyMapService:
                 removed_repos,
                 config,
             )
+            merge_s = time.time() - t_merge_start
 
             # Bug #396: Remove stale repo aliases from _domains.json
             if removed_repos:
@@ -2470,11 +3023,14 @@ class DependencyMapService:
                     f"Discovery write failed: excluding {len(new_repos)} new repo(s) "
                     "from tracking so they are re-detected on next delta run"
                 )
+            # Bug #874 Story A: pass real detect_s/merge_s timings.
             self._finalize_delta_tracking(
                 config,
                 repos_to_finalize,
                 output_dir=dependency_map_dir,
                 affected_domains=affected_domains,
+                detect_s=detect_s,
+                merge_s=merge_s,
             )
 
             logger.info(
@@ -2796,6 +3352,8 @@ class DependencyMapService:
             domains_processed = 0
             domains_changed = 0
             domains_failed = 0
+            # Bug #874 Story C: time the refinement work so phase_timings_json has honest refine_s.
+            t_refine_start = time.time()
             for domain_idx, domain_info in enumerate(batch):
                 domain_name = domain_info.get("name", "")
                 if not domain_name:
@@ -2843,6 +3401,7 @@ class DependencyMapService:
                     logger.warning(
                         "Refinement: Failed to refine domain '%s': %s", domain_name, e
                     )
+            refine_s = time.time() - t_refine_start
 
             if any_changed:
                 try:
@@ -2858,6 +3417,34 @@ class DependencyMapService:
 
             new_cursor = effective_cursor + config.refinement_domains_per_run
             self._tracking_backend.update_tracking(refinement_cursor=new_cursor)
+
+            # Bug #874 Story C FR5: first-ever _record_run_metrics call from refinement path.
+            # domain_list uses batch (what this cycle touched), not domain_list_ordered (total).
+            # repos_skipped = 0 (refinement has no per-repo skipping concept at this scope).
+            self._record_run_metrics(
+                dependency_map_dir,
+                [{"name": d["name"]} for d in batch],
+                [],
+                run_type="refinement",
+                phase_timings_json=json.dumps({"refine_s": refine_s}),
+                repos_skipped=0,
+            )
+
+            # Bug #931 Defect 1: stamp refinement_next_run unconditionally on success.
+            # Previously written only in the scheduler's own success branch — creating a
+            # chicken-and-egg bootstrap gap where the manual trigger (run_tracked_refinement)
+            # never seeded the schedule, leaving refinement_next_run=NULL indefinitely.
+            # Mirrors run_delta_analysis (lines ~877, ~2547): the cycle method owns the
+            # next-run timestamp so every caller (manual OR scheduled) seeds the schedule.
+            # `config` is the same object retrieved at method entry (line ~3199); no second
+            # config lookup needed and no fallback introduced.
+            self._tracking_backend.update_tracking(
+                refinement_next_run=(
+                    datetime.now(timezone.utc)
+                    + timedelta(hours=config.refinement_interval_hours)
+                ).isoformat()
+            )
+
             try:
                 self._activity_journal.log(
                     f"Refinement cycle complete: {domains_processed} domains processed, "

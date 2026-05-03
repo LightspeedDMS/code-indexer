@@ -36,9 +36,9 @@ def high_token_service(tmp_path):
     config = config_service.get_config()
     # 20000 tokens * 4 chars = 80000 chars max (max allowed by config)
     # This is enough for 500 lines * 10 chars = 5000 chars for short lines
-    assert config.file_content_limits_config is not None
-    config.file_content_limits_config.max_tokens_per_request = 20000
-    config.file_content_limits_config.chars_per_token = 4
+    assert config.content_limits_config is not None
+    config.content_limits_config.file_content_max_tokens = 20000
+    config.content_limits_config.chars_per_token = 4
     config_service.config_manager.save_config(config)
 
     # Create service
@@ -80,8 +80,16 @@ class TestDefaultMaxLinesLimit:
         assert metadata["has_more"] is False
         assert metadata["next_offset"] is None
 
-    def test_file_over_500_lines_returns_500_no_limit(self, high_token_service):
-        """File with >500 lines returns first 500 when no limit specified."""
+    def test_file_over_500_lines_returns_all_within_token_budget(
+        self, high_token_service
+    ):
+        """File with >500 lines returns all lines when no limit specified and within token budget.
+
+        Bug #939: get_file_content_by_path uses MAX_ALLOWED_LIMIT (5000) when limit=None
+        so that token-budget truncation is the authoritative constraint, not a 500-line cap.
+        The high-token fixture (20000 tokens * 4 chars = 80000 chars) fits all 1000 lines
+        (~10000 chars), so no truncation occurs and all lines are returned.
+        """
         service, repo_path = high_token_service
         test_file = repo_path / "medium.py"
         lines = [f"# Line {i + 1}\n" for i in range(1000)]
@@ -95,15 +103,15 @@ class TestDefaultMaxLinesLimit:
         )
 
         content_lines = result["content"].strip().split("\n")
-        assert len(content_lines) == 500
+        assert len(content_lines) == 1000
         assert content_lines[0] == "# Line 1"
-        assert content_lines[-1] == "# Line 500"
+        assert content_lines[-1] == "# Line 1000"
 
         metadata = result["metadata"]
         assert metadata["total_lines"] == 1000
-        assert metadata["returned_lines"] == 500
-        assert metadata["has_more"] is True
-        assert metadata["next_offset"] == 501
+        assert metadata["returned_lines"] == 1000
+        assert metadata["has_more"] is False
+        assert metadata["next_offset"] is None
 
     def test_file_exactly_500_lines_returns_all(self, high_token_service):
         """File with exactly 500 lines returns all when no limit specified."""

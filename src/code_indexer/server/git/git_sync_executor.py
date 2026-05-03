@@ -676,8 +676,15 @@ class GitSyncExecutor:
             config_manager = ConfigManager.create_with_backtrack(self.repository_path)
             config = config_manager.load()
 
-            # Initialize required services (similar to CLI approach)
-            embedding_provider = EmbeddingProviderFactory.create(config)
+            # Initialize required services (similar to CLI approach).
+            # Bug #899: pass http_client_factory from app.state so FaultInjectingSyncTransport
+            # can intercept indexing-time embedding HTTP calls when fault injection is active.
+            # app.state.http_client_factory is guaranteed set by lifespan on every startup path.
+            from ...app import app as _app
+
+            embedding_provider = EmbeddingProviderFactory.create(
+                config, http_client_factory=_app.state.http_client_factory
+            )
             # Initialize vector store (Story #505 - FilesystemVectorStore)
             index_dir = Path(config.codebase_dir) / ".code-indexer" / "index"
             vector_store_client = FilesystemVectorStore(

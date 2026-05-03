@@ -9,9 +9,12 @@ import datetime
 import json
 import logging
 import sqlite3
-import subprocess
 from typing import Dict, List, Optional, cast
 
+from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.dep_map_dispatcher_factory import (
+    build_dep_map_dispatcher,
+)
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 import httpx
@@ -799,51 +802,34 @@ class LogScanner:
 
     def _invoke_claude_cli(self, prompt: str) -> str:
         """
-        Invoke Claude CLI with prompt and return response.
+        Invoke CLI with prompt via CliDispatcher and return response.
+
+        Routes through build_dep_map_dispatcher (Claude or Codex) with
+        flow="self_monitoring_scan" so the call is resilient to the failure
+        of either CLI backend (Bug #936).
 
         Args:
-            prompt: Complete Claude prompt string
+            prompt: Complete prompt string for the scan analysis.
 
         Returns:
-            Claude CLI stdout response
+            CLI stdout response as a string.
 
         Raises:
-            RuntimeError: If Claude CLI invocation fails
+            RuntimeError: If the dispatcher reports failure or raises unexpectedly.
         """
-        try:
-            # Story #76 AC5: Include --model parameter from config
-            # Use -p for print mode (non-interactive), --output-format json for JSON response
-            # Use --json-schema to enforce structured JSON output matching our expected format
-            # Use --allowedTools Bash so Claude can query the log database via sqlite3
-            # Use cwd=repo_root so Claude runs in repo context (can access git, create issues)
-            result = subprocess.run(
-                [
-                    "claude",
-                    "--model",
-                    self.model,
-                    "-p",
-                    "--output-format",
-                    "json",
-                    "--json-schema",
-                    CLAUDE_RESPONSE_SCHEMA,
-                    "--allowedTools",
-                    "Bash",
-                ],
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=CLAUDE_CLI_TIMEOUT_SECONDS,
-                cwd=self.repo_root,  # Run in repo context
-            )
-
-            if result.returncode != 0:
-                raise RuntimeError(f"Claude CLI failed: {result.stderr}")
-
-            return result.stdout
-
-        except subprocess.TimeoutExpired:
+        # Bug #936: route through dispatcher (Claude or Codex) instead of
+        # calling subprocess.run directly.
+        dispatcher = build_dep_map_dispatcher(
+            get_config_service().get_config(), analysis_model=self.model
+        )
+        result = dispatcher.dispatch(
+            flow="self_monitoring_scan",
+            cwd=self.repo_root or ".",
+            prompt=prompt,
+            timeout=CLAUDE_CLI_TIMEOUT_SECONDS,
+        )
+        if not result.success:
             raise RuntimeError(
-                f"Claude CLI timeout after {CLAUDE_CLI_TIMEOUT_SECONDS} seconds"
+                f"Self-monitoring scan CLI failed: {result.error or result.output}"
             )
-        except FileNotFoundError:
-            raise RuntimeError("Claude CLI not found - ensure 'claude' is in PATH")
+        return str(result.output)

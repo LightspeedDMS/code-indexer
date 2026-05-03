@@ -1,7 +1,7 @@
 ---
 name: cidx_ssh_key_create
 category: ssh
-required_permission: activate_repos
+required_permission: repository:admin
 tl_dr: Create new SSH key pair managed by CIDX server.
 inputSchema:
   type: object

@@ -3,15 +3,16 @@ Unit tests for Admin Operations MCP Tools - Story #744.
 
 TDD Approach: These tests are written FIRST before implementation.
 
-Implements 8 MCP tools for administrative operations:
+Implements 6 MCP tools for administrative operations:
 1. query_audit_logs - Query audit logs with filtering
-2. enter_maintenance_mode - Enter maintenance mode
-3. exit_maintenance_mode - Exit maintenance mode
-4. get_maintenance_status - Get maintenance mode status
-5. scip_pr_history - Get SCIP PR creation history
-6. scip_cleanup_history - Get SCIP workspace cleanup history
-7. scip_cleanup_workspaces - Trigger workspace cleanup
-8. scip_cleanup_status - Get cleanup job status
+2. get_maintenance_status - Get maintenance mode status
+3. scip_pr_history - Get SCIP PR creation history
+4. scip_cleanup_history - Get SCIP workspace cleanup history
+5. scip_cleanup_workspaces - Trigger workspace cleanup
+6. scip_cleanup_status - Get cleanup job status
+
+Note: enter_maintenance_mode and exit_maintenance_mode were removed in Story #924
+(maintenance mode write endpoints are localhost-only and auto-updater driven).
 
 Tests verify:
 1. Tool schemas exist in TOOL_REGISTRY
@@ -93,48 +94,11 @@ class TestAuditLogToolExistsInRegistry:
 
 
 class TestMaintenanceModeToolsExistInRegistry:
-    """Verify all 3 maintenance mode MCP tools exist in TOOL_REGISTRY."""
+    """Verify the maintenance mode MCP tool exists in TOOL_REGISTRY.
 
-    def test_enter_maintenance_mode_exists_in_registry(self):
-        """AC2: enter_maintenance_mode tool exists in TOOL_REGISTRY."""
-        assert "enter_maintenance_mode" in TOOL_REGISTRY
-        assert (
-            TOOL_REGISTRY["enter_maintenance_mode"]["name"] == "enter_maintenance_mode"
-        )
-
-    def test_enter_maintenance_mode_has_correct_permission(self):
-        """enter_maintenance_mode requires manage_users permission (admin only)."""
-        assert (
-            TOOL_REGISTRY["enter_maintenance_mode"]["required_permission"]
-            == "manage_users"
-        )
-
-    def test_enter_maintenance_mode_has_input_schema(self):
-        """enter_maintenance_mode has proper inputSchema."""
-        schema = TOOL_REGISTRY["enter_maintenance_mode"]["inputSchema"]
-        assert schema["type"] == "object"
-        props = schema["properties"]
-        # Optional message parameter
-        assert "message" in props
-
-    def test_exit_maintenance_mode_exists_in_registry(self):
-        """AC3: exit_maintenance_mode tool exists in TOOL_REGISTRY."""
-        assert "exit_maintenance_mode" in TOOL_REGISTRY
-        assert TOOL_REGISTRY["exit_maintenance_mode"]["name"] == "exit_maintenance_mode"
-
-    def test_exit_maintenance_mode_has_correct_permission(self):
-        """exit_maintenance_mode requires manage_users permission (admin only)."""
-        assert (
-            TOOL_REGISTRY["exit_maintenance_mode"]["required_permission"]
-            == "manage_users"
-        )
-
-    def test_exit_maintenance_mode_has_empty_input_schema(self):
-        """exit_maintenance_mode has empty inputSchema (no inputs)."""
-        schema = TOOL_REGISTRY["exit_maintenance_mode"]["inputSchema"]
-        assert schema["type"] == "object"
-        assert schema["properties"] == {}
-        assert schema["required"] == []
+    Note: enter_maintenance_mode and exit_maintenance_mode were removed in Story #924.
+    Only get_maintenance_status (read-only) remains.
+    """
 
     def test_get_maintenance_status_exists_in_registry(self):
         """AC4: get_maintenance_status tool exists in TOOL_REGISTRY."""
@@ -253,22 +217,18 @@ class TestSCIPAdminToolsExistInRegistry:
 
 
 class TestAdminOpsMCPHandlersExistInRegistry:
-    """Verify all 8 admin operations MCP tool handlers exist in HANDLER_REGISTRY."""
+    """Verify all 6 admin operations MCP tool handlers exist in HANDLER_REGISTRY.
+
+    Note: enter_maintenance_mode and exit_maintenance_mode handlers were removed
+    in Story #924 (maintenance mode write endpoints are localhost-only).
+    """
 
     # Audit Logs (1)
     def test_query_audit_logs_handler_exists(self):
         """query_audit_logs handler exists in HANDLER_REGISTRY."""
         assert "query_audit_logs" in HANDLER_REGISTRY
 
-    # Maintenance Mode (3)
-    def test_enter_maintenance_mode_handler_exists(self):
-        """enter_maintenance_mode handler exists in HANDLER_REGISTRY."""
-        assert "enter_maintenance_mode" in HANDLER_REGISTRY
-
-    def test_exit_maintenance_mode_handler_exists(self):
-        """exit_maintenance_mode handler exists in HANDLER_REGISTRY."""
-        assert "exit_maintenance_mode" in HANDLER_REGISTRY
-
+    # Maintenance Mode (1 - read-only only)
     def test_get_maintenance_status_handler_exists(self):
         """get_maintenance_status handler exists in HANDLER_REGISTRY."""
         assert "get_maintenance_status" in HANDLER_REGISTRY
@@ -297,14 +257,12 @@ class TestAdminOpsMCPHandlersExistInRegistry:
 
 
 class TestAdminOpsMCPToolSchemaValidation:
-    """Verify all 8 admin operations MCP tools have valid JSON schemas."""
+    """Verify all 6 admin operations MCP tools have valid JSON schemas."""
 
     def test_all_tools_have_name_field(self):
         """All tools have a name field matching the registry key."""
         tools = [
             "query_audit_logs",
-            "enter_maintenance_mode",
-            "exit_maintenance_mode",
             "get_maintenance_status",
             "scip_pr_history",
             "scip_cleanup_history",
@@ -319,8 +277,6 @@ class TestAdminOpsMCPToolSchemaValidation:
         """All tools have a description field."""
         tools = [
             "query_audit_logs",
-            "enter_maintenance_mode",
-            "exit_maintenance_mode",
             "get_maintenance_status",
             "scip_pr_history",
             "scip_cleanup_history",
@@ -335,8 +291,6 @@ class TestAdminOpsMCPToolSchemaValidation:
         """All tools have an inputSchema field."""
         tools = [
             "query_audit_logs",
-            "enter_maintenance_mode",
-            "exit_maintenance_mode",
             "get_maintenance_status",
             "scip_pr_history",
             "scip_cleanup_history",
@@ -353,8 +307,6 @@ class TestAdminOpsMCPToolSchemaValidation:
         """All tools have a required_permission field."""
         tools = [
             "query_audit_logs",
-            "enter_maintenance_mode",
-            "exit_maintenance_mode",
             "get_maintenance_status",
             "scip_pr_history",
             "scip_cleanup_history",

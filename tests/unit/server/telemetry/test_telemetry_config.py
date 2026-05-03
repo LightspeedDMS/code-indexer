@@ -79,17 +79,15 @@ class TestTelemetryConfigDefaults:
 
     def test_telemetry_config_default_export_flags(self):
         """
-        AC1: Default export flags - traces/metrics True, logs False.
+        AC1: Default export flags - traces/metrics True.
 
         Given a fresh TelemetryConfig instance
         When created with no arguments
         Then export_traces and export_metrics should be True
-        And export_logs should be False
         """
         config = TelemetryConfig()
         assert config.export_traces is True, "export_traces should be True by default"
         assert config.export_metrics is True, "export_metrics should be True by default"
-        assert config.export_logs is False, "export_logs should be False by default"
 
     def test_telemetry_config_default_machine_metrics(self):
         """
@@ -106,19 +104,6 @@ class TestTelemetryConfigDefaults:
         )
         assert config.machine_metrics_interval_seconds == 60, (
             "machine_metrics_interval_seconds should be 60 by default"
-        )
-
-    def test_telemetry_config_default_trace_sample_rate(self):
-        """
-        AC1: Default trace sample rate is 1.0 (100%).
-
-        Given a fresh TelemetryConfig instance
-        When created with no arguments
-        Then trace_sample_rate should be 1.0
-        """
-        config = TelemetryConfig()
-        assert config.trace_sample_rate == 1.0, (
-            "trace_sample_rate should be 1.0 by default"
         )
 
     def test_telemetry_config_default_deployment_environment(self):
@@ -196,7 +181,6 @@ class TestTelemetryConfigSerialization:
                 enabled=True,
                 collector_endpoint="http://collector:4317",
                 service_name="test-service",
-                trace_sample_rate=0.5,
             )
 
             manager.save_config(config)
@@ -212,54 +196,6 @@ class TestTelemetryConfigSerialization:
             assert telemetry["enabled"] is True
             assert telemetry["collector_endpoint"] == "http://collector:4317"
             assert telemetry["service_name"] == "test-service"
-            assert telemetry["trace_sample_rate"] == 0.5
-
-    def test_telemetry_config_deserialization(self):
-        """
-        AC2: TelemetryConfig deserializes from JSON.
-
-        Given a config.json with telemetry settings
-        When loaded via ServerConfigManager
-        Then the TelemetryConfig is properly restored
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            manager = ServerConfigManager(tmpdir)
-
-            # Create config with telemetry settings
-            config_dict = {
-                "server_dir": tmpdir,
-                "telemetry_config": {
-                    "enabled": True,
-                    "collector_endpoint": "http://collector:4317",
-                    "collector_protocol": "http",
-                    "service_name": "test-service",
-                    "export_traces": True,
-                    "export_metrics": False,
-                    "export_logs": True,
-                    "machine_metrics_enabled": False,
-                    "machine_metrics_interval_seconds": 30,
-                    "trace_sample_rate": 0.75,
-                    "deployment_environment": "production",
-                },
-            }
-
-            with open(manager.config_file_path, "w") as f:
-                json.dump(config_dict, f)
-
-            config = manager.load_config()
-
-            assert config is not None
-            assert config.telemetry_config.enabled is True  # type: ignore[union-attr]
-            assert config.telemetry_config.collector_endpoint == "http://collector:4317"  # type: ignore[union-attr]
-            assert config.telemetry_config.collector_protocol == "http"  # type: ignore[union-attr]
-            assert config.telemetry_config.service_name == "test-service"  # type: ignore[union-attr]
-            assert config.telemetry_config.export_traces is True  # type: ignore[union-attr]
-            assert config.telemetry_config.export_metrics is False  # type: ignore[union-attr]
-            assert config.telemetry_config.export_logs is True  # type: ignore[union-attr]
-            assert config.telemetry_config.machine_metrics_enabled is False  # type: ignore[union-attr]
-            assert config.telemetry_config.machine_metrics_interval_seconds == 30  # type: ignore[union-attr]
-            assert config.telemetry_config.trace_sample_rate == 0.75  # type: ignore[union-attr]
-            assert config.telemetry_config.deployment_environment == "production"  # type: ignore[union-attr]
 
     def test_telemetry_config_backward_compatibility(self):
         """
@@ -311,10 +247,8 @@ class TestTelemetryConfigSerialization:
                 service_name="custom-service",
                 export_traces=True,
                 export_metrics=True,
-                export_logs=True,
                 machine_metrics_enabled=True,
                 machine_metrics_interval_seconds=120,
-                trace_sample_rate=0.25,
                 deployment_environment="staging",
             )
 
@@ -344,20 +278,12 @@ class TestTelemetryConfigSerialization:
                 == original.telemetry_config.export_metrics
             )
             assert (
-                loaded.telemetry_config.export_logs  # type: ignore[union-attr]
-                == original.telemetry_config.export_logs
-            )
-            assert (
                 loaded.telemetry_config.machine_metrics_enabled  # type: ignore[union-attr]
                 == original.telemetry_config.machine_metrics_enabled
             )
             assert (
                 loaded.telemetry_config.machine_metrics_interval_seconds  # type: ignore[union-attr]
                 == original.telemetry_config.machine_metrics_interval_seconds
-            )
-            assert (
-                loaded.telemetry_config.trace_sample_rate  # type: ignore[union-attr]
-                == original.telemetry_config.trace_sample_rate
             )
             assert (
                 loaded.telemetry_config.deployment_environment  # type: ignore[union-attr]
@@ -483,27 +409,6 @@ class TestTelemetryConfigEnvOverrides:
         finally:
             os.environ.pop("CIDX_OTEL_SERVICE_NAME", None)
 
-    def test_env_override_trace_sample_rate(self):
-        """
-        AC3: CIDX_OTEL_TRACE_SAMPLE_RATE overrides config.
-
-        Given a config with default trace sample rate
-        When CIDX_OTEL_TRACE_SAMPLE_RATE=0.5 is set
-        Then apply_env_overrides uses the env value
-        """
-        try:
-            os.environ["CIDX_OTEL_TRACE_SAMPLE_RATE"] = "0.5"
-
-            config = ServerConfig(server_dir="/tmp/test")
-            manager = ServerConfigManager("/tmp/test")
-            config = manager.apply_env_overrides(config)
-
-            assert (
-                config.telemetry_config.trace_sample_rate == 0.5  # type: ignore[union-attr]
-            ), "CIDX_OTEL_TRACE_SAMPLE_RATE should override trace_sample_rate"
-        finally:
-            os.environ.pop("CIDX_OTEL_TRACE_SAMPLE_RATE", None)
-
     def test_env_override_deployment_environment(self):
         """
         AC3: CIDX_DEPLOYMENT_ENVIRONMENT overrides config.
@@ -524,27 +429,6 @@ class TestTelemetryConfigEnvOverrides:
             ), "CIDX_DEPLOYMENT_ENVIRONMENT should override deployment_environment"
         finally:
             os.environ.pop("CIDX_DEPLOYMENT_ENVIRONMENT", None)
-
-    def test_env_override_invalid_trace_sample_rate_ignored(self):
-        """
-        AC3: Invalid CIDX_OTEL_TRACE_SAMPLE_RATE is ignored with warning.
-
-        Given a config with default trace sample rate
-        When CIDX_OTEL_TRACE_SAMPLE_RATE=invalid is set
-        Then apply_env_overrides keeps default value
-        """
-        try:
-            os.environ["CIDX_OTEL_TRACE_SAMPLE_RATE"] = "invalid"
-
-            config = ServerConfig(server_dir="/tmp/test")
-            manager = ServerConfigManager("/tmp/test")
-            config = manager.apply_env_overrides(config)
-
-            assert (
-                config.telemetry_config.trace_sample_rate == 1.0  # type: ignore[union-attr]
-            ), "Invalid trace_sample_rate should keep default"
-        finally:
-            os.environ.pop("CIDX_OTEL_TRACE_SAMPLE_RATE", None)
 
 
 # =============================================================================
@@ -567,52 +451,11 @@ class TestTelemetryConfigValidation:
         config.telemetry_config = TelemetryConfig(
             enabled=True,
             collector_endpoint="http://localhost:4317",
-            trace_sample_rate=0.5,
         )
 
         manager = ServerConfigManager("/tmp/test")
         # Should not raise
         manager.validate_config(config)
-
-    def test_validation_rejects_trace_sample_rate_below_zero(self):
-        """
-        Validation rejects trace_sample_rate < 0.
-
-        Given a config with trace_sample_rate = -0.1
-        When validated
-        Then it raises ValueError
-        """
-        config = ServerConfig(server_dir="/tmp/test")
-        config.telemetry_config = TelemetryConfig(trace_sample_rate=-0.1)
-
-        manager = ServerConfigManager("/tmp/test")
-
-        with pytest.raises(ValueError) as exc_info:
-            manager.validate_config(config)
-
-        assert "trace_sample_rate" in str(exc_info.value).lower(), (
-            "Error should mention trace_sample_rate"
-        )
-
-    def test_validation_rejects_trace_sample_rate_above_one(self):
-        """
-        Validation rejects trace_sample_rate > 1.0.
-
-        Given a config with trace_sample_rate = 1.5
-        When validated
-        Then it raises ValueError
-        """
-        config = ServerConfig(server_dir="/tmp/test")
-        config.telemetry_config = TelemetryConfig(trace_sample_rate=1.5)
-
-        manager = ServerConfigManager("/tmp/test")
-
-        with pytest.raises(ValueError) as exc_info:
-            manager.validate_config(config)
-
-        assert "trace_sample_rate" in str(exc_info.value).lower(), (
-            "Error should mention trace_sample_rate"
-        )
 
     def test_validation_rejects_invalid_collector_protocol(self):
         """

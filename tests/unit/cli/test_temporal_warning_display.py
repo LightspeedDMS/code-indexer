@@ -212,6 +212,7 @@ class TestCLITemporalWarningDisplay:
             "commit_date": "2024-01-15",
             "author_name": "Test User",
         }
+        fake_result.file_path = "fake/path.py"
         fake_result.score = 0.9
         fake_result.content = "def authenticate(): pass"
         fake_result.temporal_context = {}

@@ -212,7 +212,9 @@ class BackgroundJobsPostgresBackend:
                                 if language_resolution_status is not None
                                 else None
                             ),
-                            progress_info,
+                            json.dumps(progress_info)
+                            if isinstance(progress_info, dict)
+                            else progress_info,
                             json.dumps(metadata) if metadata is not None else None,
                             executing_node,
                             claimed_at,
@@ -276,6 +278,10 @@ class BackgroundJobsPostgresBackend:
             if value is None:
                 params.append(None)
             elif key in _JSON_FIELDS:
+                params.append(json.dumps(value))
+            elif key == "progress_info" and isinstance(value, dict):
+                # Bug #892: dict progress_info must be JSON-serialized before binding.
+                # str progress_info passes through unchanged.
                 params.append(json.dumps(value))
             else:
                 params.append(value)

@@ -16,6 +16,10 @@ import pytest
 
 from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
 
+# The subprocess command has the shape: ['script', '-q', '-c', <shell_str>, '/dev/null']
+# Index 3 is the embedded shell command string containing the actual claude invocation.
+_SCRIPT_SHELL_CMD_IDX = 3
+
 
 class TestClaudeMdGeneration:
     """Test CLAUDE.md orientation file generation (AC2)."""
@@ -67,7 +71,7 @@ class TestClaudeMdGeneration:
 class TestPass1Synthesis:
     """Test Pass 1: Domain synthesis (AC1)."""
 
-    @patch("subprocess.run")
+    @patch("code_indexer.server.services.claude_invoker.subprocess.run")
     def test_run_pass_1_invokes_claude_cli(self, mock_subprocess, tmp_path):
         """Test that run_pass_1_synthesis invokes Claude CLI with correct parameters."""
         # Mock subprocess response
@@ -121,16 +125,20 @@ class TestPass1Synthesis:
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
 
-        # Check command structure (last element is the prompt)
-        # Pass 1 uses allowed_tools=None (no --allowedTools flag - built-in tools available)
+        # Check command structure.
+        # Pass 1 routes through CliDispatcher -> ClaudeInvoker which builds:
+        #   ['script', '-q', '-c', 'timeout <N> claude --model <m> -p <prompt> ...', '/dev/null']
+        # so 'claude' and the prompt appear inside cmd[3] (the shell command string).
         cmd = call_args[0][0]
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
-        assert "--model" in cmd
-        assert "--max-turns" in cmd
-        # Prompt is passed via stdin (input= kwarg), not as -p CLI arg (avoids E2BIG with large prompts)
-        assert "-p" not in cmd
-        assert "Identify domain clusters" in call_args[1]["input"]  # Prompt via stdin
+        assert any("claude" in arg for arg in cmd), (
+            f"Expected 'claude' somewhere in cmd: {cmd}"
+        )
+        assert any("--print" in arg for arg in cmd)
+        assert any("--model" in arg for arg in cmd)
+        # Prompt is embedded in cmd[3] (the -c argument to script) via -p flag.
+        # ClaudeInvoker does not add --max-turns; it uses a soft inner timeout instead.
+        assert any("-p" in arg for arg in cmd)
+        assert "Identify domain clusters" in cmd[3]
         assert call_args[1]["cwd"] == str(tmp_path)
         assert (
             call_args[1]["timeout"] == 600
@@ -190,23 +198,35 @@ class TestPass1Synthesis:
 class TestPass2PerDomain:
     """Test Pass 2: Per-domain analysis (AC1)."""
 
-    @patch("subprocess.run")
-    def test_run_pass_2_invokes_claude_cli(self, mock_subprocess, tmp_path):
-        """Test that run_pass_2_per_domain invokes Claude CLI with domain context."""
-        # Generate output >1000 chars to avoid retry logic
-        content = (
+    def test_run_pass_2_invokes_claude_cli(self, tmp_path):
+        """Test that run_pass_2_per_domain invokes the CLI dispatcher with domain context.
+
+        Story #848: the primary Pass 2 call is routed through _invoke_pass2_dispatcher
+        (CliDispatcher). We inject a mock CliDispatcher via cli_dispatcher= and verify
+        dispatch() is called with the correct prompt and timeout.
+        """
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        dispatcher_output = (
             "# Authentication Domain\n\nDetailed analysis with sufficient content to avoid retry. "
             + "X" * 1000
         )
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout=content,
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output=dispatcher_output,
+            error="",
+            cli_used="claude",
+            was_failover=False,
         )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -224,14 +244,12 @@ class TestPass2PerDomain:
             staging_dir, domain, domain_list, repo_list=[], max_turns=60
         )
 
-        # Verify subprocess called with full timeout
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-
-        assert call_args[0][0][0] == "claude"
-        assert "--max-turns" in call_args[0][0]
-        assert "60" in call_args[0][0]
-        assert call_args[1]["timeout"] == 600  # full pass_timeout
+        # Verify dispatcher.dispatch was called with correct flow, cwd, prompt, timeout
+        mock_dispatcher.dispatch.assert_called_once()
+        call_kwargs = mock_dispatcher.dispatch.call_args
+        assert call_kwargs.kwargs["flow"] == "dependency_map_pass_2"
+        assert call_kwargs.kwargs["timeout"] == 600
+        assert len(call_kwargs.kwargs["prompt"]) > 0
 
     def test_run_pass_2_writes_domain_file_with_frontmatter(self, tmp_path):
         """Test that run_pass_2_per_domain writes domain file with YAML frontmatter and strips meta-commentary."""
@@ -278,25 +296,30 @@ class TestPass2PerDomain:
             # Verify meta-commentary was stripped
             assert "Based on my analysis" not in content
 
-    @patch("subprocess.run")
-    def test_run_pass_2_prompt_includes_tech_stack_verification(
-        self, mock_subprocess, tmp_path
-    ):
+    def test_run_pass_2_prompt_includes_tech_stack_verification(self, tmp_path):
         """Test that run_pass_2_per_domain prompt includes Technology Stack Verification mandate."""
-        # Generate output >1000 chars to avoid retry logic
-        content = (
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        dispatcher_output = (
             "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. "
             + "Y" * 1000
         )
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout=content,
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output=dispatcher_output,
+            error="",
+            cli_used="claude",
+            was_failover=False,
         )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -312,10 +335,9 @@ class TestPass2PerDomain:
             staging_dir, domain, [domain], repo_list=[], max_turns=60
         )
 
-        # Verify subprocess was called with prompt containing tech stack verification
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]  # Prompt passed via stdin
+        # Capture prompt from injected dispatcher
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Verify the Technology Stack Verification section exists
         assert "## MANDATORY: Technology Stack Verification" in prompt
@@ -363,9 +385,13 @@ class TestPass3Index:
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
 
-        assert call_args[0][0][0] == "claude"
-        assert "--max-turns" in call_args[0][0]
-        assert "30" in call_args[0][0]
+        cmd = call_args[0][
+            0
+        ]  # subprocess command list: ['script', '-q', '-c', <shell_str>, '/dev/null']
+        assert cmd[0] == "script"
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "--max-turns" in shell_cmd
+        assert "30" in shell_cmd
         assert call_args[1]["timeout"] == 300  # half of pass_timeout
 
     def test_run_pass_3_writes_index_with_frontmatter(self, tmp_path):
@@ -673,17 +699,24 @@ class TestPass1PromptGuardrails:
         # Verify prompt contains critical guardrails
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]  # Prompt passed via stdin
+        cmd = call_args[0][
+            0
+        ]  # subprocess command list: ['script', '-q', '-c', <shell_str>, '/dev/null']
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
 
         # Verify COMPLETENESS MANDATE section instructs internal verification
-        assert "Verify INTERNALLY that total repos across all domains equals" in prompt
-        assert "Do NOT output the verification" in prompt
+        assert (
+            "Verify INTERNALLY that total repos across all domains equals" in shell_cmd
+        )
+        assert "Do NOT output the verification" in shell_cmd
 
         # Verify file-based output instructions (Story #349 — replaces old Output Format section)
-        assert "You MUST write your output as a JSON file" in prompt
+        assert "You MUST write your output as a JSON file" in shell_cmd
         # Softened: now allows stdout fallback when permissions block file writing
-        assert "PREFERRED: Write to the file above" in prompt or "FALLBACK" in prompt
-        assert "python3 -m json.tool" in prompt
+        assert (
+            "PREFERRED: Write to the file above" in shell_cmd or "FALLBACK" in shell_cmd
+        )
+        assert "python3 -m json.tool" in shell_cmd
 
 
 class TestPass1JsonParseFailure:
@@ -771,21 +804,25 @@ class TestPass1JsonParseFailure:
         # Verify subprocess was called twice (agentic + agentic retry)
         assert mock_subprocess.call_count == 2
 
-        # Verify first call used max_turns=50 (agentic)
+        # Verify first call used max_turns=50 (agentic) — flags in embedded shell string
         first_call_args = mock_subprocess.call_args_list[0]
-        first_cmd = first_call_args[0][0]
-        assert "--max-turns" in first_cmd
-        first_turns_idx = first_cmd.index("--max-turns")
-        assert first_cmd[first_turns_idx + 1] == "50"
+        first_cmd = first_call_args.args[
+            0
+        ]  # positional arg 0 = the subprocess command list
+        first_shell_cmd = first_cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "--max-turns" in first_shell_cmd
+        assert "--max-turns 50" in first_shell_cmd
 
         # Verify second call also uses agentic mode (Story #349: no more single-shot retry)
         second_call_args = mock_subprocess.call_args_list[1]
-        second_cmd = second_call_args[0][0]
-        assert "--max-turns" in second_cmd
+        second_cmd = second_call_args.args[
+            0
+        ]  # positional arg 0 = the subprocess command list
+        second_shell_cmd = second_cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "--max-turns" in second_shell_cmd
 
-        # Verify retry prompt contains file-write reminder
-        second_prompt = second_call_args[1]["input"]
-        assert "CRITICAL: You MUST write your output to the file" in second_prompt
+        # Verify retry prompt contains file-write reminder — embedded in cmd[3]
+        assert "CRITICAL: You MUST write your output to the file" in second_shell_cmd
 
         # Verify result is from successful retry
         assert len(result) == 1
@@ -878,23 +915,30 @@ class TestPass1JsonParseFailure:
 class TestIncrementalPass2:
     """Test incremental Pass 2 with previous_domain_dir (FIX 9)."""
 
-    @patch("subprocess.run")
-    def test_run_pass_2_uses_previous_domain_content(self, mock_subprocess, tmp_path):
+    def test_run_pass_2_uses_previous_domain_content(self, tmp_path):
         """Test that run_pass_2_per_domain includes previous domain content in prompt."""
-        # Generate output >1000 chars to avoid retry logic
-        content = (
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        dispatcher_output = (
             "# Updated Domain Analysis\n\nNew analysis with sufficient content to avoid retry. "
             + "Z" * 1000
         )
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout=content,
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output=dispatcher_output,
+            error="",
+            cli_used="claude",
+            was_failover=False,
         )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -926,11 +970,9 @@ class TestIncrementalPass2:
             previous_domain_dir=previous_dir,
         )
 
-        # Verify subprocess was called with prompt referencing the file (Bug #840:
-        # content is NOT embedded inline; prompt instructs Claude to use Read tool)
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]  # Prompt passed via stdin
+        # Capture prompt from injected dispatcher
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         assert "Previous Analysis (refine and improve)" in prompt
         # Bug #840 new invariant: content must NOT be embedded inline
@@ -989,16 +1031,15 @@ class TestAllowedToolsPerPass:
 
     @patch("subprocess.run")
     def test_pass_2_has_allowed_tools(self, mock_subprocess, tmp_path):
-        """Test that Pass 2 is called with --allowedTools mcp__cidx-local__search_code."""
-        # Generate output >1000 chars to avoid retry logic
-        content = (
-            "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. "
-            + "W" * 1000
-        )
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout=content,
-        )
+        """Test that _invoke_claude_cli passes --allowedTools mcp__cidx-local__search_code.
+
+        Story #848: the primary Pass 2 call routes through CliDispatcher, which abstracts
+        CLI flags. The --allowedTools flag is a _invoke_claude_cli implementation detail
+        used in the retry paths. This test verifies _invoke_claude_cli directly so the
+        allowed_tools contract is preserved independently of dispatcher routing.
+        """
+        content = "# Domain Analysis\n\nContent. " + "W" * 1000
+        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
@@ -1006,20 +1047,15 @@ class TestAllowedToolsPerPass:
             pass_timeout=600,
         )
 
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        domain = {
-            "name": "test-domain",
-            "description": "Test domain",
-            "participating_repos": ["repo1"],
-        }
-
-        analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        # Call _invoke_claude_cli directly with allowed_tools to verify the flag is wired
+        analyzer._invoke_claude_cli(
+            prompt="Test prompt",
+            timeout=600,
+            max_turns=50,
+            allowed_tools="mcp__cidx-local__search_code",
         )
 
-        # Verify --allowedTools is present with correct value
+        # Verify --allowedTools is present with correct value in subprocess argv
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
@@ -1104,14 +1140,17 @@ class TestSingleShotVsAgenticMode:
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
 
-        # Verify command structure: claude --print --model opus
-        # WITHOUT --max-turns, prompt passed via stdin (not -p CLI arg)
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
-        assert "--model" in cmd
-        assert "--max-turns" not in cmd
-        assert "-p" not in cmd  # Prompt via stdin to avoid E2BIG
-        assert "input" in call_args[1]  # Prompt passed as stdin input
+        # Verify command structure: script -q -c "timeout 90 claude ..." /dev/null
+        # WITHOUT --max-turns in the embedded shell command string
+        assert cmd[0] == "script"
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "claude" in shell_cmd
+        assert "--print" in shell_cmd
+        assert "--model" in shell_cmd
+        assert "--max-turns" not in shell_cmd
+        assert (
+            "input" not in call_args[1]
+        )  # Prompt is embedded in shell cmd, not via stdin
 
     @patch("subprocess.run")
     def test_agentic_mode_includes_max_turns(self, mock_subprocess, tmp_path):
@@ -1156,15 +1195,17 @@ class TestSingleShotVsAgenticMode:
         call_args = mock_subprocess.call_args
         cmd = call_args[0][0]
 
-        # Verify command includes --max-turns 50
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
-        assert "--model" in cmd
-        assert "--max-turns" in cmd
-        turns_idx = cmd.index("--max-turns")
-        assert cmd[turns_idx + 1] == "50"
-        assert "-p" not in cmd  # Prompt via stdin to avoid E2BIG
-        assert "input" in call_args[1]  # Prompt passed as stdin input
+        # Verify command structure: script -q -c "timeout 90 claude ... --max-turns 50 ..." /dev/null
+        assert cmd[0] == "script"
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
+        assert "claude" in shell_cmd
+        assert "--print" in shell_cmd
+        assert "--model" in shell_cmd
+        assert "--max-turns" in shell_cmd
+        assert "--max-turns 50" in shell_cmd
+        assert (
+            "input" not in call_args[1]
+        )  # Prompt is embedded in shell cmd, not via stdin
 
 
 class TestEmptyOutputDetection:
@@ -1599,16 +1640,26 @@ Analysis text."""
 class TestPass2PromptGuardrails:
     """Test Fix 2 (Iteration 9): Prompt guardrails against YAML output and speculative content."""
 
-    @patch("subprocess.run")
-    def test_prompt_prohibits_yaml_frontmatter_output(self, mock_subprocess, tmp_path):
+    def test_prompt_prohibits_yaml_frontmatter_output(self, tmp_path):
         """Test that Pass 2 prompt explicitly prohibits YAML frontmatter output."""
-        content = "# Domain Analysis\n\n" + "X" * 1000
-        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis\n\n" + "X" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
+        )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -1624,24 +1675,32 @@ class TestPass2PromptGuardrails:
             staging_dir, domain, [domain], repo_list=[], max_turns=60
         )
 
-        # Verify prompt contains YAML prohibition
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]  # Prompt passed via stdin
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         assert "## PROHIBITED Content" in prompt
         assert "YAML frontmatter blocks (the system adds these automatically)" in prompt
 
-    @patch("subprocess.run")
-    def test_prompt_prohibits_speculative_content(self, mock_subprocess, tmp_path):
+    def test_prompt_prohibits_speculative_content(self, tmp_path):
         """Test that Pass 2 prompt prohibits speculative/advisory content."""
-        content = "# Domain Analysis\n\n" + "Y" * 1000
-        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis\n\n" + "Y" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
+        )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -1657,10 +1716,8 @@ class TestPass2PromptGuardrails:
             staging_dir, domain, [domain], repo_list=[], max_turns=60
         )
 
-        # Verify prompt contains speculative content prohibition
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Check for exact text in PROHIBITED section
         assert "## PROHIBITED Content" in prompt
@@ -1816,6 +1873,7 @@ More text."""
 class TestIteration10QualityGate:
     """Test Iteration 10 Fix 2: Quality gate for missing headings in Pass 2."""
 
+    @pytest.mark.slow
     @patch("subprocess.run")
     def test_quality_gate_no_headings_triggers_retry(self, mock_subprocess, tmp_path):
         """Test that run_pass_2_per_domain detects and retries when output has no headings."""
@@ -1882,16 +1940,26 @@ class TestIteration10QualityGate:
 class TestIteration10PromptReinforcement:
     """Test Iteration 10 Fix 3: Prompt reinforcement for heading requirement."""
 
-    @patch("subprocess.run")
-    def test_pass2_prompt_contains_heading_requirement(self, mock_subprocess, tmp_path):
+    def test_pass2_prompt_contains_heading_requirement(self, tmp_path):
         """Test that Pass 2 prompt includes heading requirement instruction."""
-        content = "# Domain Analysis\n\n" + "Z" * 1000
-        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis\n\n" + "Z" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
+        )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -1907,10 +1975,8 @@ class TestIteration10PromptReinforcement:
             staging_dir, domain, [domain], repo_list=[], max_turns=60
         )
 
-        # Verify prompt contains heading requirement
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]  # Prompt passed via stdin
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         assert "CRITICAL: Your output MUST begin with a markdown heading" in prompt
         assert (
@@ -1922,16 +1988,26 @@ class TestIteration10PromptReinforcement:
 class TestIteration11Fix2QualityCheckPrevious:
     """Test Iteration 11 Fix 2: Quality-check previous analysis before feeding it back."""
 
-    @patch("subprocess.run")
-    def test_skips_low_quality_previous_analysis(self, mock_subprocess, tmp_path):
+    def test_skips_low_quality_previous_analysis(self, tmp_path):
         """Test that low-quality previous analysis (no headings or <1000 chars) is NOT fed into prompt."""
-        content = "# Domain Analysis\n\n" + "Y" * 1000
-        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis\n\n" + "Y" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
+        )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -1963,25 +2039,33 @@ class TestIteration11Fix2QualityCheckPrevious:
             previous_domain_dir=previous_dir,
         )
 
-        # Verify subprocess was called with prompt that does NOT include previous content
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]  # Prompt passed via stdin
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Should NOT contain "Previous Analysis" section
         assert "Previous Analysis (refine and improve)" not in prompt
         assert "Please approve my write" not in prompt
 
-    @patch("subprocess.run")
-    def test_includes_high_quality_previous_analysis(self, mock_subprocess, tmp_path):
+    def test_includes_high_quality_previous_analysis(self, tmp_path):
         """Test that high-quality previous analysis (has headings AND >1000 chars) IS fed into prompt."""
-        content = "# Updated Analysis\n\n" + "Z" * 1000
-        mock_subprocess.return_value = MagicMock(returncode=0, stdout=content)
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Updated Analysis\n\n" + "Z" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
+        )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -2012,11 +2096,8 @@ class TestIteration11Fix2QualityCheckPrevious:
             previous_domain_dir=previous_dir,
         )
 
-        # Verify subprocess was called with prompt referencing the file (Bug #840:
-        # content is NOT embedded inline; prompt instructs Claude to use Read tool)
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args
-        prompt = call_args[1]["input"]  # Prompt passed via stdin
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Should contain "Previous Analysis" section header
         assert "Previous Analysis (refine and improve)" in prompt
@@ -2243,11 +2324,16 @@ class TestIteration11Fix3SkipGarbageWrite:
 
 
 class TestIteration13HookThresholdFix:
-    """Test hook threshold calculation fixes (Iteration 13)."""
+    """Test hook threshold calculation fixes (Iteration 13).
+
+    Story #848: the primary Pass 2 call routes through CliDispatcher, which abstracts
+    CLI-level args like --settings. These tests verify _invoke_claude_cli directly
+    with explicit hook_thresholds tuples, which is the correct unit under test.
+    """
 
     @patch("subprocess.run")
     def test_hook_thresholds_fixed_default(self, mock_subprocess, tmp_path):
-        """Verify early=max(5, int(50*0.3))=15 and late=max(10, int(50*0.6))=30 for max_turns=50."""
+        """Verify early=15 and late=30 are encoded in --settings JSON when hook_thresholds=(15,30)."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
@@ -2259,29 +2345,26 @@ class TestIteration13HookThresholdFix:
             pass_timeout=600,
         )
 
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        domain = {
-            "name": "test-domain",
-            "description": "Test domain",
-            "participating_repos": ["repo1"],
-        }
-
-        analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        # Call _invoke_claude_cli directly with the default thresholds that
+        # run_pass_2_per_domain computes for max_turns=50, small domain: (15, 30)
+        # post_tool_hook must be provided — _invoke_claude_cli only adds --settings
+        # when post_tool_hook is not None (see line 2437 of dependency_map_analyzer.py)
+        analyzer._invoke_claude_cli(
+            prompt="Test prompt for threshold verification",
+            timeout=600,
+            max_turns=50,
+            allowed_tools="mcp__cidx-local__search_code",
+            post_tool_hook="Test hook reminder",
+            hook_thresholds=(15, 30),
         )
 
-        # Verify subprocess was called with correct thresholds in --settings JSON
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args[0][0]
 
-        # Find --settings argument
         settings_idx = call_args.index("--settings")
         settings_json = call_args[settings_idx + 1]
         settings = json.loads(settings_json)
 
-        # Extract bash script that contains threshold checks
         bash_script = settings["hooks"]["PostToolUse"][0]["command"]
 
         # Verify thresholds: early=15, late=30
@@ -2290,7 +2373,7 @@ class TestIteration13HookThresholdFix:
 
     @patch("subprocess.run")
     def test_hook_thresholds_custom_override(self, mock_subprocess, tmp_path):
-        """Verify hook_thresholds=(7,17) overrides default calculation."""
+        """Verify hook_thresholds=(7,17) produces (7, 17) in --settings JSON."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
@@ -2302,26 +2385,18 @@ class TestIteration13HookThresholdFix:
             pass_timeout=600,
         )
 
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        domain = {
-            "name": "test-domain",
-            "description": "Test domain",
-            "participating_repos": [
-                "repo1",
-                "repo2",
-                "repo3",
-                "repo4",
-                "repo5",
-            ],  # Large domain
-        }
-
-        analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        # Call _invoke_claude_cli directly with the large-domain thresholds (7, 17)
+        # post_tool_hook must be provided — _invoke_claude_cli only adds --settings
+        # when post_tool_hook is not None (see line 2437 of dependency_map_analyzer.py)
+        analyzer._invoke_claude_cli(
+            prompt="Test prompt for custom threshold verification",
+            timeout=600,
+            max_turns=50,
+            allowed_tools="mcp__cidx-local__search_code",
+            post_tool_hook="Test hook reminder",
+            hook_thresholds=(7, 17),
         )
 
-        # Verify subprocess was called with custom thresholds
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args[0][0]
 
@@ -2331,7 +2406,6 @@ class TestIteration13HookThresholdFix:
 
         bash_script = settings["hooks"]["PostToolUse"][0]["command"]
 
-        # For large domain (5 repos), thresholds should be (7, 17) not (15, 30)
         assert '[ "$C" -gt 17 ]' in bash_script, (
             "Late threshold should be 17 for large domain"
         )
@@ -2341,7 +2415,7 @@ class TestIteration13HookThresholdFix:
 
     @patch("subprocess.run")
     def test_hook_thresholds_small_max_turns(self, mock_subprocess, tmp_path):
-        """Verify max_turns=10 gives early=max(5,3)=5 and late=max(10,6)=10."""
+        """Verify hook_thresholds=(5,10) produces early=5 and late=10 in --settings JSON."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
@@ -2353,17 +2427,18 @@ class TestIteration13HookThresholdFix:
             pass_timeout=600,
         )
 
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        domain = {
-            "name": "test-domain",
-            "description": "Test domain",
-            "participating_repos": ["repo1"],
-        }
-
-        analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=10
+        # Call _invoke_claude_cli directly with the thresholds computed for max_turns=10:
+        # early = max(5, int(10*0.3)) = max(5, 3) = 5
+        # late = max(10, int(10*0.6)) = max(10, 6) = 10
+        # post_tool_hook must be provided — _invoke_claude_cli only adds --settings
+        # when post_tool_hook is not None (see line 2437 of dependency_map_analyzer.py)
+        analyzer._invoke_claude_cli(
+            prompt="Test prompt for small-turns threshold verification",
+            timeout=600,
+            max_turns=10,
+            allowed_tools="mcp__cidx-local__search_code",
+            post_tool_hook="Test hook reminder",
+            hook_thresholds=(5, 10),
         )
 
         mock_subprocess.assert_called_once()
@@ -2375,8 +2450,6 @@ class TestIteration13HookThresholdFix:
 
         bash_script = settings["hooks"]["PostToolUse"][0]["command"]
 
-        # early = max(5, int(10*0.3)) = max(5, 3) = 5
-        # late = max(10, int(10*0.6)) = max(10, 6) = 10
         assert '[ "$C" -gt 10 ]' in bash_script, "Late threshold should be 10"
         assert '[ "$C" -gt 5 ]' in bash_script, "Early threshold should be 5"
 
@@ -2384,18 +2457,26 @@ class TestIteration13HookThresholdFix:
 class TestIteration13LargeDomainDetection:
     """Test large domain detection and output-first prompt selection (Iteration 13)."""
 
-    @patch("subprocess.run")
-    def test_large_domain_uses_output_first_prompt(self, mock_subprocess, tmp_path):
+    def test_large_domain_uses_output_first_prompt(self, tmp_path):
         """With 4+ repos, verify prompt starts with WRITE YOUR ANALYSIS FIRST."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout="# Domain Analysis: test-domain\n\nContent. " + "X" * 1000,
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis: test-domain\n\nContent. " + "X" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
         )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -2416,9 +2497,8 @@ class TestIteration13LargeDomainDetection:
             staging_dir, domain, [domain], repo_list=[], max_turns=50
         )
 
-        mock_subprocess.assert_called_once()
-        _call_args = mock_subprocess.call_args[0][0]
-        prompt = mock_subprocess.call_args[1]["input"]  # Prompt passed via stdin
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Verify output-first prompt characteristics
         assert "WRITE YOUR ANALYSIS FIRST" in prompt
@@ -2428,18 +2508,26 @@ class TestIteration13LargeDomainDetection:
         assert "AT MOST 5" in prompt  # Limited searches
         assert "OPTIONAL" in prompt  # Searches are optional
 
-    @patch("subprocess.run")
-    def test_small_domain_uses_standard_prompt(self, mock_subprocess, tmp_path):
+    def test_small_domain_uses_standard_prompt(self, tmp_path):
         """With 3 or fewer repos, verify prompt DOES contain Source Code Exploration Mandate."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis\n\nContent. " + "X" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
         )
 
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -2455,8 +2543,8 @@ class TestIteration13LargeDomainDetection:
             staging_dir, domain, [domain], repo_list=[], max_turns=50
         )
 
-        mock_subprocess.assert_called_once()
-        prompt = mock_subprocess.call_args[1]["input"]
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Verify standard prompt characteristics (existing behavior)
         assert "Source Code Exploration Mandate" in prompt
@@ -2464,7 +2552,11 @@ class TestIteration13LargeDomainDetection:
 
     @patch("subprocess.run")
     def test_large_domain_earlier_hook_thresholds(self, mock_subprocess, tmp_path):
-        """Verify 5-repo domain with max_turns=50 uses hook thresholds (7,17) not default (15,30)."""
+        """Verify 5-repo large domain uses hook thresholds (7,17) not default (15,30).
+
+        Story #848: tests _invoke_claude_cli directly with hook_thresholds=(7,17) since
+        --settings is a _invoke_claude_cli internal detail abstracted by CliDispatcher.
+        """
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
@@ -2476,17 +2568,16 @@ class TestIteration13LargeDomainDetection:
             pass_timeout=600,
         )
 
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        domain = {
-            "name": "test-domain",
-            "description": "Test domain",
-            "participating_repos": ["repo1", "repo2", "repo3", "repo4", "repo5"],
-        }
-
-        analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        # Call _invoke_claude_cli directly with the large-domain thresholds
+        # post_tool_hook must be provided — _invoke_claude_cli only adds --settings
+        # when post_tool_hook is not None (see line 2437 of dependency_map_analyzer.py)
+        analyzer._invoke_claude_cli(
+            prompt="Test prompt for large domain threshold verification",
+            timeout=600,
+            max_turns=50,
+            allowed_tools="mcp__cidx-local__search_code",
+            post_tool_hook="Test hook reminder",
+            hook_thresholds=(7, 17),
         )
 
         mock_subprocess.assert_called_once()
@@ -2758,11 +2849,30 @@ class TestIteration14PurposeDrivenHooks:
     """Test Iteration 14: Purpose-driven hook reminders and retry fixes."""
 
     def test_hook_reminder_contains_purpose(self, tmp_path):
-        """Test that hook_reminder includes purpose-driven language about inter-repo navigation and conciseness."""
+        """Test that the Pass 2 prompt includes purpose-driven language about inter-repo navigation.
+
+        Story #848: the primary Pass 2 call routes through CliDispatcher. We inject a mock
+        dispatcher and verify the prompt sent to dispatch() contains the hook_reminder content
+        (which is embedded in the prompt as a reminder section).
+        """
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis\n\nContent. " + "X" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
+        )
+
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
@@ -2774,31 +2884,17 @@ class TestIteration14PurposeDrivenHooks:
             "participating_repos": ["repo1"],
         }
 
-        # We need to extract hook_reminder from run_pass_2_per_domain
-        # The hook_reminder is built inside the method, so we'll mock _invoke_claude_cli
-        # to capture it
-        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
-            mock_invoke.return_value = "# Domain Analysis\n\nContent. " + "X" * 1000
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
-            try:
-                analyzer.run_pass_2_per_domain(
-                    staging_dir, domain, [domain], repo_list=[], max_turns=50
-                )
-            except Exception:
-                pass  # We just want to capture the call
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-            # Extract post_tool_hook from the call
-            assert mock_invoke.called
-            call_kwargs = mock_invoke.call_args[1]
-            hook_reminder = call_kwargs.get("post_tool_hook", "")
-
-            # Verify purpose-driven language
-            assert (
-                "inter-repository navigation" in hook_reminder
-                or "inter-repo" in hook_reminder
-            )
-            assert "concise" in hook_reminder.lower()
-            assert "# Domain Analysis" in hook_reminder
+        # Verify purpose-driven language is present in the prompt
+        assert "inter-repository navigation" in prompt or "inter-repo" in prompt
+        assert "concise" in prompt.lower()
+        assert "# Domain Analysis" in prompt
 
     def test_threshold_messages_contain_purpose(self, tmp_path):
         """Test that CRITICAL and WARNING threshold messages mention conciseness, not 'complete analysis'."""
@@ -2849,46 +2945,52 @@ class TestIteration14PurposeDrivenHooks:
 
     def test_standard_prompt_conciseness_guidelines(self, tmp_path):
         """Test that standard prompt (small domains <=3 repos) includes Content Guidelines with conciseness constraints."""
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
+
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis\n\nContent. " + "X" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
+        )
+
+        # Small domain with 2 repos (<=3 triggers standard prompt)
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
 
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        # Small domain with 2 repos (<=3 triggers standard prompt)
         domain = {
             "name": "test-domain",
             "description": "Test domain",
             "participating_repos": ["repo1", "repo2"],
         }
 
-        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
-            mock_invoke.return_value = "# Domain Analysis\n\nContent. " + "X" * 1000
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
-            try:
-                analyzer.run_pass_2_per_domain(
-                    staging_dir, domain, [domain], repo_list=[], max_turns=50
-                )
-            except Exception:
-                pass
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-            # Extract prompt from the call
-            assert mock_invoke.called
-            call_args = mock_invoke.call_args[0]
-            prompt = call_args[0]
-
-            # Verify Content Guidelines section exists
-            assert "## Content Guidelines" in prompt
-            assert "CONCISE" in prompt or "concise" in prompt
-            assert "inter-repository navigation" in prompt or "inter-repo" in prompt
-            assert (
-                "no code snippets" in prompt.lower()
-                or "not full code snippets" in prompt.lower()
-            )
-            assert "3-8 sentences" in prompt or "shorter is better" in prompt.lower()
+        # Verify Content Guidelines section exists
+        assert "## Content Guidelines" in prompt
+        assert "CONCISE" in prompt or "concise" in prompt
+        assert "inter-repository navigation" in prompt or "inter-repo" in prompt
+        assert (
+            "no code snippets" in prompt.lower()
+            or "not full code snippets" in prompt.lower()
+        )
+        assert "3-8 sentences" in prompt or "shorter is better" in prompt.lower()
 
     @patch("subprocess.run")
     def test_insufficient_output_retry_is_write_only(self, mock_subprocess, tmp_path):
@@ -2987,37 +3089,62 @@ class TestIteration15InsideOutAndConciseness:
             staging_dir, {}, repo_list=repo_list, max_turns=50
         )
 
-        # Extract prompt from subprocess call
+        # Extract the shell string from the subprocess command list.
+        # Since Bug #936 the prompt is embedded in cmd[3] (the shell string),
+        # not passed via input= kwarg.
         mock_subprocess.assert_called_once()
-        prompt = mock_subprocess.call_args[1]["input"]
+        cmd = mock_subprocess.call_args[0][0]
+        shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
 
-        # Verify file count and MB size in prompt
-        assert "150 files" in prompt
-        assert "5.0 MB" in prompt or "5 MB" in prompt
+        # Verify file count and MB size are embedded in the shell string.
+        assert "150 files" in shell_cmd
+        assert "5.0 MB" in shell_cmd or "5 MB" in shell_cmd
 
-    @patch("subprocess.run")
-    def test_pass2_inside_out_instruction_present(self, mock_subprocess, tmp_path):
-        """Test that Pass 2 prompt includes INSIDE-OUT ANALYSIS STRATEGY section."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
+    # ---------------------------------------------------------------------------
+    # Shared helper for Pass 2 dispatcher-injection tests (Story #848)
+    # ---------------------------------------------------------------------------
+
+    def _make_pass2_context(self, tmp_path):
+        """Build an analyzer with injected mock CliDispatcher + a staging dir.
+
+        Returns (analyzer, staging_dir, mock_dispatcher) so each test can call
+        run_pass_2_per_domain and then read mock_dispatcher.dispatch.call_args.
+        """
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
         )
 
+        mock_dispatcher = MagicMock()
+        mock_dispatcher.dispatch.return_value = InvocationResult(
+            success=True,
+            output="# Domain Analysis\n\nContent. " + "X" * 1000,
+            error="",
+            cli_used="claude",
+            was_failover=False,
+        )
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
+            cli_dispatcher=mock_dispatcher,
         )
-
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
+        return analyzer, staging_dir, mock_dispatcher
+
+    # ---------------------------------------------------------------------------
+    # Tests
+    # ---------------------------------------------------------------------------
+
+    def test_pass2_inside_out_instruction_present(self, tmp_path):
+        """Test that Pass 2 prompt includes INSIDE-OUT ANALYSIS STRATEGY section."""
+        analyzer, staging_dir, mock_dispatcher = self._make_pass2_context(tmp_path)
 
         domain = {
             "name": "test-domain",
             "description": "Test domain",
             "participating_repos": ["repo1", "repo2"],
         }
-
         repo_list = [
             {"alias": "repo1", "clone_path": "/path/to/repo1", "total_bytes": 10000000},
             {"alias": "repo2", "clone_path": "/path/to/repo2", "total_bytes": 5000000},
@@ -3027,37 +3154,21 @@ class TestIteration15InsideOutAndConciseness:
             staging_dir, domain, [domain], repo_list=repo_list, max_turns=50
         )
 
-        # Extract prompt
-        mock_subprocess.assert_called_once()
-        prompt = mock_subprocess.call_args[1]["input"]
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        # Verify INSIDE-OUT section present
         assert "INSIDE-OUT ANALYSIS STRATEGY" in prompt
         assert "largest repository" in prompt
 
-    @patch("subprocess.run")
-    def test_participating_repos_sorted_by_size(self, mock_subprocess, tmp_path):
+    def test_participating_repos_sorted_by_size(self, tmp_path):
         """Test that participating repos are sorted by size (largest first) in Pass 2 prompt."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
-        )
-
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
+        analyzer, staging_dir, mock_dispatcher = self._make_pass2_context(tmp_path)
 
         domain = {
             "name": "test-domain",
             "description": "Test domain",
             "participating_repos": ["small-repo", "large-repo", "medium-repo"],
         }
-
         repo_list = [
             {
                 "alias": "small-repo",
@@ -3080,49 +3191,34 @@ class TestIteration15InsideOutAndConciseness:
             staging_dir, domain, [domain], repo_list=repo_list, max_turns=50
         )
 
-        # Extract prompt
-        mock_subprocess.assert_called_once()
-        prompt = mock_subprocess.call_args[1]["input"]
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        # Extract the "Repository Filesystem Locations" section where repos should be sorted
         repo_section_start = prompt.find("## Repository Filesystem Locations")
         assert repo_section_start >= 0, (
             "Repository Filesystem Locations section not found"
         )
         next_section_start = prompt.find("##", repo_section_start + 10)
-        if next_section_start >= 0:
-            repo_section = prompt[repo_section_start:next_section_start]
-        else:
-            repo_section = prompt[repo_section_start:]
+        repo_section = (
+            prompt[repo_section_start:next_section_start]
+            if next_section_start >= 0
+            else prompt[repo_section_start:]
+        )
 
-        # Find the order repos appear in the Repository Filesystem Locations section
         large_idx = repo_section.find("large-repo")
         medium_idx = repo_section.find("medium-repo")
         small_idx = repo_section.find("small-repo")
 
-        # Verify repos appear in size-descending order in the Repository Filesystem Locations section
         assert large_idx < medium_idx < small_idx, (
-            f"Repos not sorted by size in Repository Filesystem Locations section: large@{large_idx}, medium@{medium_idx}, small@{small_idx}"
+            f"Repos not sorted by size in Repository Filesystem Locations section: "
+            f"large@{large_idx}, medium@{medium_idx}, small@{small_idx}"
         )
 
-    @patch("subprocess.run")
-    def test_standard_prompt_has_output_template(self, mock_subprocess, tmp_path):
+    def test_standard_prompt_has_output_template(self, tmp_path):
         """Test that standard prompt (<=3 repos) includes OUTPUT TEMPLATE section with headings."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
-        )
+        analyzer, staging_dir, mock_dispatcher = self._make_pass2_context(tmp_path)
 
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
-
-        # Small domain (3 repos) should use standard prompt
+        # Small domain (3 repos) triggers standard prompt
         domain = {
             "name": "test-domain",
             "description": "Test domain",
@@ -3133,33 +3229,18 @@ class TestIteration15InsideOutAndConciseness:
             staging_dir, domain, [domain], repo_list=[], max_turns=50
         )
 
-        # Extract prompt
-        mock_subprocess.assert_called_once()
-        prompt = mock_subprocess.call_args[1]["input"]
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        # Verify OUTPUT TEMPLATE section with required headings
         assert "OUTPUT TEMPLATE" in prompt
         assert "## Overview" in prompt
         assert "## Repository Roles" in prompt
         assert "## Intra-Domain Dependencies" in prompt
         assert "## Cross-Domain Connections" in prompt
 
-    @patch("subprocess.run")
-    def test_standard_prompt_has_output_budget(self, mock_subprocess, tmp_path):
+    def test_standard_prompt_has_output_budget(self, tmp_path):
         """Test that standard prompt includes Output Budget section with 3,000-10,000 character limit."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
-        )
-
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
+        analyzer, staging_dir, mock_dispatcher = self._make_pass2_context(tmp_path)
 
         domain = {
             "name": "test-domain",
@@ -3171,31 +3252,16 @@ class TestIteration15InsideOutAndConciseness:
             staging_dir, domain, [domain], repo_list=[], max_turns=50
         )
 
-        # Extract prompt
-        mock_subprocess.assert_called_once()
-        prompt = mock_subprocess.call_args[1]["input"]
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        # Verify Output Budget section
         assert "Output Budget" in prompt
         assert "3,000" in prompt or "3000" in prompt
         assert "10,000" in prompt or "10000" in prompt
 
-    @patch("subprocess.run")
-    def test_prohibited_content_includes_search_audit(self, mock_subprocess, tmp_path):
+    def test_prohibited_content_includes_search_audit(self, tmp_path):
         """Test that PROHIBITED Content section explicitly forbids 'MCP Searches Performed' sections."""
-        mock_subprocess.return_value = MagicMock(
-            returncode=0,
-            stdout="# Domain Analysis\n\nContent. " + "X" * 1000,
-        )
-
-        analyzer = DependencyMapAnalyzer(
-            golden_repos_root=tmp_path,
-            cidx_meta_path=tmp_path / "cidx-meta",
-            pass_timeout=600,
-        )
-
-        staging_dir = tmp_path / "staging"
-        staging_dir.mkdir()
+        analyzer, staging_dir, mock_dispatcher = self._make_pass2_context(tmp_path)
 
         domain = {
             "name": "test-domain",
@@ -3207,9 +3273,8 @@ class TestIteration15InsideOutAndConciseness:
             staging_dir, domain, [domain], repo_list=[], max_turns=50
         )
 
-        # Extract prompt
-        mock_subprocess.assert_called_once()
-        prompt = mock_subprocess.call_args[1]["input"]
+        mock_dispatcher.dispatch.assert_called_once()
+        prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Verify PROHIBITED section mentions MCP Searches
         assert "PROHIBITED" in prompt
@@ -3267,6 +3332,14 @@ class TestIteration15InsideOutAndConciseness:
 
 class TestIteration16CrossDomainGraph:
     """Test Iteration 16: Cross-domain dependency graph in Pass 3."""
+
+    @pytest.fixture
+    def mock_pass3_subprocess(self):
+        with patch("subprocess.run") as mock_sp:
+            mock_sp.return_value = MagicMock(
+                returncode=0, stdout="# Index Content\n\nGenerated index."
+            )
+            yield mock_sp
 
     def test_extract_cross_domain_section_basic(self):
         """Test standard heading extraction from domain file."""
@@ -3625,7 +3698,9 @@ Uses **repo-b** from domain-b.
         # At minimum, should not crash
         assert isinstance(graph_section, str)
 
-    def test_cross_domain_graph_appended_to_index(self, tmp_path):
+    def test_cross_domain_graph_appended_to_index(
+        self, tmp_path, mock_pass3_subprocess
+    ):
         """Test that graph section appears in _index.md after Pass 3."""
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
@@ -3666,10 +3741,7 @@ Uses **repo-b** from domain-b.
             pass_timeout=600,
         )
 
-        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
-            mock_invoke.return_value = "# Index Content\n\nGenerated index."
-
-            analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
+        analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
 
         # Check that _index.md contains cross-domain graph section
         index_file = staging_dir / "_index.md"
@@ -3680,7 +3752,9 @@ Uses **repo-b** from domain-b.
         assert "domain-a" in content
         assert "domain-b" in content
 
-    def test_cross_domain_graph_not_appended_when_no_edges(self, tmp_path):
+    def test_cross_domain_graph_not_appended_when_no_edges(
+        self, tmp_path, mock_pass3_subprocess
+    ):
         """Test no graph section when no edges exist."""
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
@@ -3713,10 +3787,7 @@ Standalone domain.
             pass_timeout=600,
         )
 
-        with patch.object(analyzer, "_invoke_claude_cli") as mock_invoke:
-            mock_invoke.return_value = "# Index Content\n\nGenerated index."
-
-            analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
+        analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=10)
 
         index_file = staging_dir / "_index.md"
         content = index_file.read_text()

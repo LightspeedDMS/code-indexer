@@ -176,6 +176,30 @@ class TOTPService:
             conn.commit()
         finally:
             conn.close()
+        # Add elevation replay-prevention column if missing.
+        # SQLite solo: applied here (idempotent ALTER TABLE).
+        # PostgreSQL cluster: applied by migration 023_totp_replay_prevention.sql.
+        if self._pool is None:
+            self._ensure_last_used_otp_counter_column()
+
+    def _ensure_last_used_otp_counter_column(self) -> None:
+        """Add last_used_otp_counter to user_mfa if absent (SQLite, idempotent).
+
+        Stores int(unix_time // 30) — the TOTP time-step index — for CAS
+        replay prevention in the elevation flow (Story #923 AC9).
+        """
+        conn = self._get_conn()
+        try:
+            existing = {
+                row[1] for row in conn.execute("PRAGMA table_info(user_mfa)").fetchall()
+            }
+            if "last_used_otp_counter" not in existing:
+                conn.execute(
+                    "ALTER TABLE user_mfa ADD COLUMN last_used_otp_counter INTEGER"
+                )
+                conn.commit()
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Secret Management
@@ -427,7 +451,10 @@ class TOTPService:
     def verify_recovery_code(
         self, username: str, code: str, ip_address: str = "unknown"
     ) -> bool:
-        """Verify and consume a recovery code.
+        """Atomically verify and consume a recovery code (Codex AC10 + Codex M1).
+
+        Single conditional UPDATE prevents TOCTOU race where two concurrent
+        requests could both consume the same unused code.
 
         Returns True if valid. The used code is marked consumed (not deleted)
         so it can't be reused.
@@ -435,22 +462,23 @@ class TOTPService:
         code_hash = self._hash_recovery_code(code)
         if self._pool is not None:
             with self._pool.connection() as conn:
-                conn.row_factory = dict_row
-                row = conn.execute(
-                    "SELECT id FROM user_recovery_codes WHERE user_id = %s AND code_hash = %s AND used_at IS NULL",
-                    (username, code_hash),
-                ).fetchone()
-                if row is None:
-                    return False
-                conn.execute(
-                    "UPDATE user_recovery_codes SET used_at = CURRENT_TIMESTAMP, used_ip = %s WHERE id = %s",
-                    (ip_address, row["id"]),
+                cursor = conn.execute(
+                    """
+                    UPDATE user_recovery_codes
+                    SET used_at = CURRENT_TIMESTAMP, used_ip = %s
+                    WHERE user_id = %s
+                      AND code_hash = %s
+                      AND used_at IS NULL
+                    """,
+                    (ip_address, username, code_hash),
                 )
                 conn.commit()
+                if cursor.rowcount == 0:
+                    return False
                 remaining = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM user_recovery_codes WHERE user_id = %s AND used_at IS NULL",
+                    "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = %s AND used_at IS NULL",
                     (username,),
-                ).fetchone()["cnt"]
+                ).fetchone()[0]
                 logger.info(
                     "Recovery code used for %s. %d codes remaining.",
                     username,
@@ -460,21 +488,23 @@ class TOTPService:
         else:
             conn = self._get_conn()
             try:
-                row = conn.execute(
-                    "SELECT id FROM user_recovery_codes WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
-                    (username, code_hash),
-                ).fetchone()
-                if row is None:
-                    return False
-                conn.execute(
-                    "UPDATE user_recovery_codes SET used_at = CURRENT_TIMESTAMP, used_ip = ? WHERE id = ?",
-                    (ip_address, row["id"]),
+                cursor = conn.execute(
+                    """
+                    UPDATE user_recovery_codes
+                    SET used_at = CURRENT_TIMESTAMP, used_ip = ?
+                    WHERE user_id = ?
+                      AND code_hash = ?
+                      AND used_at IS NULL
+                    """,
+                    (ip_address, username, code_hash),
                 )
                 conn.commit()
+                if cursor.rowcount == 0:
+                    return False
                 remaining = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL",
+                    "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL",
                     (username,),
-                ).fetchone()["cnt"]
+                ).fetchone()[0]
                 logger.info(
                     "Recovery code used for %s. %d codes remaining.",
                     username,
@@ -490,6 +520,113 @@ class TOTPService:
         Does NOT change the TOTP seed.
         """
         return self.generate_recovery_codes(username)
+
+    # ------------------------------------------------------------------
+    # Elevation-specific TOTP verification (Story #923 AC9)
+    # ------------------------------------------------------------------
+
+    def verify_enabled_code(self, username: str, code: str) -> bool:
+        """Verify a TOTP code only when MFA is fully enabled, with CAS replay guard.
+
+        Unlike verify_code(), this method:
+        - Rejects codes that are not exactly _TOTP_DIGITS decimal digits.
+        - Returns False immediately if MFA is not enabled for the user.
+        - Finds the exact TOTP time-step that produced the submitted code,
+          then atomically records that step in last_used_otp_counter so that
+          a second call with the same code (same time-step) is rejected.
+
+        Args:
+            username: Non-empty admin username.
+            code: Exactly 6 decimal digits from the authenticator app.
+
+        Returns:
+            True if MFA is enabled, code is valid, and the matched time-step
+            has not been used before for elevation.  False otherwise.
+
+        Raises:
+            ValueError: If username is blank or code is not 6 decimal digits.
+        """
+        if not isinstance(username, str) or not username.strip():
+            raise ValueError("username must be a non-empty string")
+        if not isinstance(code, str) or not (
+            len(code) == _TOTP_DIGITS and code.isdigit()
+        ):
+            raise ValueError(
+                f"code must be exactly {_TOTP_DIGITS} decimal digits, got {code!r}"
+            )
+
+        if not self.is_mfa_enabled(username):
+            return False
+
+        secret = self._get_secret(username)
+        if secret is None:
+            return False
+
+        totp = pyotp.TOTP(secret, digits=_TOTP_DIGITS, interval=_TOTP_PERIOD)
+
+        # Find the specific time-step that produced this code so the CAS
+        # guard stores the exact matched window, not the current server window.
+        base_step = int(time.time()) // _TOTP_PERIOD
+        matched_step: Optional[int] = None
+        for offset in range(-self._window_tolerance, self._window_tolerance + 1):
+            candidate = base_step + offset
+            if totp.at(candidate * _TOTP_PERIOD) == code:
+                matched_step = candidate
+                break
+
+        if matched_step is None:
+            return False
+
+        if self._pool is not None:
+            return self._cas_otp_counter_pg(username, matched_step)
+        return self._cas_otp_counter_sqlite(username, matched_step)
+
+    def _cas_otp_counter_sqlite(self, username: str, step: int) -> bool:
+        """CAS update last_used_otp_counter if step is newer (SQLite)."""
+        conn = None
+        try:
+            conn = self._get_conn()
+            conn.execute("BEGIN EXCLUSIVE")
+            row = conn.execute(
+                "SELECT last_used_otp_counter FROM user_mfa WHERE user_id = ?",
+                (username,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            stored = row["last_used_otp_counter"]
+            if stored is not None and stored >= step:
+                conn.rollback()
+                return False
+            conn.execute(
+                "UPDATE user_mfa SET last_used_otp_counter = ? WHERE user_id = ?",
+                (step, username),
+            )
+            conn.commit()
+            return True
+        finally:
+            if conn:
+                conn.close()
+
+    def _cas_otp_counter_pg(self, username: str, step: int) -> bool:
+        """CAS update last_used_otp_counter if step is newer (PostgreSQL).
+
+        Uses cursor.rowcount instead of RETURNING so the same SQL works
+        against the SQLite-backed test harness (SQLite < 3.35 lacks RETURNING).
+        """
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE user_mfa
+                   SET last_used_otp_counter = %s
+                 WHERE user_id = %s
+                   AND (last_used_otp_counter IS NULL OR last_used_otp_counter < %s)
+                """,
+                (step, username, step),
+            )
+            conn.commit()
+            return bool(cursor.rowcount > 0)
 
     def _hash_recovery_code(self, code: str) -> str:
         """HMAC-SHA256 hash of a recovery code using the encryption key as pepper."""

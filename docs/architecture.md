@@ -618,6 +618,44 @@ Operational visibility: startup emits `DatabaseConnectionManager cleanup daemon 
 | Cap default | `src/code_indexer/server/cache/__init__.py` | `DEFAULT_MAX_CACHE_SIZE_MB`, `_apply_default_size_cap()` |
 | Cap hot-reload | `src/code_indexer/server/services/config_service.py` | `ConfigService._hot_reload_cache_size_cap()` |
 
+## v10.0 Architectural Additions
+
+This section documents architectural changes added between v8.0 and v10.0 -- features that have shipped since the v8.0 simplification. It is a roll-up of the per-feature design decisions described in their own sections above and in the linked story/epic notes.
+
+### Server Mode Subsystems
+
+CIDX server (since v8.x) now includes the following subsystems:
+
+**Research Assistant (admin-only, double-MFA gated)** -- privileged remediation agent that runs Claude CLI subprocesses with a closed-set permission allow/deny ruleset. HTTP fetches are bounded by the `cidx-curl.sh` wrapper (Story #929), which validates URLs against an operator-configured CIDR allowlist (always-on loopback, never disablable) and scrubs ambient routing/config state (proxy env vars, `~/.curlrc`, CA cert env vars) before exec'ing curl. Prompt-template loading is fail-closed -- there is no silent fallback to a stale `SECURITY_GUARDRAILS` template.
+
+**Memory Store (Story #877)** -- shared technical memory CRUD via the MCP `create_memory` / `edit_memory` / `delete_memory` tools, persisted to the cidx-meta repo. A coarse write lock is acquired via `RefreshScheduler.acquire_write_lock` to coordinate with the refresh cycle. A per-memory file lock prevents concurrent edits to the same memory.
+
+**Memory Retrieval Pipeline (Story #883)** -- when `search_code` runs with `search_mode` set to `semantic` or `hybrid`, a parallel pipeline retrieves stored memories and injects them into the `relevant_memories` response field. Stages: VoyageAI query vector -> HNSW candidates -> Voyage floor -> assembly -> ordering -> optional Cohere rerank -> body hydration -> empty-state nudge. Memory IDs are validated via `^[A-Za-z0-9_-]+$` regex and resolved with `Path.relative_to()` to prevent traversal. Body hydration faults log WARNING and drop the candidate; they do not raise.
+
+**Auto-trigger Dep-Map Repair (Story #927)** -- scheduled delta and refinement jobs optionally trigger a single repair pass when anomalies are detected. Default-off opt-in via the Web UI `dep_map_auto_repair_enabled` flag. Cluster-aware decision lock: PostgreSQL `pg_try_advisory_xact_lock` (cluster) or `threading.Lock` (solo) at three trigger sites. The lock is held only for the atomic claim window; long-running work runs outside the lock with the JobTracker entry serving as the cross-node in-flight signal. Anti-fallback on health-check error: skip auto-repair rather than repair against unknown anomaly state.
+
+**Codex CLI Integration (Epic #843, Story #885)** -- Codex GPT-5 background agents register `cidx-local` MCP at server startup with persistent `client_id:client_secret` credentials issued by `MCPCredentialManager` (no JWT, no TTL). Codex auth modes: `api_key` (delegates `auth.json` schema to `codex login --with-api-key` via stdin), `subscription` (OAuth lease-loop via `CodexCredentialsFileManager`), `none` (no-op).
+
+**TOTP Step-Up Elevation (Epic #922)** -- admin operations require an active TOTP elevation window (rolling 5-min idle, 30-min absolute max age, both runtime-configurable). `ElevatedSessionManager` has dual-backend support (SQLite solo / PostgreSQL cluster) with atomic touch and `ON CONFLICT (session_key) DO UPDATE` for atomic re-elevation. Three error codes: `totp_setup_required` (403, with `setup_url`), `elevation_required` (403), `elevation_failed` (401). The kill switch returns HTTP 503 (not 403) when the feature is administratively off -- 403 misleadingly implies "forbidden", 503 correctly signals "feature administratively off". Recovery codes grant `scope=totp_repair` narrow window for TOTP reset/regenerate/disable only -- full-scope endpoints reject.
+
+**Maintenance Mode Localhost-Only (Story #924)** -- write endpoints (`POST /api/admin/maintenance/enter` and `POST /api/admin/maintenance/exit`) are restricted to loopback callers via the `require_localhost` FastAPI dependency. These endpoints are auto-updater driven (system processes, not humans), so TOTP elevation does not apply -- a system process cannot satisfy a TOTP prompt. The MCP enter/exit tools were removed entirely. Read endpoints (`GET /api/admin/maintenance/status`, `GET /drain-status`, `GET /drain-timeout`) remain admin-auth only.
+
+**cidx-meta Backup (Story #926)** -- continuous git backup of the cidx-meta directory to a remote repository. All git operations execute against the mutable base path; never inside `.versioned/cidx-meta/v_{timestamp}/` snapshot directories. Index always runs after sync (deferred-failure pattern: a push failure becomes `sync_failure` on the `SyncResult`, which marks the job FAILED after indexing completes). Conflict resolution invokes Claude via `invoke_claude_cli()` with a 600s timeout (SIGTERM first, SIGKILL after a 30s grace period). Branch detection supports remotes whose default is `main`; falls back to `master` when detection fails.
+
+### Stability Mitigations (Bug #897, Bug #878)
+
+These are the long-running-process mitigations layered on top of the v9.20.13 connection lifecycle and cache-cap work:
+
+- **glibc malloc_trim (default ON, bootstrap-only flag `enable_malloc_trim`)**: calls `malloc_trim(0)` at the end of each HNSW cache cleanup cycle. Linux+glibc only; silently no-ops on musl/macOS. Bug #897 root cause was glibc multi-arena `brk` segments holding small `label_lookup_` / `linkLists_` allocations after bulk lifecycle backfills.
+- **MALLOC_ARENA_MAX=2 (default ON, bootstrap-only flag `enable_malloc_arena_max`)**: idempotently injected as `Environment=MALLOC_ARENA_MAX=2` into the cidx-server systemd unit file by the auto-updater on each cycle. Reverting the flag removes the line on the next auto-updater run.
+- **DatabaseConnectionManager-cleanup-daemon**: a single thread sweeps stale SQLite connections across all registered singletons every 60 seconds. Started and stopped from the FastAPI lifespan (error codes `APP-GENERAL-034` / `APP-GENERAL-035`). Identity-guarded clear on shutdown.
+- **HNSW/FTS cache cap**: singletons always carry a finite `max_cache_size_mb`. When config has `None`, `DEFAULT_MAX_CACHE_SIZE_MB = 4096` is overlaid at `get_global_cache()` / `get_global_fts_cache()` init. Hot-reload via `ConfigService._hot_reload_cache_size_cap()` is narrow-scoped to `index_cache_max_size_mb` and `fts_cache_max_size_mb` only.
+- **Omni search caps (Bug #881, Bug #894)**: per-pattern wildcard expansion cap (default 50) and total alias fan-out cap after wildcard expansion plus literal union (default 50). Both return `Union[List[str], CapBreach]` and callers handle via the cap-breach helper.
+
+### Fault Injection Harness (Bug #864 + Story #864)
+
+Non-production-only fault injection for end-to-end resiliency testing. Bootstrap-only config (`config.json`, never DB): `fault_injection_enabled` (default `false`) plus `fault_injection_nonprod_ack` (default `false`). Four startup scenarios. Enabled-without-ack or enabled-in-production triggers a CRITICAL log followed by `sys.exit(1)`. All outbound async HTTP to embedding/reranking providers MUST go through `HttpClientFactory`; direct `httpx.AsyncClient()` construction outside the factory is caught by the Scenario 18 anti-regression test in `test_http_client_factory.py`.
+
 ## Related Documentation
 
 - **[Algorithms](algorithms.md)** - Detailed algorithm descriptions and complexity analysis

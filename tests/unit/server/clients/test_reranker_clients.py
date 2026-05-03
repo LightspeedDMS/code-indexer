@@ -9,7 +9,6 @@ Uses pytest_httpx for HTTP mocking (not object mocks) per project conventions.
 """
 
 import json
-import os
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
@@ -227,15 +226,17 @@ class TestVoyageRerankerClientInstantiation:
             VoyageRerankerClient(max_chars=0)
 
     @pytest.mark.parametrize("bad_key", [None, ""])
-    def test_voyage_reranker_client_rejects_invalid_api_key(self, bad_key):
-        """rerank() raises ValueError when API key is None or empty string."""
+    def test_voyage_reranker_client_rejects_invalid_api_key(self, bad_key, monkeypatch):
+        """rerank() raises ValueError when API key is None or empty string and env var absent."""
         from code_indexer.server.clients.reranker_clients import VoyageRerankerClient
 
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         client = VoyageRerankerClient()
         bad_cs = MagicMock()
         bad_cs.get_config.return_value.claude_integration_config.voyageai_api_key = (
             bad_key
         )
+        bad_cs.get_config.return_value.rerank_config.voyage_reranker_model = None
 
         with patch(
             "code_indexer.server.clients.reranker_clients.get_config_service",
@@ -260,28 +261,6 @@ class TestVoyageRerankerClientApiKey:
             return_value=cs,
         ):
             assert client._get_api_key() == "test-voyage-key-123"
-
-    def test_get_api_key_does_not_use_environment_variable(self):
-        """
-        _get_api_key() must NOT fall back to VOYAGE_API_KEY env var.
-        When config returns None, None is returned regardless of env var.
-        """
-        from code_indexer.server.clients.reranker_clients import VoyageRerankerClient
-
-        client = VoyageRerankerClient()
-        none_cs = MagicMock()
-        none_cs.get_config.return_value.claude_integration_config.voyageai_api_key = (
-            None
-        )
-
-        with patch.dict(os.environ, {"VOYAGE_API_KEY": "env-key-must-not-be-used"}):
-            with patch(
-                "code_indexer.server.clients.reranker_clients.get_config_service",
-                return_value=none_cs,
-            ):
-                api_key = client._get_api_key()
-
-        assert api_key is None
 
     def test_get_model_returns_default_model(self):
         """_get_model() returns 'rerank-2.5' as default model."""
@@ -502,13 +481,18 @@ class TestDocumentTruncation:
 
         assert _get_request_body(httpx_mock)["documents"][0] == "short doc"
 
-    def test_empty_document_sent_as_is(self, httpx_mock: HTTPXMock, patched_client):
-        """Empty documents are sent without modification."""
+    def test_empty_document_replaced_with_single_space(
+        self, httpx_mock: HTTPXMock, patched_client
+    ):
+        """Empty documents are replaced with a single space to satisfy Voyage API constraints.
+
+        Voyage AI rejects payloads containing empty strings (HTTP 400, Bug #963).
+        """
         _add_rerank_response(httpx_mock)
 
         patched_client.rerank(query="q", documents=[""], top_k=1)
 
-        assert _get_request_body(httpx_mock)["documents"][0] == ""
+        assert _get_request_body(httpx_mock)["documents"][0] == " "
 
     def test_truncation_flag_always_set_in_request_body(
         self, httpx_mock: HTTPXMock, patched_client
@@ -794,26 +778,6 @@ class TestCohereRerankerClientApiKey:
         ):
             assert client._get_api_key() == "test-cohere-key-123"
 
-    def test_get_api_key_does_not_use_co_api_key_environment_variable(self):
-        """
-        _get_api_key() must NOT fall back to CO_API_KEY env var.
-        When config returns None, None is returned regardless of env var.
-        """
-        from code_indexer.server.clients.reranker_clients import CohereRerankerClient
-
-        client = CohereRerankerClient()
-        none_cs = MagicMock()
-        none_cs.get_config.return_value.claude_integration_config.cohere_api_key = None
-
-        with patch.dict(os.environ, {"CO_API_KEY": "env-key-must-not-be-used"}):
-            with patch(
-                "code_indexer.server.clients.reranker_clients.get_config_service",
-                return_value=none_cs,
-            ):
-                api_key = client._get_api_key()
-
-        assert api_key is None
-
     def test_get_model_returns_default_cohere_model(self):
         """_get_model() returns 'rerank-v3.5' as default model."""
         from code_indexer.server.clients.reranker_clients import CohereRerankerClient
@@ -854,15 +818,17 @@ class TestCohereRerankerClientApiKey:
             assert CohereRerankerClient()._get_model() == "rerank-v3.5"
 
     @pytest.mark.parametrize("bad_key", [None, ""])
-    def test_cohere_reranker_client_rejects_invalid_api_key(self, bad_key):
-        """rerank() raises ValueError when API key is None or empty string."""
+    def test_cohere_reranker_client_rejects_invalid_api_key(self, bad_key, monkeypatch):
+        """rerank() raises ValueError when API key is None or empty string and env var absent."""
         from code_indexer.server.clients.reranker_clients import CohereRerankerClient
 
+        monkeypatch.delenv("CO_API_KEY", raising=False)
         client = CohereRerankerClient()
         bad_cs = MagicMock()
         bad_cs.get_config.return_value.claude_integration_config.cohere_api_key = (
             bad_key
         )
+        bad_cs.get_config.return_value.rerank_config.cohere_reranker_model = None
 
         with patch(
             "code_indexer.server.clients.reranker_clients.get_config_service",
@@ -1152,15 +1118,18 @@ class TestCohereRerankerClientDocumentTruncation:
 
         assert _get_cohere_request_body(httpx_mock)["documents"][0] == "short doc"
 
-    def test_empty_document_sent_as_is(
+    def test_empty_document_replaced_with_single_space(
         self, httpx_mock: HTTPXMock, patched_cohere_client
     ):
-        """Empty documents are sent without modification."""
+        """Empty documents are replaced with a single space to prevent API rejections.
+
+        Consistent with VoyageRerankerClient fix (Bug #963).
+        """
         _add_cohere_rerank_response(httpx_mock)
 
         patched_cohere_client.rerank(query="q", documents=[""], top_k=1)
 
-        assert _get_cohere_request_body(httpx_mock)["documents"][0] == ""
+        assert _get_cohere_request_body(httpx_mock)["documents"][0] == " "
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,8 @@ Part of the inline_routes.py modularization effort. Contains 6 route handlers:
 Zero behavior change: same paths, methods, response models, and handler logic.
 """
 
+import logging
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -40,6 +42,8 @@ from ..auth.concurrency_protection import (
     password_change_concurrency_protection,
     ConcurrencyConflictError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def register_admin_user_routes(
@@ -84,7 +88,7 @@ def register_admin_user_routes(
     @app.post("/api/admin/users", response_model=UserResponse, status_code=201)
     def create_user(
         user_data: CreateUserRequest,
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(dependencies.require_elevation()),
     ):
         """
         Create new user (admin only).
@@ -124,7 +128,7 @@ def register_admin_user_routes(
     def update_user(
         username: str,
         user_data: UpdateUserRequest,
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(dependencies.require_elevation()),
     ):
         """
         Update user role (admin only).
@@ -160,6 +164,20 @@ def register_admin_user_routes(
                     detail=f"User not found: {username}",
                 )
 
+            # Story #923 AC8: revoke all elevation windows for the target user
+            from code_indexer.server.auth.elevated_session_manager import (
+                elevated_session_manager,
+            )
+
+            try:
+                elevated_session_manager.revoke_all_for_username(username)
+            except Exception:
+                logger.warning(
+                    "Failed to revoke elevation windows on role change for user=%s",
+                    username,
+                    exc_info=True,
+                )
+
             return MessageResponse(message=f"User '{username}' updated successfully")
 
         except ValueError as e:
@@ -168,7 +186,7 @@ def register_admin_user_routes(
     @app.delete("/api/admin/users/{username}", response_model=MessageResponse)
     def delete_user(
         username: str,
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(dependencies.require_elevation()),
     ):
         """
         Delete user (admin only).
@@ -347,6 +365,20 @@ def register_admin_user_routes(
                         username, "password_change"
                     )
 
+                    # Story #923 AC8: revoke all elevation windows for this user
+                    from code_indexer.server.auth.elevated_session_manager import (
+                        elevated_session_manager,
+                    )
+
+                    try:
+                        elevated_session_manager.revoke_all_for_username(username)
+                    except Exception:
+                        logger.warning(
+                            "Failed to revoke elevation windows on password change for user=%s",
+                            username,
+                            exc_info=True,
+                        )
+
                     # Log successful password change
                     password_audit_logger.log_password_change_success(
                         username=username,
@@ -406,7 +438,7 @@ def register_admin_user_routes(
     def change_user_password(
         username: str,
         password_data: AdminChangePasswordRequest,
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(dependencies.require_elevation()),
     ):
         """
         Change any user's password (admin only).
@@ -428,6 +460,20 @@ def register_admin_user_routes(
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"User not found: {username}",
+                )
+
+            # Story #923 AC8: revoke all elevation windows for the target user
+            from code_indexer.server.auth.elevated_session_manager import (
+                elevated_session_manager,
+            )
+
+            try:
+                elevated_session_manager.revoke_all_for_username(username)
+            except Exception:
+                logger.warning(
+                    "Failed to revoke elevation windows on admin password change for user=%s",
+                    username,
+                    exc_info=True,
                 )
 
             return MessageResponse(

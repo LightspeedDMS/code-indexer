@@ -13,11 +13,28 @@ file-not-found, and success paths.
 import time
 import pytest
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from code_indexer.server.routers.research_assistant import router
 from code_indexer.server.web.auth import require_admin_session, SessionData
+
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, router):
+    """Override all require_elevation deps so tests can call routes without TOTP setup."""
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +57,7 @@ def app():
         )
 
     test_app.dependency_overrides[require_admin_session] = mock_admin_session
+    _bypass_elevation(test_app, router)
     return test_app
 
 

@@ -95,7 +95,7 @@ OTHER_TOOLS: list[tuple[str, str, JsonArgs]] = [
 @pytest.mark.parametrize(
     PARAMETRIZE_FIELDS,
     OTHER_TOOLS,
-    ids=[t[TOOL_LABEL_INDEX] for t in OTHER_TOOLS],
+    ids=[str(t[TOOL_LABEL_INDEX]) for t in OTHER_TOOLS],
 )
 def test_mcp_other_tool(
     label: str,

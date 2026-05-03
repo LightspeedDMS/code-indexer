@@ -10,7 +10,11 @@ import os
 import pytest
 
 
-# Single source of truth for all 122 expected HANDLER_REGISTRY keys (AC7)
+# Single source of truth for all 120 expected HANDLER_REGISTRY keys (AC7)
+# Note: enter_maintenance_mode and exit_maintenance_mode were removed per Story #924
+# (maintenance mode write endpoints are now localhost-only and auto-updater driven;
+# system processes cannot satisfy TOTP step-up, so MCP registrations were deleted).
+# get_maintenance_status (read-only) remains registered.
 EXPECTED_REGISTRY_KEYS = frozenset(
     {
         # Dict literal entries from original HANDLER_REGISTRY definition
@@ -62,6 +66,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "git_search_diffs",
         "directory_tree",
         "authenticate",
+        "elevate_session",
         "cidx_ssh_key_create",
         "cidx_ssh_key_list",
         "cidx_ssh_key_delete",
@@ -157,8 +162,6 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "admin_list_all_mcp_credentials",
         "admin_list_system_mcp_credentials",
         "query_audit_logs",
-        "enter_maintenance_mode",
-        "exit_maintenance_mode",
         "get_maintenance_status",
         "scip_pr_history",
         "scip_cleanup_history",
@@ -177,6 +180,8 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "depmap_get_domain_summary",
         "depmap_get_stale_domains",
         "depmap_get_cross_domain_graph",
+        # Story #889: hub domains handler
+        "depmap_get_hub_domains",
         # Story #877: memory store handlers
         "create_memory",
         "edit_memory",
@@ -325,11 +330,15 @@ def test_provider_indexes_private_helpers_importable():
     assert callable(_provider_index_job)
 
 
-def test_no_circular_imports():
+@pytest.mark.timeout(90)
+def test_no_circular_imports(tmp_path):
     """Package import must complete without circular import errors (AC3).
 
     Uses a subprocess to test import in a clean interpreter — avoids
     issues with sys.modules aliasing used in the Phase 1 package scaffold.
+    CIDX_SERVER_DATA_DIR is set to an isolated temp dir so create_app() in
+    app.py (module-level) does not contend with the real DB.
+    Marked timeout=90s because DB schema init under parallel load takes >15s.
     """
     import subprocess
     import sys
@@ -342,6 +351,7 @@ def test_no_circular_imports():
         ],
         capture_output=True,
         text=True,
+        timeout=60,
         env={
             "PYTHONPATH": str(
                 os.path.normpath(
@@ -349,7 +359,8 @@ def test_no_circular_imports():
                         os.path.dirname(__file__), "..", "..", "..", "..", "src"
                     )
                 )
-            )
+            ),
+            "CIDX_SERVER_DATA_DIR": str(tmp_path),
         },
     )
     assert result.returncode == 0, f"Circular import detected. stderr:\n{result.stderr}"

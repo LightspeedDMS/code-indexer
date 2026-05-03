@@ -15,6 +15,7 @@ Performance improvement: ~277ms → <1ms for repeated queries (1800x faster).
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+import ctypes
 import json
 import logging
 import os
@@ -28,6 +29,102 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+# Bug #897 mitigation 1: glibc heap trim support.
+# _LIBC_LOAD_LOCK guards first-load so two concurrent cleanup cycles cannot
+# race on _LIBC_HANDLE/_LIBC_LOAD_ATTEMPTED.
+_LIBC_LOAD_LOCK: threading.Lock = threading.Lock()
+_LIBC_HANDLE: Optional[Any] = None
+_LIBC_LOAD_ATTEMPTED: bool = False
+
+
+def _feature_flag_enabled(flag_name: str) -> bool:
+    """Return the boolean value of a bootstrap config flag from ServerConfigManager.
+
+    Reads config.json directly (bootstrap path) so the flag is available on
+    the cleanup daemon thread before the DB runtime config is loaded.
+    Returns False on any read/parse error so the default is always safe/off.
+
+    Args:
+        flag_name: Attribute name on ServerConfig (e.g. "enable_malloc_trim").
+    """
+    try:
+        from code_indexer.server.utils.config_manager import ServerConfigManager
+
+        config = ServerConfigManager().load_config()
+        if config is None:
+            return False
+        return bool(getattr(config, flag_name, False))
+    except Exception as exc:
+        logger.debug(
+            "_feature_flag_enabled(%r) failed, defaulting to False: %s",
+            flag_name,
+            exc,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return False
+
+
+def _maybe_malloc_trim() -> None:
+    """Bug #897 mitigation 1: call glibc malloc_trim(0) to return contractible
+    brk pages after a bulk HNSW eviction cycle.
+
+    Linux-only. No-ops on non-glibc platforms (macOS dev, musl Alpine).
+    The libc handle is lazy-loaded once under _LIBC_LOAD_LOCK and cached for
+    the process lifetime so concurrent cleanup cycles do not race.
+
+    malloc_trim(0) return value: 1 means pages were released to the OS,
+    0 means the call succeeded but no pages were available to release.
+    """
+    global _LIBC_HANDLE, _LIBC_LOAD_ATTEMPTED
+    if sys.platform != "linux":
+        logger.debug(
+            "malloc_trim skipped: not Linux (platform=%s)",
+            sys.platform,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return
+    with _LIBC_LOAD_LOCK:
+        if not _LIBC_LOAD_ATTEMPTED:
+            _LIBC_LOAD_ATTEMPTED = True
+            try:
+                _LIBC_HANDLE = ctypes.CDLL("libc.so.6")
+            except OSError as exc:
+                # Non-glibc platform (musl Alpine, etc.); expected on some hosts.
+                logger.debug(
+                    "malloc_trim unavailable: could not load libc.so.6: %s",
+                    exc,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                _LIBC_HANDLE = None
+    if _LIBC_HANDLE is None:
+        return
+    try:
+        released = _LIBC_HANDLE.malloc_trim(0)
+        if released:
+            logger.debug(
+                "malloc_trim(0) returned %d: pages released to OS",
+                released,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            logger.debug(
+                "malloc_trim(0) returned 0: call succeeded but no pages available to release",
+                extra={"correlation_id": get_correlation_id()},
+            )
+    except AttributeError as exc:
+        # musl libc lacks the malloc_trim symbol; expected on Alpine.
+        logger.debug(
+            "malloc_trim skipped: symbol not found in libc: %s",
+            exc,
+            extra={"correlation_id": get_correlation_id()},
+        )
+    except OSError as exc:
+        logger.warning(
+            "malloc_trim(0) raised OSError unexpectedly: %s",
+            exc,
+            extra={"correlation_id": get_correlation_id()},
+        )
 
 
 @dataclass
@@ -548,6 +645,12 @@ class HNSWIndexCache:
                     f"Evicted {len(expired_repos)} expired cache entries",
                     extra={"correlation_id": get_correlation_id()},
                 )
+
+        # Bug #897 mitigation 1: optionally trim glibc heap after eviction.
+        # Feature-flagged so operators can measure RSS recovery on staging
+        # before committing. Default ON since v9.23.3; set enable_malloc_trim=false in config.json to disable.
+        if _feature_flag_enabled("enable_malloc_trim"):
+            _maybe_malloc_trim()
 
     def start_background_cleanup(self) -> None:
         """

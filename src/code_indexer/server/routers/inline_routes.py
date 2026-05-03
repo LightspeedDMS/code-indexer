@@ -55,6 +55,8 @@ from ..routers.api_keys import router as api_keys_router
 from ..routers.diagnostics import router as diagnostics_router
 from ..routers.research_assistant import router as research_assistant_router
 from ..web.mfa_routes import mfa_router, user_mfa_router
+from ..auth.elevation_routes import router as elevation_router
+from ..web.elevation_web_routes import router as elevation_web_router
 from ..routers.repository_health import router as repository_health_router
 from ..routers.activated_repos import router as activated_repos_router
 from ..routers.provider_indexes import router as provider_indexes_router
@@ -69,6 +71,7 @@ from ..routers.groups import (
 from ..routers.repo_categories import router as repo_categories_router
 from ..routes.multi_query_routes import router as multi_query_router
 from ..routes.scip_multi_routes import router as scip_multi_router
+from ..routes.reaper_routes import router as reaper_router  # Story #967
 from ..web import (
     web_router,
     user_router,
@@ -263,11 +266,14 @@ def register_inline_routes(
     app.include_router(diagnostics_router)
     app.include_router(research_assistant_router)
     app.include_router(mfa_router)  # Story #559: MFA setup UI
+    app.include_router(elevation_router)  # Story #923: AC3+AC4 elevation endpoints
+    app.include_router(elevation_web_router)  # Story #923: AC7 Web UI elevation form
     app.include_router(repository_health_router)
     app.include_router(activated_repos_router)
     app.include_router(provider_indexes_router)
     app.include_router(admin_provider_health_router)
     app.include_router(debug_router)
+    app.include_router(reaper_router, prefix="/api/admin")  # Story #967
 
     # Mount Web Admin UI routes and static files
     from fastapi.staticfiles import StaticFiles

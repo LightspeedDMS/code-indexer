@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
+from code_indexer.server.services.metadata_reader import read_current_commit
+
 logger = logging.getLogger(__name__)
 
 
@@ -295,7 +297,7 @@ class DependencyMapDashboardService:
         Compute status for all repos (active + removed).
 
         Uses _current_commits_provider if injected (for testing), otherwise
-        reads from metadata.json in the repo's clone_path.
+        reads via read_current_commit() (voyage-ai first, legacy fallback).
 
         The last_analyzed field is set to the tracking backend's last_run timestamp
         for repos that are present in stored_hashes (OK, CHANGED, REMOVED), and
@@ -324,7 +326,7 @@ class DependencyMapDashboardService:
                 status = "NEW"
                 status_color = "BLUE"
                 last_analyzed = None
-            elif current_commit == stored_hashes[alias]:
+            elif current_commit is not None and current_commit == stored_hashes[alias]:
                 status = "OK"
                 status_color = "GREEN"
                 last_analyzed = last_run
@@ -363,7 +365,9 @@ class DependencyMapDashboardService:
         Get the current commit hash for a repo.
 
         If _current_commits_provider is injected (testing), delegates to it.
-        Otherwise reads from clone_path/.code-indexer/metadata.json.
+        Otherwise delegates to read_current_commit() which prefers
+        metadata-voyage-ai.json and falls back to legacy metadata.json.
+        Returns None when no valid metadata is found (Bug #890).
         """
         provider = getattr(self, "_current_commits_provider", None)
         if provider is not None:
@@ -372,19 +376,7 @@ class DependencyMapDashboardService:
         if not clone_path:
             return None
 
-        metadata_path = Path(clone_path) / ".code-indexer" / "metadata.json"
-        if not metadata_path.exists():
-            return "local"
-
-        try:
-            with open(metadata_path) as f:
-                metadata = json.load(f)
-            return cast(Optional[str], metadata.get("current_commit", "unknown"))
-        except Exception as e:
-            logger.warning(
-                "dependency_map_dashboard: failed to read metadata for %s: %s", alias, e
-            )
-            return None
+        return cast(Optional[str], read_current_commit(clone_path))
 
     def _build_repo_domain_map(self) -> Dict[str, List[str]]:
         """

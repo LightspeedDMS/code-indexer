@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Optional, Protocol, TypeVar, runtime_checkable
 
 from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.services.memory_file_lock_manager import (
@@ -42,6 +42,8 @@ from code_indexer.server.services.memory_schema import (
     validate_create_payload,
     validate_edit_payload,
 )
+
+_T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +85,21 @@ class RateLimitError(Exception):
 class RefreshSchedulerProtocol(Protocol):
     """Minimal subset of refresh_scheduler used by MemoryStoreService."""
 
-    def acquire_write_lock(
-        self, alias: str, owner_name: str, ttl_seconds: int = 60
-    ) -> bool: ...
+    def acquire_write_lock(self, alias: str, owner_name: str) -> bool: ...
 
-    def release_write_lock(self, alias: str, owner_name: str) -> bool: ...
+    # Story #932 follow-up: ttl_seconds removed — the real RefreshScheduler.acquire_write_lock
+    # delegates to WriteLockManager which owns TTL internally; the kwarg was never forwarded.
 
-    def is_write_lock_held(self, alias: str) -> bool: ...
+    def release_write_lock(self, alias: str, owner_name: str) -> None: ...
 
-    def trigger_refresh_for_repo(self, repo_alias: str) -> Any: ...
+    def is_write_locked(self, alias: str) -> bool: ...
+
+    def trigger_refresh_for_repo(
+        self,
+        alias_name: str,
+        submitter_username: str = "system",
+        force_reset: bool = False,
+    ) -> Optional[str]: ...
 
 
 @runtime_checkable
@@ -297,8 +305,8 @@ class MemoryStoreService:
             raise NotFoundError(f"Memory {memory_id!r} does not exist")
 
     def _run_with_per_memory_lock(
-        self, memory_id: str, owner: str, operation: Callable[[], Any]
-    ) -> Any:
+        self, memory_id: str, owner: str, operation: Callable[[], _T]
+    ) -> _T:
         """Non-blocking acquire of per-memory lock; release guaranteed in finally.
 
         Raises ConflictError immediately if lock is not available.
@@ -322,14 +330,17 @@ class MemoryStoreService:
     def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
         """Return True if piggybacking (skip acquire/release).
 
-        Piggyback when is_write_lock_held returns True, or when acquire
+        Piggyback when is_write_locked returns True, or when acquire
         returns False (race — another process acquired between check and here).
         """
-        if self._scheduler.is_write_lock_held(_COARSE_ALIAS):
+        if self._scheduler.is_write_locked(_COARSE_ALIAS):
             return True
-        acquired = self._scheduler.acquire_write_lock(
-            _COARSE_ALIAS, owner, ttl_seconds=self._config.coarse_lock_ttl_seconds
-        )
+        # Story #932 follow-up: ttl_seconds NOT forwarded here — the real
+        # RefreshScheduler.acquire_write_lock delegates to WriteLockManager which
+        # owns TTL internally.  coarse_lock_ttl_seconds is kept in the config
+        # dataclass as a documented knob for future use should WriteLockManager
+        # ever expose an override.
+        acquired = self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner)
         # acquired=False means a race into piggyback; we never held the lock.
         return not acquired
 
@@ -355,14 +366,8 @@ class MemoryStoreService:
             self._debouncer.signal_dirty()
 
     def _release_coarse_lock(self, owner: str) -> None:
-        """Release coarse lock; log warning if release fails."""
-        released = self._scheduler.release_write_lock(_COARSE_ALIAS, owner)
-        if not released:
-            logger.warning(
-                "Coarse lock release returned False for owner=%r; "
-                "lock may persist until TTL.",
-                owner,
-            )
+        """Release coarse lock."""
+        self._scheduler.release_write_lock(_COARSE_ALIAS, owner)
 
     def _run_with_coarse_lock(self, owner: str, operation: Callable[[], Any]) -> Any:
         """Acquire coarse lock (or piggyback), run operation, trigger refresh.

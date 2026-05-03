@@ -80,7 +80,8 @@ class BranchService:
             branches = []
             current_branch_name = self.git_topology_service.get_current_branch()
 
-            # Get all local branches
+            # Get all local branches; track names already added to deduplicate remote refs
+            seen_branch_names: set = set()
             for branch in self.repo.heads:
                 branch_info = self._create_branch_info(
                     branch,
@@ -88,6 +89,26 @@ class BranchService:
                     include_remote=include_remote,
                 )
                 branches.append(branch_info)
+                seen_branch_names.add(branch.name)
+
+            # Add remote-only branches (those with no local counterpart)
+            for remote in self.repo.remotes:
+                for ref in remote.refs:
+                    # Skip symbolic refs like origin/HEAD
+                    if ref.name.endswith("/HEAD"):
+                        continue
+                    # Strip "<remote>/" prefix to get the bare branch name
+                    prefix = remote.name + "/"
+                    bare_name = (
+                        ref.name[len(prefix) :]
+                        if ref.name.startswith(prefix)
+                        else ref.name
+                    )
+                    # Skip if this branch name was already added (local takes precedence)
+                    if bare_name in seen_branch_names:
+                        continue
+                    branches.append(self._create_remote_branch_info(bare_name, ref))
+                    seen_branch_names.add(bare_name)
 
             # Sort branches with current branch first, then alphabetically
             branches.sort(key=lambda b: (not b.is_current, b.name))
@@ -159,6 +180,36 @@ class BranchService:
             )
             return None
 
+    def _create_remote_branch_info(self, name: str, ref) -> BranchInfo:
+        """Create BranchInfo for a remote-only branch (no local counterpart).
+
+        Remote refs are never the current branch and do not track another remote.
+        This avoids calling .tracking_branch() on RemoteReference objects, which
+        have different semantics than local Head objects.
+
+        Args:
+            name: Bare branch name (origin/ prefix already stripped)
+            ref: Remote git reference object (RemoteReference or similar)
+
+        Returns:
+            BranchInfo with is_current=False and remote_tracking=None
+        """
+        last_commit = ref.commit
+        commit_info = CommitInfo(
+            sha=last_commit.hexsha,
+            message=last_commit.message.strip(),
+            author=last_commit.author.name,
+            date=last_commit.committed_datetime.isoformat(),
+        )
+        index_status = self._get_index_status(name)
+        return BranchInfo(
+            name=name,
+            is_current=False,
+            last_commit=commit_info,
+            index_status=index_status,
+            remote_tracking=None,
+        )
+
     def _create_branch_info(
         self, branch, is_current: bool = False, include_remote: bool = False
     ) -> BranchInfo:
@@ -184,9 +235,14 @@ class BranchService:
         # Get index status
         index_status = self._get_index_status(branch.name)
 
-        # Get remote tracking info if requested
+        # Get remote tracking info if requested.
+        # RemoteReference objects represent remote branches that do not track another
+        # remote — calling .tracking_branch() on them has different semantics than on
+        # local Head objects, so skip the lookup entirely for remote refs.
+        from git import RemoteReference
+
         remote_tracking = None
-        if include_remote:
+        if include_remote and not isinstance(branch, RemoteReference):
             remote_tracking = self._get_remote_tracking_info(branch)
 
         return BranchInfo(

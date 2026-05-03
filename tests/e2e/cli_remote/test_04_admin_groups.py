@@ -18,6 +18,11 @@ Self-contained tests (create, delete) wrap post-creation logic in
 ``try/finally`` so cleanup always runs after ``group_id`` is captured,
 regardless of assertion failures.
 
+NOTE (Story #980): All tests in this module are active. The CLI supports
+TOTP step-up elevation via with_elevation_retry(). In the E2E test environment
+elevation_enforcement_enabled is typically False, so admin group endpoints
+are accessible without TOTP challenge (server returns 503-disabled passthrough).
+
 Test functions (6):
   test_admin_groups_create     -- create a new group (self-contained)
   test_admin_groups_list       -- list groups, verify created group visible
@@ -89,9 +94,11 @@ def _remove_all_members_from_group(
     """
     import warnings
 
-    # Get the current member list from the group
     show_result = run_cidx(
-        "admin", "groups", "show", str(group_id),
+        "admin",
+        "groups",
+        "show",
+        str(group_id),
         "--json",
         cwd=str(workspace),
         env=cli_env,
@@ -116,11 +123,12 @@ def _remove_all_members_from_group(
         return
 
     if not members:
-        return  # Nothing to remove -- no warning needed
+        return
 
-    # Find the ID of the default "admins" group so we can move users back to it
     list_result = run_cidx(
-        "admin", "groups", "list",
+        "admin",
+        "groups",
+        "list",
         "--json",
         cwd=str(workspace),
         env=cli_env,
@@ -156,8 +164,12 @@ def _remove_all_members_from_group(
 
     for member in members:
         move_result = run_cidx(
-            "admin", "groups", "add-member", str(admins_group_id),
-            "--user", member,
+            "admin",
+            "groups",
+            "add-member",
+            str(admins_group_id),
+            "--user",
+            member,
             cwd=str(workspace),
             env=cli_env,
         )
@@ -185,7 +197,6 @@ def _delete_group_best_effort(
 
     Any other failure is re-raised so cleanup errors are not silently discarded.
     """
-    # Move members out before attempting delete
     _remove_all_members_from_group(group_id, workspace, cli_env, label=label)
 
     result = run_cidx(
@@ -211,7 +222,7 @@ def _delete_group_best_effort(
 
 
 # ---------------------------------------------------------------------------
-# Module-scoped fixture: creates a test group and yields (group_id, group_name)
+# Module-scoped fixture: skipped pending Story #925 CLI elevation support
 # ---------------------------------------------------------------------------
 
 
@@ -220,8 +231,8 @@ def created_group(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
 ) -> Generator[tuple[int, str], None, None]:
-    """Create a test group, yield (group_id, group_name), then delete on teardown."""
-    group_name = f"e2egrp_{uuid.uuid4().hex[:8]}"
+    """Create a test group and yield (group_id, group_name). Delete on teardown."""
+    group_name = f"e2egroup_{uuid.uuid4().hex[:8]}"
 
     create_result = run_cidx(
         "admin",
@@ -229,8 +240,6 @@ def created_group(
         "create",
         "--name",
         group_name,
-        "--description",
-        "E2E test group",
         "--json",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
@@ -254,7 +263,7 @@ def created_group(
 
 
 # ---------------------------------------------------------------------------
-# Admin group tests
+# Admin group tests (all skipped pending Story #925 CLI elevation support)
 # ---------------------------------------------------------------------------
 
 
@@ -284,8 +293,6 @@ def test_admin_groups_create(
     group_id = _parse_group_id(create_result, "test_admin_groups_create")
 
     try:
-        # No additional assertions needed here beyond rc=0 and parseable ID;
-        # the presence of a valid integer ID confirms the create contract.
         assert group_id > 0, f"Expected positive group ID, got {group_id}"
     finally:
         _delete_group_best_effort(
@@ -359,7 +366,6 @@ def test_admin_groups_update(
     )
     _assert_ok(update_result, f"cidx admin groups update {group_id}")
 
-    # Verify the update was persisted by reading back the group
     show_result = run_cidx(
         "admin",
         "groups",
@@ -395,7 +401,6 @@ def test_admin_groups_add_member(
     )
     _assert_ok(add_result, f"cidx admin groups add-member {group_id} --user admin")
 
-    # Verify the membership was persisted by reading back the group
     show_result = run_cidx(
         "admin",
         "groups",
@@ -461,7 +466,6 @@ def test_admin_groups_delete(
             )
     finally:
         if delete_failed:
-            # Best-effort cleanup since the primary delete did not succeed
             _delete_group_best_effort(
                 group_id,
                 authenticated_workspace,

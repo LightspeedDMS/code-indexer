@@ -95,8 +95,13 @@
 </section>
 
 <!-- Users List Section -->
-<section id="users-list-section">
-    {% include "partials/users_list.html" %}
+<section
+    id="users-list-section"
+    hx-get="/admin/partials/users-list"
+    hx-trigger="load"
+    hx-swap="innerHTML"
+>
+    <p aria-busy="true">Loading users…</p>
 </section>
 
 <script>
