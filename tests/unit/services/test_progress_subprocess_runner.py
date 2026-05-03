@@ -263,8 +263,6 @@ class TestSigtermErrorDetails:
         contain signal-identifying text so the refresh_scheduler SIGTERM matcher works.
         The startup banner text must NOT be the only content.
         """
-        import os
-        import signal
         import sys
 
         from code_indexer.services.progress_phase_allocator import (
@@ -338,7 +336,6 @@ class TestSigtermErrorDetails:
 
         # Script prints stdout banner, then exits with SIGKILL equivalent (-9) by using
         # os.kill with SIGKILL.
-        import signal
 
         script = (
             "import os, signal, sys\n"
@@ -376,7 +373,6 @@ class TestSigtermErrorDetails:
         This test verifies the produced error message is compatible with the
         refresh_scheduler matcher without importing refresh_scheduler itself.
         """
-        import signal
         import sys
 
         from code_indexer.services.progress_phase_allocator import (

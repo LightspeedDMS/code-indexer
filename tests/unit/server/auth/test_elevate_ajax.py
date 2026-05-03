@@ -8,6 +8,7 @@ with MagicMock — no real DB, no live server.
 
 import contextlib
 from datetime import datetime, timezone
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -99,7 +100,7 @@ def _ajax_ctx(
     enforcement: bool = True,
     totp_svc=None,
     esm=None,
-    session_key: str = _SESSION_JTI,
+    session_key: Optional[str] = _SESSION_JTI,
 ):
     """Patch all four dependencies for elevate-ajax tests and yield the esm mock."""
     if totp_svc is None:

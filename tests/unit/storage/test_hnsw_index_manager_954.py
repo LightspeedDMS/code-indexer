@@ -15,7 +15,7 @@ An unrelated RuntimeError must propagate immediately without retries.
 import json
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest

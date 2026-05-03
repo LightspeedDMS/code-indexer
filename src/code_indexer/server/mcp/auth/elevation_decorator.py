@@ -146,7 +146,7 @@ def require_mcp_elevation(required_scope: str = "full") -> Callable:
             # All gates passed — invoke the real handler
             return handler(args, user, *extra, **kwargs)
 
-        wrapper.__mcp_requires_session_key__ = True
+        wrapper.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
         return wrapper
 
     return decorator
