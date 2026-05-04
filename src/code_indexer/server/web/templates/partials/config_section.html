@@ -718,6 +718,62 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- X-Ray Search Settings Section (Story #977) -->
+<details class="config-section" id="section-xray">
+    <summary>
+        <h2>X-Ray Search</h2>
+    </summary>
+    <p class="section-description">
+        Configures the X-Ray precision AST-aware code search engine. The timeout controls
+        the per-job wall-clock cap for each X-Ray search invocation. The worker threads
+        setting controls the ThreadPoolExecutor size used for Phase 2 AST evaluation.
+        Changes take effect immediately for new jobs; no server restart is required.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-xray">
+            <table class="config-table">
+                <tr>
+                    <td class="config-label">Timeout (seconds)</td>
+                    <td class="config-value">{{ config.xray.xray_timeout_seconds }}</td>
+                    <td class="config-description">Per-job wall-clock timeout (default: 120, range 10-600)</td>
+                </tr>
+                <tr>
+                    <td class="config-label">Worker Threads</td>
+                    <td class="config-value">{{ config.xray.xray_worker_threads }}</td>
+                    <td class="config-description">AST evaluation thread pool size (default: 2, range 1-8)</td>
+                </tr>
+            </table>
+            <div class="form-actions">
+                <button class="outline small" onclick="toggleEditMode('xray')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-xray" method="post" action="/admin/config/xray" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.xray %}
+            <div class="validation-error">{{ validation_errors.xray }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label>
+                    Timeout (seconds)
+                    <input type="number" id="xray-timeout-seconds" name="xray_timeout_seconds" value="{{ config.xray.xray_timeout_seconds }}" min="10" max="600">
+                    <small>Range: 10-600 seconds (default: 120). Per-job wall-clock cap for X-Ray searches.</small>
+                </label>
+                <label>
+                    Worker Threads
+                    <input type="number" id="xray-worker-threads" name="xray_worker_threads" value="{{ config.xray.xray_worker_threads }}" min="1" max="8">
+                    <small>Range: 1-8 threads (default: 2). Size of the ThreadPoolExecutor for AST evaluation.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('xray')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->

@@ -14,7 +14,7 @@
 - [feedback_no_sleep_in_production.md](feedback_no_sleep_in_production.md) - NEVER add time.sleep() for UI visibility — fix display logic
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - Ask confirmation before ANY changes to progress reporting
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
-- [feedback_use_codex_for_reviews.md](feedback_use_codex_for_reviews.md) - Always use codex-code-reviewer (not code-reviewer) for all code reviews in this project
+- [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Use code-reviewer (opus, NOT codex-code-reviewer) for all code reviews in this project — Codex credits running low
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field in either; Voyage prepends instruction to query, Cohere concatenates
 - [project_reranker_injection_point.md](project_reranker_injection_point.md) - Reranker fires AFTER dual-provider RRF coalescing, BEFORE truncation/caching — mandatory pipeline order for Story #653
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access — CIDX client NOT yet built (needs CowStorageDaemonClient story)
@@ -23,3 +23,4 @@
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex pressure-test flags over-engineering, SIMPLIFY immediately — do not commission architect counter-reviews that rubber-stamp complexity
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - Targeted improvement requests (pagination, one endpoint) must NOT trigger UI rewrites, column/button deletions, or styling changes — preserve template exactly and patch only requested behavior
 - [feedback_storage_backend_dual.md](feedback_storage_backend_dual.md) - NEVER say "SQLite" as if PostgreSQL doesn't exist — CIDX runs on BOTH; cover both backends or use agnostic language
+- [feedback_convert_tool_docs_destructive.md](feedback_convert_tool_docs_destructive.md) - NEVER run tools/convert_tool_docs.py — it regenerates 165 tool_docs/*.md files WITHOUT inputSchema, silently breaking the entire MCP tool surface (TOOL_REGISTRY collapses to ~1 tool)

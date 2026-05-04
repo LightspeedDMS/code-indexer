@@ -155,6 +155,73 @@ Zero tolerance — never leave GitHub Actions failed. Fix in the same session. S
 
 Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, deduplication of indexing. If refactoring removes any of these, STOP. See memory: `project_query_is_everything.md`.
 
+### X-Ray Module Lazy-Load Invariant (Epic #968 / Story #969)
+
+`src/code_indexer/xray/` is the AST-aware code search engine wrapping tree-sitter. The lazy-load discipline mirrors the existing FTS/Tantivy pattern: `tree_sitter` and `tree_sitter_languages` are imported ONLY inside `AstSearchEngine.__init__()`. Importing `code_indexer.xray.ast_engine` at module level does NOT trigger the heavy tree-sitter import. CLI startup is unaffected — `cidx --help` measured at ~0.57s with X-Ray code present (budget 2.0s).
+
+**CI gate**: `tests/unit/xray/test_lazy_load.py` runs a SUBPROCESS test asserting `tree_sitter` and `tree_sitter_languages` are absent from `sys.modules` after `from code_indexer.cli import cli`. The subprocess form is required because pytest's session may pre-load tree-sitter via other tests, polluting the in-process check. This test is BLOCKING — if it fails, X-Ray has regressed CLI startup.
+
+**Architecture invariants**:
+- All raw `tree_sitter.Node` objects are wrapped in `XRayNode` before exposure to evaluator code; raw nodes NEVER reach user-supplied evaluator scripts (`xray_node.py` uses `__slots__ = ("_node",)` and normal `self._node = node` assignment — DO NOT reintroduce `object.__setattr__` workaround, which breaks mypy tracking).
+- `AstSearchEngine.supported_languages` and `extension_map` are INSTANCE-level dynamic registries (`self._supported_languages`, `self._extension_map`) — they conditionally include `terraform` / `.tf` when `tree_sitter_hcl` is importable at engine construction time.
+- 10 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css. Terraform is the optional 11th when HCL grammar is present.
+
+**Dependency**: `tree-sitter-languages==1.10.2` (pinned for grammar version stability). Optional install via `pip install code-indexer[xray]` (story #971 wires the extras in `pyproject.toml`).
+
+**Files**: `src/code_indexer/xray/{ast_engine,xray_node,languages,errors}.py`. Tests: `tests/unit/xray/` (10 test files, 3182+ tests, >=95% coverage per module).
+
+### X-Ray Sandbox Security Boundary (Epic #968 / Story #970)
+
+`src/code_indexer/xray/sandbox.py` — `PythonEvaluatorSandbox` securely executes caller-supplied Python evaluator code against AST nodes.
+
+**Three defense layers**:
+1. AST whitelist validation (Layer 1) — `ast.parse()` + walk; any node not in `ALLOWED_NODES` is rejected before subprocess spawn.
+2. Stripped exec() environment (Layer 2) — `STRIPPED_BUILTINS` removed from globals dict; only `SAFE_BUILTIN_NAMES` are available.
+3. `multiprocessing.Process` isolation (Layer 3) — SIGTERM at 5.0s, SIGKILL at +1.0s; side effects confined to child.
+
+**ALLOWED_NODES**: `Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, List, Tuple, Dict, Return, Expr, Module, Load` + abstract bases `boolop, cmpop, unaryop, expr_context` (match concrete subclasses via isinstance).
+
+**STRIPPED_BUILTINS**: `getattr, setattr, delattr, hasattr, __import__, eval, exec, open, compile`.
+
+**SAFE_BUILTIN_NAMES** (17): `len, str, int, bool, list, tuple, dict, min, max, sum, any, all, range, enumerate, zip, sorted, reversed`.
+
+**Timeout policy**: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), `SIGKILL_GRACE_SECONDS=1.0` (SIGKILL if still alive). Pipe data is read BEFORE `is_alive()` check — under heavy concurrency `waitpid()` races can cause `is_alive()=True` after the child has sent valid data; pipe data takes precedence.
+
+**Why NOT signal.alarm**: FastAPI request handlers run in worker threads; `signal.alarm()` only works in the main thread.
+
+**Four failure modes** (EvalResult.failure): `"validation_failed"`, `"evaluator_timeout"`, `"evaluator_subprocess_died"` (detail: `exitcode=N` or `no_pipe_data`), `"evaluator_returned_non_bool"` (detail: type name).
+
+**Dunder access is BLOCKED at validation time** (Story #970 security patch — confirmed exploit closed):
+- `DUNDER_ATTR_BLOCKLIST` (frozenset, 24 names) covers: `__class__`, `__bases__`, `__base__`, `__mro__`, `__subclasses__`, `__init__`, `__init_subclass__`, `__new__`, `__globals__`, `__builtins__`, `__import__`, `__dict__`, `__getattribute__`, `__setattr__`, `__delattr__`, `__reduce__`, `__reduce_ex__`, `__call__`, `__code__`, `__closure__`, `__func__`, `__module__`, `__name__`, `__qualname__`.
+- Any `ast.Attribute` node whose `.attr` is in the blocklist → `validation_failed`.
+- Any `ast.Subscript` node whose slice is a string `Constant` starting with `__` → `validation_failed`.
+- Verified by canary tests in `tests/unit/xray/test_sandbox_dunder_escapes.py` that confirm `validation_failed` + no-subprocess + no-side-effect for each escape pattern including the confirmed exploit: `node.__class__.__init__.__globals__['__builtins__']['open']('/tmp/...','w')`.
+- `type()` is intentionally absent from `SAFE_BUILTIN_NAMES` — `type(x)` raises `NameError` in the subprocess (Layer 2).
+
+**Files**: `src/code_indexer/xray/sandbox.py`. Tests: `tests/unit/xray/test_sandbox*.py` (8 files, 112+ tests).
+
+### X-Ray Search Engine and MCP Tool (Epic #968 / Story #972)
+
+`src/code_indexer/xray/search_engine.py` — `XRaySearchEngine` is the two-phase orchestrator:
+
+- Phase 1 (driver): regex walk over `repo_path` via `_run_phase1_driver`. Applies `driver_regex` to file content or relative path (`search_target`). Honors `include_patterns`/`exclude_patterns` (fnmatch). Returns a sorted list of candidate `Path` objects.
+- Phase 2 (evaluator): for each candidate file, `AstSearchEngine.parse()` produces a root `XRayNode`, then `PythonEvaluatorSandbox.run()` evaluates `evaluator_code` against it. A `True` result adds a match entry; failure modes (UnsupportedLanguage, EvaluatorTimeout, EvaluatorCrash, NonBoolReturn) append to `evaluation_errors` without failing the job.
+- `max_files` cap: when provided, only the first N candidates are evaluated; result includes `partial=True` and `max_files_reached=True`.
+- `progress_callback(percent, phase_name, phase_detail)` is called at 0%, 50%, and 100%.
+
+`src/code_indexer/server/mcp/handlers/xray.py` — `handle_xray_search` is a thin MCP handler shim:
+
+- Auth check: `user.has_permission("query_repos")` or returns `auth_required`.
+- Parameter validation: `search_target` in ("content", "filename"), `max_files >= 1`, `timeout_seconds` in [10, 600].
+- Repo resolution: delegates to `_resolve_golden_repo_path` (versioned snapshot path).
+- Pre-flight: `XRaySearchEngine()` instantiation (raises `XRayExtrasNotInstalled` if tree-sitter absent) then `sandbox.validate(evaluator_code)` (fast rejection without subprocess).
+- Job submission: `background_job_manager.submit_job(operation_type="xray_search", func=job_fn, ...)` — job function closes over all validated params.
+- Returns `{"job_id": "<uuid>"}` immediately. Clients poll `GET /api/jobs/{job_id}`.
+
+Tool doc: `src/code_indexer/server/mcp/tool_docs/search/xray.md`. Registered in `HANDLER_REGISTRY` via `_legacy.py` (`_xray_register`). Story #978 will add ThreadPoolExecutor parallelism and job-level timeout to `XRaySearchEngine.run()`.
+
+**Files**: `src/code_indexer/xray/search_engine.py`, `src/code_indexer/server/mcp/handlers/xray.py`. Tests: `tests/unit/xray/test_search_engine.py` (20 tests, 100% coverage), `tests/unit/server/mcp/test_xray_search_handler.py` (15 tests).
+
 ### TOTP Step-Up Elevation (Epic #922 / Story #923)
 
 **ElevatedSessionManager** (`src/code_indexer/server/auth/elevated_session_manager.py`):

@@ -113,6 +113,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.search",
                 "code_indexer.server.mcp.handlers.depmap",
                 "code_indexer.server.mcp.handlers.memory",
+                "code_indexer.server.mcp.handlers.xray",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -383,6 +384,10 @@ from code_indexer.server.mcp.handlers.cicd import (  # noqa: F401, E402
 
 from code_indexer.server.mcp.handlers.depmap import (  # noqa: F401, E402
     depmap_find_consumers_handler,
+)
+
+from code_indexer.server.mcp.handlers.xray import (  # noqa: F401, E402
+    handle_xray_search,
 )
 
 # Re-export infrastructure symbols patched by tests via handlers.X

@@ -186,6 +186,9 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "create_memory",
         "edit_memory",
         "delete_memory",
+        # Epic #968: X-Ray AST-aware search handlers
+        "xray_search",
+        "xray_explore",
     }
 )
 

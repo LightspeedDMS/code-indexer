@@ -576,6 +576,11 @@ class ConfigService:
             },
             # Story #967 - Activated repository reaper configuration
             "activated_reaper": _activated_reaper_settings(config),
+            # Story #977 - X-Ray precision AST-aware code search configuration
+            "xray": {
+                "xray_timeout_seconds": config.xray_config.xray_timeout_seconds,  # type: ignore[union-attr]
+                "xray_worker_threads": config.xray_config.xray_worker_threads,  # type: ignore[union-attr]
+            },
             # Story #223 - AC4: Indexing configuration
             "indexing": {
                 "indexable_extensions": (
@@ -753,6 +758,9 @@ class ConfigService:
         # Story #967 - Activated repository reaper configuration
         elif category == "activated_reaper":
             self._update_activated_reaper_setting(config, key, value)
+        # Story #977 - X-Ray precision AST-aware code search configuration
+        elif category == "xray":
+            self._update_xray_setting(config, key, value)
         # Story #223 - AC4: Indexing configuration
         elif category == "indexing":
             self._update_indexing_setting(key, value)
@@ -1733,6 +1741,17 @@ class ConfigService:
             reaper.cadence_hours = int(value)
         else:
             raise ValueError(f"Unknown activated_reaper setting: {key}")
+
+    def _update_xray_setting(self, config: ServerConfig, key: str, value: Any) -> None:
+        """Update an X-Ray setting (Story #977)."""
+        xray = config.xray_config
+        assert xray is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "xray_timeout_seconds":
+            xray.xray_timeout_seconds = int(value)
+        elif key == "xray_worker_threads":
+            xray.xray_worker_threads = int(value)
+        else:
+            raise ValueError(f"Unknown xray setting: {key}")
 
     def save_all_settings(self, settings: Dict[str, Dict[str, Any]]) -> None:
         """

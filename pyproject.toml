@@ -87,6 +87,10 @@ cluster = [
     "psycopg-pool>=3.1.0",
 ]
 cohere = ["cohere>=5.0.0"]
+xray = [
+    "tree-sitter>=0.21,<0.22",
+    "tree-sitter-languages==1.10.2",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -188,6 +192,7 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = "pydantic._internal.*"
 ignore_errors = true
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
