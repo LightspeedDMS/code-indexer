@@ -1,0 +1,5 @@
+password = "supersecret_real"
+api_key = "AKIAIOSFODNN7EXAMPLE"
+test_password = "for_testing_only"
+empty_password = ""
+password_placeholder = "<your_password_here>"

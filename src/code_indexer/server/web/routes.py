@@ -187,6 +187,8 @@ _VALID_CONFIG_SECTIONS = (
     "data_retention",
     # Story #967 - Activated repository reaper configuration
     "activated_reaper",
+    # Story #977 - X-Ray precision AST-aware code search configuration
+    "xray",
     # Story #652 - Reranking configuration
     "rerank",
     # Story #885 - Lifecycle analysis timeouts
@@ -5622,6 +5624,8 @@ def _get_current_config() -> dict:
         DataRetentionConfig,
         # Story #967 - Activated repository reaper configuration
         ActivatedReaperConfig,
+        # Story #977 - X-Ray configuration
+        XRayConfig,
         # Story #652 - Reranking configuration
         RerankConfig,
         # Story #885 - Lifecycle analysis configuration
@@ -5831,6 +5835,8 @@ def _get_current_config() -> dict:
         "activated_reaper": settings.get(
             "activated_reaper", asdict(ActivatedReaperConfig())
         ),
+        # Story #977: X-Ray precision AST-aware code search configuration
+        "xray": settings.get("xray", asdict(XRayConfig())),
         # Story #652: Reranking configuration
         "rerank": settings.get("rerank", asdict(RerankConfig())),
         # Story #885: Lifecycle analysis configuration
@@ -6579,6 +6585,26 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Cadence Hours must be between 1 and 168"
             except (ValueError, TypeError):
                 return "Cadence Hours must be a valid number"
+
+    elif section == "xray":
+        # Story #977: X-Ray configuration validation
+        xray_timeout = data.get("xray_timeout_seconds")
+        if xray_timeout is not None:
+            try:
+                val_int = int(xray_timeout)
+                if val_int < 10 or val_int > 600:
+                    return "X-Ray Timeout must be between 10 and 600 seconds"
+            except (ValueError, TypeError):
+                return "X-Ray Timeout must be a valid number"
+
+        xray_workers = data.get("xray_worker_threads")
+        if xray_workers is not None:
+            try:
+                val_int = int(xray_workers)
+                if val_int < 1 or val_int > 8:
+                    return "X-Ray Worker Threads must be between 1 and 8"
+            except (ValueError, TypeError):
+                return "X-Ray Worker Threads must be a valid number"
 
     elif section == "omni_search":
         # Story #28: Omni-search configuration
