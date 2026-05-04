@@ -433,3 +433,186 @@ class TestXraySearchHandlerTruncation:
 
         mock_truncate.assert_called_once_with(engine_result)
         assert job_result == truncated_result
+
+
+# ---------------------------------------------------------------------------
+# Tests: await_seconds parameter (Issue #17)
+# ---------------------------------------------------------------------------
+
+
+class TestXraySearchHandlerAwaitSeconds:
+    """await_seconds=0 returns {job_id}; N>0 polls and returns inline result if done."""
+
+    def test_await_seconds_zero_returns_job_id(self):
+        """await_seconds=0 (default) returns {job_id} immediately."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-await-zero"
+        params = {**VALID_PARAMS, "await_seconds": 0}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "job_id" in data
+        assert "matches" not in data
+
+    def test_await_seconds_omitted_returns_job_id(self):
+        """await_seconds absent (default 0) returns {job_id} immediately."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-no-await"
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(VALID_PARAMS.copy(), user)
+
+        data = _parse_response(result)
+        assert "job_id" in data
+        assert "matches" not in data
+
+    def test_await_seconds_positive_returns_inline_result_when_job_completes(self):
+        """await_seconds=5 returns inline {matches, ...} when job completes within window."""
+        user = _make_user(UserRole.NORMAL_USER)
+        inline_result = {
+            "matches": [{"file_path": "a.py"}],
+            "evaluation_errors": [],
+            "files_processed": 1,
+            "files_total": 1,
+            "elapsed_seconds": 0.1,
+            "truncated": False,
+            "cache_handle": None,
+        }
+
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-fast"
+        mock_bjm.get_job_status.return_value = {
+            "status": "completed",
+            "result": inline_result,
+        }
+
+        params = {**VALID_PARAMS, "await_seconds": 5}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "matches" in data
+        assert "job_id" not in data
+
+    def test_await_seconds_returns_job_id_when_job_does_not_complete_in_window(self):
+        """await_seconds=1 returns {job_id} when job stays pending beyond window."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-slow"
+        mock_bjm.get_job_status.return_value = {
+            "status": "running",
+            "result": None,
+        }
+
+        params = {**VALID_PARAMS, "await_seconds": 1}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch("time.sleep"),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "job_id" in data
+
+    def test_await_seconds_negative_rejected(self):
+        """await_seconds=-1 returns await_seconds_invalid error."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": -1}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid"
+
+    def test_await_seconds_31_rejected(self):
+        """await_seconds=31 exceeds cap of 30, returns await_seconds_invalid."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": 31}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid"
+
+    def test_await_seconds_30_accepted(self):
+        """await_seconds=30 is the maximum valid value."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-max-await"
+        mock_bjm.get_job_status.return_value = {
+            "status": "running",
+            "result": None,
+        }
+        params = {**VALID_PARAMS, "await_seconds": 30}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch("time.sleep"),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        # 30 is valid — no await_seconds_invalid error
+        assert data.get("error") != "await_seconds_invalid"

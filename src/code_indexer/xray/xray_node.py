@@ -115,6 +115,47 @@ class XRayNode:
             current = current.parent
         return False
 
+    def descendants_of_type(self, name: str) -> list["XRayNode"]:
+        """Return all descendants whose type matches *name*, in DFS pre-order.
+
+        Uses an explicit stack (not recursion) to keep stack depth bounded for
+        deeply nested trees.  Does NOT include the node itself.
+        """
+        result: list["XRayNode"] = []
+        stack = list(reversed(self._node.children))
+        while stack:
+            current = stack.pop()
+            if current.type == name:
+                result.append(XRayNode(current))
+            stack.extend(reversed(current.children))
+        return result
+
+    def count_descendants_of_type(self, name: str) -> int:
+        """Return the count of descendants whose type matches *name*.
+
+        Faster than ``len(descendants_of_type(name))`` — uses a plain integer
+        accumulator and never materializes wrapper objects.
+        """
+        count = 0
+        stack = list(reversed(self._node.children))
+        while stack:
+            current = stack.pop()
+            if current.type == name:
+                count += 1
+            stack.extend(reversed(current.children))
+        return count
+
+    def enclosing(self, type_name: str) -> Optional["XRayNode"]:
+        """Walk up the parent chain (inclusive of self) and return the first
+        node whose type matches *type_name*.  Returns None if not found.
+        """
+        current = self._node
+        while current is not None:
+            if current.type == type_name:
+                return XRayNode(current)
+            current = current.parent
+        return None
+
     # ------------------------------------------------------------------
     # Position
     # ------------------------------------------------------------------

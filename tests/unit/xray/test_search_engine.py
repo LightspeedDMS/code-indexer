@@ -521,3 +521,78 @@ class TestXRaySearchEngineAstDebug:
         )
         assert len(result["matches"]) >= 1
         assert isinstance(result["matches"][0]["ast_debug"]["children"], list)
+
+
+class TestXRaySearchEngineMatchedNode:
+    """include_ast_debug=True adds matched_node block per match (Issue #14).
+
+    matched_node describes the specific AST node that the evaluator received
+    (deepest enclosing node at the match position), distinct from ast_debug
+    which is always rooted at the file's parse root.
+    """
+
+    def test_matched_node_present_when_ast_debug_true(self, search_engine, tmp_path):
+        """Each match includes matched_node block when include_ast_debug=True."""
+        (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
+
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code="return True",
+            search_target="content",
+            include_ast_debug=True,
+        )
+        assert len(result["matches"]) >= 1
+        assert "matched_node" in result["matches"][0]
+
+    def test_matched_node_has_required_fields(self, search_engine, tmp_path):
+        """matched_node block has type, start_byte, end_byte, start_point, end_point."""
+        (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
+
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code="return True",
+            search_target="content",
+            include_ast_debug=True,
+        )
+        assert len(result["matches"]) >= 1
+        mn = result["matches"][0]["matched_node"]
+        assert "type" in mn
+        assert "start_byte" in mn
+        assert "end_byte" in mn
+        assert "start_point" in mn
+        assert "end_point" in mn
+
+    def test_matched_node_field_types(self, search_engine, tmp_path):
+        """matched_node fields have the correct types."""
+        (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
+
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code="return True",
+            search_target="content",
+            include_ast_debug=True,
+        )
+        assert len(result["matches"]) >= 1
+        mn = result["matches"][0]["matched_node"]
+        assert isinstance(mn["type"], str)
+        assert isinstance(mn["start_byte"], int)
+        assert isinstance(mn["end_byte"], int)
+        assert isinstance(mn["start_point"], list) and len(mn["start_point"]) == 2
+        assert isinstance(mn["end_point"], list) and len(mn["end_point"]) == 2
+
+    def test_matched_node_absent_when_ast_debug_false(self, search_engine, tmp_path):
+        """matched_node is absent when include_ast_debug is False (default)."""
+        (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
+
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code="return True",
+            search_target="content",
+            include_ast_debug=False,
+        )
+        assert len(result["matches"]) >= 1
+        assert "matched_node" not in result["matches"][0]

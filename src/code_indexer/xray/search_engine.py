@@ -317,6 +317,11 @@ class XRaySearchEngine:
             result["partial"] = True
             result["max_files_reached"] = True
 
+        # Surface zero-match include_pattern warnings (fix #3).
+        phase1_warnings = getattr(self, "_last_phase1_warnings", [])
+        if phase1_warnings:
+            result["warnings"] = phase1_warnings
+
         if progress_callback:
             if timeout_hit:
                 progress_callback(
@@ -426,6 +431,14 @@ class XRaySearchEngine:
                         "evaluator_decision": True,
                     }
                     if include_ast_debug:
+                        raw_node = getattr(node, "_node", node)
+                        match_entry["matched_node"] = {
+                            "type": raw_node.type,
+                            "start_byte": raw_node.start_byte,
+                            "end_byte": raw_node.end_byte,
+                            "start_point": list(raw_node.start_point),
+                            "end_point": list(raw_node.end_point),
+                        }
                         match_entry["ast_debug"] = self._serialize_ast(
                             root, max_debug_nodes
                         )
@@ -476,6 +489,100 @@ class XRaySearchEngine:
                 }
             ]
 
+    @staticmethod
+    def _check_zero_match_patterns(
+        include_patterns: List[str],
+        all_rel_paths: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Return a warning dict for each include_pattern that matched zero files.
+
+        Args:
+            include_patterns: The caller-supplied glob patterns.  Empty list
+                means "include all" — no warnings are emitted.
+            all_rel_paths: Relative paths (from repo root) of every file that
+                existed in the repo before regex / include filtering.  These are
+                used to determine whether each pattern is capable of matching
+                anything in this repository at all.
+
+        Returns:
+            List of warning dicts (may be empty).  Each dict has keys:
+            ``type``, ``pattern``, ``hint``.
+
+        Notes:
+            ``*`` matches a single path segment (no ``/`` traversal).
+            ``**`` matches multiple path segments recursively.
+            A pattern that matches zero files receives a hint explaining the
+            difference and suggesting ``**`` as a fix.
+        """
+        if not include_patterns:
+            return []
+        warnings: List[Dict[str, Any]] = []
+        hint = (
+            "Pattern matched 0 files. fnmatch-style globs use `*` for a single "
+            "path segment; use `**/time.py` (with **) for recursive matching "
+            "across directories."
+        )
+        for pat in include_patterns:
+            if not any(fnmatch.fnmatch(rel, pat) for rel in all_rel_paths):
+                warnings.append(
+                    {
+                        "type": "zero_match_include_pattern",
+                        "pattern": pat,
+                        "hint": hint,
+                    }
+                )
+        return warnings
+
+    def _probe_zero_match_patterns_content(
+        self,
+        repo_path: Path,
+        include_patterns: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Probe each include_pattern to detect those that match zero files.
+
+        Uses ``RegexSearchService`` with a trivial ``.*`` regex so that the
+        glob semantics are identical to the main Phase 1 content search
+        (ripgrep-backed), avoiding false warnings from Python fnmatch
+        divergence (e.g. ``*/x`` has different semantics in ripgrep vs
+        Python fnmatch).
+
+        Args:
+            repo_path: Root directory of the repository.
+            include_patterns: The caller-supplied glob patterns to probe.
+
+        Returns:
+            List of zero-match warning dicts (may be empty).
+        """
+        if not include_patterns:
+            return []
+
+        hint = (
+            "Pattern matched 0 files. fnmatch-style globs use `*` for a single "
+            "path segment; use `**` for recursive matching across directories "
+            "(e.g. `**/time.py` instead of `*/time.py`)."
+        )
+        warnings: List[Dict[str, Any]] = []
+        probe_service = RegexSearchService(repo_path)
+
+        for pat in include_patterns:
+            probe_result = _run_async_in_sync(
+                probe_service.search(
+                    pattern=r".*",
+                    include_patterns=[pat],
+                    max_results=1,
+                )
+            )
+            if not probe_result.matches:
+                warnings.append(
+                    {
+                        "type": "zero_match_include_pattern",
+                        "pattern": pat,
+                        "hint": hint,
+                    }
+                )
+
+        return warnings
+
     def _run_phase1_driver(
         self,
         repo_path: Path,
@@ -505,8 +612,9 @@ class XRaySearchEngine:
         Returns:
             Ordered, deduplicated list of matching Path objects.
         """
-        # Reset per-call side-channel consumed by issue #983.
+        # Reset per-call side-channels consumed by issue #983 and fix #3.
         self._last_phase1_positions: Dict[Path, List[Tuple[int, str]]] = {}
+        self._last_phase1_warnings: List[Dict[str, Any]] = []
 
         if search_target == "filename":
             return self._run_phase1_filename(
@@ -524,15 +632,29 @@ class XRaySearchEngine:
         include_patterns: List[str],
         exclude_patterns: List[str],
     ) -> List[Path]:
-        """Inline filename-path walker (RegexSearchService has no filename mode)."""
+        """Inline filename-path walker (RegexSearchService has no filename mode).
+
+        Args:
+            repo_path: Root directory to walk.
+            driver_regex: Regular expression applied to relative file paths.
+            include_patterns: Glob include filters — ``*`` matches one path
+                segment, ``**`` matches multiple segments recursively.
+                Warnings are emitted for any pattern that matches zero files.
+            exclude_patterns: Glob exclude filters (empty = exclude none).
+
+        Returns:
+            Ordered, deduplicated list of matching Path objects.
+        """
         pattern = re.compile(driver_regex)
         candidates: List[Path] = []
+        all_rel_paths: List[str] = []
 
         for p in sorted(repo_path.rglob("*")):
             if not p.is_file():
                 continue
 
             rel = str(p.relative_to(repo_path))
+            all_rel_paths.append(rel)
 
             if include_patterns and not any(
                 fnmatch.fnmatch(rel, ip) for ip in include_patterns
@@ -547,6 +669,9 @@ class XRaySearchEngine:
             if pattern.search(rel):
                 candidates.append(p)
 
+        self._last_phase1_warnings = self._check_zero_match_patterns(
+            include_patterns, all_rel_paths
+        )
         return candidates
 
     def _run_phase1_content(
@@ -556,7 +681,20 @@ class XRaySearchEngine:
         include_patterns: List[str],
         exclude_patterns: List[str],
     ) -> List[Path]:
-        """Content driver via RegexSearchService (ripgrep-backed, async-bridged)."""
+        """Content driver via RegexSearchService (ripgrep-backed, async-bridged).
+
+        Args:
+            repo_path: Root directory to search.
+            driver_regex: Regular expression applied to file content.
+            include_patterns: Glob include filters — ``*`` matches one path
+                segment, ``**`` matches multiple segments recursively.
+                Warnings are emitted for any pattern that matches zero files
+                in the repository, regardless of whether the regex matched.
+            exclude_patterns: Glob exclude filters (empty = exclude none).
+
+        Returns:
+            Ordered, deduplicated list of matching Path objects.
+        """
         service = RegexSearchService(repo_path)
         search_result = _run_async_in_sync(
             service.search(
@@ -578,6 +716,13 @@ class XRaySearchEngine:
                 self._last_phase1_positions[abs_path] = []
             self._last_phase1_positions[abs_path].append(
                 (m.line_number, m.line_content)
+            )
+
+        # Probe each include_pattern to detect zero-match patterns.
+        # Uses ripgrep-backed probe so glob semantics match the main search.
+        if include_patterns:
+            self._last_phase1_warnings = self._probe_zero_match_patterns_content(
+                repo_path, include_patterns
             )
 
         return candidates

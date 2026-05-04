@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import difflib
 import multiprocessing
 import textwrap
 from dataclasses import dataclass, field
@@ -118,6 +119,87 @@ SAFE_BUILTIN_NAMES: frozenset[str] = frozenset(
 
 
 # ---------------------------------------------------------------------------
+# Validation hint strings (improvement A — field-feedback fix #18)
+# ---------------------------------------------------------------------------
+
+# Maps the *first* forbidden AST node type name encountered during validation
+# to a human-readable workaround hint.  Keys are exact type.__name__ strings.
+_VALIDATION_HINTS: dict[str, str] = {
+    "For": (
+        "Use a comprehension (ListComp/GeneratorExp/SetComp/DictComp) instead "
+        "of a top-level `for` statement."
+    ),
+    "While": (
+        "While loops are not allowed. Express the iteration as a comprehension "
+        "or use `count_descendants_of_type` for counting."
+    ),
+    "Lambda": (
+        "Lambdas are not allowed. Inline the boolean expression directly, "
+        "or assign with `=` to a local variable."
+    ),
+    "FunctionDef": (
+        "Function and class definitions are not allowed. Evaluator code must be "
+        "a single expression or sequence of statements that produces a return value."
+    ),
+    "AsyncFunctionDef": (
+        "Function and class definitions are not allowed. Evaluator code must be "
+        "a single expression or sequence of statements that produces a return value."
+    ),
+    "ClassDef": (
+        "Function and class definitions are not allowed. Evaluator code must be "
+        "a single expression or sequence of statements that produces a return value."
+    ),
+    "Import": (
+        "Imports are not allowed. "
+        "Available builtins: len, str, int, bool, list, tuple, dict, "
+        "min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr."
+    ),
+    "ImportFrom": (
+        "Imports are not allowed. "
+        "Available builtins: len, str, int, bool, list, tuple, dict, "
+        "min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr."
+    ),
+    "Global": (
+        "Global/nonlocal declarations are not allowed. Use local `=` assignments only."
+    ),
+    "Nonlocal": (
+        "Global/nonlocal declarations are not allowed. Use local `=` assignments only."
+    ),
+}
+
+# Public attributes and methods of XRayNode used by difflib for suggestions
+# (improvement B — field-feedback fix #18).
+_XRAY_NODE_PUBLIC_ATTRS: frozenset[str] = frozenset(
+    {
+        # Properties
+        "parent",
+        "children",
+        "named_children",
+        "type",
+        "text",
+        "start_byte",
+        "end_byte",
+        "start_point",
+        "end_point",
+        "child_count",
+        "named_child_count",
+        "is_named",
+        "has_error",
+        # Methods
+        "is_descendant_of",
+        "descendants_of_type",
+        "count_descendants_of_type",
+        "enclosing",
+        "child_by_field_name",
+        "children_by_field_name",
+    }
+)
+
+# Minimum similarity score (0-1) for difflib to emit a suggestion.
+_ATTR_SUGGESTION_CUTOFF: float = 0.6
+
+
+# ---------------------------------------------------------------------------
 # Subprocess worker (module-level so it is picklable for spawn context)
 # ---------------------------------------------------------------------------
 
@@ -162,6 +244,26 @@ def _run_evaluator(
         exec(wrapped, globals_dict, locals_dict)  # noqa: S102
         result = locals_dict["__evaluator__"]()
         conn.send(bool(result))
+    except AttributeError as exc:  # noqa: BLE001
+        # Augment AttributeError with difflib suggestions for XRayNode typos.
+        base_msg = str(exc)
+        # Extract the bad attribute name from messages like
+        # "'XRayNode' object has no attribute 'children_named'"
+        suggestion_suffix = ""
+        if "has no attribute" in base_msg:
+            parts = base_msg.rsplit("'", 2)
+            # parts[-2] is the bad attribute name when the string ends with "'name'"
+            bad_attr = parts[-2] if len(parts) >= 2 else ""
+            if bad_attr:
+                matches = difflib.get_close_matches(
+                    bad_attr,
+                    _XRAY_NODE_PUBLIC_ATTRS,
+                    n=3,
+                    cutoff=_ATTR_SUGGESTION_CUTOFF,
+                )
+                if matches:
+                    suggestion_suffix = f" Did you mean: {', '.join(matches)}?"
+        conn.send(f"__exception__:AttributeError:{base_msg}{suggestion_suffix}")
     except Exception as exc:  # noqa: BLE001
         conn.send(f"__exception__:{type(exc).__name__}:{exc}")
     finally:
@@ -189,8 +291,14 @@ class PythonEvaluatorSandbox:
 
     # Allowed Python AST node types (whitelist).
     # ``isinstance()`` is used for the check, so abstract base classes
-    # (ast.boolop, ast.cmpop, ast.unaryop, ast.expr_context) correctly
-    # match their concrete subclasses (Eq, And, Not, Load, etc.).
+    # (ast.boolop, ast.cmpop, ast.unaryop, ast.expr_context, ast.operator)
+    # correctly match their concrete subclasses (Eq, And, Not, Load, Add, etc.).
+    #
+    # Comprehensions are allowed; top-level ``for`` statements are NOT — use a
+    # comprehension (ListComp/GeneratorExp/SetComp/DictComp) instead of a for-loop.
+    #
+    # Local variables via ``=`` and ``+=`` are allowed; ``global`` and
+    # ``nonlocal`` declarations are NOT.
     ALLOWED_NODES: tuple[type, ...] = (
         ast.Call,
         ast.Name,
@@ -213,6 +321,23 @@ class PythonEvaluatorSandbox:
         ast.cmpop,
         ast.unaryop,
         ast.expr_context,
+        # Group A — local variable binding
+        # Assign: allows ``x = node.named_children`` then reuse ``x``
+        ast.Assign,
+        # AugAssign: allows ``count += 1`` for accumulation patterns;
+        # requires ast.operator for the operator node (Add, Sub, etc.)
+        ast.AugAssign,
+        ast.operator,  # abstract base: Add, Sub, Mult, Div, BitOr, etc.
+        # Group B — comprehensions and ternaries (highest usability impact)
+        # comprehension: the ``for x in y if z`` clause inside any comprehension
+        ast.comprehension,
+        # Comprehension expression forms — all share the same clause node
+        ast.GeneratorExp,  # (x for x in items)
+        ast.ListComp,      # [x for x in items]
+        ast.SetComp,       # {x for x in items}
+        ast.DictComp,      # {k: v for k, v in items}
+        # IfExp: ternary expression — ``a if cond else b``
+        ast.IfExp,
     )
 
     # Dunder attribute names that are blocked at AST validation time.
@@ -281,6 +406,45 @@ class PythonEvaluatorSandbox:
     )
 
     # ---------------------------------------------------------------------------
+    # Internal class helpers
+    # ---------------------------------------------------------------------------
+
+    @classmethod
+    def _allowed_node_names(cls) -> list[str]:
+        """Return a sorted list of concrete AST node type names from ALLOWED_NODES."""
+        names: list[str] = []
+        for node_type in cls.ALLOWED_NODES:
+            name = node_type.__name__
+            # Skip abstract base classes whose names are lowercase (boolop, cmpop, …)
+            if name[0].isupper():
+                names.append(name)
+        return sorted(set(names))
+
+    @classmethod
+    def _build_rejection_reason(cls, forbidden_name: str) -> str:
+        """Build a rich, actionable rejection message for a forbidden AST node type.
+
+        Includes:
+        - The forbidden node type name
+        - A workaround hint (when one is registered in _VALIDATION_HINTS)
+        - The full list of whitelisted node names
+        - A pointer to evaluator API documentation
+        """
+        parts: list[str] = [f"'{forbidden_name}' is not allowed in evaluator code."]
+
+        hint = _VALIDATION_HINTS.get(forbidden_name)
+        if hint:
+            parts.append(hint)
+
+        allowed = ", ".join(cls._allowed_node_names())
+        parts.append(f"Whitelisted nodes: {allowed}.")
+        parts.append(
+            "See evaluator API documentation for the full whitelist and usage examples."
+        )
+
+        return " ".join(parts)
+
+    # ---------------------------------------------------------------------------
     # Public API
     # ---------------------------------------------------------------------------
 
@@ -308,7 +472,7 @@ class PythonEvaluatorSandbox:
             if not isinstance(node, self.ALLOWED_NODES):
                 return ValidationResult(
                     ok=False,
-                    reason=f"{type(node).__name__} not in allowed nodes",
+                    reason=self._build_rejection_reason(type(node).__name__),
                 )
 
             # Block Attribute access to dunder names (Python sandbox escape vector).
