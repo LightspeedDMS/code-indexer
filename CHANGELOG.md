@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.3.0 — 2026-05-04
+
+### Added
+
+- **X-Ray field-feedback bundle (21 issues, 14 work items)** — comprehensive response to real-world claude.ai testing feedback on the v10.2.0 X-Ray engine.
+
+  **Sandbox whitelist expansion** (issue #7): the evaluator sandbox now accepts comprehensions (`comprehension`, `GeneratorExp`, `ListComp`, `SetComp`, `DictComp`), local variable binding (`Assign`, `AugAssign`, `operator`), and ternary expressions (`IfExp`). Top-level `for`/`while` statements remain banned (use a comprehension instead). This unlocks the canonical AST-search use case ("find functions with N elif clauses") which previously required client-side aggregation.
+
+  **New XRayNode methods**: `descendants_of_type(name) -> list[XRayNode]` (DFS pre-order, excludes self), `count_descendants_of_type(name) -> int` (fast accumulator that doesn't materialise wrapper objects), `enclosing(type_name) -> XRayNode | None` (walks up parent chain, inclusive of self — solves the "regex landed on `def` keyword instead of `function_definition`" gotcha), and `node.text` property (raw source text decoded UTF-8 with `errors='replace'` — required for string-literal pattern checks like SQL injection detection).
+
+  **xray_explore matched_node** (issue #14): every match in `xray_explore` output now includes a `matched_node` block with `type`, `start_byte`, `end_byte`, `start_point`, `end_point` — describes what the evaluator actually received, complementing the existing file-rooted `ast_debug` field.
+
+  **xray_dump_ast MCP tool** (issue #19): new synchronous tool for single-file AST exploration without requiring a `driver_regex`. Returns the file's parse tree in the same serialisation format as `xray_explore`'s `ast_debug` field. 5s timeout. Auth: `query_repos`.
+
+  **await_seconds parameter** (issue #17): `xray_search` and `xray_explore` now accept `await_seconds` (int, 0..30, default 0). When >0, the server polls job status for up to N seconds before falling through to the async `{job_id}` envelope. For fast queries (<5s), this halves the round-trip count vs the previous always-async pattern.
+
+  **cidx_fetch_cached_payload MCP tool** (issue #20): the cache fetch endpoint (`GET /api/cache/{cache_handle}`) is now exposed as a discoverable MCP tool. Truncation messages in `xray_search`/`xray_explore` now name the tool by its registered name so clients can find it.
+
+### Fixed
+
+- **Glob zero-match warnings** (issue #3): when an `include_patterns` entry matches zero files in Phase 1, the response now includes a `warnings[]` array with a `zero_match_include_pattern` entry naming the pattern and explaining the `*` vs `**` distinction. Previously `*/time.py` silently produced `files_total: 0` with no diagnostic.
+
+- **Sandbox validation error messages** (issue #18): rejection messages now include (a) the full current whitelist, (b) targeted workaround hints for common mistakes (e.g., `For` rejection now reads "Use a comprehension (ListComp/GeneratorExp/SetComp/DictComp) instead of a top-level `for` statement"), and (c) a pointer to the evaluator API documentation. Evaluator AttributeError messages now include `Did you mean: <closest valid attribute>?` suggestions via `difflib.get_close_matches`.
+
+- **Doc accuracy** (issues #1, #2, #4, #10): the `xray_search` example using `any(n.type == 'X' for n in root.named_children)` now actually works (was previously rejected by the sandbox before #21). The `line_number` and `code_snippet` fields are correctly documented as populated for `search_target='content'` (was previously claimed null pending Story #978).
+
+### Documentation
+
+- **XRayNode reference table** (issues #8, #11): every public attribute and method on `XRayNode` is now documented in a single reference table in both `xray_search.md` and `xray_explore.md`. Users no longer need to probe with `hasattr` to discover the API.
+- **Common patterns cookbook** (issue #12): 8 worked evaluator patterns covering the most common questions — filter to function bodies, exclude comments/docstrings, walk to ancestor, count structural property, string-literal pattern check, parameter count, deep nesting detection, comprehension presence.
+- **Cross-language node type table** (issue #13): a 6-language reference covering 10 construct categories (function definition, function call, class definition, if statement, else-if, for loop, try block, variable declaration, string literal, comment) so users coming from one language can apply patterns to another.
+- **evaluation_errors[] payload examples** (issue #15): one realistic payload per error_type (`EvaluatorTimeout`, `EvaluatorCrash`, `NonBoolReturn`, `UnsupportedLanguage`) plus the synchronous `validation_failed` rejection path that fires before job submission.
+
 ## v10.2.1 — 2026-05-04
 
 ### Fixed

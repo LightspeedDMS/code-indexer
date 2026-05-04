@@ -706,3 +706,187 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
             f"Engine must receive 'return True' when evaluator_code is empty string, "
             f"got: {captured_kwargs.get('evaluator_code')!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# matched_node block (Issue #14)
+# ---------------------------------------------------------------------------
+
+
+class TestXrayExploreHandlerMatchedNode:
+    """xray_explore engine is called with include_ast_debug=True which produces
+    matched_node per match entry (Issue #14).
+
+    The xray_explore handler passes include_ast_debug=True to XRaySearchEngine.run();
+    the matched_node block appears in each match because search_engine._evaluate_file
+    emits it alongside ast_debug when include_ast_debug=True.
+    """
+
+    def test_explore_job_fn_produces_matched_node_in_matches(self):
+        """The job function result includes matched_node in each match entry (Issue #14).
+
+        Verifies: (1) include_ast_debug=True is passed to engine.run, AND
+        (2) the job result propagates match entries with matched_node field.
+        """
+        user = _make_user(UserRole.NORMAL_USER)
+        captured_kwargs: Dict[str, Any] = {}
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-matched-node"
+
+        sample_match_with_matched_node = {
+            "file_path": "/repo/foo.py",
+            "line_number": 1,
+            "code_snippet": "prepareStatement()",
+            "language": "python",
+            "evaluator_decision": True,
+            "ast_debug": {"type": "module", "children": []},
+            "matched_node": {
+                "type": "comment",
+                "start_byte": 17,
+                "end_byte": 35,
+                "start_point": [0, 17],
+                "end_point": [0, 35],
+            },
+        }
+
+        engine_result = {
+            "matches": [sample_match_with_matched_node],
+            "evaluation_errors": [],
+            "files_processed": 1,
+            "files_total": 1,
+            "elapsed_seconds": 0.1,
+        }
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path/to/repo",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch(
+                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                side_effect=lambda **kw: captured_kwargs.update(kw) or engine_result,
+            ),
+        ):
+            handler = _import_handler()
+            handler(VALID_PARAMS.copy(), user)
+
+            submit_call = mock_bjm.submit_job.call_args
+            job_fn = submit_call.kwargs["func"]
+            job_result = job_fn(lambda *a: None)
+
+        # Verify include_ast_debug=True was passed so engine emits matched_node
+        assert captured_kwargs.get("include_ast_debug") is True, (
+            "xray_explore must pass include_ast_debug=True to engine"
+        )
+        # Verify job result propagates matches with matched_node
+        assert "matches" in job_result
+        assert len(job_result["matches"]) >= 1
+        first_match = job_result["matches"][0]
+        assert "matched_node" in first_match, (
+            "Each match entry must contain matched_node block (Issue #14)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: await_seconds parameter (Issue #17)
+# ---------------------------------------------------------------------------
+
+
+class TestXrayExploreHandlerAwaitSeconds:
+    """await_seconds=0 returns {job_id}; N>0 polls and returns inline result if done."""
+
+    def test_await_seconds_zero_returns_job_id(self):
+        """await_seconds=0 (default) returns {job_id} immediately."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "explore-await-zero"
+        params = {**VALID_PARAMS, "await_seconds": 0}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "job_id" in data
+        assert "matches" not in data
+
+    def test_await_seconds_positive_returns_inline_result_when_job_completes(self):
+        """await_seconds=5 returns inline {matches, ...} when explore job completes."""
+        user = _make_user(UserRole.NORMAL_USER)
+        inline_result = {
+            "matches": [{"file_path": "a.py", "ast_debug": {}}],
+            "evaluation_errors": [],
+            "files_processed": 1,
+            "files_total": 1,
+            "elapsed_seconds": 0.2,
+            "truncated": False,
+            "cache_handle": None,
+        }
+
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "explore-fast-job"
+        mock_bjm.get_job_status.return_value = {
+            "status": "completed",
+            "result": inline_result,
+        }
+        params = {**VALID_PARAMS, "await_seconds": 5}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "matches" in data
+        assert "job_id" not in data
+
+    def test_await_seconds_negative_rejected(self):
+        """await_seconds=-1 returns await_seconds_invalid error."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": -1}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid"
+
+    def test_await_seconds_31_rejected(self):
+        """await_seconds=31 exceeds cap of 30, returns await_seconds_invalid."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": 31}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid"

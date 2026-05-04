@@ -144,30 +144,53 @@ class TestWhitelistBypassAttempts:
 
     # --- ListComp ---
 
-    def test_list_comp_rejected(self):
-        _assert_rejected("[x for x in range(10)]", "ListComp")
-        _assert_no_subprocess_spawned("[x for x in range(10)]")
+    def test_list_comp_accepted(self):
+        # ListComp was added to ALLOWED_NODES (field-feedback fix #7).
+        # [x for x in items] is a canonical AST-search pattern.
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate("[x for x in range(10)]")
+        assert result.ok is True, (
+            f"ListComp should be accepted after whitelist expansion; "
+            f"got reason={result.reason!r}"
+        )
 
     # --- DictComp ---
 
-    def test_dict_comp_rejected(self):
-        code = "{x: x*2 for x in range(10)}"
-        _assert_rejected(code, "DictComp")
-        _assert_no_subprocess_spawned(code)
+    def test_dict_comp_accepted(self):
+        # DictComp was added to ALLOWED_NODES (field-feedback fix #7).
+        # Use {x: 1 for x in range(10)} — avoids BinOp (x*2 is not whitelisted).
+        sb = PythonEvaluatorSandbox()
+        code = "{x: 1 for x in range(10)}"
+        result = sb.validate(code)
+        assert result.ok is True, (
+            f"DictComp should be accepted after whitelist expansion; "
+            f"got reason={result.reason!r}"
+        )
 
     # --- SetComp ---
 
-    def test_set_comp_rejected(self):
+    def test_set_comp_accepted(self):
+        # SetComp was added to ALLOWED_NODES (field-feedback fix #7).
+        sb = PythonEvaluatorSandbox()
         code = "{x for x in range(10)}"
-        _assert_rejected(code, "SetComp")
-        _assert_no_subprocess_spawned(code)
+        result = sb.validate(code)
+        assert result.ok is True, (
+            f"SetComp should be accepted after whitelist expansion; "
+            f"got reason={result.reason!r}"
+        )
 
     # --- GeneratorExp ---
 
-    def test_generator_exp_rejected(self):
+    def test_generator_exp_accepted(self):
+        # GeneratorExp was added to ALLOWED_NODES (field-feedback fix #7).
+        # any(n.type == 'call' for n in node.named_children) is the canonical example.
+        sb = PythonEvaluatorSandbox()
         code = "return list(x for x in range(10))"
-        _assert_rejected(code, "GeneratorExp")
-        _assert_no_subprocess_spawned(code)
+        result = sb.validate(code)
+        assert result.ok is True, (
+            f"GeneratorExp should be accepted after whitelist expansion; "
+            f"got reason={result.reason!r}"
+        )
 
     # --- Yield ---
 
@@ -242,17 +265,29 @@ class TestWhitelistBypassAttempts:
 
     # --- Assign ---
 
-    def test_assign_rejected(self):
+    def test_assign_accepted(self):
+        # Assign was added to ALLOWED_NODES (field-feedback fix #7).
+        # x = node.named_children; return len(x) > 0 is a common bind-then-use pattern.
+        sb = PythonEvaluatorSandbox()
         code = "x = 5"
-        _assert_rejected(code, "Assign")
-        _assert_no_subprocess_spawned(code)
+        result = sb.validate(code)
+        assert result.ok is True, (
+            f"Assign should be accepted after whitelist expansion; "
+            f"got reason={result.reason!r}"
+        )
 
     # --- AugAssign ---
 
-    def test_aug_assign_rejected(self):
+    def test_aug_assign_accepted(self):
+        # AugAssign was added to ALLOWED_NODES (field-feedback fix #7).
+        # count += 1 inside evaluator code is a common accumulation pattern.
+        sb = PythonEvaluatorSandbox()
         code = "x += 1"
-        _assert_rejected(code, "AugAssign")
-        _assert_no_subprocess_spawned(code)
+        result = sb.validate(code)
+        assert result.ok is True, (
+            f"AugAssign should be accepted after whitelist expansion; "
+            f"got reason={result.reason!r}"
+        )
 
     # --- AnnAssign ---
 
@@ -307,10 +342,16 @@ class TestWhitelistBypassAttempts:
 
     # --- IfExp (ternary) ---
 
-    def test_if_exp_ternary_rejected(self):
+    def test_if_exp_ternary_accepted(self):
+        # IfExp was added to ALLOWED_NODES (field-feedback fix #7).
+        # result = True if node.type == 'X' else False is a useful shorthand.
+        sb = PythonEvaluatorSandbox()
         code = "return x if y else z"
-        _assert_rejected(code, "IfExp")
-        _assert_no_subprocess_spawned(code)
+        result = sb.validate(code)
+        assert result.ok is True, (
+            f"IfExp should be accepted after whitelist expansion; "
+            f"got reason={result.reason!r}"
+        )
 
     # --- Pass ---
 

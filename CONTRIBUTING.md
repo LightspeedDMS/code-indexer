@@ -80,6 +80,42 @@ pre-commit run --all-files
 pre-commit run
 ```
 
+## Developer Certificate of Origin (DCO)
+
+CIDX uses the [Developer Certificate of Origin](https://developercertificate.org/) as a lightweight contributor agreement. The DCO is a per-commit attestation that you wrote the code you are submitting, or have the right to submit it under the project's MIT license. There is no CLA to sign.
+
+### How to sign off
+
+Every commit you contribute must include a `Signed-off-by` trailer in the commit message footer:
+
+```
+Signed-off-by: Your Real Name <your.email@example.com>
+```
+
+The easiest way is to use `git commit -s` (or `--signoff`), which appends the trailer automatically using your `user.name` and `user.email` from `git config`. To make this the default for every commit:
+
+```bash
+git config --global format.signOff true     # appends -s by default for git commit
+```
+
+### What you are attesting
+
+By adding the `Signed-off-by` trailer you certify the statements in https://developercertificate.org/ — in summary:
+
+- You wrote the code (or have the right to submit it).
+- The contribution is licensed under the project's open-source license (MIT).
+- You understand the contribution is public and will be redistributed under that license.
+
+### Enforcement
+
+Pull requests without DCO sign-off on every commit will be asked to re-submit with sign-offs added. To retroactively sign existing commits on a branch, use:
+
+```bash
+git rebase --signoff origin/development
+```
+
+(replace the base branch as appropriate).
+
 ## Architecture Overview
 
 CIDX v8.0+ uses a container-free, filesystem-based architecture:

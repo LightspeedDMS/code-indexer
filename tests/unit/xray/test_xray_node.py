@@ -232,3 +232,254 @@ class TestXRayNodeRepr:
         """repr(node) is a str."""
         root = _parse_python("x = 1\n")
         assert isinstance(repr(root), str)
+
+
+class TestDescendantsOfType:
+    """XRayNode.descendants_of_type(name) returns all descendant nodes of that type."""
+
+    def test_empty_on_leaf_node(self) -> None:
+        """A leaf node (no children) returns an empty list."""
+        root = _parse_python("x = 1\n")
+
+        def find_integer(node):  # type: ignore[return]
+            if node.type == "integer":
+                return node
+            for child in node.children:
+                result = find_integer(child)
+                if result is not None:
+                    return result
+
+        leaf = find_integer(root)
+        assert leaf is not None, "Expected to find an integer node"
+        assert leaf.child_count == 0
+        assert leaf.descendants_of_type("integer") == []
+
+    def test_direct_children_only_when_no_nesting(self) -> None:
+        """Returns direct children of matching type when there is no deeper nesting."""
+        root = _parse_python("x = 1\ny = 2\n")
+        results = root.descendants_of_type("expression_statement")
+        assert len(results) == 2
+
+    def test_deep_nesting_finds_all_integers(self) -> None:
+        """DFS walk finds integers nested at any depth in a complex expression."""
+        source = "class Foo:\n    def bar(self):\n        x = [1, 2, [3, 4]]\n"
+        root = _parse_python(source)
+        integers = root.descendants_of_type("integer")
+        assert len(integers) == 4
+
+    def test_dfs_preorder_ordering(self) -> None:
+        """Nodes are returned in DFS pre-order (left-to-right)."""
+        source = "x = 1\ny = 2\n"
+        root = _parse_python(source)
+        stmts = root.descendants_of_type("expression_statement")
+        assert stmts[0].start_byte < stmts[1].start_byte
+
+    def test_type_not_present_returns_empty(self) -> None:
+        """A type that doesn't exist in the tree returns an empty list."""
+        root = _parse_python("x = 1\n")
+        assert root.descendants_of_type("nonexistent_node_type_xyz") == []
+
+    def test_does_not_include_self(self) -> None:
+        """The node itself is never included in the results."""
+        root = _parse_python("x = 1\n")
+        results = root.descendants_of_type("module")
+        assert all(r.start_byte != root.start_byte for r in results)
+
+    def test_returns_list_of_xray_nodes(self) -> None:
+        """All returned nodes are XRayNode instances."""
+        from code_indexer.xray.xray_node import XRayNode
+
+        root = _parse_python("x = 1\ny = 2\n")
+        results = root.descendants_of_type("expression_statement")
+        assert all(isinstance(r, XRayNode) for r in results)
+
+
+class TestCountDescendantsOfType:
+    """XRayNode.count_descendants_of_type(name) returns integer count."""
+
+    def test_leaf_node_count_is_zero(self) -> None:
+        """A leaf node returns 0."""
+        root = _parse_python("x = 1\n")
+
+        def find_integer(node):  # type: ignore[return]
+            if node.type == "integer":
+                return node
+            for child in node.children:
+                result = find_integer(child)
+                if result is not None:
+                    return result
+
+        leaf = find_integer(root)
+        assert leaf is not None
+        assert leaf.count_descendants_of_type("integer") == 0
+
+    def test_count_matches_len_of_descendants_of_type(self) -> None:
+        """count_descendants_of_type matches len(descendants_of_type(...))."""
+        source = "class Foo:\n    def bar(self):\n        x = [1, 2, [3, 4]]\n"
+        root = _parse_python(source)
+        assert root.count_descendants_of_type("integer") == len(
+            root.descendants_of_type("integer")
+        )
+
+    def test_count_returns_int(self) -> None:
+        """Return type is int."""
+        root = _parse_python("x = 1\n")
+        assert isinstance(root.count_descendants_of_type("expression_statement"), int)
+
+    def test_count_not_present_is_zero(self) -> None:
+        """Type that doesn't exist returns 0."""
+        root = _parse_python("x = 1\n")
+        assert root.count_descendants_of_type("nonexistent_type_xyz") == 0
+
+    def test_count_deep_nesting(self) -> None:
+        """Count finds integers at any depth."""
+        source = "class Foo:\n    def bar(self):\n        x = [1, 2, [3, 4]]\n"
+        root = _parse_python(source)
+        assert root.count_descendants_of_type("integer") == 4
+
+    def test_count_multiple_statements(self) -> None:
+        """Count works across siblings."""
+        root = _parse_python("x = 1\ny = 2\n")
+        assert root.count_descendants_of_type("expression_statement") == 2
+
+
+class TestEnclosing:
+    """XRayNode.enclosing(type_name) walks up the parent chain inclusive of self."""
+
+    def test_self_match_returns_self(self) -> None:
+        """When the node itself matches, it is returned."""
+        from code_indexer.xray.xray_node import XRayNode
+
+        root = _parse_python("x = 1\n")
+        result = root.enclosing("module")
+        assert isinstance(result, XRayNode)
+        assert result.type == "module"
+        assert result.start_byte == root.start_byte
+
+    def test_one_level_walk_to_root(self) -> None:
+        """A direct child's enclosing('module') returns the root module."""
+        root = _parse_python("x = 1\n")
+        child = root.named_children[0]
+        result = child.enclosing("module")
+        assert result is not None
+        assert result.type == "module"
+
+    def test_not_found_returns_none(self) -> None:
+        """Returns None when no ancestor (including self) matches."""
+        root = _parse_python("x = 1\n")
+        result = root.enclosing("nonexistent_type_xyz")
+        assert result is None
+
+    def test_classic_def_keyword_to_function_definition(self) -> None:
+        """The classic case: def keyword leaf -> enclosing function_definition."""
+        root = _parse_python("def foo(): pass\n")
+
+        def find_def_keyword(node):  # type: ignore[return]
+            if node.type == "def":
+                return node
+            for child in node.children:
+                result = find_def_keyword(child)
+                if result is not None:
+                    return result
+
+        def_kw = find_def_keyword(root)
+        assert def_kw is not None, "Expected to find a 'def' keyword node"
+        result = def_kw.enclosing("function_definition")
+        assert result is not None
+        assert result.type == "function_definition"
+
+    def test_enclosing_returns_xray_node(self) -> None:
+        """Return value is always an XRayNode (not raw tree_sitter.Node)."""
+        from code_indexer.xray.xray_node import XRayNode
+
+        root = _parse_python("def foo(): pass\n")
+        child = root.named_children[0]
+        result = child.enclosing("module")
+        assert isinstance(result, XRayNode)
+
+    def test_enclosing_intermediate_ancestor(self) -> None:
+        """Can find an ancestor more than one hop away."""
+        source = "def foo():\n    x = 1\n"
+        root = _parse_python(source)
+
+        def find_integer(node):  # type: ignore[return]
+            if node.type == "integer":
+                return node
+            for child in node.children:
+                result = find_integer(child)
+                if result is not None:
+                    return result
+
+        integer_node = find_integer(root)
+        assert integer_node is not None
+        result = integer_node.enclosing("function_definition")
+        assert result is not None
+        assert result.type == "function_definition"
+
+
+class TestNewAPIsInSandbox:
+    """Verify new XRayNode APIs are accessible from sandbox evaluator code."""
+
+    def test_descendants_of_type_in_sandbox(self) -> None:
+        """descendants_of_type works in a real sandboxed evaluator."""
+        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+        from code_indexer.xray.ast_engine import AstSearchEngine
+
+        engine = AstSearchEngine()
+        source = b"x = 1\ny = 2\n"
+        root = engine.parse(source, "python")
+
+        sb = PythonEvaluatorSandbox()
+        result = sb.run(
+            "return len(node.descendants_of_type('expression_statement')) == 2",
+            node=root,
+            root=root,
+            source=source.decode(),
+            lang="python",
+            file_path="/test.py",
+        )
+        assert result.failure is None, f"Sandbox failed: {result.failure} {result.detail}"
+        assert result.value is True
+
+    def test_count_descendants_of_type_in_sandbox(self) -> None:
+        """count_descendants_of_type works in a real sandboxed evaluator."""
+        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+        from code_indexer.xray.ast_engine import AstSearchEngine
+
+        engine = AstSearchEngine()
+        source = b"x = 1\ny = 2\n"
+        root = engine.parse(source, "python")
+
+        sb = PythonEvaluatorSandbox()
+        result = sb.run(
+            "return node.count_descendants_of_type('expression_statement') == 2",
+            node=root,
+            root=root,
+            source=source.decode(),
+            lang="python",
+            file_path="/test.py",
+        )
+        assert result.failure is None, f"Sandbox failed: {result.failure} {result.detail}"
+        assert result.value is True
+
+    def test_enclosing_in_sandbox(self) -> None:
+        """enclosing works in a real sandboxed evaluator."""
+        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+        from code_indexer.xray.ast_engine import AstSearchEngine
+
+        engine = AstSearchEngine()
+        source = b"def foo(): pass\n"
+        root = engine.parse(source, "python")
+        node = root.named_children[0]
+
+        sb = PythonEvaluatorSandbox()
+        result = sb.run(
+            "return node.enclosing('module') is not None",
+            node=node,
+            root=root,
+            source=source.decode(),
+            lang="python",
+            file_path="/test.py",
+        )
+        assert result.failure is None, f"Sandbox failed: {result.failure} {result.detail}"
+        assert result.value is True

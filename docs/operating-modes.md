@@ -324,7 +324,7 @@ See [Server Deployment Guide](server-deployment.md) for complete instructions.
 **Quick Overview**:
 ```bash
 # 1. Install on server
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
 
 # 2. Configure environment
 export VOYAGE_API_KEY="your-key"
