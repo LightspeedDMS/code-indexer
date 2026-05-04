@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.3.2 — 2026-05-04
+
+### Changed (BREAKING for evaluator code)
+
+- **X-Ray evaluator contract: `node` is now ALWAYS the file root** — corrects the design mistake from v10.3.0 (the "Bug #983 fix" wrongly passed the smallest enclosing match node). Both content-mode and filename-mode evaluators now receive `node = root`. Phase 1 regex match position is exposed as THREE NEW evaluator globals: `match_byte_offset` (int|None), `match_line_number` (int|None), `match_line_content` (str|None) — all `None` in filename mode. **MIGRATION**: evaluators that walked UP via `node.enclosing(...)` should be rewritten to walk DOWN via `node.descendants_of_type(...)` and (if positional precision matters) filter via `match_byte_offset`. The `root` global is preserved as an alias for `node` for explicit code. Field-test feedback: previous contract forced inverting every predicate from "this match is leaky" to "block contains a leaky thing"; the corrected contract restores the natural top-down walking pattern.
+
+### Added
+
+- **`await_seconds` accepts FLOAT values** — for sub-second sync mode (e.g., `await_seconds=0.5` = 500ms wait). Single parameter, expanded type — backward compatible (integer values still work). Previously int-only.
+- **7 new cookbook patterns** in xray_search.md tool docs — bringing the total from 8 to 15: functions with N+ branches, returns inside ifs, calls without error handling, TODO/FIXME comments, public functions missing return-type annotations (Python), bare except clauses, classes with no docstring. All examples rewritten to use the v10.3.2 node=root contract.
+
+### Changed
+
+- **`await_seconds` ceiling lowered from 30s to 10s** — bounds threadpool occupancy. FastAPI sync handlers run in a finite thread pool (default ~40 threads); `await_seconds=30` at modest concurrency could starve other endpoints. For longer waits, use the async `{job_id}` path. Operators who need a different cap can adjust the constant in `handlers/xray.py` or tune uvicorn `--limit-concurrency`.
+
+### Documentation
+
+- Comprehensive evaluator-contract documentation update across `xray_search.md`, `xray_explore.md`, `docs/xray-architecture.md`, and `CLAUDE.md`. New "Globals exposed to your evaluator" subsection documents all 8 globals (was 5). XRayNode reference table clarified to apply to any node reachable from `node`. inputSchema for `await_seconds` updated: `type: number`, `maximum: 10.0`.
+
 ## v10.3.1 — 2026-05-04
 
 ### Documentation
