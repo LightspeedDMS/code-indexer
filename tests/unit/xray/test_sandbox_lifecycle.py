@@ -167,6 +167,7 @@ def _run_evaluator_sends_dict(
     lang: str,
     file_path: str,
     conn: Any,
+    *args: Any,
 ) -> None:
     """Replacement for _run_evaluator that sends a dict instead of a bool."""
     try:
@@ -219,6 +220,7 @@ def _run_evaluator_exits(exit_code: int):
         lang: str,
         file_path: str,
         conn: Any,
+        *args: Any,
     ) -> None:
         conn.close()
         os._exit(exit_code)  # noqa: SLF001
@@ -345,6 +347,7 @@ def _run_evaluator_exits_no_data_nonzero(
     lang: Any,
     file_path: Any,
     conn: Any,
+    *args: Any,
 ) -> None:
     """Replacement: close pipe without sending, exit with code 2."""
     conn.close()
@@ -394,6 +397,7 @@ def _run_evaluator_ignores_sigterm(
     lang: Any,
     file_path: Any,
     conn: Any,
+    *args: Any,
 ) -> None:
     """Replacement: install SIG_IGN for SIGTERM and block forever.
 

@@ -14,7 +14,7 @@ inputSchema:
       description: 'Regular expression applied in Phase 1 to file content or file paths to identify candidate files. Phase 1 match collection is capped at 100,000 regex hits across the repository.'
     evaluator_code:
       type: string
-      description: 'Python expression evaluated in a sandboxed subprocess against each AST match position. Must return a bool. For search_target=content, node is the deepest AST node enclosing the regex match position; for search_target=filename, node equals root. Available names: node, root, source, lang, file_path.'
+      description: 'Python expression evaluated in a sandboxed subprocess against each AST match position. Must return a bool. As of v10.3.2 the evaluator always receives node=root (the file parse tree) in BOTH content and filename modes — walk DOWN via node.descendants_of_type(...) to find specific constructs. Phase 1 regex match position is exposed separately via match_byte_offset / match_line_number / match_line_content (None in filename mode). Available names: node, root, source, lang, file_path, match_byte_offset, match_line_number, match_line_content.'
     search_target:
       type: string
       enum:
@@ -44,10 +44,10 @@ inputSchema:
       description: 'Maximum number of candidate files to evaluate. When the cap is hit the result includes partial=true and max_files_reached=true. Use a small value (e.g. 5) to test your evaluator before running the full search. Must be >= 1 when provided.'
       minimum: 1
     await_seconds:
-      type: integer
-      description: 'Optional server-side polling window in seconds. When 0 (default), the tool returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds seconds and returns the inline result if the job completes in time; otherwise falls back to {job_id}. Range: 0..30. Error code await_seconds_invalid if out of range or wrong type.'
+      type: number
+      description: 'Optional server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0 (default), the tool returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds seconds and returns the inline result if the job completes in time; otherwise falls back to {job_id}. Range: 0.0..10.0 (lowered from 30 in v10.3.2 to keep server-side polling within the threadpool capacity cap and avoid starving other tools). Error code await_seconds_invalid if out of range or wrong type.'
       minimum: 0
-      maximum: 30
+      maximum: 10.0
       default: 0
   required:
     - repository_alias
@@ -72,7 +72,7 @@ Precision two-phase AST-aware code search. Returns {job_id} immediately; poll GE
 
 PHASE 1 (driver): regex driver narrows the file set — only files whose content (or path) matches driver_regex are passed to Phase 2. (Note: Phase 1 currently uses an inline sync regex driver; story #978 will migrate to RegexSearchService for ripgrep performance.)
 
-PHASE 2 (evaluator): for each candidate file, the AST is parsed with tree-sitter and your Python evaluator_code runs in a sandboxed subprocess with access to: node (root XRayNode), root (root XRayNode), source (full file text), lang (language string), file_path (absolute path). Return True to include the file in matches.
+PHASE 2 (evaluator): for each Phase 1 match position, the AST is parsed with tree-sitter and your Python evaluator_code runs in a sandboxed subprocess. As of v10.3.2 the evaluator always receives `node = root` (the file parse tree) in BOTH content and filename modes — walk DOWN via `node.descendants_of_type(...)` to find specific constructs. The Phase 1 regex match position is exposed separately via `match_byte_offset`, `match_line_number`, and `match_line_content` (None in filename mode). Return True to include the match in results.
 
 ## Parameters
 
@@ -80,29 +80,38 @@ PHASE 2 (evaluator): for each candidate file, the AST is parsed with tree-sitter
 |-----------|------|----------|---------|-------------|
 | repository_alias | str | yes | -- | Global repository alias, e.g. "myrepo-global". Use list_global_repos to see available repositories. |
 | driver_regex | str | yes | -- | Regular expression applied in Phase 1 to file content or file paths to identify candidate files. Phase 1 match collection is capped at 100,000 regex hits across the repository. For very dense patterns on large repos, narrow the candidate set with include_patterns/exclude_patterns to avoid silent truncation. |
-| evaluator_code | str | yes | -- | Python expression evaluated in a sandboxed subprocess against each AST match position. Must return a bool. For search_target=content, node is the deepest AST node enclosing the regex match position; for search_target=filename, node equals root. |
-| search_target | "content" or "filename" | yes | -- | What the driver_regex applies to: "content" matches against file text (evaluator called once per match position with the enclosing AST node); "filename" matches against relative file paths (evaluator called once per file with node==root). |
+| evaluator_code | str | yes | -- | Python expression evaluated in a sandboxed subprocess against each AST match position. Must return a bool. As of v10.3.2 `node` is ALWAYS the file root in both content and filename modes — walk DOWN via `node.descendants_of_type(...)` to inspect specific constructs. Phase 1 regex match position is exposed separately via `match_byte_offset` / `match_line_number` / `match_line_content` (None in filename mode). |
+| search_target | "content" or "filename" | yes | -- | What the driver_regex applies to: "content" matches against file text (evaluator called once per Phase 1 match position with `node==root` plus `match_byte_offset`/`match_line_number`/`match_line_content` populated); "filename" matches against relative file paths (evaluator called once per file with `node==root` and the three `match_*` metadata fields set to None). |
 | include_patterns | list[str] | no | [] | Glob patterns for files to include (e.g. ["*.java", "*.kt"]). Empty list means include all. |
 | exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude (e.g. ["*/test/*"]). Empty list means exclude none. |
 | timeout_seconds | int | no | 120 | Per-job wall-clock timeout in seconds. Range: 10..600. Defaults to server config xray_timeout_seconds. |
 | max_files | int | no | null | Maximum number of candidate files to evaluate. When the cap is hit the result includes partial=true and max_files_reached=true. Use max_files: 5 to test your evaluator before running the full search. |
-| await_seconds | int | no | 0 | Server-side polling window in seconds. When 0, returns {job_id} immediately. When > 0, the server polls for up to await_seconds seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range: 0..30. Error code: await_seconds_invalid. |
+| await_seconds | float | no | 0 | Server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0, returns {job_id} immediately. When > 0, the server polls for up to await_seconds seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range: 0.0..10.0 (lowered from 30 in v10.3.2 to keep server-side polling within the threadpool capacity cap and avoid starving other tools). Error code: await_seconds_invalid. |
 
 ## Evaluator API
 
-The evaluator code runs inside a sandboxed subprocess and receives these names:
+### Globals exposed to your evaluator
 
-- `node` — for `search_target='content'`, the deepest XRayNode whose [start_byte, end_byte) contains the Phase 1 regex match position (the "closest enclosing ancestor" at the match site). For `search_target='filename'`, this is the file root (same as `root`). Use `node` to inspect the specific construct at the match; use `root` to traverse the entire file tree.
-- `root` — the file's root XRayNode (tree-sitter parse root)
-- `source` — the full file content as a UTF-8 string
-- `lang` — one of: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css
-- `file_path` — absolute path of the file being evaluated
+As of v10.3.2 the sandbox exposes 8 globals to your `evaluator_code` (was 5). The mental model changed: `node` is now ALWAYS the file root, and the Phase 1 regex match position is exposed as separate metadata. Walk DOWN from `node` via `descendants_of_type(...)` to find specific constructs; use `match_byte_offset` to know where the Phase 1 regex matched if you need to scope your descendants to the hit.
 
-For `search_target='content'`: the evaluator is called once per regex match position; `node` is the deepest AST node enclosing that position. For `search_target='filename'`: the evaluator is called once per matching file with `node == root` (no per-position semantics — there is no in-content match position to enclose).
+| Name | Type | Semantics |
+|------|------|-----------|
+| `node` | `XRayNode` | The file's root XRayNode (tree-sitter parse root). ALWAYS the root in both `content` and `filename` modes — v10.3.2 contract change. |
+| `root` | `XRayNode` | Alias for `node`. Kept for backward compatibility and clarity when callers want the explicit "I want the file root" name. |
+| `source` | `str` | Full file content as a UTF-8 string. Equivalent to `node.text`. |
+| `lang` | `str` | tree-sitter language name. One of: `java`, `kotlin`, `go`, `python`, `typescript`, `javascript`, `bash`, `csharp`, `html`, `css` (and `terraform` when `tree_sitter_hcl` is installed). |
+| `file_path` | `str` | Absolute path of the file being evaluated. |
+| `match_byte_offset` | `int \| None` | NEW in v10.3.2 — Phase 1 regex match byte offset into `source`. `None` in `filename` mode (the regex matched a path, not file content). |
+| `match_line_number` | `int \| None` | NEW in v10.3.2 — Phase 1 regex match 1-indexed line number. `None` in `filename` mode. |
+| `match_line_content` | `str \| None` | NEW in v10.3.2 — raw text of the Phase 1 regex match line (no trailing newline). `None` in `filename` mode. |
+
+For `search_target='content'`: the evaluator is called once per Phase 1 regex match position. `node` is the file root; the three `match_*` fields point at where the regex hit. To scope your inspection to the hit, walk down with `descendants_of_type` and filter by the byte range, e.g. `[f for f in node.descendants_of_type('function_definition') if f.start_byte <= match_byte_offset < f.end_byte]`.
+
+For `search_target='filename'`: the evaluator is called once per matching file. `node` is the file root; the three `match_*` fields are `None` (there is no in-content match position because the regex matched the path, not file text).
 
 ### XRayNode reference
 
-The `node` argument passed to your evaluator code is an `XRayNode` instance. The full public surface:
+These methods and properties apply to `node` (the file root) and to any `XRayNode` you reach via `descendants_of_type`, `children`, `named_children`, `parent`, or `enclosing(...)`. The full public surface:
 
 | Name | Type | Description |
 |------|------|-------------|
@@ -122,55 +131,157 @@ The `node` argument passed to your evaluator code is an `XRayNode` instance. The
 
 ### Common patterns cookbook
 
-Eight worked evaluator patterns that cover most everyday queries. Each pattern is a complete `evaluator_code` value — copy-paste it directly into your tool call.
+Fifteen worked evaluator patterns that cover most everyday queries. Each pattern is a complete `evaluator_code` value — copy-paste it directly into your tool call.
 
-1. **Filter regex matches inside function bodies** (the most common ask):
+> **v10.3.2 contract change**: Evaluators now receive `node = root` (the file's parse tree) in BOTH `content` and `filename` modes. Use `node.descendants_of_type(...)` to walk DOWN to specific constructs. The Phase 1 regex match position is exposed as `match_byte_offset` / `match_line_number` / `match_line_content` — use these to scope your descendants to the hit, e.g. `f.start_byte <= match_byte_offset < f.end_byte`. Statement-level `if`/`for`/`while`/`try` are still BANNED inside the sandbox; use comprehensions, `any()`/`all()` over generators, and `IfExp` ternaries to express the same logic.
+
+1. **Filter regex matches inside function bodies** (the most common ask) — walk down to find functions, then check whether the Phase 1 hit landed inside one:
    ```python
-   return node.is_descendant_of('function_definition')
+   funcs = node.descendants_of_type('function_definition')
+   return any(
+       f.start_byte <= match_byte_offset < f.end_byte
+       for f in funcs
+   )
    ```
 
-2. **Exclude docstring/comment matches**:
+2. **Exclude docstring/comment matches** — the Phase 1 hit landed inside a comment or string node:
    ```python
-   return node.type != 'comment' and node.type != 'string'
+   comments = node.descendants_of_type('comment')
+   strings  = node.descendants_of_type('string')
+   inside_comment_or_string = any(
+       n.start_byte <= match_byte_offset < n.end_byte
+       for n in comments + strings
+   )
+   return not inside_comment_or_string
    ```
 
-3. **Walk up to a specific ancestor and inspect it**:
+3. **Walk down to a specific function by name** — find the enclosing function at the hit and inspect its name:
    ```python
-   func = node.enclosing('function_definition')
-   return func is not None and func.named_children[0].text == 'public_method'
+   funcs = node.descendants_of_type('function_definition')
+   enclosing = [
+       f for f in funcs
+       if f.start_byte <= match_byte_offset < f.end_byte
+   ]
+   return any(
+       f.named_children
+       and f.named_children[0].text == 'public_method'
+       for f in enclosing
+   )
    ```
 
-4. **Count structural property — N elif clauses** (the canonical "find functions with N elifs" use case):
+4. **Count structural property — N elif clauses inside any function** (the canonical "find functions with N elifs" use case):
    ```python
-   return node.count_descendants_of_type('elif_clause') >= 5
+   funcs = node.descendants_of_type('function_definition')
+   return any(
+       f.count_descendants_of_type('elif_clause') >= 5
+       for f in funcs
+   )
    ```
 
-5. **String literal containing a substring** (with `node.text`):
+5. **SQL-shaped string literals at the hit position** — find the string node at the Phase 1 match and check its content:
    ```python
-   return node.type == 'string' and 'SELECT' in node.text.upper()
+   strings = node.descendants_of_type('string')
+   hit_strings = [
+       s for s in strings
+       if s.start_byte <= match_byte_offset < s.end_byte
+   ]
+   return any('SELECT' in s.text.upper() for s in hit_strings)
    ```
 
-6. **Function with too many parameters**:
+6. **Function with too many parameters** — find the function enclosing the hit and count its parameters:
    ```python
-   func = node.enclosing('function_definition')
-   if func is None:
-       return False
-   params = func.descendants_of_type('parameter')
-   return len(params) > 7
+   funcs = node.descendants_of_type('function_definition')
+   enclosing = [
+       f for f in funcs
+       if f.start_byte <= match_byte_offset < f.end_byte
+   ]
+   return any(
+       len(f.descendants_of_type('parameter')) > 7
+       for f in enclosing
+   )
    ```
 
-7. **Deep nesting detection**:
+7. **Deep nesting detection** — total branching constructs across the file:
    ```python
-   if_count = node.count_descendants_of_type('if_statement')
-   for_count = node.count_descendants_of_type('for_statement')
-   while_count = node.count_descendants_of_type('while_statement')
-   return (if_count + for_count + while_count) >= 10
+   ifs    = node.count_descendants_of_type('if_statement')
+   fors   = node.count_descendants_of_type('for_statement')
+   whiles = node.count_descendants_of_type('while_statement')
+   return (ifs + fors + whiles) >= 10
    ```
 
-8. **List comprehension presence** (showcasing post-#21 comprehension support):
+8. **List comprehension presence anywhere in the file** (showcasing post-#21 comprehension support):
    ```python
-   return any(c.type == 'list_comprehension' for c in node.named_children)
+   return node.count_descendants_of_type('list_comprehension') >= 1
    ```
+
+9. **Functions with N+ branches** — counts all branching constructs across all functions in a file (cyclomatic-complexity audit):
+   ```python
+   funcs = node.descendants_of_type('function_definition')
+   high_complexity = [
+       f for f in funcs
+       if (f.count_descendants_of_type('if_statement') +
+           f.count_descendants_of_type('elif_clause')) >= 8
+   ]
+   return len(high_complexity) > 0
+   ```
+
+10. **Returns inside `if` statements** — find files containing return statements inside conditional branches (often a code-smell for early returns or missing else cases):
+    ```python
+    returns = node.descendants_of_type('return_statement')
+    return any(r.enclosing('if_statement') is not None for r in returns)
+    ```
+
+11. **Calls without error handling** — find files containing function calls NOT wrapped in try/except (audit risky operations):
+    ```python
+    calls = node.descendants_of_type('call')
+    unsafe = [c for c in calls if c.enclosing('try_statement') is None]
+    return len(unsafe) >= 5  # threshold tunable per audit
+    ```
+
+12. **TODO/FIXME comments** — typical pre-merge audit:
+    ```python
+    comments = node.descendants_of_type('comment')
+    return any('TODO' in c.text or 'FIXME' in c.text for c in comments)
+    ```
+
+13. **Public functions missing return-type annotations (Python)** — `def` statements at module level without a return type annotation:
+    ```python
+    funcs = node.descendants_of_type('function_definition')
+    public_unannotated = [
+        f for f in funcs
+        if f.named_children
+        and not f.named_children[0].text.startswith('_')
+        and not any(c.type == 'type' for c in f.named_children)
+    ]
+    return len(public_unannotated) > 0
+    ```
+
+14. **Bare `except:` clauses** — `except:` without an exception type silences all errors:
+    ```python
+    excepts = node.descendants_of_type('except_clause')
+    bare = [
+        e for e in excepts
+        if not any(c.type in ('identifier', 'attribute', 'tuple') for c in e.named_children)
+    ]
+    return len(bare) > 0
+    ```
+
+15. **Classes with no docstring** — class definitions whose body's first statement is NOT a string literal. Sandbox-safe via comprehensions only (no statement-level `for`/`if`/`continue`, no `next()` since it's not in the safe-builtins list):
+    ```python
+    classes = node.descendants_of_type('class_definition')
+    bodies_list = [
+        [c for c in cls.named_children if c.type == 'block']
+        for cls in classes
+    ]
+    has_docstring = [
+        bool(bl)
+        and bool(bl[0].named_children)
+        and bl[0].named_children[0].type == 'expression_statement'
+        and any(c.type == 'string' for c in bl[0].named_children[0].named_children)
+        for bl in bodies_list
+    ]
+    return any(not h for h in has_docstring)
+    ```
 
 ### Common cross-language node type names
 
@@ -259,7 +370,7 @@ Hard timeout: 5 seconds per evaluator invocation, enforced by multiprocessing.Pr
 After polling GET /api/jobs/{job_id} to COMPLETED status, result contains:
 
 - matches[]: file_path, line_number, code_snippet, language, evaluator_decision
-  - As of v10.2.0, `line_number` and `code_snippet` are populated from Phase 1 ripgrep match positions (`RegexSearchService`) for `search_target='content'`. For `search_target='filename'` searches, `line_number` is `null` and `code_snippet` is `null` because the regex matched a path, not in-content text — the evaluator was called once per file with `node == root`.
+  - As of v10.2.0, `line_number` and `code_snippet` are populated from Phase 1 ripgrep match positions (`RegexSearchService`) for `search_target='content'` — these correspond to the same `match_line_number` / `match_line_content` values the v10.3.2 evaluator received as globals. For `search_target='filename'` searches, `line_number` is `null` and `code_snippet` is `null` because the regex matched a path, not in-content text — and the evaluator's `match_byte_offset` / `match_line_number` / `match_line_content` globals are likewise `None`. (In both modes, the evaluator's `node` global is the file root per the v10.3.2 contract.)
 - evaluation_errors[]: list of per-match evaluator failures. Each entry has file_path, line_number, error_type, error_message. error_type is one of: AttributeError (evaluator referenced a node attribute that does not exist for this node type), EvaluatorTimeout (the 5s sandbox timer fired), EvaluatorCrash (subprocess exited with non-zero code), UnsupportedLanguage, NonBoolReturn. evaluation_errors does NOT cause job failure — status remains COMPLETED.
 - files_processed: int — number of candidate files evaluated
 - files_total: int — total candidate files found by driver
@@ -425,19 +536,19 @@ Iterating on an evaluator expression is a fundamental part of using xray_search.
 
 ### Example: detect SQL injection via per-position node inspection
 
-Find every `prepareStatement(...)` call that is NOT inside a try-with-resources statement (Java).
+Find every `prepareStatement(...)` call that is NOT inside a try-with-resources statement (Java). Walk DOWN to find method invocations, scope to the Phase 1 hit via `match_byte_offset`, then verify the enclosing try-with-resources is absent.
 
 ```json
 {
   "repository_alias": "myapp-global",
   "driver_regex": "prepareStatement",
   "search_target": "content",
-  "evaluator_code": "return node.type == 'method_invocation' and not node.is_descendant_of('try_with_resources_statement')",
+  "evaluator_code": "invs = node.descendants_of_type('method_invocation')\nat_hit = [i for i in invs if i.start_byte <= match_byte_offset < i.end_byte]\nreturn any(i.enclosing('try_with_resources_statement') is None for i in at_hit)",
   "include_patterns": ["*.java"]
 }
 ```
 
-Here `node` is the AST node enclosing each `prepareStatement` match — typically the `method_invocation` itself. We check both that the node IS an invocation (regex could have matched in a comment) AND that its ancestor chain does not include a try-with-resources block.
+Here we use the v10.3.2 contract: `node` is the file root, so we walk DOWN with `descendants_of_type('method_invocation')`, then narrow to invocations that contain the Phase 1 regex hit (`match_byte_offset` falls in `[start_byte, end_byte)`). For each such invocation we check `enclosing('try_with_resources_statement')` — if that returns `None`, the call has no try-with-resources guard. This filters out regex hits inside comments or strings (those won't be inside a `method_invocation` node) AND surfaces the audit signal.
 
 ## Related
 

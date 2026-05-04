@@ -30,8 +30,16 @@ _TIMEOUT_MAX = 600
 _DEFAULT_TIMEOUT_SECONDS = 120
 
 # await_seconds range and poll interval.
-_AWAIT_SECONDS_MIN = 0
-_AWAIT_SECONDS_MAX = 30
+# _AWAIT_SECONDS_MAX lowered from 30 to 10 in v10.3.2 (Task #39): FastAPI sync
+# handlers run in a finite threadpool (default ~40 threads). With await_seconds=30
+# at modest concurrency, the pool can be exhausted, starving every other endpoint.
+# Capping at 10s bounds worst-case per-thread occupancy.
+# Operator tuning: increase uvicorn --limit-concurrency or anyio threadpool size
+# (ANYIO_THREADPOOL_WORKERS env var) if longer inline waits are required, and
+# use the async {job_id} polling path for waits beyond this ceiling.
+# Task #35 (v10.3.2): await_seconds accepts int OR float — typed as float.
+_AWAIT_SECONDS_MIN: float = 0.0
+_AWAIT_SECONDS_MAX: float = 10.0
 _AWAIT_POLL_INTERVAL = 0.05
 
 
@@ -57,7 +65,7 @@ def _get_background_job_manager():
 
 
 def _await_job_result(
-    bjm: Any, job_id: str, username: str, await_seconds: int
+    bjm: Any, job_id: str, username: str, await_seconds: float
 ) -> Optional[Dict[str, Any]]:
     """Poll BackgroundJobManager until the job completes or the window expires.
 
@@ -118,27 +126,31 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     max_files = params.get("max_files")
     await_seconds_raw = params.get("await_seconds", 0)
 
-    # await_seconds must be a plain integer in [0, 30].
-    if not isinstance(await_seconds_raw, int) or isinstance(await_seconds_raw, bool):
+    # await_seconds accepts int or float in [0.0, 10.0]. Cap lowered from 30
+    # to 10 in v10.3.2 to bound threadpool occupancy (see top-of-file comment).
+    if isinstance(await_seconds_raw, bool) or not isinstance(
+        await_seconds_raw, (int, float)
+    ):
         return _mcp_response(
             {
                 "error": "await_seconds_invalid",
                 "message": (
-                    f"await_seconds must be an integer in "
+                    f"await_seconds must be a number (int or float) in "
                     f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}], "
                     f"got {await_seconds_raw!r}"
                 ),
             }
         )
-    await_seconds: int = await_seconds_raw
+    await_seconds: float = float(await_seconds_raw)
     if not (_AWAIT_SECONDS_MIN <= await_seconds <= _AWAIT_SECONDS_MAX):
         return _mcp_response(
             {
                 "error": "await_seconds_invalid",
                 "message": (
                     f"await_seconds must be in "
-                    f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}], "
-                    f"got {await_seconds}"
+                    f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}] "
+                    f"(cap lowered from 30 in v10.3.2 — for longer waits "
+                    f"use the async {{job_id}} path), got {await_seconds}"
                 ),
             }
         )
@@ -289,27 +301,31 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     max_debug_nodes = params.get("max_debug_nodes", _MAX_DEBUG_NODES_DEFAULT)
     await_seconds_raw = params.get("await_seconds", 0)
 
-    # await_seconds must be a plain integer in [0, 30].
-    if not isinstance(await_seconds_raw, int) or isinstance(await_seconds_raw, bool):
+    # await_seconds accepts int or float in [0.0, 10.0]. Cap lowered from 30
+    # to 10 in v10.3.2 to bound threadpool occupancy (see top-of-file comment).
+    if isinstance(await_seconds_raw, bool) or not isinstance(
+        await_seconds_raw, (int, float)
+    ):
         return _mcp_response(
             {
                 "error": "await_seconds_invalid",
                 "message": (
-                    f"await_seconds must be an integer in "
+                    f"await_seconds must be a number (int or float) in "
                     f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}], "
                     f"got {await_seconds_raw!r}"
                 ),
             }
         )
-    await_seconds: int = await_seconds_raw
+    await_seconds: float = float(await_seconds_raw)
     if not (_AWAIT_SECONDS_MIN <= await_seconds <= _AWAIT_SECONDS_MAX):
         return _mcp_response(
             {
                 "error": "await_seconds_invalid",
                 "message": (
                     f"await_seconds must be in "
-                    f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}], "
-                    f"got {await_seconds}"
+                    f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}] "
+                    f"(cap lowered from 30 in v10.3.2 — for longer waits "
+                    f"use the async {{job_id}} path), got {await_seconds}"
                 ),
             }
         )

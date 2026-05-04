@@ -14,7 +14,7 @@ inputSchema:
       description: 'Regular expression applied in Phase 1 to file content or file paths to identify candidate files. Phase 1 match collection is capped at 100,000 regex hits across the repository.'
     evaluator_code:
       type: string
-      description: 'Optional. Python expression evaluated in a sandboxed subprocess against each AST match position. Must return a bool. Defaults to "return True" (accept all candidate files for AST exploration). For search_target=content, node is the deepest AST node enclosing the regex match position; for search_target=filename, node equals root. Available names: node, root, source, lang, file_path.'
+      description: 'Optional. Python expression evaluated in a sandboxed subprocess against each AST match position. Must return a bool. Defaults to "return True" (accept all candidate files for AST exploration). As of v10.3.2 the evaluator always receives node=root (the file parse tree) in BOTH content and filename modes — walk DOWN via node.descendants_of_type(...) to find specific constructs. Phase 1 regex match position is exposed separately via match_byte_offset / match_line_number / match_line_content (None in filename mode). Available names: node, root, source, lang, file_path, match_byte_offset, match_line_number, match_line_content.'
     search_target:
       type: string
       enum:
@@ -50,10 +50,10 @@ inputSchema:
       description: 'Maximum number of candidate files to evaluate. When the cap is hit the result includes partial=true and max_files_reached=true. Use a small value (e.g. 5) to test your evaluator before running the full search. Must be >= 1 when provided.'
       minimum: 1
     await_seconds:
-      type: integer
-      description: 'Optional server-side polling window in seconds. When 0 (default), the tool returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds seconds and returns the inline result if the job completes in time; otherwise falls back to {job_id}. Range: 0..30. Error code await_seconds_invalid if out of range or wrong type.'
+      type: number
+      description: 'Optional server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0 (default), the tool returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds seconds and returns the inline result if the job completes in time; otherwise falls back to {job_id}. Range: 0.0..10.0 (lowered from 30 in v10.3.2 to keep server-side polling within the threadpool capacity cap and avoid starving other tools). Error code await_seconds_invalid if out of range or wrong type.'
       minimum: 0
-      maximum: 30
+      maximum: 10.0
       default: 0
   required:
     - repository_alias
@@ -81,7 +81,7 @@ For production search workflows use xray_search instead — it is faster because
 
 PHASE 1 (driver): regex driver narrows the file set — only files whose content (or path) matches driver_regex are passed to Phase 2.
 
-PHASE 2 (evaluator): for each candidate file, the AST is parsed with tree-sitter and your Python evaluator_code runs in a sandboxed subprocess with access to: node (root XRayNode), root (root XRayNode), source (full file text), lang (language string), file_path (absolute path). Return True to include the file in matches.
+PHASE 2 (evaluator): for each Phase 1 match position, the AST is parsed with tree-sitter and your Python evaluator_code runs in a sandboxed subprocess. As of v10.3.2 the evaluator always receives `node = root` (the file parse tree) in BOTH content and filename modes — walk DOWN via `node.descendants_of_type(...)` to find specific constructs. The Phase 1 regex match position is exposed separately via `match_byte_offset`, `match_line_number`, and `match_line_content` (None in filename mode). Return True to include the match in results.
 
 ## Parameters
 
@@ -89,30 +89,39 @@ PHASE 2 (evaluator): for each candidate file, the AST is parsed with tree-sitter
 |-----------|------|----------|---------|-------------|
 | repository_alias | str | yes | -- | Global repository alias, e.g. "myrepo-global". Use list_global_repos to see available repositories. |
 | driver_regex | str | yes | -- | Regular expression applied in Phase 1 to file content or file paths to identify candidate files. Phase 1 match collection is capped at 100,000 regex hits across the repository. For very dense patterns on large repos, narrow the candidate set with include_patterns/exclude_patterns to avoid silent truncation. |
-| evaluator_code | str | no | "return True" | Optional Python expression evaluated in a sandboxed subprocess against each AST match position. Must return a bool. Defaults to "return True" (accept all candidate files for AST exploration). For search_target=content, node is the deepest AST node enclosing the regex match position; for search_target=filename, node equals root. |
-| search_target | "content" or "filename" | yes | -- | What the driver_regex applies to: "content" matches against file text (evaluator called once per match position with the enclosing AST node); "filename" matches against relative file paths (evaluator called once per file with node==root). |
+| evaluator_code | str | no | "return True" | Optional Python expression evaluated in a sandboxed subprocess against each AST match position. Must return a bool. Defaults to "return True" (accept all candidate files for AST exploration). As of v10.3.2 `node` is ALWAYS the file root in both content and filename modes — walk DOWN via `node.descendants_of_type(...)` to inspect specific constructs. Phase 1 regex match position is exposed separately via `match_byte_offset` / `match_line_number` / `match_line_content` (None in filename mode). |
+| search_target | "content" or "filename" | yes | -- | What the driver_regex applies to: "content" matches against file text (evaluator called once per Phase 1 match position with `node==root` plus `match_byte_offset`/`match_line_number`/`match_line_content` populated); "filename" matches against relative file paths (evaluator called once per file with `node==root` and the three `match_*` metadata fields set to None). |
 | include_patterns | list[str] | no | [] | Glob patterns for files to include (e.g. ["*.java", "*.kt"]). Empty list means include all. |
 | exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude (e.g. ["*/test/*"]). Empty list means exclude none. |
 | timeout_seconds | int | no | 120 | Per-job wall-clock timeout in seconds. Range: 10..600. Defaults to server config xray_timeout_seconds. |
 | max_debug_nodes | int | no | 50 | Maximum number of AST nodes to include in the ast_debug payload for each match. Range: 1..500. When the cap is hit a {"type": "...truncated"} sentinel appears in the children list. |
 | max_files | int | no | null | Maximum number of candidate files to evaluate. When the cap is hit the result includes partial=true and max_files_reached=true. Use max_files: 5 to test your evaluator before running the full search. |
-| await_seconds | int | no | 0 | Server-side polling window in seconds. When 0, returns {job_id} immediately. When > 0, the server polls for up to await_seconds seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range: 0..30. Error code: await_seconds_invalid. |
+| await_seconds | float | no | 0 | Server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0, returns {job_id} immediately. When > 0, the server polls for up to await_seconds seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range: 0.0..10.0 (lowered from 30 in v10.3.2 to keep server-side polling within the threadpool capacity cap and avoid starving other tools). Error code: await_seconds_invalid. |
 
 ## Evaluator API
 
-The evaluator code runs inside a sandboxed subprocess and receives these names:
+### Globals exposed to your evaluator
 
-- `node` — for `search_target='content'`, the deepest XRayNode whose [start_byte, end_byte) contains the Phase 1 regex match position (the "closest enclosing ancestor" at the match site). For `search_target='filename'`, this is the file root (same as `root`). Use `node` to inspect the specific construct at the match; use `root` to traverse the entire file tree.
-- `root` — the file's root XRayNode (tree-sitter parse root)
-- `source` — the full file content as a UTF-8 string
-- `lang` — one of: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css
-- `file_path` — absolute path of the file being evaluated
+As of v10.3.2 the sandbox exposes 8 globals to your `evaluator_code` (was 5). The mental model changed: `node` is now ALWAYS the file root, and the Phase 1 regex match position is exposed as separate metadata. Walk DOWN from `node` via `descendants_of_type(...)` to find specific constructs; use `match_byte_offset` to know where the Phase 1 regex matched if you need to scope your descendants to the hit.
 
-For `search_target='content'`: the evaluator is called once per regex match position; `node` is the deepest AST node enclosing that position. For `search_target='filename'`: the evaluator is called once per matching file with `node == root` (no per-position semantics — there is no in-content match position to enclose).
+| Name | Type | Semantics |
+|------|------|-----------|
+| `node` | `XRayNode` | The file's root XRayNode (tree-sitter parse root). ALWAYS the root in both `content` and `filename` modes — v10.3.2 contract change. |
+| `root` | `XRayNode` | Alias for `node`. Kept for backward compatibility and clarity when callers want the explicit "I want the file root" name. |
+| `source` | `str` | Full file content as a UTF-8 string. Equivalent to `node.text`. |
+| `lang` | `str` | tree-sitter language name. One of: `java`, `kotlin`, `go`, `python`, `typescript`, `javascript`, `bash`, `csharp`, `html`, `css` (and `terraform` when `tree_sitter_hcl` is installed). |
+| `file_path` | `str` | Absolute path of the file being evaluated. |
+| `match_byte_offset` | `int \| None` | NEW in v10.3.2 — Phase 1 regex match byte offset into `source`. `None` in `filename` mode (the regex matched a path, not file content). |
+| `match_line_number` | `int \| None` | NEW in v10.3.2 — Phase 1 regex match 1-indexed line number. `None` in `filename` mode. |
+| `match_line_content` | `str \| None` | NEW in v10.3.2 — raw text of the Phase 1 regex match line (no trailing newline). `None` in `filename` mode. |
+
+For `search_target='content'`: the evaluator is called once per Phase 1 regex match position. `node` is the file root; the three `match_*` fields point at where the regex hit. To scope your inspection to the hit, walk down with `descendants_of_type` and filter by the byte range, e.g. `[f for f in node.descendants_of_type('function_definition') if f.start_byte <= match_byte_offset < f.end_byte]`.
+
+For `search_target='filename'`: the evaluator is called once per matching file. `node` is the file root; the three `match_*` fields are `None` (there is no in-content match position because the regex matched the path, not file text).
 
 ### XRayNode reference
 
-The `node` argument passed to your evaluator code is an `XRayNode` instance. The full public surface:
+These methods and properties apply to `node` (the file root) and to any `XRayNode` you reach via `descendants_of_type`, `children`, `named_children`, `parent`, or `enclosing(...)`. The full public surface:
 
 | Name | Type | Description |
 |------|------|-------------|
@@ -130,7 +139,7 @@ The `node` argument passed to your evaluator code is an `XRayNode` instance. The
 | `node.count_descendants_of_type(type_name)` | int | fast count without materialising a list — use this when you only need a count |
 | `node.enclosing(type_name)` | XRayNode \| None | walks UP parent chain (inclusive of self) and returns first ancestor matching `type_name` |
 
-For a "common patterns cookbook" of 8 worked evaluator examples (filter to function bodies, exclude comments, count elif clauses, deep-nesting detection, etc.) and a cross-language node type table covering the 10 mandatory languages (Python / Java / TypeScript / JavaScript / Go / Kotlin / C# / etc.), see the corresponding sections in `xray_search.md`. The same evaluator API and `XRayNode` surface apply to both tools.
+For a "common patterns cookbook" of 15 worked evaluator examples (filter to function bodies via `match_byte_offset`, exclude comments, count elif clauses, deep-nesting detection, branch counts, returns inside `if`, calls without try/except, TODO/FIXME audit, missing return-type annotations, bare `except:`, classes with no docstring, etc.) and a cross-language node type table covering the 10 mandatory languages (Python / Java / TypeScript / JavaScript / Go / Kotlin / C# / etc.), see the corresponding sections in `xray_search.md`. The same evaluator API and `XRayNode` surface apply to both tools.
 
 ### Evaluator code structure
 
@@ -247,8 +256,8 @@ The sandbox enforces three defence layers:
 After polling GET /api/jobs/{job_id} to COMPLETED status, result contains:
 
 - matches[]: file_path, line_number, code_snippet, language, evaluator_decision, matched_node, ast_debug
-  - As of v10.2.0, `line_number` and `code_snippet` are populated from Phase 1 ripgrep match positions (`RegexSearchService`) for `search_target='content'`. For `search_target='filename'` searches, `line_number` is `null` and `code_snippet` is `null` because the regex matched a path, not in-content text — the evaluator was called once per file with `node == root`.
-  - `matched_node` — compact description of the deepest enclosing AST node passed to the evaluator (the same node that `node` refers to in evaluator_code). Present on every match entry when xray_explore is used. Fields: `type` (str, tree-sitter node type), `start_byte` (int), `end_byte` (int), `start_point` ([row, col] list), `end_point` ([row, col] list). Distinct from `ast_debug` which is always rooted at the file root; `matched_node` describes only the evaluator's input node.
+  - As of v10.2.0, `line_number` and `code_snippet` are populated from Phase 1 ripgrep match positions (`RegexSearchService`) for `search_target='content'` — these correspond to the same `match_line_number` / `match_line_content` values the v10.3.2 evaluator received as globals. For `search_target='filename'` searches, `line_number` is `null` and `code_snippet` is `null` because the regex matched a path, not in-content text — and the evaluator's `match_byte_offset` / `match_line_number` / `match_line_content` globals are likewise `None`. (In both modes, the evaluator's `node` global is the file root per the v10.3.2 contract.)
+  - `matched_node` — compact description of the deepest AST node enclosing the Phase 1 regex match position. Computed by the result envelope as a convenience for tooling that wants to know "what construct did the regex hit land in?" — distinct from the `node` evaluator global, which under the v10.3.2 contract is the file root. To obtain the same node from inside an evaluator, walk down with `descendants_of_type` and filter by `match_byte_offset`. Present on every match entry when xray_explore is used. Fields: `type` (str, tree-sitter node type), `start_byte` (int), `end_byte` (int), `start_point` ([row, col] list), `end_point` ([row, col] list). For `search_target='filename'` matches, `matched_node` describes the file root (no in-content match position).
   - `ast_debug` — full BFS-serialised AST tree rooted at the parse root (see ast_debug Payload section above).
 - evaluation_errors[]: list of per-match evaluator failures. Each entry has file_path, line_number, error_type, error_message. error_type is one of: AttributeError (evaluator referenced a node attribute that does not exist for this node type), EvaluatorTimeout (the 5s sandbox timer fired), EvaluatorCrash (subprocess exited with non-zero code), UnsupportedLanguage, NonBoolReturn. evaluation_errors does NOT cause job failure — status remains COMPLETED.
 - files_processed: int — number of candidate files evaluated

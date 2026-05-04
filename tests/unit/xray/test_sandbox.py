@@ -317,3 +317,90 @@ class TestRun:
         assert results[1].value is False
         assert results[2].value is True
         assert results[3].value is True
+
+
+# ---------------------------------------------------------------------------
+# New match-position globals: match_byte_offset, match_line_number,
+# match_line_content exposed to the evaluator subprocess
+# ---------------------------------------------------------------------------
+
+
+class TestMatchPositionGlobals:
+    """sandbox.run exposes match_byte_offset/match_line_number/match_line_content."""
+
+    def _root(self, source: str = "x = 1") -> "XRayNode":  # type: ignore[name-defined]
+        _, root = _make_engine_and_node(source)
+        return root
+
+    def test_run_accepts_new_kwargs_with_none_defaults(self):
+        """run() still works when new kwargs are omitted (backward compat)."""
+        sb = PythonEvaluatorSandbox()
+        root = self._root()
+        result = sb.run(
+            "return True",
+            node=root,
+            root=root,
+            source="x = 1",
+            lang="python",
+            file_path="/src/main.py",
+            # new kwargs intentionally omitted — must default to None, no error
+        )
+        assert result.failure is None
+        assert result.value is True
+
+    def test_match_byte_offset_int_is_visible_in_evaluator(self):
+        """Evaluator can read match_byte_offset when an int value is passed."""
+        sb = PythonEvaluatorSandbox()
+        root = self._root()
+        result = sb.run(
+            "return match_byte_offset == 42",
+            node=root,
+            root=root,
+            source="x = 1",
+            lang="python",
+            file_path="/src/main.py",
+            match_byte_offset=42,
+        )
+        assert result.failure is None
+        assert result.value is True
+
+    def test_match_byte_offset_none_is_visible_as_none(self):
+        """Evaluator sees match_byte_offset as None when None is passed."""
+        sb = PythonEvaluatorSandbox()
+        root = self._root()
+        result = sb.run(
+            "return match_byte_offset is None",
+            node=root,
+            root=root,
+            source="x = 1",
+            lang="python",
+            file_path="/src/main.py",
+            match_byte_offset=None,
+        )
+        assert result.failure is None
+        assert result.value is True
+
+    def test_all_three_match_globals_accessible_together(self):
+        """match_byte_offset, match_line_number, match_line_content all visible."""
+        sb = PythonEvaluatorSandbox()
+        root = self._root()
+        code = (
+            "return ("
+            "match_byte_offset == 10 "
+            "and match_line_number == 3 "
+            "and match_line_content == 'foo()'"
+            ")"
+        )
+        result = sb.run(
+            code,
+            node=root,
+            root=root,
+            source="x = 1",
+            lang="python",
+            file_path="/src/main.py",
+            match_byte_offset=10,
+            match_line_number=3,
+            match_line_content="foo()",
+        )
+        assert result.failure is None
+        assert result.value is True

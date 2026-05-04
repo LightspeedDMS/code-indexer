@@ -189,7 +189,8 @@ Query capability is the core product value. NEVER remove or break: query functio
 `XRaySearchEngine` is a two-phase orchestrator (regex driver Phase 1 → sandboxed Python evaluator Phase 2 over `XRayNode` ASTs). The MCP handler `handle_xray_search` is a thin shim that validates params, runs sandbox pre-flight validation, then submits an async background job.
 
 **Essential invariants**:
-- Two-phase pipeline: Phase 1 regex walk produces candidate `Path` list (honors include/exclude fnmatch patterns); Phase 2 parses + sandbox-evaluates each candidate. Failure modes (UnsupportedLanguage, EvaluatorTimeout, EvaluatorCrash, NonBoolReturn) accumulate in `evaluation_errors` and never fail the job.
+- Two-phase pipeline: Phase 1 regex walk produces candidate `Path` list with per-match positions (honors include/exclude fnmatch patterns); Phase 2 parses + sandbox-evaluates each Phase 1 match position. Failure modes (UnsupportedLanguage, EvaluatorTimeout, EvaluatorCrash, NonBoolReturn) accumulate in `evaluation_errors` and never fail the job.
+- v10.3.2 evaluator contract: sandbox passes 8 globals — `node` (ALWAYS the file root in both content and filename modes), `root` (alias), `source`, `lang`, `file_path`, plus `match_byte_offset` / `match_line_number` / `match_line_content` (None in filename mode). Evaluators walk DOWN via `node.descendants_of_type(...)`; Phase 1 match position is metadata. Also: `_AWAIT_SECONDS_MAX` lowered 30→10 in v10.3.2; `await_seconds` accepts float in [0.0, 10.0].
 - Async job pattern: handler returns `{"job_id": "<uuid>"}` immediately; clients poll `GET /api/jobs/{job_id}`. Pre-flight runs `sandbox.validate(evaluator_code)` to reject malformed evaluator code BEFORE submitting the job.
 - Tree-sitter is a CORE dependency since v10.2.1 (no longer optional); `XRayExtrasNotInstalled` was deleted along with the `[xray]` extras.
 - `max_files` cap surfaces `partial=True` / `max_files_reached=True` in the result.

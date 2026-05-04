@@ -890,3 +890,260 @@ class TestXrayExploreHandlerAwaitSeconds:
 
         data = _parse_response(result)
         assert data.get("error") == "await_seconds_invalid"
+
+
+# ---------------------------------------------------------------------------
+# Tests: await_seconds float + new 10s cap (v10.3.2, Tasks #35 and #39)
+# ---------------------------------------------------------------------------
+
+
+class TestXrayExploreHandlerAwaitSecondsV2:
+    """Tests for float await_seconds and the 10s cap introduced in v10.3.2.
+
+    Task #35: await_seconds accepts int OR float (not just int).
+    Task #39: ceiling lowered from 30s to 10s to bound threadpool occupancy.
+    """
+
+    # --- Float acceptance ---
+
+    def test_await_seconds_float_half_accepted(self):
+        """await_seconds=0.5 (float) is accepted and treated as 500ms wait."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "explore-float-half"
+        mock_bjm.get_job_status.return_value = {"status": "running", "result": None}
+        params = {**VALID_PARAMS, "await_seconds": 0.5}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch("time.sleep"),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") != "await_seconds_invalid", (
+            "await_seconds=0.5 (float) must be accepted"
+        )
+
+    def test_await_seconds_float_near_zero_accepted(self):
+        """await_seconds=0.001 (near-zero float) is accepted."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "explore-float-tiny"
+        mock_bjm.get_job_status.return_value = {"status": "running", "result": None}
+        params = {**VALID_PARAMS, "await_seconds": 0.001}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch("time.sleep"),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") != "await_seconds_invalid", (
+            "await_seconds=0.001 (near-zero float) must be accepted"
+        )
+
+    def test_await_seconds_float_at_cap_accepted(self):
+        """await_seconds=10.0 (float at new cap) is accepted."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "explore-float-cap"
+        mock_bjm.get_job_status.return_value = {"status": "running", "result": None}
+        params = {**VALID_PARAMS, "await_seconds": 10.0}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch("time.sleep"),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") != "await_seconds_invalid", (
+            "await_seconds=10.0 (float at cap) must be accepted"
+        )
+
+    # --- Float rejection ---
+
+    def test_await_seconds_float_just_above_cap_rejected(self):
+        """await_seconds=10.001 (just above new cap) is rejected with await_seconds_invalid."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": 10.001}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid", (
+            "await_seconds=10.001 must be rejected"
+        )
+
+    def test_await_seconds_float_negative_rejected(self):
+        """await_seconds=-0.001 (negative float) is rejected with await_seconds_invalid."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": -0.001}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid", (
+            "await_seconds=-0.001 (negative float) must be rejected"
+        )
+
+    def test_await_seconds_bool_true_rejected(self):
+        """await_seconds=True (bool) is rejected — bool subclasses int but must be blocked."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": True}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid", (
+            "await_seconds=True (bool) must be rejected even though bool subclasses int"
+        )
+
+    def test_await_seconds_string_rejected(self):
+        """await_seconds='0.5' (string) is rejected with await_seconds_invalid."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": "0.5"}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid", (
+            "await_seconds='0.5' (string) must be rejected"
+        )
+
+    # --- Backward-compat: int still works ---
+
+    def test_await_seconds_int_zero_regression(self):
+        """await_seconds=0 (int) still returns {job_id} immediately (regression)."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "explore-int-zero"
+        params = {**VALID_PARAMS, "await_seconds": 0}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "job_id" in data
+        assert data.get("error") != "await_seconds_invalid"
+
+    def test_await_seconds_int_five_regression(self):
+        """await_seconds=5 (int) is still accepted (regression)."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "explore-int-five"
+        mock_bjm.get_job_status.return_value = {"status": "running", "result": None}
+        params = {**VALID_PARAMS, "await_seconds": 5}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch("time.sleep"),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") != "await_seconds_invalid"
+
+    # --- New cap enforcement ---
+
+    def test_await_seconds_11_rejected_new_cap(self):
+        """await_seconds=11 exceeds new cap of 10 — rejected (cap lowered from 30 in v10.3.2)."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": 11}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid", (
+            "await_seconds=11 must be rejected by the new 10s cap"
+        )
+        message = data.get("message", "")
+        assert "10" in message, (
+            f"Error message must mention the new cap (10), got: {message!r}"
+        )
+
+    def test_await_seconds_30_now_rejected(self):
+        """await_seconds=30 was valid in v10.3.0 but rejected now (cap lowered to 10 in v10.3.2)."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "await_seconds": 30}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "await_seconds_invalid", (
+            "await_seconds=30 must now be rejected (cap lowered from 30 to 10 in v10.3.2)"
+        )
