@@ -7,6 +7,22 @@ description: Guide for exploring and answering questions about LightspeedDMS pro
 
 This skill provides a structured approach for exploring LightspeedDMS products and answering questions using the CIDX server's code intelligence capabilities.
 
+## Table of Contents
+
+- [Reranking: Use It By Default](#reranking-use-it-by-default)
+- [Context Discovery Phase (MANDATORY)](#context-discovery-phase-mandatory--run-before-any-search)
+- [Step 1: Start with the Knowledge Base](#step-1-start-with-the-knowledge-base)
+- [Step 2: Discover Relevant Repositories via cidx-meta-global](#step-2-discover-relevant-repositories-via-cidx-meta-global)
+- [Step 3: Explore Specific Repositories](#step-3-explore-specific-repositories)
+- [Step 4: Assess Depth Requirements](#step-4-assess-depth-requirements)
+- [Response Guidelines](#response-guidelines)
+- [Information Security](#information-security)
+- [Advanced Neo Techniques](#advanced-neo-techniques)
+- [X-Ray: AST-Aware Precision Search](#x-ray-ast-aware-precision-search)
+- [Example Query Patterns](#example-query-patterns)
+- [Efficiency Tips](#efficiency-tips)
+- [KB Responses](#constructing-knowledge-base-responses)
+
 ## Core Principle
 
 When users ask questions about LightspeedDMS products, use Neo to systematically explore the codebase. Answer questions with concepts and natural language rather than disclosing source code by default, unless explicitly asked to reveal code.
@@ -226,9 +242,29 @@ search_code(
 - Use `fts` for exact text matching ("class InventoryManager") — reranking optional
 - Use `hybrid` when you need both approaches — **always add reranking**
 
+### regex_search vs search_code
+
+Use `regex_search` when:
+- You have a known regex pattern (e.g. `def\s+test_`, `class\s+\w+Manager`)
+- You need exact match semantics, not semantic similarity
+- You are doing a follow-up after `search_code` narrowed the scope and you now need to find specific syntactic patterns within those files
+
+Use `search_code` (semantic mode) when you know a concept but not a syntactic pattern.
+
+For deeper structural distinctions (e.g. "is this method call inside a try-resource block?"), use `xray_search` instead — see the X-Ray section below.
+
 ### Step 4: Assess Depth Requirements
 
-Consider the nature of the user's question:
+Match your investigation depth to the question type:
+
+| Question Type | Tool Strategy | When To Stop |
+|---------------|---------------|--------------|
+| "What does X do?" (high-level) | One semantic `search_code` + read top 1-2 results | Concept understood, can answer in 2-3 sentences |
+| "How does X work?" (technical) | Semantic `search_code` + `regex_search` for exact identifiers + 1-2 file reads | Can describe data flow / control flow |
+| "Why does X behave Y way?" (deep technical) | Semantic search + `scip_references` + `git_log` + targeted file reads | Root cause identified with evidence |
+| "Find all instances of pattern Y" (precision) | `xray_explore` then `xray_search` | Match count stabilized, no `evaluation_errors` |
+
+If you are 3+ tool calls in and not converging, STOP and ask the user to clarify what level of detail they need.
 
 **High-level questions** → knowledge-base-global + dependency map may be sufficient
 - "What features does Evolution DMS have?"
@@ -269,16 +305,20 @@ Even when showing code, keep snippets focused and contextual rather than dumping
 
 ### Information Security
 
-Be mindful of:
-- Proprietary algorithms or business logic that shouldn't be casually disclosed
-- Security-sensitive implementations (authentication, encryption, access control)
-- Trade secrets or competitive advantages
+**Concrete rules for handling sensitive material in search results:**
 
-When in doubt, describe the approach conceptually rather than showing exact code.
+- **Never quote credentials in your response.** If a search result contains an API key, password, hash, or raw SQL credential, describe its presence/location/format without echoing the value. Example: "There is a hardcoded `password` field at `src/config/db.py:42` containing what appears to be a 16-character base64 string."
+- **Redact stack traces with PII.** If a stack trace includes user IDs, email addresses, or request IDs that look real, mask them: `user_id=12345` becomes `user_id=<redacted>`.
+- **Refuse to extract content from files matching `*.pem`, `*.key`, `*.env`, `*credentials*`, `*secrets*`.** If a search result hits one of these, report the file existed but do not retrieve content.
+- **Be mindful of:** proprietary algorithms or business logic, security-sensitive implementations (authentication, encryption, access control), and trade secrets or competitive advantages.
+- **When uncertain, ask.** "I found a result that may contain a credential. Should I describe it generically, or do you need the literal value?"
+- **When in doubt,** describe the approach conceptually rather than showing exact code.
 
 ## Advanced Neo Techniques
 
 ### Multi-Repository Analysis
+
+*Use when a question spans multiple systems and you need to compare or consolidate results across repo boundaries.*
 
 For questions spanning multiple systems, use array syntax:
 
@@ -294,6 +334,8 @@ search_code(
 ```
 
 ### Temporal Queries
+
+*Use when you need to know what changed between two points in time, or find when a feature was introduced.*
 
 For understanding feature evolution or when code was added:
 
@@ -315,6 +357,8 @@ Or use git history tools:
 
 ### Code Intelligence (SCIP)
 
+*Use when you know a symbol name and need to navigate its definition, all usages, or trace an execution path with call-graph precision — more reliable than regex for symbol lookup.*
+
 When available, use SCIP tools for precise code navigation:
 - `scip_definition` - Find where a class/function is defined
 - `scip_references` - Find all usages of a symbol
@@ -323,12 +367,226 @@ When available, use SCIP tools for precise code navigation:
 - `scip_impact` - Assess change impact across the codebase
 - `scip_callchain` - Trace execution flow between two symbols
 
+**Find all usages of a class:**
+
+```json
+scip_references(
+    repository_alias="evolution-global",
+    symbol="UserManager"
+)
+```
+
+**Find the definition of a symbol:**
+
+```json
+scip_definition(
+    repository_alias="evolution-global",
+    symbol="processPayment"
+)
+```
+
+**Trace a call chain:**
+
+```json
+scip_callchain(
+    repository_alias="evolution-global",
+    from_symbol="HttpController.handleRequest",
+    to_symbol="DatabaseClient.execute"
+)
+```
+
 ### Repository Structure Exploration
+
+*Use when you need to understand how a repository is organized before diving into code search — orient yourself with the directory layout first.*
 
 For understanding project organization:
 - `directory_tree` for visual hierarchy
 - `browse_directory` for detailed file listings with metadata
 - `list_files` for programmatic file discovery
+
+## X-Ray: AST-Aware Precision Search
+
+Use X-Ray when regex or semantic search produces too many false positives because
+the distinction you need is structural, not textual. X-Ray adds an AST filter on
+top of a regex driver — only files where the Python evaluator returns True are
+included in results.
+
+**When to choose X-Ray vs other tools:**
+
+| Signal | Tool |
+|--------|------|
+| You know a concept but not a location | `search_code` (semantic) |
+| You know an exact identifier or string | `search_code` (fts) or `regex_search` |
+| You know a pattern that regex finds, but you need to exclude false positives based on surrounding code structure | **`xray_search`** |
+| You want to understand what AST node tree-sitter produces for a construct before writing an evaluator | **`xray_explore`** |
+| You need to find all callers/usages of a known symbol with call-graph precision | `scip_references` |
+
+X-Ray is not a replacement for semantic search. It is a precision filter for situations where you already know what the code pattern looks like textually and need to make a structural distinction regex cannot express — e.g., "only calls NOT inside a try-with-resources", "only HTTP clients missing a timeout parameter", "only direct DB writes outside a transaction boundary".
+
+### Two-tool workflow: explore first, then search
+
+Never write a `xray_search` evaluator cold. Always run `xray_explore` first on 2-3
+files to see what AST nodes tree-sitter produces for your language and construct.
+
+**Step 1 — Explore (discover AST shape):**
+
+```json
+xray_explore(
+    repository_alias="evolution-global",
+    driver_regex="prepareStatement",
+    search_target="content",
+    include_patterns=["*.java"],
+    max_files=3,
+    max_debug_nodes=30
+)
+```
+
+This returns immediately with a `job_id`. Poll `get_job_details(job_id="<id>")` until
+`status == "completed"`. Read the `ast_debug` field in each match — it shows the
+breadth-first AST tree rooted at the file, with `type`, `text_preview`, and byte
+offsets per node. Find the `type` string for the node you care about (e.g.,
+`"method_invocation"`, `"try_with_resources_statement"`).
+
+**Step 2 — Write and test evaluator on 5 files:**
+
+```json
+xray_search(
+    repository_alias="evolution-global",
+    driver_regex="prepareStatement",
+    evaluator_code="return node.type == 'method_invocation' and not node.is_descendant_of('try_with_resources_statement')",
+    search_target="content",
+    include_patterns=["*.java"],
+    max_files=5
+)
+```
+
+Poll `get_job_details` to COMPLETED. Read `evaluation_errors` first. `AttributeError`
+entries mean your evaluator referenced a node attribute that does not exist for that
+node type — fix the attribute name and re-run. `EvaluatorTimeout` means the expression
+is too slow — simplify it. Only proceed to the full run when `evaluation_errors` is
+empty on the 5-file test.
+
+**Step 3 — Full search (remove max_files cap):**
+
+Same call as Step 2 without `max_files`. Poll to COMPLETED. If the result has
+`truncated: true`, use `get_cached_content(cache_handle="<uuid>", page=1)` to retrieve
+pages of results.
+
+### Evaluator API — what you need to know
+
+The evaluator is a single Python expression that must return a bool. It runs in a
+sandboxed subprocess. Five names are available:
+
+| Name | What it is |
+|------|-----------|
+| `node` | Deepest AST node enclosing the regex match position (the "closest ancestor" at the match site). For `search_target="filename"`, this equals `root`. |
+| `root` | The file's root AST node — use this to traverse the full file tree. |
+| `source` | Full file text as a UTF-8 string. |
+| `lang` | Language string: `java`, `kotlin`, `go`, `python`, `typescript`, `javascript`, `bash`, `csharp`, `html`, `css`. |
+| `file_path` | Absolute path of the file being evaluated. |
+
+Key methods on `node` and `root`:
+- `node.type` — tree-sitter node type string (what you see in `ast_debug`)
+- `node.is_descendant_of("node_type_string")` — True if any ancestor in the tree has that type
+- `node.named_children` — list of named child nodes
+- `node.text` — source text of the node (use `source[node.start_byte:node.end_byte]` as equivalent)
+
+**Safe builtins:** `len`, `str`, `int`, `bool`, `list`, `tuple`, `dict`, `min`, `max`,
+`sum`, `any`, `all`, `range`, `enumerate`, `zip`, `sorted`, `reversed`, `hasattr`.
+
+**Not available:** `getattr`, `setattr`, `open`, `eval`, `exec`, `__import__`, and
+all dunder attribute access (e.g., `node.__class__` is blocked). Import statements,
+loops (`for`, `while`), and `with` blocks are rejected at AST validation time before
+any subprocess is spawned.
+
+The hard per-invocation timeout is 5 seconds. Keep evaluators simple — a single
+boolean expression on `node.type` and `node.is_descendant_of()` is the typical pattern.
+
+### Async reminder
+
+Both `xray_search` and `xray_explore` return `{job_id}` immediately. The job runs
+in the background. You MUST poll:
+
+```
+get_job_details(job_id="<returned_job_id>")
+```
+
+Repeat until `status == "completed"` or `status == "failed"`. Do not assume the result
+is ready after a single poll. Default timeout is 120 seconds; increase `timeout_seconds`
+for large repositories (max 600).
+
+### Paged results reminder
+
+X-Ray results from large repositories often exceed the inline preview threshold (~2000
+chars). When the polled result has `truncated: true`:
+
+1. Note the `cache_handle` value.
+2. Call `get_cached_content(cache_handle="<uuid>", page=1)` for the first page.
+3. Increment `page` until the response indicates no further pages.
+
+The `matches_and_errors_preview` field and the first 3 inline `matches[]` entries give
+a quick scan without fetching the cache.
+
+### LightspeedDMS-specific X-Ray examples
+
+**Unsafe SQL — prepareStatement outside try-with-resources (Java):**
+
+```json
+xray_search(
+    repository_alias="evolution-global",
+    driver_regex="prepareStatement",
+    evaluator_code="return node.type == 'method_invocation' and not node.is_descendant_of('try_with_resources_statement')",
+    search_target="content",
+    include_patterns=["*.java"],
+    exclude_patterns=["*/test/*"]
+)
+```
+
+Finds every JDBC prepared statement call that is not resource-managed. False positives
+from comments or string literals are filtered by the `node.type` check.
+
+**Hardcoded credentials — string literals that look like passwords:**
+
+```json
+xray_search(
+    repository_alias="evolution-global",
+    driver_regex="(?i)(password|passwd|secret|api_key)\\s*=\\s*[\"'][^\"']{6,}[\"']",
+    evaluator_code="return node.type in ('string_literal', 'string', 'assignment_expression') and lang in ('java', 'kotlin', 'python')",
+    search_target="content",
+    exclude_patterns=["*/test/*", "*/resources/i18n/*"]
+)
+```
+
+**HTTP calls without a timeout (Java/Kotlin):**
+
+```json
+xray_search(
+    repository_alias="integration-services-global",
+    driver_regex="HttpClient|OkHttpClient|RestTemplate",
+    evaluator_code="return node.type == 'object_creation_expression' and not any(c.type == 'argument_list' and 'timeout' in source[c.start_byte:c.end_byte].lower() for c in node.named_children)",
+    search_target="content",
+    include_patterns=["*.java", "*.kt"]
+)
+```
+
+Note: run `xray_explore` first on 2-3 files to confirm the `object_creation_expression`
+node type name for the target language — Kotlin's tree-sitter grammar may use a
+different type string.
+
+**Direct DB writes outside a transaction (Java — detecting raw update/insert calls):**
+
+```json
+xray_search(
+    repository_alias="evolution-global",
+    driver_regex="executeUpdate|executeInsert|executeBatch",
+    evaluator_code="return node.type == 'method_invocation' and not node.is_descendant_of('try_statement') and not node.is_descendant_of('method_declaration')",
+    search_target="content",
+    include_patterns=["*.java"],
+    exclude_patterns=["*/test/*"]
+)
+```
+
+This evaluator finds raw `executeUpdate`/`executeInsert`/`executeBatch` calls that are NOT inside a try-block (suggesting no transaction-rollback safety) AND NOT inside a method declaration body (filtering out lambda/closure contexts). For full transaction-detection, follow up with a second X-Ray pass that checks for `@Transactional` annotations or surrounding `try`/`finally` blocks — see "Iterating on Your Evaluator" in the per-tool docs at `tool_docs/search/xray.md`.
 
 ## Example Query Patterns
 
@@ -393,6 +651,13 @@ If you're unsure which repository to search:
 - Cache handles are provided for large results - use `get_cached_content` to retrieve full content
 - Use `response_format='grouped'` for multi-repo searches when you want results organized by repository
 - For `regex_search` with broad patterns returning many matches, add `rerank_query` to push the most relevant matches to the top
+
+**Async tools and large result paging:** Some Neo tools (`activate_repository`,
+`xray_search`, `xray_explore`) return a `{job_id}` immediately and run in the
+background. Always poll `get_job_details(job_id="<id>")` until `status` reaches
+`"completed"` or `"failed"` before reading the result. For any tool result that
+returns `truncated: true` and a `cache_handle`, use `get_cached_content(cache_handle,
+page=N)` to retrieve the full content page by page.
 
 ## Common LightspeedDMS Repositories
 
@@ -537,3 +802,25 @@ Results include `wiki_url`, `real_views`, `first_viewed_at`, and `last_viewed_at
 - **Provide context** — Include a brief summary of what the article covers alongside the link
 - **Multiple results** — If relevant, provide 2-3 links in the References section for comprehensive coverage
 - **Check `repo_category`** — Any repo with `repo_category: "Documentation"` in search results is a knowledge base; apply these linking practices to all such repos, not just the ones listed above
+
+## Quick Reference Cheat Sheet
+
+**Tool selection:**
+- Concepts → `search_code` (semantic) + reranking
+- Exact strings → `search_code` (fts) or `regex_search`
+- Structural patterns (AST-level) → `xray_explore` then `xray_search`
+- Symbol navigation → `scip_definition`, `scip_references`, `scip_callchain`
+- Time-travel → `git_log`, `git_diff`, `git_blame`
+
+**Mandatory pre-search steps:**
+1. Ask environment + system (production / staging / development)
+2. Verify branch with `get_repository_status`
+3. For LightspeedDMS: search `cidx-meta-global` first to find relevant repos
+
+**Rerank by default for 2+ word queries in semantic/hybrid mode.**
+
+**Async tools:** `activate_repository`, `xray_search`, `xray_explore` return `{job_id}` — poll `get_job_details` until COMPLETED.
+
+**Paged retrieval:** when result has `truncated: true`, use `get_cached_content(cache_handle, page=N)`.
+
+**KB responses:** prepend `https://codeindexer.lightspeedtools.cloud` to the `wiki_url` field; always include a References section when drawing on KB articles.

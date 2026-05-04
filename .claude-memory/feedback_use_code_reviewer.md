@@ -1,5 +1,5 @@
 ---
-name: feedback_use_codex_for_reviews
+name: feedback_use_code_reviewer
 description: Use opus-based code-reviewer (not codex-code-reviewer) for all code reviews in this project
 type: feedback
 originSessionId: f59c0b85-76c2-44e4-b18c-0cc9fc093617

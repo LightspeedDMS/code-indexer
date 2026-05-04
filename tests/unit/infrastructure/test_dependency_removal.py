@@ -14,18 +14,14 @@ import pytest
 class TestTreeSitterDependencyRemoval:
     """Test that all tree-sitter dependencies are completely removed."""
 
-    def test_requirements_txt_no_tree_sitter(self):
-        """Test that requirements.txt does not contain tree-sitter-language-pack."""
-        requirements_path = (
-            Path(__file__).parent.parent.parent.parent / "requirements.txt"
-        )
-
-        with open(requirements_path, "r") as f:
-            content = f.read()
-
-        # This should fail initially
+    def test_pyproject_no_tree_sitter_language_pack(self):
+        """pyproject.toml must not depend on tree-sitter-language-pack
+        (a different package not used by CIDX). The optional [xray] extras
+        use tree-sitter and tree-sitter-languages — those are PERMITTED."""
+        pyproject_path = Path(__file__).parent.parent.parent.parent / "pyproject.toml"
+        content = pyproject_path.read_text()
         assert "tree-sitter-language-pack" not in content, (
-            "tree-sitter-language-pack dependency should be removed from requirements.txt"
+            "pyproject.toml must not depend on tree-sitter-language-pack"
         )
 
     def test_no_tree_sitter_imports_in_codebase(self):

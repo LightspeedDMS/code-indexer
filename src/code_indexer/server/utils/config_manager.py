@@ -727,6 +727,23 @@ class ActivatedReaperConfig:
 
 
 @dataclass
+class XRayConfig:
+    """
+    Configuration for X-Ray precision AST-aware code search (Story #977).
+
+    Controls the default per-job timeout and ThreadPoolExecutor worker count
+    used by XRaySearchEngine. Both values are runtime-tunable via the Web UI
+    Config Screen and persist via get_config_service().get_config().
+    """
+
+    # Default per-job wall-clock timeout in seconds (range 10..600)
+    xray_timeout_seconds: int = 120
+
+    # ThreadPoolExecutor worker count for Phase 2 AST evaluation (range 1..8)
+    xray_worker_threads: int = 2
+
+
+@dataclass
 class ContentLimitsConfig:
     """
     Unified content limits configuration (Story #32).
@@ -1072,6 +1089,9 @@ class ServerConfig:
     # Story #967 - Activated repository reaper configuration
     activated_reaper_config: Optional[ActivatedReaperConfig] = None
 
+    # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
+    xray_config: Optional[XRayConfig] = None
+
     password_expiry_config: Optional[PasswordExpiryConfig] = None  # Story #565
 
     # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
@@ -1205,6 +1225,9 @@ class ServerConfig:
         # Story #967 - Initialize activated reaper config
         if self.activated_reaper_config is None:
             self.activated_reaper_config = ActivatedReaperConfig()
+        # Story #977 - Initialize X-Ray config
+        if self.xray_config is None:
+            self.xray_config = XRayConfig()
         # Story #565 - Initialize password expiry config
         if self.password_expiry_config is None:
             self.password_expiry_config = PasswordExpiryConfig()
@@ -1796,6 +1819,12 @@ class ServerConfigManager:
             config_dict["activated_reaper_config"] = ActivatedReaperConfig(
                 **config_dict["activated_reaper_config"]
             )
+
+        # Story #977: Convert xray_config dict to XRayConfig
+        if "xray_config" in config_dict and isinstance(
+            config_dict["xray_config"], dict
+        ):
+            config_dict["xray_config"] = XRayConfig(**config_dict["xray_config"])
 
         # Epic #408: Convert ontap dict to OntapConfig
         if "ontap" in config_dict and isinstance(config_dict["ontap"], dict):
