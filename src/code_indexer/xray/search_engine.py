@@ -355,8 +355,11 @@ class XRaySearchEngine:
         """Evaluate a candidate file once per Phase 1 match position.
 
         Parses the file once, then calls sandbox.run once per (line_number,
-        line_content) position from Phase 1.  The node passed to the evaluator
-        is the deepest AST node enclosing that position's byte offset.
+        line_content) position from Phase 1.  The ``node`` passed to the
+        evaluator is always the file root — evaluators walk DOWN from root via
+        ``descendants_of_type``.  Per-match position information is exposed as
+        additional globals: ``match_byte_offset``, ``match_line_number``, and
+        ``match_line_content`` (all ``None`` in filename-target mode).
 
         Called from Phase 2 via ThreadPoolExecutor workers.
 
@@ -367,13 +370,11 @@ class XRaySearchEngine:
             max_debug_nodes: BFS node cap for ast_debug serialisation.
             match_positions: List of (line_number, line_content) tuples from
                 Phase 1.  When None (filename-target or legacy call), falls
-                back to a single call with the root node (line_number=None).
+                back to a single call with root and all match globals set to None.
 
         Returns:
             Tuple of (matches, errors) where each is a list of dicts.
         """
-        from code_indexer.xray.ast_engine import find_enclosing_node
-
         lang = self.ast_engine.detect_language(file_path)
         if lang is None:
             return [], [
@@ -404,20 +405,26 @@ class XRaySearchEngine:
             errors: List[Dict[str, Any]] = []
 
             for line_number, line_content in positions_to_eval:
-                # Locate the enclosing AST node for this position.
+                # node is ALWAYS the file root — evaluators walk DOWN via
+                # descendants_of_type.  Per-match position is exposed as
+                # additional globals instead of narrowing the node.
                 if line_number is not None:
-                    byte_offset = _line_to_byte_offset(source, line_number)
-                    node = find_enclosing_node(root, byte_offset)
+                    match_byte_offset: Optional[int] = _line_to_byte_offset(
+                        source, line_number
+                    )
                 else:
-                    node = root
+                    match_byte_offset = None
 
                 eval_result = self.sandbox.run(
                     evaluator_code,
-                    node=node,
+                    node=root,
                     root=root,
                     source=source,
                     lang=lang,
                     file_path=str(file_path),
+                    match_byte_offset=match_byte_offset,
+                    match_line_number=line_number,
+                    match_line_content=line_content,
                 )
 
                 err_line = line_number if line_number is not None else 0
@@ -431,13 +438,13 @@ class XRaySearchEngine:
                         "evaluator_decision": True,
                     }
                     if include_ast_debug:
-                        raw_node = getattr(node, "_node", node)
+                        raw_root = getattr(root, "_node", root)
                         match_entry["matched_node"] = {
-                            "type": raw_node.type,
-                            "start_byte": raw_node.start_byte,
-                            "end_byte": raw_node.end_byte,
-                            "start_point": list(raw_node.start_point),
-                            "end_point": list(raw_node.end_point),
+                            "type": raw_root.type,
+                            "start_byte": raw_root.start_byte,
+                            "end_byte": raw_root.end_byte,
+                            "start_point": list(raw_root.start_point),
+                            "end_point": list(raw_root.end_point),
                         }
                         match_entry["ast_debug"] = self._serialize_ast(
                             root, max_debug_nodes

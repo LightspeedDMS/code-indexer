@@ -212,6 +212,9 @@ def _run_evaluator(
     lang: str,
     file_path: str,
     conn: Any,
+    match_byte_offset: Optional[int] = None,
+    match_line_number: Optional[int] = None,
+    match_line_content: Optional[str] = None,
 ) -> None:
     """Execute *code* inside a stripped-builtin environment and send result via *conn*.
 
@@ -236,6 +239,9 @@ def _run_evaluator(
             "source": source,
             "lang": lang,
             "file_path": file_path,
+            "match_byte_offset": match_byte_offset,
+            "match_line_number": match_line_number,
+            "match_line_content": match_line_content,
         }
         locals_dict: dict[str, Any] = {}
 
@@ -523,6 +529,9 @@ class PythonEvaluatorSandbox:
         source: str,
         lang: str,
         file_path: str,
+        match_byte_offset: Optional[int] = None,
+        match_line_number: Optional[int] = None,
+        match_line_content: Optional[str] = None,
     ) -> EvalResult:
         """Run *code* in a sandboxed subprocess and return the result.
 
@@ -533,11 +542,18 @@ class PythonEvaluatorSandbox:
 
         Args:
             code: Evaluator source code (must pass ``validate()``).
-            node: Current AST node (XRayNode) passed to the evaluator.
-            root: Root AST node (XRayNode) passed to the evaluator.
+            node: File root AST node (XRayNode) — always the module/file root.
+                Evaluators walk DOWN from this node via ``descendants_of_type``.
+            root: Alias for *node* (same object); kept for backward compatibility.
             source: Full source text of the file being evaluated.
             lang: Language identifier string (e.g. ``"java"``, ``"python"``).
             file_path: Absolute path of the file being evaluated.
+            match_byte_offset: Byte offset of the Phase 1 regex match within the
+                file source.  ``None`` in filename-target mode.
+            match_line_number: 1-based line number of the Phase 1 regex match.
+                ``None`` in filename-target mode.
+            match_line_content: Text of the line that matched the Phase 1 regex.
+                ``None`` in filename-target mode.
 
         Returns:
             EvalResult — see class docstring for failure mode details.
@@ -551,7 +567,18 @@ class PythonEvaluatorSandbox:
 
         proc = ctx.Process(
             target=_run_evaluator,
-            args=(code, node, root, source, lang, file_path, child_conn),
+            args=(
+                code,
+                node,
+                root,
+                source,
+                lang,
+                file_path,
+                child_conn,
+                match_byte_offset,
+                match_line_number,
+                match_line_content,
+            ),
             daemon=True,
         )
         proc.start()
