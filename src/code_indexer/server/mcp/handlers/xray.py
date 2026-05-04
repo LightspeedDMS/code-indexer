@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
 from code_indexer.server.auth.user_manager import User
+from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
 from ._utils import _mcp_response
@@ -136,15 +137,7 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # 5. Pre-flight evaluator validation
     # ------------------------------------------------------------------
-    try:
-        engine = XRaySearchEngine()
-    except XRayExtrasNotInstalled as exc:
-        return _mcp_response(
-            {
-                "error": "xray_extras_not_installed",
-                "message": str(exc),
-            }
-        )
+    engine = XRaySearchEngine()
 
     validation = engine.sandbox.validate(evaluator_code)
     if not validation.ok:
@@ -295,15 +288,7 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # 5. Pre-flight evaluator validation
     # ------------------------------------------------------------------
-    try:
-        engine = XRaySearchEngine()
-    except XRayExtrasNotInstalled as exc:
-        return _mcp_response(
-            {
-                "error": "xray_extras_not_installed",
-                "message": str(exc),
-            }
-        )
+    engine = XRaySearchEngine()
 
     validation = engine.sandbox.validate(evaluator_code)
     if not validation.ok:
@@ -415,8 +400,3 @@ def _register(registry: Dict[str, Any]) -> None:
     registry["xray_explore"] = handle_xray_explore
 
 
-# Lazy imports kept at module bottom to honour the [xray] extras boundary.
-# AstSearchEngine and PythonEvaluatorSandbox are only imported if the
-# tree-sitter extras are present; the handler catches XRayExtrasNotInstalled.
-from code_indexer.xray.errors import XRayExtrasNotInstalled  # noqa: E402
-from code_indexer.xray.search_engine import XRaySearchEngine  # noqa: E402

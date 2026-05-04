@@ -437,40 +437,6 @@ class TestMaxFilesOutOfRange:
 
 
 # ---------------------------------------------------------------------------
-# TC-09: xray extras not installed returns 503
-# ---------------------------------------------------------------------------
-
-
-class TestXrayExtrasNotInstalled:
-    """When XRaySearchEngine raises XRayExtrasNotInstalled, return 503."""
-
-    def test_extras_not_installed_returns_503(self, app, client):
-        """XRayExtrasNotInstalled exception -> 503 with error_code."""
-        from code_indexer.xray.errors import XRayExtrasNotInstalled
-
-        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
-
-        bjm_patch, mock_bjm = _patch_bjm()
-        try:
-            with (
-                _patch_repo_found(),
-                bjm_patch,
-                patch(
-                    "code_indexer.server.routes.xray_routes.XRaySearchEngine",
-                    side_effect=XRayExtrasNotInstalled("tree_sitter"),
-                ),
-            ):
-                resp = client.post("/api/xray/search", json=VALID_BODY)
-        finally:
-            app.dependency_overrides.clear()
-
-        assert resp.status_code == 503
-        data = resp.json()
-        assert _err_code(data) == "xray_extras_not_installed"
-        assert "pip install" in data["detail"].get("detail", "").lower()
-
-
-# ---------------------------------------------------------------------------
 # TC-10: Malformed JSON body returns 400/422
 # ---------------------------------------------------------------------------
 

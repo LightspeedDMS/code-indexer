@@ -16,8 +16,8 @@ class TestTreeSitterDependencyRemoval:
 
     def test_pyproject_no_tree_sitter_language_pack(self):
         """pyproject.toml must not depend on tree-sitter-language-pack
-        (a different package not used by CIDX). The optional [xray] extras
-        use tree-sitter and tree-sitter-languages — those are PERMITTED."""
+        (a different package not used by CIDX). The core dependencies include
+        tree-sitter and tree-sitter-languages for X-Ray — those are PERMITTED."""
         pyproject_path = Path(__file__).parent.parent.parent.parent / "pyproject.toml"
         content = pyproject_path.read_text()
         assert "tree-sitter-language-pack" not in content, (

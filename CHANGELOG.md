@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.2.1 — 2026-05-04
+
+### Fixed
+
+- **X-Ray dependencies promoted to core (deployment fix)** — v10.2.0 shipped `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` as `[xray]` optional extras, but the CIDX server auto-updater installs the base package only. Result: `xray_search` and `xray_explore` MCP tools were registered in the schema but failed at runtime on staging with `XRayExtrasNotInstalled` because tree-sitter wasn't installed. Both dependencies are now core (in `[project] dependencies`); the `[xray]` extras block is removed. The `XRayExtrasNotInstalled` exception class and all its error-handling branches in CLI, MCP handlers, and HTTP routes are deleted (per Anti-Fallback rule — tree-sitter is a system invariant now). Five tests that verified the optional-extras error path are deleted.
+
 ## v10.2.0 — 2026-05-04
 
 ### Added

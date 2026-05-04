@@ -36,51 +36,6 @@ class TestAstSearchEngineInstantiation:
         engine = _make_engine()
         assert engine is not None
 
-    def test_missing_tree_sitter_languages_raises_xray_error(self) -> None:
-        """AstSearchEngine() raises XRayExtrasNotInstalled when tree_sitter_languages absent.
-
-        We simulate the missing package by temporarily hiding it in sys.modules,
-        then restoring it afterward. This tests the real error path without
-        uninstalling the package.
-        """
-        import sys
-        from code_indexer.xray.errors import XRayExtrasNotInstalled
-
-        # Remove the module from cache to force a fresh import attempt
-        saved = {k: v for k, v in sys.modules.items() if "tree_sitter" in k}
-        for key in saved:
-            del sys.modules[key]
-
-        # Also remove the cached ast_engine module so __init__ re-runs
-        engine_mod = sys.modules.pop("code_indexer.xray.ast_engine", None)
-
-        try:
-            # Patch builtins.__import__ so tree_sitter_languages raises ImportError.
-            # Capture real __import__ before patching to avoid recursion.
-            real_import = (
-                __builtins__["__import__"]
-                if isinstance(__builtins__, dict)
-                else __builtins__.__import__
-            )  # type: ignore[union-attr]
-
-            def _block_ts(name: str, *args: object, **kwargs: object) -> object:
-                if "tree_sitter" in name:
-                    raise ImportError(f"Simulated missing: {name}")
-                return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-            from unittest.mock import patch
-
-            with patch("builtins.__import__", side_effect=_block_ts):
-                with pytest.raises(XRayExtrasNotInstalled):
-                    from code_indexer.xray.ast_engine import AstSearchEngine  # type: ignore[assignment]  # re-import under patched __import__
-
-                    AstSearchEngine()
-        finally:
-            # Restore everything
-            sys.modules.update(saved)
-            if engine_mod is not None:
-                sys.modules["code_indexer.xray.ast_engine"] = engine_mod
-
     def test_lazy_load_invariant_ast_engine_module_itself(self) -> None:
         """tree_sitter must NOT be imported simply by importing ast_engine module.
 

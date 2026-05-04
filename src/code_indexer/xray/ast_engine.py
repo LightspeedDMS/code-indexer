@@ -16,7 +16,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional, Union, cast
 
-from code_indexer.xray.errors import XRayExtrasNotInstalled
 from code_indexer.xray.languages import (
     EXTENSION_MAP,
     SUPPORTED_LANGUAGES,
@@ -65,20 +64,9 @@ class AstSearchEngine:
     """
 
     def __init__(self) -> None:
-        """Initialise the engine, importing tree-sitter at this point.
-
-        Raises:
-            XRayExtrasNotInstalled: if tree_sitter_languages is not installed.
-        """
-        try:
-            import tree_sitter_languages as _tsl  # noqa: F401
-        except ImportError:
-            raise XRayExtrasNotInstalled("tree_sitter_languages")
-
-        try:
-            import tree_sitter as _ts  # noqa: F401
-        except ImportError:
-            raise XRayExtrasNotInstalled("tree_sitter")
+        """Initialise the engine, importing tree-sitter at this point."""
+        import tree_sitter_languages as _tsl  # noqa: F401
+        import tree_sitter as _ts  # noqa: F401
 
         # Store references so parse() can use them without re-importing
         self._tsl = _tsl

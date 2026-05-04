@@ -93,12 +93,7 @@ class XRaySearchEngine:
     """
 
     def __init__(self) -> None:
-        """Initialise the engine, importing tree-sitter at this point.
-
-        Raises:
-            XRayExtrasNotInstalled: if tree_sitter or tree_sitter_languages is
-                not installed.
-        """
+        """Initialise the engine, importing tree-sitter at this point."""
         from code_indexer.xray.ast_engine import AstSearchEngine
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
