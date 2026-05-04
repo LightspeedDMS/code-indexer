@@ -132,6 +132,24 @@ The `node` argument passed to your evaluator code is an `XRayNode` instance. The
 
 For a "common patterns cookbook" of 8 worked evaluator examples (filter to function bodies, exclude comments, count elif clauses, deep-nesting detection, etc.) and a cross-language node type table covering the 10 mandatory languages (Python / Java / TypeScript / JavaScript / Go / Kotlin / C# / etc.), see the corresponding sections in `xray_search.md`. The same evaluator API and `XRayNode` surface apply to both tools.
 
+### Evaluator code structure
+
+The evaluator code is parsed as a Python **Module** (function body), NOT a bare expression. Multi-statement evaluators are first-class:
+
+```python
+# Bind intermediate variables with =, then return the final boolean.
+elifs = node.count_descendants_of_type('elif_clause')
+fors  = node.count_descendants_of_type('for_statement')
+return (elifs + fors) >= 5
+```
+
+Rules:
+- The code must end with a `return <expression>` statement that produces a boolean.
+- Bind locals with `=` (`Assign`) or `+=`-style (`AugAssign`).
+- A non-bool return value triggers `NonBoolReturn` in `evaluation_errors[]` — wrap with `bool(...)` if your last expression is a list/int/etc.
+
+### Whitelisted node types
+
 Whitelisted Python AST node types (all others are rejected before any subprocess is spawned):
 
 - Expression core: `Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, List, Tuple, Dict, Return, Expr`
@@ -140,7 +158,11 @@ Whitelisted Python AST node types (all others are rejected before any subprocess
 - Abstract operator base classes (matched via isinstance against concrete subclasses): `boolop, cmpop, unaryop, expr_context, operator`
 - Module/Load markers: `Module, Load`
 
-Top-level `for` and `while` statements remain BANNED — use a comprehension (`ListComp` / `GeneratorExp` / `SetComp` / `DictComp`) or a generator-driven `any()` / `all()` / `sum()` instead. `class`, `def`, `import`, `lambda`, `try`, `with`, `global`, `nonlocal` are also banned.
+Statement-level **`if` / `for` / `while` / `try`** are BANNED. Use the expression-level alternatives:
+- Conditional logic → `IfExp` ternary: `result = a if cond else b`
+- Iteration → comprehension: `[x for x in items if cond]`, `any(cond for x in items)`, `sum(1 for x in items if cond)`
+
+Also banned: `class`, `def`, `import`, `lambda`, `with`, `global`, `nonlocal`.
 
 As of v10.3.0 the sandbox accepts assignments and comprehensions, so these idiomatic patterns work:
 

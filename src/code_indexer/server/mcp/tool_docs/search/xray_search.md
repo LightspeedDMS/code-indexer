@@ -191,6 +191,24 @@ tree-sitter node type names differ between languages — there is no shared voca
 
 These are the most common types — every grammar has hundreds of node types. The fastest way to discover the exact type names for a construct is to use `xray_dump_ast` on a small example file in the language you care about, OR to consult the tree-sitter grammar repository for that language (e.g., https://github.com/tree-sitter/tree-sitter-python/blob/master/grammar.js).
 
+### Evaluator code structure
+
+The evaluator code is parsed as a Python **Module** (function body), NOT a bare expression. Multi-statement evaluators are first-class:
+
+```python
+# Bind intermediate variables with =, then return the final boolean.
+elifs = node.count_descendants_of_type('elif_clause')
+fors  = node.count_descendants_of_type('for_statement')
+return (elifs + fors) >= 5
+```
+
+Rules:
+- The code must end with a `return <expression>` statement that produces a boolean.
+- Bind locals with `=` (`Assign`) or `+=`-style (`AugAssign`).
+- A non-bool return value triggers `NonBoolReturn` in `evaluation_errors[]` — wrap with `bool(...)` if your last expression is a list/int/etc.
+
+### Whitelisted node types
+
 Whitelisted Python AST node types (all others are rejected before any subprocess is spawned):
 
 - Expression core: `Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, List, Tuple, Dict, Return, Expr`
@@ -199,7 +217,11 @@ Whitelisted Python AST node types (all others are rejected before any subprocess
 - Abstract operator base classes (matched via isinstance against concrete subclasses): `boolop, cmpop, unaryop, expr_context, operator`
 - Module/Load markers: `Module, Load`
 
-Top-level `for` and `while` statements remain BANNED — use a comprehension (`ListComp` / `GeneratorExp` / `SetComp` / `DictComp`) or a generator-driven `any()` / `all()` / `sum()` instead. `class`, `def`, `import`, `lambda`, `try`, `with`, `global`, `nonlocal` are also banned.
+Statement-level **`if` / `for` / `while` / `try`** are BANNED. Use the expression-level alternatives:
+- Conditional logic → `IfExp` ternary: `result = a if cond else b`
+- Iteration → comprehension: `[x for x in items if cond]`, `any(cond for x in items)`, `sum(1 for x in items if cond)`
+
+Also banned: `class`, `def`, `import`, `lambda`, `with`, `global`, `nonlocal`.
 
 As of v10.3.0 the sandbox accepts assignments and comprehensions, so these idiomatic patterns work:
 

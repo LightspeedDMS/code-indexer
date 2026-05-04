@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.3.1 — 2026-05-04
+
+### Documentation
+
+- **X-Ray docs: explicit ban on statement-level `if`** (post-v10.3.0 field-test follow-up): `xray_search.md` and `xray_explore.md` now explicitly call out that `if` / `for` / `while` / `try` statements are banned alongside the previously-documented banned constructs, with guidance to use `IfExp` ternary (`a if cond else b`) for conditional logic and comprehensions for iteration.
+- **X-Ray docs: Evaluator code structure subsection**: a new "Evaluator code structure" section explains that the evaluator code is parsed as a Python **Module** (function body), not a bare expression. Multi-statement evaluators are first-class — bind locals with `=` (`Assign`) or `+=` (`AugAssign`), then return a final boolean. The previous documentation implied bare expressions were the only valid form, hiding the multi-statement capability that the v10.3.0 sandbox expansion enabled.
+
 ## v10.3.0 — 2026-05-04
 
 ### Added
