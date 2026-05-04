@@ -67,7 +67,7 @@ CIDX combines semantic embeddings with traditional search to help you find code 
 ### pipx (Recommended)
 
 ```bash
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.3
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
 
 # Verify installation
 cidx --version
@@ -78,7 +78,7 @@ cidx --version
 ```bash
 python3 -m venv code-indexer-env
 source code-indexer-env/bin/activate
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.3
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
 ```
 
 **Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key (or Cohere API key)

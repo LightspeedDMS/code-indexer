@@ -66,7 +66,7 @@ Best for most users - provides isolated environment with global command access:
 
 ```bash
 # Install the package
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
 
 # Verify installation
 cidx --version
@@ -99,7 +99,7 @@ source code-indexer-env/bin/activate  # Linux/macOS
 code-indexer-env\Scripts\activate     # Windows
 
 # Install CIDX
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
 
 # Verify installation
 cidx --version
@@ -289,7 +289,7 @@ python -m pipx ensurepath
 # Restart terminal
 
 # Install CIDX
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
 ```
 
 **Path issues**: If `cidx` not found:
@@ -327,10 +327,10 @@ pip install --upgrade git+https://github.com/LightspeedDMS/code-indexer.git@mast
 
 ```bash
 # pipx
-pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
 
 # pip
-pip install --force-reinstall git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+pip install --force-reinstall git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
 ```
 
 ### Post-Upgrade Steps
@@ -371,7 +371,7 @@ cidx index
 3. **Reinstall**:
    ```bash
    pipx uninstall code-indexer
-   pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+   pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
    ```
 
 ### Python Version Too Old
@@ -396,7 +396,7 @@ cidx index
 
 3. **Use specific Python version**:
    ```bash
-   python3.11 -m pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v8.13.0
+   python3.11 -m pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
    ```
 
 ### VoyageAI API Key Not Found

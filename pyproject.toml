@@ -7,7 +7,7 @@ name = "code-indexer"
 dynamic = ["version"]
 description = "AI-powered semantic code search with local models"
 authors = [
-    {name = "Seba Battig", email = "jsbattig@gmail.com"}
+    {name = "LightspeedDMS", email = "seba.battig@lightspeeddms.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
