@@ -43,6 +43,12 @@ inputSchema:
       type: integer
       description: 'Maximum number of candidate files to evaluate. When the cap is hit the result includes partial=true and max_files_reached=true. Use a small value (e.g. 5) to test your evaluator before running the full search. Must be >= 1 when provided.'
       minimum: 1
+    await_seconds:
+      type: integer
+      description: 'Optional server-side polling window in seconds. When 0 (default), the tool returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds seconds and returns the inline result if the job completes in time; otherwise falls back to {job_id}. Range: 0..30. Error code await_seconds_invalid if out of range or wrong type.'
+      minimum: 0
+      maximum: 30
+      default: 0
   required:
     - repository_alias
     - driver_regex
@@ -80,6 +86,7 @@ PHASE 2 (evaluator): for each candidate file, the AST is parsed with tree-sitter
 | exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude (e.g. ["*/test/*"]). Empty list means exclude none. |
 | timeout_seconds | int | no | 120 | Per-job wall-clock timeout in seconds. Range: 10..600. Defaults to server config xray_timeout_seconds. |
 | max_files | int | no | null | Maximum number of candidate files to evaluate. When the cap is hit the result includes partial=true and max_files_reached=true. Use max_files: 5 to test your evaluator before running the full search. |
+| await_seconds | int | no | 0 | Server-side polling window in seconds. When 0, returns {job_id} immediately. When > 0, the server polls for up to await_seconds seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range: 0..30. Error code: await_seconds_invalid. |
 
 ## Evaluator API
 
@@ -93,9 +100,114 @@ The evaluator code runs inside a sandboxed subprocess and receives these names:
 
 For `search_target='content'`: the evaluator is called once per regex match position; `node` is the deepest AST node enclosing that position. For `search_target='filename'`: the evaluator is called once per matching file with `node == root` (no per-position semantics — there is no in-content match position to enclose).
 
+### XRayNode reference
+
+The `node` argument passed to your evaluator code is an `XRayNode` instance. The full public surface:
+
+| Name | Type | Description |
+|------|------|-------------|
+| `node.type` | str | tree-sitter node type, e.g. `'function_definition'`, `'call'`, `'if_statement'` |
+| `node.parent` | XRayNode \| None | parent node; None for the file root |
+| `node.children` | list[XRayNode] | all child nodes including anonymous ones (punctuation, keywords) |
+| `node.named_children` | list[XRayNode] | only named children — usually what you want |
+| `node.start_byte` | int | byte offset where the node starts |
+| `node.end_byte` | int | byte offset where the node ends |
+| `node.start_point` | tuple[int, int] | (row, column), zero-indexed |
+| `node.end_point` | tuple[int, int] | (row, column), zero-indexed |
+| `node.text` | str | raw source text — equivalent to `source[node.start_byte:node.end_byte]` |
+| `node.is_descendant_of(type_name)` | bool | true if any ancestor matches `type_name` |
+| `node.descendants_of_type(type_name)` | list[XRayNode] | DFS pre-order; all descendants whose type matches `type_name` (excludes self) |
+| `node.count_descendants_of_type(type_name)` | int | fast count without materialising a list — use this when you only need a count |
+| `node.enclosing(type_name)` | XRayNode \| None | walks UP parent chain (inclusive of self) and returns first ancestor matching `type_name` |
+
+### Common patterns cookbook
+
+Eight worked evaluator patterns that cover most everyday queries. Each pattern is a complete `evaluator_code` value — copy-paste it directly into your tool call.
+
+1. **Filter regex matches inside function bodies** (the most common ask):
+   ```python
+   return node.is_descendant_of('function_definition')
+   ```
+
+2. **Exclude docstring/comment matches**:
+   ```python
+   return node.type != 'comment' and node.type != 'string'
+   ```
+
+3. **Walk up to a specific ancestor and inspect it**:
+   ```python
+   func = node.enclosing('function_definition')
+   return func is not None and func.named_children[0].text == 'public_method'
+   ```
+
+4. **Count structural property — N elif clauses** (the canonical "find functions with N elifs" use case):
+   ```python
+   return node.count_descendants_of_type('elif_clause') >= 5
+   ```
+
+5. **String literal containing a substring** (with `node.text`):
+   ```python
+   return node.type == 'string' and 'SELECT' in node.text.upper()
+   ```
+
+6. **Function with too many parameters**:
+   ```python
+   func = node.enclosing('function_definition')
+   if func is None:
+       return False
+   params = func.descendants_of_type('parameter')
+   return len(params) > 7
+   ```
+
+7. **Deep nesting detection**:
+   ```python
+   if_count = node.count_descendants_of_type('if_statement')
+   for_count = node.count_descendants_of_type('for_statement')
+   while_count = node.count_descendants_of_type('while_statement')
+   return (if_count + for_count + while_count) >= 10
+   ```
+
+8. **List comprehension presence** (showcasing post-#21 comprehension support):
+   ```python
+   return any(c.type == 'list_comprehension' for c in node.named_children)
+   ```
+
+### Common cross-language node type names
+
+tree-sitter node type names differ between languages — there is no shared vocabulary across grammars. Use this table as a starting reference for the 10 mandatory languages.
+
+| Construct | Python | Java | TypeScript / JavaScript | Go | Kotlin | C# |
+|-----------|--------|------|-------------------------|-----|--------|-----|
+| Function definition | `function_definition` | `method_declaration` | `function_declaration` / `method_definition` | `function_declaration` | `function_declaration` | `method_declaration` |
+| Function call | `call` | `method_invocation` | `call_expression` | `call_expression` | `call_expression` | `invocation_expression` |
+| Class definition | `class_definition` | `class_declaration` | `class_declaration` | (no class — `type_declaration` for structs) | `class_declaration` | `class_declaration` |
+| If statement | `if_statement` | `if_statement` | `if_statement` | `if_statement` | `if_expression` | `if_statement` |
+| Else-if | `elif_clause` (Python-only) | `else if` chain inside `if_statement` | `else if` chain | `else if` chain | `else if` chain | `else if` chain |
+| For loop | `for_statement` | `enhanced_for_statement` / `for_statement` | `for_statement` / `for_in_statement` | `for_statement` | `for_statement` | `for_statement` |
+| Try block | `try_statement` | `try_statement` / `try_with_resources_statement` | `try_statement` | (no try — `defer`/`recover`) | `try_expression` | `try_statement` |
+| Variable declaration | `assignment` (no separate decl) | `local_variable_declaration` | `lexical_declaration` (`let`/`const`) / `variable_declaration` (`var`) | `var_declaration` / `short_var_declaration` | `property_declaration` | `local_declaration_statement` |
+| String literal | `string` | `string_literal` | `string` | `interpreted_string_literal` | `string_literal` | `string_literal` |
+| Comment | `comment` | `line_comment` / `block_comment` | `comment` | `comment` | `line_comment` / `block_comment` | `comment` |
+
+These are the most common types — every grammar has hundreds of node types. The fastest way to discover the exact type names for a construct is to use `xray_dump_ast` on a small example file in the language you care about, OR to consult the tree-sitter grammar repository for that language (e.g., https://github.com/tree-sitter/tree-sitter-python/blob/master/grammar.js).
+
 Whitelisted Python AST node types (all others are rejected before any subprocess is spawned):
-Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, List, Tuple, Dict, Return, Expr.
-Abstract operator base classes (boolop, cmpop, unaryop, expr_context) and Module/Load markers are also accepted via isinstance().
+
+- Expression core: `Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, List, Tuple, Dict, Return, Expr`
+- Local binding: `Assign` (e.g. `x = node.named_children`), `AugAssign` (e.g. `count += 1`)
+- Comprehensions and ternary: `comprehension, GeneratorExp, ListComp, SetComp, DictComp, IfExp`
+- Abstract operator base classes (matched via isinstance against concrete subclasses): `boolop, cmpop, unaryop, expr_context, operator`
+- Module/Load markers: `Module, Load`
+
+Top-level `for` and `while` statements remain BANNED — use a comprehension (`ListComp` / `GeneratorExp` / `SetComp` / `DictComp`) or a generator-driven `any()` / `all()` / `sum()` instead. `class`, `def`, `import`, `lambda`, `try`, `with`, `global`, `nonlocal` are also banned.
+
+As of v10.3.0 the sandbox accepts assignments and comprehensions, so these idiomatic patterns work:
+
+- `[c for c in node.named_children if c.type == 'X']`
+- `any(c.type == 'X' for c in node.named_children)`
+- `count = node.count_descendants_of_type('X')\nreturn count >= 5`
+- `result = True if cond else False`
+- `total = 0\ntotal += len(node.named_children)\nreturn total > 0`
 
 Safe builtins (available in the exec() environment):
 len, str, int, bool, list, tuple, dict, min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr.
@@ -125,7 +237,7 @@ Hard timeout: 5 seconds per evaluator invocation, enforced by multiprocessing.Pr
 After polling GET /api/jobs/{job_id} to COMPLETED status, result contains:
 
 - matches[]: file_path, line_number, code_snippet, language, evaluator_decision
-  - Note: line_number and code_snippet are null until story #978 wires per-match position tracking via RegexSearchService.
+  - As of v10.2.0, `line_number` and `code_snippet` are populated from Phase 1 ripgrep match positions (`RegexSearchService`) for `search_target='content'`. For `search_target='filename'` searches, `line_number` is `null` and `code_snippet` is `null` because the regex matched a path, not in-content text — the evaluator was called once per file with `node == root`.
 - evaluation_errors[]: list of per-match evaluator failures. Each entry has file_path, line_number, error_type, error_message. error_type is one of: AttributeError (evaluator referenced a node attribute that does not exist for this node type), EvaluatorTimeout (the 5s sandbox timer fired), EvaluatorCrash (subprocess exited with non-zero code), UnsupportedLanguage, NonBoolReturn. evaluation_errors does NOT cause job failure — status remains COMPLETED.
 - files_processed: int — number of candidate files evaluated
 - files_total: int — total candidate files found by driver
@@ -133,6 +245,91 @@ After polling GET /api/jobs/{job_id} to COMPLETED status, result contains:
 - partial: true (only on partial completion)
 - timeout: true (only when job-level timeout fired)
 - max_files_reached: true (only when max_files cap fired)
+
+### evaluation_errors[] payload examples
+
+Each error_type carries a distinct error_message shape. The examples below show the actual wire format clients receive (sourced from `src/code_indexer/xray/search_engine.py::_evaluate_file` and `src/code_indexer/xray/sandbox.py::EvalResult`):
+
+**EvaluatorTimeout** — sandbox 5s wall-clock budget exceeded; subprocess received SIGTERM (and SIGKILL after a 1.0s grace period if still alive):
+
+```json
+{
+  "file_path": "/srv/cidx/repo/src/code_indexer/server/services/very_large_module.py",
+  "line_number": 142,
+  "error_type": "EvaluatorTimeout",
+  "error_message": "evaluator exceeded 5s sandbox limit"
+}
+```
+
+**EvaluatorCrash** — subprocess died before returning a value. The `error_message` carries the failure detail in one of three forms:
+
+- `exitcode=<N>` — the subprocess exited with a non-zero status (e.g. `exitcode=139` indicates a SIGSEGV from a C-level fault inside tree-sitter or another extension).
+- `no_pipe_data` — the subprocess died without sending any data over the pipe and returned an `exitcode` of None (typically a forked-process accounting race; treat as "subprocess died silently").
+- `__exception__:<TypeName>:<message>` — the subprocess raised a Python exception inside `_run_evaluator` and serialised it before exiting cleanly. Common when stripped builtins are referenced (e.g. `getattr` raises `NameError`) or when an attribute lookup on the AST node fails.
+
+```json
+{
+  "file_path": "/srv/cidx/repo/src/code_indexer/cli.py",
+  "line_number": 87,
+  "error_type": "EvaluatorCrash",
+  "error_message": "exitcode=139"
+}
+```
+
+```json
+{
+  "file_path": "/srv/cidx/repo/src/code_indexer/handlers/edge_case.py",
+  "line_number": 23,
+  "error_type": "EvaluatorCrash",
+  "error_message": "__exception__:NameError:name 'getattr' is not defined"
+}
+```
+
+**NonBoolReturn** — subprocess exited cleanly but the evaluator returned something other than `bool`. The `error_message` is exactly the type name from the subprocess (`type(value).__name__`):
+
+```json
+{
+  "file_path": "/srv/cidx/repo/src/code_indexer/server/handler.py",
+  "line_number": 56,
+  "error_type": "NonBoolReturn",
+  "error_message": "list"
+}
+```
+
+Other observed `error_message` values for this error_type: `"int"`, `"str"`, `"NoneType"`, `"dict"`. Wrap the evaluator return expression in `bool(...)` or use an explicit `return True/False` to fix.
+
+**UnsupportedLanguage** — Phase 1 selected a candidate file whose extension has no tree-sitter grammar registered. The 10 mandatory languages are: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css (terraform when `tree_sitter_hcl` is installed):
+
+```json
+{
+  "file_path": "/srv/cidx/repo/docs/architecture.md",
+  "line_number": 0,
+  "error_type": "UnsupportedLanguage",
+  "error_message": "No grammar for extension '.md'"
+}
+```
+
+**Generic exception types** (e.g. `IOError`, `UnicodeDecodeError`, `OSError`) — emitted by the catch-all in `_evaluate_file` when the file itself cannot be read or parsed. The `error_type` is the Python exception class name and `error_message` is `str(exc)`.
+
+```json
+{
+  "file_path": "/srv/cidx/repo/src/code_indexer/server/symlinked_file.py",
+  "line_number": 0,
+  "error_type": "PermissionError",
+  "error_message": "[Errno 13] Permission denied: '/srv/cidx/repo/src/code_indexer/server/symlinked_file.py'"
+}
+```
+
+Note: `validation_failed` (sandbox AST whitelist rejection) does NOT appear in `evaluation_errors[]`. The handler validates `evaluator_code` synchronously BEFORE submitting the background job and returns a sync error response instead:
+
+```json
+{
+  "error": "xray_evaluator_validation_failed",
+  "message": "Lambda not in allowed nodes"
+}
+```
+
+Other validation rejection messages include `"Import not in allowed nodes"`, `"For not in allowed nodes"` (top-level `for` statements — use a comprehension or `any()`/`all()` over a generator instead; the `comprehension`, `GeneratorExp`, `ListComp`, `SetComp`, and `DictComp` nodes ARE on the whitelist), `"Lambda not in allowed nodes"`, `"FunctionDef not in allowed nodes"`, `"While not in allowed nodes"`, `"Try not in allowed nodes"`, `"Attribute access to '__class__' blocked (sandbox escape vector)"`, `"Subscript access to '__import__' blocked (sandbox escape vector)"`, and `"syntax_error: <SyntaxError repr>"`.
 
 ### Large Result Paging
 
