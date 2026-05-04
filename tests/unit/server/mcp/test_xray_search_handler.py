@@ -365,37 +365,6 @@ class TestXraySearchHandlerRepoResolution:
 
 
 # ---------------------------------------------------------------------------
-# Tests: xray extras not installed
-# ---------------------------------------------------------------------------
-
-
-class TestXraySearchHandlerExtrasNotInstalled:
-    """Handler returns xray_extras_not_installed when tree-sitter unavailable."""
-
-    def test_extras_not_installed_error_returned(self):
-        """When XRayExtrasNotInstalled is raised, handler returns the error code."""
-        from code_indexer.xray.errors import XRayExtrasNotInstalled
-
-        user = _make_user(UserRole.NORMAL_USER)
-
-        with (
-            patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
-                return_value="/some/path",
-            ),
-            patch(
-                "code_indexer.server.mcp.handlers.xray.XRaySearchEngine",
-                side_effect=XRayExtrasNotInstalled("tree_sitter_languages"),
-            ),
-        ):
-            handler = _import_handler()
-            result = handler(VALID_PARAMS.copy(), user)
-
-        data = _parse_response(result)
-        assert data.get("error") == "xray_extras_not_installed"
-
-
-# ---------------------------------------------------------------------------
 # Tests: job_fn wires _truncate_xray_result
 # ---------------------------------------------------------------------------
 

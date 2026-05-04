@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
+from code_indexer.xray.search_engine import XRaySearchEngine
 
 logger = logging.getLogger(__name__)
 
@@ -175,16 +176,7 @@ def xray_search(
     # ------------------------------------------------------------------
     # 4. Pre-flight evaluator validation
     # ------------------------------------------------------------------
-    try:
-        engine = XRaySearchEngine()
-    except XRayExtrasNotInstalled as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "xray_extras_not_installed",
-                "detail": str(exc),
-            },
-        )
+    engine = XRaySearchEngine()
 
     validation = engine.sandbox.validate(body.evaluator_code)
     if not validation.ok:
@@ -240,9 +232,3 @@ def xray_search(
     return XRaySearchResponse(job_id=job_id)
 
 
-# ---------------------------------------------------------------------------
-# Lazy imports — kept at module bottom to honour [xray] extras boundary.
-# The handler catches XRayExtrasNotInstalled if the extras are absent.
-# ---------------------------------------------------------------------------
-from code_indexer.xray.errors import XRayExtrasNotInstalled  # noqa: E402
-from code_indexer.xray.search_engine import XRaySearchEngine  # noqa: E402

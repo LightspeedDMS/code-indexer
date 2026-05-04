@@ -9,8 +9,7 @@ inputs alone.
 from __future__ import annotations
 
 import sys
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 
 # ---------------------------------------------------------------------------
@@ -20,48 +19,6 @@ from unittest.mock import patch, MagicMock
 
 class TestXRayDefensiveBranches:
     """Targeted tests to hit uncovered branches in ast_engine and xray_node."""
-
-    def test_tree_sitter_missing_raises_xray_error(self) -> None:
-        """ast_engine.py lines 49-50: tree_sitter absent while tree_sitter_languages present.
-
-        Simulates the rare scenario where tree_sitter_languages is installed but
-        tree_sitter itself is not. Verifies the correct XRayExtrasNotInstalled is raised.
-        """
-        from code_indexer.xray.errors import XRayExtrasNotInstalled
-
-        # Save modules we will temporarily modify
-        saved_ts = sys.modules.get("tree_sitter")
-        engine_mod = sys.modules.pop("code_indexer.xray.ast_engine", None)
-
-        # Remove tree_sitter from cache so the import inside __init__ triggers fresh
-        if "tree_sitter" in sys.modules:
-            del sys.modules["tree_sitter"]
-
-        real_import = (
-            __builtins__["__import__"]  # type: ignore[index]
-            if isinstance(__builtins__, dict)
-            else __builtins__.__import__  # type: ignore[union-attr]
-        )
-
-        def _block_only_tree_sitter(
-            name: str, *args: object, **kwargs: object
-        ) -> object:
-            if name == "tree_sitter" and name != "tree_sitter_languages":
-                raise ImportError(f"Simulated missing: {name}")
-            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-        try:
-            with patch("builtins.__import__", side_effect=_block_only_tree_sitter):
-                from code_indexer.xray.ast_engine import AstSearchEngine as _Fresh  # type: ignore[assignment]
-
-                with pytest.raises(XRayExtrasNotInstalled):
-                    _Fresh()
-        finally:
-            # Restore original modules
-            if saved_ts is not None:
-                sys.modules["tree_sitter"] = saved_ts
-            if engine_mod is not None:
-                sys.modules["code_indexer.xray.ast_engine"] = engine_mod
 
     def test_hcl_available_returns_true_when_module_injected(self) -> None:
         """languages.py line 57: _hcl_available() returns True when tree_sitter_hcl is present.

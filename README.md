@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 10.2.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
+**Version 10.2.1** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
 
 ## What's New in v10.0
 
@@ -84,16 +84,6 @@ pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.0.3
 **Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key (or Cohere API key)
 
 For detailed installation instructions including Windows, configuration, and troubleshooting, see [Installation Guide](docs/installation.md).
-
-### X-Ray (AST-aware search)
-
-For precision AST-aware code search via the `cidx xray` command (and MCP `xray_search` / REST `/api/xray/search`):
-
-```bash
-pip install code-indexer[xray]
-```
-
-This installs `tree-sitter` and `tree-sitter-languages==1.10.2` (~50MB native deps for 11 supported languages). Without these extras, X-Ray entry points emit a graceful error pointing to this install command. CLI startup time and all other commands are unaffected.
 
 ## Quick Start
 

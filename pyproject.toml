@@ -79,6 +79,9 @@ dependencies = [
     "pyotp>=2.9.0",
     "qrcode>=7.4.0",
     "pillow>=10.0.0",
+    # X-Ray AST-aware code search (core since v10.2.1)
+    "tree-sitter>=0.21,<0.22",
+    "tree-sitter-languages==1.10.2",
 ]
 
 [project.optional-dependencies]
@@ -87,10 +90,6 @@ cluster = [
     "psycopg-pool>=3.1.0",
 ]
 cohere = ["cohere>=5.0.0"]
-xray = [
-    "tree-sitter>=0.21,<0.22",
-    "tree-sitter-languages==1.10.2",
-]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

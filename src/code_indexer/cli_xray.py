@@ -3,13 +3,6 @@
 Provides the ``cidx xray`` group and ``cidx xray search`` subcommand for
 direct, blocking execution of an X-Ray two-phase AST search against a local
 repository.  No server required; no async job ID.
-
-Lazy-load discipline
---------------------
-This module must NOT import ``tree_sitter`` or ``tree_sitter_languages`` at
-module level.  Those imports are deferred to the body of ``xray_search()`` via
-``XRaySearchEngine.__init__``, which is only called when the user explicitly
-invokes ``cidx xray search``.  All other ``cidx`` commands are unaffected.
 """
 
 from __future__ import annotations
@@ -29,7 +22,7 @@ import click
 
 @click.group("xray")
 def xray_group() -> None:
-    """AST-aware code search via tree-sitter (requires [xray] extras)."""
+    """AST-aware code search via tree-sitter."""
     pass
 
 
@@ -189,33 +182,11 @@ def xray_search(
         sys.exit(2)
 
     # ------------------------------------------------------------------
-    # Lazy import XRaySearchEngine (tree-sitter boundary)
+    # Import XRaySearchEngine (tree-sitter is a core dependency)
     # ------------------------------------------------------------------
-    try:
-        from code_indexer.xray.search_engine import XRaySearchEngine
-    except ImportError:
-        click.echo(
-            "Error: X-Ray requires 'pip install code-indexer[xray]'",
-            err=True,
-        )
-        sys.exit(2)
+    from code_indexer.xray.search_engine import XRaySearchEngine
 
-    try:
-        engine = XRaySearchEngine()
-    except Exception as exc:
-        # XRayExtrasNotInstalled is a subclass of ImportError
-        if (
-            "xray" in str(exc).lower()
-            or "tree" in str(exc).lower()
-            or "not installed" in str(exc).lower()
-        ):
-            click.echo(
-                "Error: X-Ray requires 'pip install code-indexer[xray]'",
-                err=True,
-            )
-        else:
-            click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
+    engine = XRaySearchEngine()
 
     # ------------------------------------------------------------------
     # Pre-flight: validate evaluator code before touching the filesystem
@@ -482,33 +453,11 @@ def xray_explore(
         sys.exit(2)
 
     # ------------------------------------------------------------------
-    # Lazy import XRaySearchEngine (tree-sitter boundary)
+    # Import XRaySearchEngine (tree-sitter is a core dependency)
     # ------------------------------------------------------------------
-    try:
-        from code_indexer.xray.search_engine import XRaySearchEngine
-    except ImportError:
-        click.echo(
-            "Error: X-Ray requires 'pip install code-indexer[xray]'",
-            err=True,
-        )
-        sys.exit(2)
+    from code_indexer.xray.search_engine import XRaySearchEngine
 
-    try:
-        engine = XRaySearchEngine()
-    except Exception as exc:
-        # XRayExtrasNotInstalled is a subclass of ImportError
-        if (
-            "xray" in str(exc).lower()
-            or "tree" in str(exc).lower()
-            or "not installed" in str(exc).lower()
-        ):
-            click.echo(
-                "Error: X-Ray requires 'pip install code-indexer[xray]'",
-                err=True,
-            )
-        else:
-            click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
+    engine = XRaySearchEngine()
 
     # ------------------------------------------------------------------
     # Pre-flight: validate evaluator code before touching the filesystem

@@ -14,7 +14,6 @@ Acceptance criteria covered:
   - AC7: max_debug_nodes cap causes partial=True / max_files_reached flag
   - AC8: AST renderer produces hierarchical indented output; truncated sentinel shown
   - AC9: Bad evaluator code yields exit 2 with validation error
-  - AC10: Missing [xray] extras yields install hint on stderr
   - AC11: PARTIAL timeout result yields exit code 3
   - AC12: --eval and --eval-file mutually exclusive
   - AC13: --help exits 0 and lists explore subcommand
