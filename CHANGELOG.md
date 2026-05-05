@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.5 (2026-05-05) — Field-test follow-ups + UX cleanup
+
+Five defects from the v10.4.3 / v10.4.4 staging field-test cycles.
+
+- **Defect 1 — `set_session_impersonation` returned generic "internal error"**: bare `except Exception` in `handle_set_session_impersonation` swallowed the real cause (often `session_state=None` from MCP transport, or the `@require_mcp_elevation` decorator firing with structured 403 errors). Now surfaces specific error codes (`session_state_unavailable`, `elevation_required`, etc.) instead of stringifying.
+- **Defect 2 — `xray_search` vs `xray_explore` dedup gate inconsistency**: BackgroundJobManager.submit_job's dedup fires identically for both (operation_type + repo_alias scoped, in-flight jobs only — completed jobs do NOT block resubmission). The field-test observation was a timing artifact (xray_search jobs complete fast on small repos and don't collide). Documented behavior in tool docs and added concurrency test to lock the contract.
+- **Defect 3 — Admin-mask risk on C3.5 / C3.7**: added explicit non-admin protocol-level access tests proving v10.4.4's deactivate_repository fix and v10.4.4's nonexistent-repo wording both work for non-admins, not just via admin bypass.
+- **Defect 4 — `is_admin` field naming confusion**: test agents repeatedly misread job-result `is_admin: false` as "this user is not an admin". Added clarifying docstring to `BackgroundJob` dataclass and tool docs explaining `is_admin` is a job-priority opt-in flag (bypasses ownership check on cancel/get-job), NOT the submitter's role. Xray handlers don't request the priority lane so `is_admin` always reports False regardless of who submitted.
+- **Defect 5 — Single-element list returned multi-repo shape**: `repository_alias=["cidx-meta-global"]` returned `{job_ids:[...], errors:[]}` instead of `{job_id:"..."}`. Now normalized: 1-element list → single-repo shape; multi-element list → multi-repo shape unchanged. Plain-string alias unchanged.
+
 ## v10.4.4 (2026-05-05) — X-Ray hotfix bundle (post-v10.4.3 staging findings)
 
 Seven findings from the v10.4.3 arms-length staging test cycle.

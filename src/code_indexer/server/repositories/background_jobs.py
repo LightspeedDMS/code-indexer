@@ -75,7 +75,12 @@ class BackgroundJob:
     error: Optional[str]
     progress: int  # 0-100
     username: str  # User who submitted the job
-    is_admin: bool = False  # Admin priority flag
+    is_admin: bool = (
+        False  # Job-priority opt-in flag (bypasses username ownership check on
+    )
+    # operations like cancel/get-job). Does NOT reflect the submitter's user role — admin users
+    # submitting through xray_search/xray_explore see is_admin=False because those handlers
+    # never request the priority lane (they omit is_admin from submit_job).
     cancelled: bool = False  # Cancellation flag
 
     # SCIP Self-Healing Fields (AC1: Extended BackgroundJob Model)

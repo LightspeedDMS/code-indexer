@@ -110,6 +110,9 @@ outputSchema:
       description: 'Inline per-file value list when await_seconds resolves.'
       items:
         type: object
+    is_admin:
+      type: boolean
+      description: 'Job-priority opt-in flag present in GET /api/jobs/{job_id} results. Always false for xray_explore and xray_search jobs — these handlers never request the admin priority lane. This field does NOT reflect whether the submitting user is an administrator; an admin user submitting xray_explore will see is_admin=false.'
     error:
       type: string
       description: 'Error code when the request is rejected synchronously.'

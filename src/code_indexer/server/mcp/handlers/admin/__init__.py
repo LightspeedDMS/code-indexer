@@ -708,14 +708,26 @@ def handle_set_session_impersonation(
                 {"status": "error", "error": f"User not found: {username}"}
             )
 
-        if session_state:
-            session_state.set_impersonation(target_user)
-            password_audit_logger.log_impersonation_set(
-                actor_username=user.username,
-                target_username=username,
-                session_id=session_state.session_id,
-                ip_address="unknown",
+        if session_state is None:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {
+                    "status": "error",
+                    "error": "session_state_unavailable",
+                    "message": (
+                        "No MCP session state is available for this request. "
+                        "Impersonation requires a stateful MCP session. "
+                        "Ensure the client supports session state and retry."
+                    ),
+                }
             )
+
+        session_state.set_impersonation(target_user)
+        password_audit_logger.log_impersonation_set(
+            actor_username=user.username,
+            target_username=username,
+            session_id=session_state.session_id,
+            ip_address="unknown",
+        )
 
         return _mcp_response({"status": "ok", "impersonating": username})  # type: ignore[no-any-return]
 
@@ -727,7 +739,9 @@ def handle_set_session_impersonation(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"status": "error", "error": str(e)})  # type: ignore[no-any-return]
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        )
 
 
 # =============================================================================
