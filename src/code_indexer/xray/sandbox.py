@@ -70,7 +70,10 @@ class EvalResult:
 
     Exactly one of ``value`` (success) or ``failure`` (error) is meaningful:
 
-    - ``failure is None`` — success; ``value`` holds the bool result.
+    - ``failure is None`` — success; ``value`` holds the evaluator return value.
+      In the file-as-unit contract (v10.4.0+), ``value`` is a dict with shape
+      ``{"matches": [...], "value": <anything>}``.  In the legacy bool contract
+      (now rejected at the engine layer), ``value`` was a bool.
     - ``failure == "validation_failed"`` — static analysis rejected the code;
       ``detail`` contains the rejection reason.
     - ``failure == "evaluator_timeout"`` — subprocess did not finish within
@@ -78,11 +81,11 @@ class EvalResult:
     - ``failure == "evaluator_subprocess_died"`` — subprocess exited with
       non-zero code (segfault, NameError on stripped builtin, etc.);
       ``detail`` carries ``exitcode=N`` or ``no_pipe_data``.
-    - ``failure == "evaluator_returned_non_bool"`` — subprocess exited cleanly
-      but sent a value that is not a ``bool``; ``detail`` is the type name.
+    - ``failure == "evaluator_returned_non_bool"`` — legacy failure mode kept
+      for backward compatibility; no longer emitted by current engine.
     """
 
-    value: Optional[bool] = field(default=None)
+    value: Optional[Any] = field(default=None)
     failure: Optional[str] = field(default=None)
     detail: Optional[str] = field(default=None)
 
@@ -98,6 +101,18 @@ SAFE_BUILTIN_NAMES: frozenset[str] = frozenset(
         "int",
         "bool",
         "list",
+        # Exception types — needed for ``except Exception:`` / ``except ValueError:``
+        # in try/except blocks (Group D, v10.4.0).  These are read-only references;
+        # none grant escalation power beyond what the dunder blocklist prevents.
+        "Exception",
+        "ValueError",
+        "TypeError",
+        "RuntimeError",
+        "AttributeError",
+        "KeyError",
+        "IndexError",
+        "NameError",
+        "StopIteration",
         "tuple",
         "dict",
         "min",
@@ -125,14 +140,6 @@ SAFE_BUILTIN_NAMES: frozenset[str] = frozenset(
 # Maps the *first* forbidden AST node type name encountered during validation
 # to a human-readable workaround hint.  Keys are exact type.__name__ strings.
 _VALIDATION_HINTS: dict[str, str] = {
-    "For": (
-        "Use a comprehension (ListComp/GeneratorExp/SetComp/DictComp) instead "
-        "of a top-level `for` statement."
-    ),
-    "While": (
-        "While loops are not allowed. Express the iteration as a comprehension "
-        "or use `count_descendants_of_type` for counting."
-    ),
     "Lambda": (
         "Lambdas are not allowed. Inline the boolean expression directly, "
         "or assign with `=` to a local variable."
@@ -215,11 +222,18 @@ def _run_evaluator(
     match_byte_offset: Optional[int] = None,
     match_line_number: Optional[int] = None,
     match_line_content: Optional[str] = None,
+    match_positions: Optional[list] = None,
 ) -> None:
     """Execute *code* inside a stripped-builtin environment and send result via *conn*.
 
     This function runs inside a forked/spawned subprocess.  All imports needed
     here must be available in the child process (they are, via fork inheritance).
+
+    In the file-as-unit contract (v10.4.0+), ``match_positions`` is the list of
+    all Phase 1 regex hits for the file: each entry is a dict with keys
+    ``line_number``, ``line_content``, ``column``, ``byte_offset``.
+    The evaluator is expected to return a dict ``{"matches": [...], "value": ...}``.
+    The raw return value is sent over the pipe (not coerced to bool).
     """
     try:
         # Build safe builtins from the canonical builtins module — not from
@@ -239,9 +253,12 @@ def _run_evaluator(
             "source": source,
             "lang": lang,
             "file_path": file_path,
+            # Legacy per-position globals (kept for compat, now always None)
             "match_byte_offset": match_byte_offset,
             "match_line_number": match_line_number,
             "match_line_content": match_line_content,
+            # File-as-unit: all Phase 1 hits as a list of dicts
+            "match_positions": match_positions if match_positions is not None else [],
         }
         locals_dict: dict[str, Any] = {}
 
@@ -249,7 +266,8 @@ def _run_evaluator(
         wrapped = "def __evaluator__():\n" + textwrap.indent(code, "    ")
         exec(wrapped, globals_dict, locals_dict)  # noqa: S102
         result = locals_dict["__evaluator__"]()
-        conn.send(bool(result))
+        # Send the raw result — engine layer validates dict shape and enriches.
+        conn.send(result)
     except AttributeError as exc:  # noqa: BLE001
         # Augment AttributeError with difflib suggestions for XRayNode typos.
         base_msg = str(exc)
@@ -300,8 +318,13 @@ class PythonEvaluatorSandbox:
     # (ast.boolop, ast.cmpop, ast.unaryop, ast.expr_context, ast.operator)
     # correctly match their concrete subclasses (Eq, And, Not, Load, Add, etc.).
     #
-    # Comprehensions are allowed; top-level ``for`` statements are NOT — use a
-    # comprehension (ListComp/GeneratorExp/SetComp/DictComp) instead of a for-loop.
+    # Statement-level control flow allowed: If, For, While, Break, Continue, Pass.
+    # Comprehensions AND for-statements are both allowed.
+    #
+    # Loop termination is bounded by HARD_TIMEOUT_SECONDS — infinite loops result
+    # in EvaluatorTimeout, not in validation rejection.  Safety belts at AST
+    # validation are intentionally minimal; the subprocess timeout is the
+    # authoritative termination guarantee.
     #
     # Local variables via ``=`` and ``+=`` are allowed; ``global`` and
     # ``nonlocal`` declarations are NOT.
@@ -344,6 +367,28 @@ class PythonEvaluatorSandbox:
         ast.DictComp,      # {k: v for k, v in items}
         # IfExp: ternary expression — ``a if cond else b``
         ast.IfExp,
+        # Group C — statement-level control flow
+        # Infinite loops are bounded by HARD_TIMEOUT_SECONDS subprocess kill;
+        # misbehaving evaluators produce EvaluatorTimeout, not validation rejection.
+        ast.If,        # statement-level branching: if/elif/else blocks
+        ast.For,       # statement-level iteration: for x in iterable
+        ast.While,     # statement-level iteration: while condition (bounded by timeout)
+        ast.Break,     # early loop exit
+        ast.Continue,  # skip current iteration
+        ast.Pass,      # empty body placeholder: if cond: pass
+        # Group D — structured exception handling (Directive D, v10.4.0)
+        # try/except/finally lets evaluators handle per-node errors gracefully.
+        # raise lets evaluators surface clean errors — produces EvaluatorCrash,
+        # not validation_failed.
+        ast.Try,           # try/except/finally blocks
+        ast.ExceptHandler, # except clauses (bare and typed)
+        ast.Raise,         # raise statements
+        # Group E — arithmetic binary operations
+        # BinOp allows x + n, x - n, x * n etc. in evaluator code.
+        # ast.operator covers concrete subclasses Add, Sub, Mult, Div etc.
+        # via isinstance() — same pattern as ast.boolop, ast.cmpop.
+        ast.BinOp,         # binary arithmetic: x + y, x * y, etc.
+        ast.operator,      # abstract base for Add, Sub, Mult, Div, Mod, etc.
     )
 
     # Dunder attribute names that are blocked at AST validation time.
@@ -532,6 +577,7 @@ class PythonEvaluatorSandbox:
         match_byte_offset: Optional[int] = None,
         match_line_number: Optional[int] = None,
         match_line_content: Optional[str] = None,
+        match_positions: Optional[list] = None,
     ) -> EvalResult:
         """Run *code* in a sandboxed subprocess and return the result.
 
@@ -578,6 +624,7 @@ class PythonEvaluatorSandbox:
                 match_byte_offset,
                 match_line_number,
                 match_line_content,
+                match_positions,
             ),
             daemon=True,
         )
@@ -642,12 +689,8 @@ class PythonEvaluatorSandbox:
                 detail=raw,
             )
 
-        if not isinstance(raw, bool):
-            return EvalResult(
-                failure="evaluator_returned_non_bool",
-                detail=type(raw).__name__,
-            )
-
+        # Accept any value — dict (new file-as-unit contract) or bool (legacy).
+        # The engine layer (_evaluate_file) validates the dict shape and enriches.
         return EvalResult(value=raw)
 
     # ---------------------------------------------------------------------------

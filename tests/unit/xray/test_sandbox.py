@@ -16,6 +16,7 @@ from code_indexer.xray.sandbox import (
     PythonEvaluatorSandbox,
     ValidationResult,
 )
+from code_indexer.xray.xray_node import XRayNode
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,24 +71,23 @@ class TestValidation:
         assert result.ok is False
         assert "Lambda" in result.reason
 
-    def test_rejects_try_except(self):
+    def test_now_accepts_try_except_v10_4_0(self):
+        # try/except was added to ALLOWED_NODES in v10.4.0 (loops/control-flow lift).
         sb = PythonEvaluatorSandbox()
         result = sb.validate("try:\n    1\nexcept:\n    2")
-        assert result.ok is False
-        # Python 3.9 uses Try; newer may use TryStar too
-        assert "Try" in result.reason or "ExceptHandler" in result.reason
+        assert result.ok is True
 
-    def test_rejects_for_loop(self):
+    def test_now_accepts_for_loop_v10_4_0(self):
+        # for-loop was added to ALLOWED_NODES in v10.4.0 (loops/control-flow lift).
         sb = PythonEvaluatorSandbox()
         result = sb.validate("for x in range(10): pass")
-        assert result.ok is False
-        assert "For" in result.reason
+        assert result.ok is True
 
-    def test_rejects_while_loop(self):
+    def test_now_accepts_while_loop_v10_4_0(self):
+        # while-loop was added to ALLOWED_NODES in v10.4.0 (loops/control-flow lift).
         sb = PythonEvaluatorSandbox()
         result = sb.validate("while True: pass")
-        assert result.ok is False
-        assert "While" in result.reason
+        assert result.ok is True
 
     def test_rejects_with_statement(self):
         sb = PythonEvaluatorSandbox()
@@ -172,8 +172,14 @@ class TestRun:
         assert result.failure is None
         assert result.value is False
 
-    def test_evaluator_falsy_non_bool_coerced_to_false(self):
-        """Return value 0 (falsy non-bool) should be coerced to False."""
+    def test_evaluator_returns_raw_value_no_coercion(self):
+        """Sandbox passes the raw return value through without bool coercion (v10.4.0).
+
+        In v10.4.0 the sandbox no longer coerces return values to bool.
+        The raw value is sent over the pipe and returned as-is.  The engine
+        layer (_evaluate_file) validates the dict shape; raw bool/int values
+        produce an InvalidEvaluatorReturn error at the engine level.
+        """
         sb = PythonEvaluatorSandbox()
         node, root = self._python_node_and_root()
         result = sb.run(
@@ -184,9 +190,9 @@ class TestRun:
             lang="python",
             file_path="/src/main.py",
         )
-        # 0 is falsy — bool(0) == False; subprocess sends bool(result)
+        # Sandbox returns the raw value; no coercion to bool.
         assert result.failure is None
-        assert result.value is False
+        assert result.value == 0
 
     def test_api_exposes_node_root_source_lang_file_path(self):
         sb = PythonEvaluatorSandbox()

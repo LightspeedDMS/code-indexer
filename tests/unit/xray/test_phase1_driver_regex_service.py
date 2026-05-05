@@ -174,13 +174,14 @@ class TestPhase1PositionsForIssue983:
         assert len(positions) == 1
         key = list(positions.keys())[0]
         assert isinstance(key, Path)
-        # Each value is a list of (line_number, line_content) tuples
+        # Each value is a list of dicts with line_number and line_content keys
         matches_for_file = positions[key]
         assert isinstance(matches_for_file, list)
         assert len(matches_for_file) == 1
-        line_num, line_text = matches_for_file[0]
-        assert line_num == 5
-        assert "password" in line_text
+        pos = matches_for_file[0]
+        assert isinstance(pos, dict)
+        assert pos["line_number"] == 5
+        assert "password" in pos["line_content"]
 
 
 class TestAsyncToSyncHelper:

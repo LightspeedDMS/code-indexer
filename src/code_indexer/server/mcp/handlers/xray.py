@@ -18,7 +18,7 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
-from ._utils import _mcp_response
+from ._utils import _mcp_response, _parse_json_string_array
 
 logger = logging.getLogger(__name__)
 
@@ -117,14 +117,31 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # 2. Parameter parse + validation
     # ------------------------------------------------------------------
     repo_alias: str = params.get("repository_alias", "")
-    driver_regex: str = params.get("driver_regex", "")
+    # 'pattern' is the regex_search-aligned name (was 'driver_regex')
+    driver_regex: str = params.get("pattern", "")
     evaluator_code: str = params.get("evaluator_code", "")
     search_target: str = params.get("search_target", "")
     include_patterns = params.get("include_patterns") or []
     exclude_patterns = params.get("exclude_patterns") or []
+    # regex_search-aligned params
+    case_sensitive: bool = params.get("case_sensitive", True)
+    context_lines_raw = params.get("context_lines", 0)
+    multiline: bool = params.get("multiline", False)
+    pcre2: bool = params.get("pcre2", False)
+    path: Optional[str] = params.get("path")
     timeout_override = params.get("timeout_seconds")
-    max_files = params.get("max_files")
+    # 'max_results' is the regex_search-aligned name (was 'max_files')
+    max_results = params.get("max_results")
     await_seconds_raw = params.get("await_seconds", 0)
+
+    # 'pattern' is required — reject if missing or empty (catches old 'driver_regex' callers)
+    if not driver_regex:
+        return _mcp_response(
+            {
+                "error": "pattern_required",
+                "message": "pattern is required (formerly 'driver_regex' — use 'pattern')",
+            }
+        )
 
     # await_seconds accepts int or float in [0.0, 10.0]. Cap lowered from 30
     # to 10 in v10.3.2 to bound threadpool occupancy (see top-of-file comment).
@@ -165,23 +182,139 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
-    if max_files is not None and max_files < 1:
+    # context_lines: must be int in [0, 10]
+    try:
+        context_lines: int = int(context_lines_raw)
+    except (TypeError, ValueError):
+        context_lines = 0
+    if not (0 <= context_lines <= 10):
         return _mcp_response(
             {
-                "error": "max_files_out_of_range",
-                "message": "max_files must be >= 1 when provided",
+                "error": "context_lines_out_of_range",
+                "message": "context_lines must be between 0 and 10",
+            }
+        )
+
+    if max_results is not None and max_results < 1:
+        return _mcp_response(
+            {
+                "error": "max_results_out_of_range",
+                "message": "max_results must be >= 1 when provided",
             }
         )
 
     # ------------------------------------------------------------------
-    # 3. Repository alias resolution
+    # 3. Repository alias resolution — omni-aware (string OR list)
     # ------------------------------------------------------------------
-    repo_path_str = _resolve_repo_path(repo_alias)
+    # Parse alias: accepts plain string, list of strings, or JSON-encoded
+    # string array (e.g. '["repo-a", "repo-b"]').
+    repo_alias_parsed = _parse_json_string_array(repo_alias)
+
+    if isinstance(repo_alias_parsed, list):
+        # Multi-repo path — submit one job per alias.
+        if not repo_alias_parsed:
+            return _mcp_response(
+                {
+                    "error": "alias_required",
+                    "message": "repository_alias must not be empty",
+                }
+            )
+
+        # ------------------------------------------------------------------
+        # 4. Effective timeout + range check (multi-repo path)
+        # ------------------------------------------------------------------
+        effective_timeout_multi: int = (
+            timeout_override if timeout_override is not None else _DEFAULT_TIMEOUT_SECONDS
+        )
+        if not (_TIMEOUT_MIN <= effective_timeout_multi <= _TIMEOUT_MAX):
+            return _mcp_response(
+                {
+                    "error": "timeout_out_of_range",
+                    "message": (
+                        f"timeout_seconds must be between {_TIMEOUT_MIN} and "
+                        f"{_TIMEOUT_MAX}, got {effective_timeout_multi}"
+                    ),
+                }
+            )
+
+        # ------------------------------------------------------------------
+        # 5. Pre-flight evaluator validation (multi-repo path)
+        # ------------------------------------------------------------------
+        engine_multi = XRaySearchEngine()
+        validation_multi = engine_multi.sandbox.validate(evaluator_code)
+        if not validation_multi.ok:
+            return _mcp_response(
+                {
+                    "error": "xray_evaluator_validation_failed",
+                    "message": validation_multi.reason,
+                }
+            )
+
+        # ------------------------------------------------------------------
+        # 6. Submit one background job per alias
+        # ------------------------------------------------------------------
+        bjm_multi = _get_background_job_manager()
+        job_ids: list = []
+        errors: list = []
+
+        for single_alias in repo_alias_parsed:
+            single_path_str = _resolve_repo_path(single_alias)
+            if single_path_str is None:
+                errors.append(
+                    {
+                        "repository_alias": single_alias,
+                        "error": "repository_not_found",
+                        "message": f"Repository alias {single_alias!r} not found",
+                    }
+                )
+                continue
+
+            single_repo_path = Path(single_path_str)
+            timeout_capture = effective_timeout_multi
+
+            def _make_job_fn(rp: Path, t: int):  # type: ignore[no-untyped-def]
+                def _job(progress_callback):  # type: ignore[no-untyped-def]
+                    from code_indexer.xray.search_engine import XRaySearchEngine as _E
+
+                    result = _E().run(
+                        repo_path=rp,
+                        driver_regex=driver_regex,
+                        evaluator_code=evaluator_code,
+                        search_target=search_target,
+                        include_patterns=list(include_patterns),
+                        exclude_patterns=list(exclude_patterns),
+                        case_sensitive=case_sensitive,
+                        context_lines=context_lines,
+                        multiline=multiline,
+                        pcre2=pcre2,
+                        path=path,
+                        timeout_seconds=t,
+                        progress_callback=progress_callback,
+                        max_files=max_results,
+                    )
+                    return _truncate_xray_result(result)
+
+                return _job
+
+            jid: str = bjm_multi.submit_job(
+                operation_type="xray_search",
+                func=_make_job_fn(single_repo_path, timeout_capture),
+                submitter_username=user.username,
+                repo_alias=single_alias,
+            )
+            job_ids.append(jid)
+
+        return _mcp_response({"job_ids": job_ids, "errors": errors})
+
+    # ------------------------------------------------------------------
+    # Single-repo path (string alias)
+    # ------------------------------------------------------------------
+    repo_path_str = _resolve_repo_path(repo_alias_parsed)
     if repo_path_str is None:
         return _mcp_response(
             {
                 "error": "repository_not_found",
-                "message": f"Repository alias {repo_alias!r} not found",
+                "message": f"Repository alias {repo_alias_parsed!r} not found",
             }
         )
 
@@ -231,9 +364,14 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             search_target=search_target,
             include_patterns=list(include_patterns),
             exclude_patterns=list(exclude_patterns),
+            case_sensitive=case_sensitive,
+            context_lines=context_lines,
+            multiline=multiline,
+            pcre2=pcre2,
+            path=path,
             timeout_seconds=effective_timeout,
             progress_callback=progress_callback,
-            max_files=max_files,
+            max_files=max_results,
         )
         return _truncate_xray_result(result)
 
@@ -242,7 +380,7 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         operation_type="xray_search",
         func=job_fn,
         submitter_username=user.username,
-        repo_alias=repo_alias,
+        repo_alias=repo_alias_parsed,
     )
 
     if await_seconds > 0:
@@ -286,7 +424,8 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # 2. Parameter parse + validation
     # ------------------------------------------------------------------
     repo_alias: str = params.get("repository_alias", "")
-    driver_regex: str = params.get("driver_regex", "")
+    # 'pattern' is the regex_search-aligned name (was 'driver_regex')
+    driver_regex: str = params.get("pattern", "")
     # evaluator_code is optional for xray_explore; default 'return True' accepts all
     # candidate files for AST exploration without requiring the caller to supply a filter.
     raw_evaluator_code: str = params.get("evaluator_code") or ""
@@ -296,8 +435,15 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     search_target: str = params.get("search_target", "")
     include_patterns = params.get("include_patterns") or []
     exclude_patterns = params.get("exclude_patterns") or []
+    # regex_search-aligned params
+    case_sensitive: bool = params.get("case_sensitive", True)
+    context_lines_raw = params.get("context_lines", 0)
+    multiline: bool = params.get("multiline", False)
+    pcre2: bool = params.get("pcre2", False)
+    path: Optional[str] = params.get("path")
     timeout_override = params.get("timeout_seconds")
-    max_files = params.get("max_files")
+    # 'max_results' is the regex_search-aligned name (was 'max_files')
+    max_results = params.get("max_results")
     max_debug_nodes = params.get("max_debug_nodes", _MAX_DEBUG_NODES_DEFAULT)
     await_seconds_raw = params.get("await_seconds", 0)
 
@@ -330,6 +476,15 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
+    # 'pattern' is required — reject if missing or empty (catches old 'driver_regex' callers)
+    if not driver_regex:
+        return _mcp_response(
+            {
+                "error": "pattern_required",
+                "message": "pattern is required (formerly 'driver_regex' — use 'pattern')",
+            }
+        )
+
     if search_target not in ("content", "filename"):
         return _mcp_response(
             {
@@ -340,11 +495,24 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
-    if max_files is not None and max_files < 1:
+    # context_lines: must be int in [0, 10]
+    try:
+        context_lines: int = int(context_lines_raw)
+    except (TypeError, ValueError):
+        context_lines = 0
+    if not (0 <= context_lines <= 10):
         return _mcp_response(
             {
-                "error": "max_files_out_of_range",
-                "message": "max_files must be >= 1 when provided",
+                "error": "context_lines_out_of_range",
+                "message": "context_lines must be between 0 and 10",
+            }
+        )
+
+    if max_results is not None and max_results < 1:
+        return _mcp_response(
+            {
+                "error": "max_results_out_of_range",
+                "message": "max_results must be >= 1 when provided",
             }
         )
 
@@ -417,9 +585,14 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             search_target=search_target,
             include_patterns=list(include_patterns),
             exclude_patterns=list(exclude_patterns),
+            case_sensitive=case_sensitive,
+            context_lines=context_lines,
+            multiline=multiline,
+            pcre2=pcre2,
+            path=path,
             timeout_seconds=effective_timeout,
             progress_callback=progress_callback,
-            max_files=max_files,
+            max_files=max_results,
             include_ast_debug=True,
             max_debug_nodes=max_debug_nodes,
         )

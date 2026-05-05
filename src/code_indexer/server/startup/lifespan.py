@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+import anyio.to_thread
 import logging
 import os
 import time
@@ -185,6 +186,23 @@ def make_lifespan(
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
                 )
+            )
+
+        # Bootstrap-only: bump anyio threadpool size so concurrent sync handlers
+        # do not starve one another. Default 256 vs anyio's built-in default of 40.
+        # Runs inside the async lifespan so current_default_thread_limiter() resolves correctly.
+        _threadpool_size = (
+            getattr(startup_config, "server_threadpool_size", 256)
+            if startup_config is not None
+            else 256
+        )
+        if _threadpool_size > 0:
+            anyio.to_thread.current_default_thread_limiter().total_tokens = (
+                _threadpool_size
+            )
+            logger.info(
+                f"Threadpool sized to {_threadpool_size} tokens (anyio default 40)",
+                extra={"correlation_id": get_correlation_id()},
             )
 
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
