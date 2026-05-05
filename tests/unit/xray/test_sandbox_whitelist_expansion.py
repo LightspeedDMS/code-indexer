@@ -48,12 +48,9 @@ def _validate_fails(code: str, expected_fragment: str) -> None:
     """Assert that code fails validation and reason contains expected_fragment."""
     sb = PythonEvaluatorSandbox()
     result = sb.validate(code)
-    assert result.ok is False, (
-        f"Expected ok=False but got ok=True for code: {code!r}"
-    )
+    assert result.ok is False, f"Expected ok=False but got ok=True for code: {code!r}"
     assert expected_fragment in (result.reason or ""), (
-        f"Expected {expected_fragment!r} in reason {result.reason!r} "
-        f"for code: {code!r}"
+        f"Expected {expected_fragment!r} in reason {result.reason!r} for code: {code!r}"
     )
 
 
@@ -156,15 +153,13 @@ class TestGroupBComprehensionsAndTernaries:
     def test_generator_exp_validates_ok(self):
         """GeneratorExp (the canonical field-feedback broken example)."""
         _validate_ok(
-            "return any(n.type == 'function_definition' "
-            "for n in node.named_children)"
+            "return any(n.type == 'function_definition' for n in node.named_children)"
         )
 
     def test_generator_exp_executes_correctly(self):
         """GeneratorExp: any() with generator over named_children works."""
         result = _run_ok(
-            "return any(n.type == 'function_definition' "
-            "for n in node.named_children)",
+            "return any(n.type == 'function_definition' for n in node.named_children)",
             source="def foo(): pass",
         )
         assert result.value is True
@@ -172,8 +167,7 @@ class TestGroupBComprehensionsAndTernaries:
     def test_generator_exp_false_case(self):
         """GeneratorExp returns False when no children match."""
         result = _run_ok(
-            "return any(n.type == 'class_definition' "
-            "for n in node.named_children)",
+            "return any(n.type == 'class_definition' for n in node.named_children)",
             source="def foo(): pass",
         )
         assert result.value is False
@@ -245,16 +239,12 @@ class TestGroupBComprehensionsAndTernaries:
 
     def test_ifexp_validates_ok(self):
         """IfExp (ternary a if cond else b) is now in ALLOWED_NODES."""
-        _validate_ok(
-            "result = True if node.type == 'module' else False\n"
-            "return result"
-        )
+        _validate_ok("result = True if node.type == 'module' else False\nreturn result")
 
     def test_ifexp_executes_true_branch(self):
         """IfExp: condition is true — returns the true branch value."""
         result = _run_ok(
-            "result = True if node.type == 'module' else False\n"
-            "return result",
+            "result = True if node.type == 'module' else False\nreturn result",
             source="def foo(): pass",
         )
         assert result.value is True
@@ -272,9 +262,7 @@ class TestGroupBComprehensionsAndTernaries:
 
     def test_comprehension_clause_validates_ok(self):
         """comprehension clause node is used inside ListComp/GeneratorExp."""
-        _validate_ok(
-            "return len([c for c in node.named_children]) >= 0"
-        )
+        _validate_ok("return len([c for c in node.named_children]) >= 0")
 
     def test_comprehension_with_if_guard_validates_ok(self):
         """comprehension clause with an if-guard validates correctly."""
@@ -420,18 +408,12 @@ class TestGroupCControlFlow:
 
     def test_if_statement_validates_ok(self):
         """ast.If is now in ALLOWED_NODES."""
-        _validate_ok(
-            "if node.type == 'module':\n"
-            "    return True\n"
-            "return False"
-        )
+        _validate_ok("if node.type == 'module':\n    return True\nreturn False")
 
     def test_if_statement_executes_correctly(self):
         """If statement: condition matches module type, returns True."""
         result = _run_ok(
-            "if node.type == 'module':\n"
-            "    return True\n"
-            "return False",
+            "if node.type == 'module':\n    return True\nreturn False",
             source="def foo(): pass",
         )
         assert result.value is True
@@ -510,18 +492,12 @@ class TestGroupCControlFlow:
 
     def test_pass_in_for_body_validates_ok(self):
         """ast.Pass is now in ALLOWED_NODES."""
-        _validate_ok(
-            "for c in node.named_children:\n"
-            "    pass\n"
-            "return True"
-        )
+        _validate_ok("for c in node.named_children:\n    pass\nreturn True")
 
     def test_pass_in_for_body_executes_correctly(self):
         """Pass in for body: iterates without action, returns True."""
         result = _run_ok(
-            "for c in node.named_children:\n"
-            "    pass\n"
-            "return True",
+            "for c in node.named_children:\n    pass\nreturn True",
             source="def foo(): pass",
         )
         assert result.value is True
@@ -534,12 +510,7 @@ class TestGroupCControlFlow:
         Directive D lifted the ban on ast.Try, ast.ExceptHandler, and ast.Raise.
         All three are now in ALLOWED_NODES so evaluators can safely catch exceptions.
         """
-        _validate_ok(
-            "try:\n"
-            "    return True\n"
-            "except Exception:\n"
-            "    return False"
-        )
+        _validate_ok("try:\n    return True\nexcept Exception:\n    return False")
 
     def test_raise_now_accepted(self):
         """ast.Raise is now ACCEPTED after v10.4.0 lift.
@@ -582,36 +553,28 @@ class TestGroupCControlFlow:
     def test_dunder_class_inside_if_body(self):
         """Dunder access inside If body must trigger validation_failed."""
         result = _run_expecting_validation_failed(
-            "if node.__class__:\n"
-            "    return True\n"
-            "return False"
+            "if node.__class__:\n    return True\nreturn False"
         )
         assert result.detail is not None
 
     def test_dunder_bases_inside_for_body(self):
         """Dunder access inside For body must trigger validation_failed."""
         result = _run_expecting_validation_failed(
-            "for c in node.__bases__:\n"
-            "    pass\n"
-            "return True"
+            "for c in node.__bases__:\n    pass\nreturn True"
         )
         assert result.detail is not None
 
     def test_dunder_globals_inside_while_body(self):
         """Dunder access inside While body must trigger validation_failed."""
         result = _run_expecting_validation_failed(
-            "while node.__globals__ is None:\n"
-            "    pass\n"
-            "return True"
+            "while node.__globals__ is None:\n    pass\nreturn True"
         )
         assert result.detail is not None
 
     def test_subscript_dunder_inside_for_body(self):
         """Subscript dunder access inside For body must trigger validation_failed."""
         result = _run_expecting_validation_failed(
-            "for c in node.named_children:\n"
-            "    x = c.__dict__['x']\n"
-            "return True"
+            "for c in node.named_children:\n    x = c.__dict__['x']\nreturn True"
         )
         assert result.detail is not None
 
@@ -627,9 +590,7 @@ class TestGroupCControlFlow:
         sb = PythonEvaluatorSandbox()
         node, root = _make_node_root()
         result = sb.run(
-            "while True:\n"
-            "    x = 1\n"
-            "return True",
+            "while True:\n    x = 1\nreturn True",
             node=node,
             root=root,
             source="def foo(): pass",
@@ -690,11 +651,7 @@ class TestGroupDTryExceptRaise:
     def test_bare_except_validates_ok(self):
         """Bare except clause (no exception type) passes validation."""
         _validate_ok(
-            "try:\n"
-            "    x = node.named_children\n"
-            "except:\n"
-            "    x = []\n"
-            "return len(x) >= 0"
+            "try:\n    x = node.named_children\nexcept:\n    x = []\nreturn len(x) >= 0"
         )
 
     # --- Positive: execution tests ---
@@ -702,11 +659,7 @@ class TestGroupDTryExceptRaise:
     def test_try_except_executes_correctly(self):
         """try/except block: successful branch returns correct value."""
         result = _run_ok(
-            "try:\n"
-            "    x = 1\n"
-            "except Exception:\n"
-            "    x = 99\n"
-            "return x == 1",
+            "try:\n    x = 1\nexcept Exception:\n    x = 99\nreturn x == 1",
             source="def foo(): pass",
         )
         assert result.value is True
@@ -726,12 +679,7 @@ class TestGroupDTryExceptRaise:
     def test_try_finally_executes_finally_block(self):
         """finally block executes after try body."""
         result = _run_ok(
-            "x = 0\n"
-            "try:\n"
-            "    x = 1\n"
-            "finally:\n"
-            "    x = x + 10\n"
-            "return x == 11",
+            "x = 0\ntry:\n    x = 1\nfinally:\n    x = x + 10\nreturn x == 11",
             source="def foo(): pass",
         )
         assert result.value is True
@@ -781,11 +729,7 @@ class TestGroupDTryExceptRaise:
     def test_dunder_inside_finally_still_blocked(self):
         """Dunder access inside finally block must trigger validation_failed."""
         result = _run_expecting_validation_failed(
-            "try:\n"
-            "    x = 1\n"
-            "finally:\n"
-            "    y = node.__globals__\n"
-            "return x == 1"
+            "try:\n    x = 1\nfinally:\n    y = node.__globals__\nreturn x == 1"
         )
         assert result.detail is not None
 

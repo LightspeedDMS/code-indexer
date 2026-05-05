@@ -24,6 +24,7 @@ These tests verify:
   - Error message references golden_repo_alias, not user_alias
   - Admin user bypasses check for activation
 """
+
 import pytest
 from datetime import datetime
 from unittest.mock import Mock

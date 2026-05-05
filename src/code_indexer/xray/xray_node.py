@@ -149,7 +149,7 @@ class XRayNode:
         """Walk up the parent chain (inclusive of self) and return the first
         node whose type matches *type_name*.  Returns None if not found.
         """
-        current = self._node
+        current: Optional["_TsNode"] = self._node
         while current is not None:
             if current.type == type_name:
                 return XRayNode(current)

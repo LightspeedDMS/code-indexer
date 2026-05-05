@@ -1205,11 +1205,7 @@ def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]
                 accessible_names = access_filtering_service.filter_repo_listing(
                     repo_names, user.username
                 )
-                repos = [
-                    r
-                    for r in repos
-                    if r.get("repo_name", "") in accessible_names
-                ]
+                repos = [r for r in repos if r.get("repo_name", "") in accessible_names]
 
         return _mcp_response({"success": True, "repos": repos})
     except Exception as e:

@@ -164,7 +164,7 @@ class TestCidxFetchCachedPayloadInvalidHandle:
         mock_app_module = MagicMock()
         mock_app_module.app.state.payload_cache = MagicMock()
 
-        params = {}  # no cache_handle
+        params: Dict[str, Any] = {}  # no cache_handle
 
         with patch(
             "code_indexer.server.mcp.handlers.xray._utils.app_module", mock_app_module

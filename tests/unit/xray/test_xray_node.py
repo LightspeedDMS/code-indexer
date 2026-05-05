@@ -438,7 +438,9 @@ class TestNewAPIsInSandbox:
             lang="python",
             file_path="/test.py",
         )
-        assert result.failure is None, f"Sandbox failed: {result.failure} {result.detail}"
+        assert result.failure is None, (
+            f"Sandbox failed: {result.failure} {result.detail}"
+        )
         assert result.value is True
 
     def test_count_descendants_of_type_in_sandbox(self) -> None:
@@ -459,7 +461,9 @@ class TestNewAPIsInSandbox:
             lang="python",
             file_path="/test.py",
         )
-        assert result.failure is None, f"Sandbox failed: {result.failure} {result.detail}"
+        assert result.failure is None, (
+            f"Sandbox failed: {result.failure} {result.detail}"
+        )
         assert result.value is True
 
     def test_enclosing_in_sandbox(self) -> None:
@@ -481,5 +485,7 @@ class TestNewAPIsInSandbox:
             lang="python",
             file_path="/test.py",
         )
-        assert result.failure is None, f"Sandbox failed: {result.failure} {result.detail}"
+        assert result.failure is None, (
+            f"Sandbox failed: {result.failure} {result.detail}"
+        )
         assert result.value is True

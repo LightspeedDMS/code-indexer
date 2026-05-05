@@ -1368,7 +1368,8 @@ class TestXraySearchHandlerOmni:
                 return_value=mock_bjm,
             ),
         ):
-            return handle_xray_search(params, user)
+            # cast: MCP handler return type is Any (JSON dispatch); callers expect dict
+            return cast(Dict[str, Any], handle_xray_search(params, user))
 
     def test_string_alias_single_repo_works_as_before(self):
         """String alias returns {job_id} dict (unchanged single-repo path)."""
@@ -1467,7 +1468,8 @@ class TestXraySearchHandlerDefaultEvaluator:
             job_fn = submit_call.kwargs["func"]
             job_fn(lambda *a: None)
 
-        return captured.get("evaluator_code", "")
+        # cast: captured dict values are Any; evaluator_code is always str when set
+        return cast(str, captured.get("evaluator_code", ""))
 
     def test_omitted_evaluator_code_uses_non_empty_default(self):
         """When evaluator_code is omitted, engine receives a non-empty default (Bug 2)."""
