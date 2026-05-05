@@ -444,6 +444,12 @@ class BackgroundJobManager:
             try:
                 db_job = self._sqlite_backend.get_job(job_id)
                 if db_job and db_job.get("username") == username:
+                    # v10.4.6 (Obs 3.2): scrub internal is_admin field from public
+                    # response. The in-memory path above already omits it; the SQLite
+                    # row includes it for internal scheduling/ownership-bypass logic
+                    # (sqlite_backends.py:2510), but field testers misread it as
+                    # "submitter is not admin". Remove from public projection.
+                    db_job.pop("is_admin", None)
                     return db_job  # type: ignore[no-any-return]
             except Exception as e:
                 logging.error(f"Failed to get job {job_id} from SQLite: {e}")
@@ -504,8 +510,14 @@ class BackgroundJobManager:
                     status=status_filter,
                     limit=_MAX_DB_FETCH_FOR_PAGINATION,
                 )
-                # Build dict keyed by job_id from DB results
-                merged: Dict[str, Any] = {j["job_id"]: j for j in db_jobs}
+                # Build dict keyed by job_id from DB results.
+                # v10.4.6 (Obs 3.2): scrub internal is_admin field from each
+                # SQLite-sourced job dict before exposing in public response.
+                # _job_to_dict() (used for in-memory override below) already omits it.
+                merged: Dict[str, Any] = {}
+                for j in db_jobs:
+                    j.pop("is_admin", None)
+                    merged[j["job_id"]] = j
                 # Override with in-memory jobs (fresher progress) for matching criteria
                 with self._lock:
                     for job in self.jobs.values():

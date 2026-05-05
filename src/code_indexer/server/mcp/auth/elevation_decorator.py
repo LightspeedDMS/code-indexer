@@ -13,7 +13,7 @@ Error codes (mirror REST layer in dependencies.py):
 
 import logging
 from functools import wraps
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, cast
 
 from code_indexer.server.auth.elevated_session_manager import (
     elevated_session_manager,
@@ -49,19 +49,40 @@ def _is_elevation_enforcement_enabled() -> bool:
 def _disabled_error(
     message: str = "Step-up elevation is currently disabled by the operator.",
 ) -> Dict[str, Any]:
-    return {"error": "elevation_enforcement_disabled", "message": message}
+    # cast: _mcp_response returns Dict[str, Any] but lazy import (v10.4.6, breaks
+    # potential circular import) prevents mypy from inferring the annotation.
+    from code_indexer.server.mcp.handlers._utils import _mcp_response
+
+    return cast(
+        Dict[str, Any],
+        _mcp_response({"error": "elevation_enforcement_disabled", "message": message}),
+    )
 
 
 def _elevation_required_error(message: str) -> Dict[str, Any]:
-    return {"error": "elevation_required", "message": message}
+    # cast: see _disabled_error rationale above.
+    from code_indexer.server.mcp.handlers._utils import _mcp_response
+
+    return cast(
+        Dict[str, Any],
+        _mcp_response({"error": "elevation_required", "message": message}),
+    )
 
 
 def _totp_setup_required_error() -> Dict[str, Any]:
-    return {
-        "error": "totp_setup_required",
-        "setup_url": _TOTP_SETUP_URL,
-        "message": "Set up TOTP at the URL above before performing this action.",
-    }
+    # cast: see _disabled_error rationale above.
+    from code_indexer.server.mcp.handlers._utils import _mcp_response
+
+    return cast(
+        Dict[str, Any],
+        _mcp_response(
+            {
+                "error": "totp_setup_required",
+                "setup_url": _TOTP_SETUP_URL,
+                "message": "Set up TOTP at the URL above before performing this action.",
+            }
+        ),
+    )
 
 
 def require_mcp_elevation(required_scope: str = "full") -> Callable:
