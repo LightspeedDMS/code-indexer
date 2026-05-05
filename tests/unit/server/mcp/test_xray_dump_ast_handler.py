@@ -159,7 +159,11 @@ class TestXrayDumpAstHandlerErrors:
             result = handler(params, user)
 
         data = _parse_response(result)
-        assert data.get("error") in ("path_traversal_rejected", "file_not_found", "invalid_file_path")
+        assert data.get("error") in (
+            "path_traversal_rejected",
+            "file_not_found",
+            "invalid_file_path",
+        )
 
     def test_nonexistent_file_returns_error(self, tmp_path):
         """Non-existent file_path returns file_not_found error."""

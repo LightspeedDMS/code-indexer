@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.1 — 2026-05-04
+
+### Fixed
+
+- **X-Ray omni multi-repo crashed at MCP dispatch** (HIGH severity from production field testing): `repository_alias` as a native list or JSON-encoded array threw `AttributeError: 'list' object has no attribute 'endswith'` before the job was even queued. The v10.4.0 schema declared array support but handlers only had the string path wired. Fix: both `handle_xray_search` and `handle_xray_explore` now route through `_parse_json_string_array` and dispatch via `isinstance(..., list)`. Multi-repo response shape mirrors `regex_search`: `{job_ids: [...], errors: [...]}` with per-alias error handling.
+- **Default evaluator returned bool, broke under v10.4.0 dict contract** (HIGH severity from production field testing): when `evaluator_code` was omitted, both `xray_search` and `xray_explore` defaulted to `"return True"` (legacy v10.3.x contract), which under v10.4.0 yielded `InvalidEvaluatorReturn` for every file → zero matches. Both handlers now default to `_DEFAULT_EVALUATOR_CODE` — a v10.4.0-compliant snippet that emits one match per Phase 1 regex hit: `matches = [{"line_number": mp["line_number"]} for mp in match_positions]; return {"matches": matches, "value": None}`.
+
 ## v10.4.0 — 2026-05-04
 
 ### Changed (BREAKING — X-Ray evaluator contract)

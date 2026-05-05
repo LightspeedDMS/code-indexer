@@ -1324,7 +1324,9 @@ class TestXraySearchHandlerOmni:
         mock_bjm.submit_job.side_effect = job_ids
         return mock_bjm
 
-    def _run_with_aliases(self, alias_value: Any, resolved_paths: dict) -> Dict[str, Any]:
+    def _run_with_aliases(
+        self, alias_value: Any, resolved_paths: dict
+    ) -> Dict[str, Any]:
         """Run handle_xray_search with given repository_alias and path map."""
         import json as _json
 
@@ -1370,7 +1372,9 @@ class TestXraySearchHandlerOmni:
 
     def test_string_alias_single_repo_works_as_before(self):
         """String alias returns {job_id} dict (unchanged single-repo path)."""
-        result = self._run_with_aliases("myrepo-global", {"myrepo-global": "/path/repo"})
+        result = self._run_with_aliases(
+            "myrepo-global", {"myrepo-global": "/path/repo"}
+        )
         data = _parse_response(result)
         assert "job_id" in data, f"Expected job_id, got: {data}"
 
@@ -1407,4 +1411,139 @@ class TestXraySearchHandlerOmni:
         """Empty list alias returns alias_required error."""
         result = self._run_with_aliases([], {})
         data = _parse_response(result)
-        assert data.get("error") == "alias_required", f"Expected alias_required, got: {data}"
+        assert data.get("error") == "alias_required", (
+            f"Expected alias_required, got: {data}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: default evaluator produces dict contract (Bug 2 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestXraySearchHandlerDefaultEvaluator:
+    """When evaluator_code is omitted, xray_search uses a dict-contract default.
+
+    Bug 2 (v10.4.1): handle_xray_search used params.get("evaluator_code", "")
+    which passed an empty string to the engine. The sandbox then executed empty
+    code and returned None, which failed the dict contract check and produced
+    InvalidEvaluatorReturn for every candidate file.
+
+    The fix replaces the empty default with a DEFAULT_EVALUATOR that echoes
+    Phase 1 hits as matches using the v10.4.0 dict shape.
+    """
+
+    def _get_engine_evaluator_code(self, params: Dict[str, Any]) -> str:
+        """Submit a valid job and capture the evaluator_code forwarded to engine.run()."""
+        user = _make_user(UserRole.NORMAL_USER)
+        captured: Dict[str, Any] = {}
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-default-eval"
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch(
+                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                side_effect=lambda **kw: captured.update(kw)
+                or {
+                    "matches": [],
+                    "evaluation_errors": [],
+                    "files_processed": 0,
+                    "files_total": 0,
+                    "elapsed_seconds": 0.0,
+                },
+            ),
+        ):
+            handler = _import_handler()
+            handler(params, user)
+            submit_call = mock_bjm.submit_job.call_args
+            job_fn = submit_call.kwargs["func"]
+            job_fn(lambda *a: None)
+
+        return captured.get("evaluator_code", "")
+
+    def test_omitted_evaluator_code_uses_non_empty_default(self):
+        """When evaluator_code is omitted, engine receives a non-empty default (Bug 2)."""
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+            # evaluator_code intentionally omitted
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+        assert evaluator, (
+            "Engine must receive a non-empty evaluator_code when evaluator_code is omitted"
+        )
+        assert evaluator != "", (
+            "Empty evaluator_code is the Bug 2 regression — default must be non-empty"
+        )
+
+    def test_omitted_evaluator_code_default_returns_dict_not_bool(self):
+        """Default evaluator must contain dict return shape, not 'return True' bool (Bug 2)."""
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+            # evaluator_code intentionally omitted
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+        # The default must include the dict return contract
+        assert "matches" in evaluator, (
+            f"Default evaluator must return dict with 'matches' key, got: {evaluator!r}"
+        )
+        assert (
+            '"matches"' in evaluator
+            or "'matches'" in evaluator
+            or "matches" in evaluator
+        ), f"Default evaluator must build matches list, got: {evaluator!r}"
+
+    def test_omitted_evaluator_code_default_passes_sandbox_validation(self):
+        """Default evaluator must pass sandbox.validate() — not crash at preflight (Bug 2)."""
+        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+
+        sandbox = PythonEvaluatorSandbox()
+        result = sandbox.validate(evaluator)
+        assert result.ok, (
+            f"Default evaluator must pass sandbox.validate(), got failure: {result.reason!r}"
+        )
+
+    def test_empty_evaluator_code_string_uses_non_empty_default(self):
+        """Explicit empty string evaluator_code is treated same as omitted — non-empty default."""
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+            "evaluator_code": "",
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+        assert evaluator, (
+            "Empty string evaluator_code must be replaced by non-empty default (Bug 2)"
+        )
+
+    def test_explicit_evaluator_code_is_not_replaced_by_default(self):
+        """Explicit non-empty evaluator_code is forwarded as-is (regression guard)."""
+        custom_code = 'return {"matches": [{"line_number": 1}], "value": None}'
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+            "evaluator_code": custom_code,
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+        assert evaluator == custom_code, (
+            f"Explicit evaluator_code must not be replaced by default, got: {evaluator!r}"
+        )

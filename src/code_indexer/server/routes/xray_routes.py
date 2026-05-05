@@ -230,5 +230,3 @@ def xray_search(
     )
 
     return XRaySearchResponse(job_id=job_id)
-
-

@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 _TIMEOUT_MIN = 10
 _TIMEOUT_MAX = 600
 
+# Default evaluator used when the caller omits evaluator_code.
+# Returns the v10.4.0 dict contract: echoes every Phase 1 hit as a match entry.
+# For search_target='filename', match_positions is empty so matches is [].
+# Semantically equivalent to the legacy "return True" (accept all files), but
+# satisfies the dict return contract introduced in v10.4.0.
+_DEFAULT_EVALUATOR_CODE = (
+    'matches = [{"line_number": mp["line_number"]} for mp in match_positions]\n'
+    'return {"matches": matches, "value": None}'
+)
+
 # Default timeout when the caller omits timeout_seconds.
 _DEFAULT_TIMEOUT_SECONDS = 120
 
@@ -119,7 +129,14 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     repo_alias: str = params.get("repository_alias", "")
     # 'pattern' is the regex_search-aligned name (was 'driver_regex')
     driver_regex: str = params.get("pattern", "")
-    evaluator_code: str = params.get("evaluator_code", "")
+    # evaluator_code is optional; default to _DEFAULT_EVALUATOR_CODE when
+    # omitted or empty so the engine receives a valid v10.4.0 dict-contract
+    # evaluator (Bug 2 fix: empty string produced InvalidEvaluatorReturn for
+    # every candidate file).
+    raw_evaluator_code: str = params.get("evaluator_code") or ""
+    evaluator_code: str = (
+        raw_evaluator_code if raw_evaluator_code.strip() else _DEFAULT_EVALUATOR_CODE
+    )
     search_target: str = params.get("search_target", "")
     include_patterns = params.get("include_patterns") or []
     exclude_patterns = params.get("exclude_patterns") or []
@@ -224,7 +241,9 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # 4. Effective timeout + range check (multi-repo path)
         # ------------------------------------------------------------------
         effective_timeout_multi: int = (
-            timeout_override if timeout_override is not None else _DEFAULT_TIMEOUT_SECONDS
+            timeout_override
+            if timeout_override is not None
+            else _DEFAULT_TIMEOUT_SECONDS
         )
         if not (_TIMEOUT_MIN <= effective_timeout_multi <= _TIMEOUT_MAX):
             return _mcp_response(
@@ -397,6 +416,117 @@ _MAX_DEBUG_NODES_MIN = 1
 _MAX_DEBUG_NODES_MAX = 500
 
 
+def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
+    repo_path: "Path",
+    driver_regex: str,
+    evaluator_code: str,
+    search_target: str,
+    include_patterns: list,
+    exclude_patterns: list,
+    case_sensitive: bool,
+    context_lines: int,
+    multiline: bool,
+    pcre2: bool,
+    path: "Optional[str]",
+    effective_timeout: int,
+    max_results: "Optional[int]",
+    max_debug_nodes: int,
+):
+    """Return a job function closure for xray_explore.
+
+    Extracted to eliminate duplication between the single-repo and multi-repo
+    job-submission paths in handle_xray_explore.
+    """
+
+    def job_fn(progress_callback):  # type: ignore[no-untyped-def]
+        from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
+
+        return _Engine().run(
+            repo_path=repo_path,
+            driver_regex=driver_regex,
+            evaluator_code=evaluator_code,
+            search_target=search_target,
+            include_patterns=list(include_patterns),
+            exclude_patterns=list(exclude_patterns),
+            case_sensitive=case_sensitive,
+            context_lines=context_lines,
+            multiline=multiline,
+            pcre2=pcre2,
+            path=path,
+            timeout_seconds=effective_timeout,
+            progress_callback=progress_callback,
+            max_files=max_results,
+            include_ast_debug=True,
+            max_debug_nodes=max_debug_nodes,
+        )
+
+    return job_fn
+
+
+def _submit_xray_explore_omni(  # type: ignore[no-untyped-def]
+    aliases: list,
+    user: "Any",
+    driver_regex: str,
+    evaluator_code: str,
+    search_target: str,
+    include_patterns: list,
+    exclude_patterns: list,
+    case_sensitive: bool,
+    context_lines: int,
+    multiline: bool,
+    pcre2: bool,
+    path: "Optional[str]",
+    effective_timeout: int,
+    max_results: "Optional[int]",
+    max_debug_nodes: int,
+) -> Dict[str, Any]:
+    """Submit one xray_explore background job per alias.
+
+    Extracted from handle_xray_explore to keep that handler concise.
+    Returns a {job_ids, errors} response dict (not yet wrapped in _mcp_response).
+    """
+    bjm = _get_background_job_manager()
+    job_ids: list = []
+    errors: list = []
+
+    for single_alias in aliases:
+        single_path_str = _resolve_repo_path(single_alias)
+        if single_path_str is None:
+            errors.append(
+                {
+                    "repository_alias": single_alias,
+                    "error": "repository_not_found",
+                    "message": f"Repository alias {single_alias!r} not found",
+                }
+            )
+            continue
+
+        jid: str = bjm.submit_job(
+            operation_type="xray_explore",
+            func=_make_xray_explore_job_fn(
+                repo_path=Path(single_path_str),
+                driver_regex=driver_regex,
+                evaluator_code=evaluator_code,
+                search_target=search_target,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                case_sensitive=case_sensitive,
+                context_lines=context_lines,
+                multiline=multiline,
+                pcre2=pcre2,
+                path=path,
+                effective_timeout=effective_timeout,
+                max_results=max_results,
+                max_debug_nodes=max_debug_nodes,
+            ),
+            submitter_username=user.username,
+            repo_alias=single_alias,
+        )
+        job_ids.append(jid)
+
+    return {"job_ids": job_ids, "errors": errors}
+
+
 def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """MCP handler for the xray_explore tool.
 
@@ -426,11 +556,12 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     repo_alias: str = params.get("repository_alias", "")
     # 'pattern' is the regex_search-aligned name (was 'driver_regex')
     driver_regex: str = params.get("pattern", "")
-    # evaluator_code is optional for xray_explore; default 'return True' accepts all
-    # candidate files for AST exploration without requiring the caller to supply a filter.
+    # evaluator_code is optional for xray_explore; default emits one match per
+    # Phase 1 regex hit so AST debug output attaches to each. v10.4.0 dict-return
+    # contract — see _DEFAULT_EVALUATOR_CODE near the top of this file.
     raw_evaluator_code: str = params.get("evaluator_code") or ""
     evaluator_code: str = (
-        raw_evaluator_code if raw_evaluator_code.strip() else "return True"
+        raw_evaluator_code if raw_evaluator_code.strip() else _DEFAULT_EVALUATOR_CODE
     )
     search_target: str = params.get("search_target", "")
     include_patterns = params.get("include_patterns") or []
@@ -528,19 +659,16 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     # ------------------------------------------------------------------
-    # 3. Repository alias resolution
+    # 3. Alias normalisation — omni-aware (string OR list)
     # ------------------------------------------------------------------
-    repo_path_str = _resolve_repo_path(repo_alias)
-    if repo_path_str is None:
-        return _mcp_response(
-            {
-                "error": "repository_not_found",
-                "message": f"Repository alias {repo_alias!r} not found",
-            }
-        )
+    # Bug 1 fix (v10.4.1): the original code passed repo_alias directly to
+    # _resolve_repo_path without normalisation, crashing with AttributeError
+    # ('list' object has no attribute 'endswith') on native-list or
+    # JSON-encoded-array inputs.
+    repo_alias_parsed = _parse_json_string_array(repo_alias)
 
     # ------------------------------------------------------------------
-    # 4. Effective timeout + range check
+    # 4. Effective timeout + range check  (shared — runs before alias branch)
     # ------------------------------------------------------------------
     effective_timeout: int = (
         timeout_override if timeout_override is not None else _DEFAULT_TIMEOUT_SECONDS
@@ -557,11 +685,9 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     # ------------------------------------------------------------------
-    # 5. Pre-flight evaluator validation
+    # 5. Pre-flight evaluator validation  (shared — runs before alias branch)
     # ------------------------------------------------------------------
-    engine = XRaySearchEngine()
-
-    validation = engine.sandbox.validate(evaluator_code)
+    validation = XRaySearchEngine().sandbox.validate(evaluator_code)
     if not validation.ok:
         return _mcp_response(
             {
@@ -571,38 +697,54 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     # ------------------------------------------------------------------
-    # 6. Submit background job with include_ast_debug=True
+    # 6. Job submission — multi-repo OR single-repo
     # ------------------------------------------------------------------
-    repo_path = Path(repo_path_str)
+    explore_kwargs: Dict[str, Any] = dict(
+        driver_regex=driver_regex,
+        evaluator_code=evaluator_code,
+        search_target=search_target,
+        include_patterns=list(include_patterns),
+        exclude_patterns=list(exclude_patterns),
+        case_sensitive=case_sensitive,
+        context_lines=context_lines,
+        multiline=multiline,
+        pcre2=pcre2,
+        path=path,
+        effective_timeout=effective_timeout,
+        max_results=max_results,
+        max_debug_nodes=max_debug_nodes,
+    )
 
-    def job_fn(progress_callback):  # type: ignore[no-untyped-def]
-        from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
+    if isinstance(repo_alias_parsed, list):
+        if not repo_alias_parsed:
+            return _mcp_response(
+                {
+                    "error": "alias_required",
+                    "message": "repository_alias must not be empty",
+                }
+            )
+        return _mcp_response(
+            _submit_xray_explore_omni(
+                aliases=repo_alias_parsed, user=user, **explore_kwargs
+            )
+        )
 
-        return _Engine().run(
-            repo_path=repo_path,
-            driver_regex=driver_regex,
-            evaluator_code=evaluator_code,
-            search_target=search_target,
-            include_patterns=list(include_patterns),
-            exclude_patterns=list(exclude_patterns),
-            case_sensitive=case_sensitive,
-            context_lines=context_lines,
-            multiline=multiline,
-            pcre2=pcre2,
-            path=path,
-            timeout_seconds=effective_timeout,
-            progress_callback=progress_callback,
-            max_files=max_results,
-            include_ast_debug=True,
-            max_debug_nodes=max_debug_nodes,
+    # Single-repo path
+    repo_path_str = _resolve_repo_path(repo_alias_parsed)
+    if repo_path_str is None:
+        return _mcp_response(
+            {
+                "error": "repository_not_found",
+                "message": f"Repository alias {repo_alias_parsed!r} not found",
+            }
         )
 
     bjm = _get_background_job_manager()
     job_id: str = bjm.submit_job(
         operation_type="xray_explore",
-        func=job_fn,
+        func=_make_xray_explore_job_fn(repo_path=Path(repo_path_str), **explore_kwargs),
         submitter_username=user.username,
-        repo_alias=repo_alias,
+        repo_alias=repo_alias_parsed,
     )
 
     if await_seconds > 0:
@@ -876,5 +1018,3 @@ def _register(registry: Dict[str, Any]) -> None:
     registry["xray_explore"] = handle_xray_explore
     registry["xray_dump_ast"] = handle_xray_dump_ast
     registry["cidx_fetch_cached_payload"] = handle_cidx_fetch_cached_payload
-
-

@@ -77,7 +77,6 @@ inputSchema:
   required:
     - repository_alias
     - pattern
-    - evaluator_code
     - search_target
 outputSchema:
   type: object
@@ -127,7 +126,7 @@ Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately
 |-----------|------|----------|---------|-------------|
 | repository_alias | str OR list[str] | yes | -- | Single alias for single-repo search. Array (or JSON-encoded array string) for omni multi-repo search. Multi-repo returns one job id per resolved alias plus an `errors[]` list for unresolved aliases. |
 | pattern | str | yes | -- | Regular expression applied in Phase 1. Renamed from `driver_regex` in v10.3.x. |
-| evaluator_code | str | yes | -- | Python code snippet evaluated ONCE per file. Returns `{"matches": [...], "value": <any>}`. See "Evaluator API" below. |
+| evaluator_code | str | no | (default acceptor) | Python code snippet evaluated ONCE per file. Returns `{"matches": [...], "value": <any>}`. See "Evaluator API" below. When omitted, the server substitutes a default that echoes every Phase 1 hit as a match with `line_number` only and `value: null`. |
 | search_target | "content" or "filename" | yes | -- | "content" — Phase 1 regex applies to file text; `match_positions` is populated. "filename" — Phase 1 regex applies to relative paths; `match_positions` is empty. |
 | include_patterns | list[str] | no | [] | Glob patterns for files to include. `*` matches a single path segment; use `**` for recursive matching. Empty means include all. |
 | exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude. Empty means exclude none. |

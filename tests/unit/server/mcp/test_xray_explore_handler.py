@@ -602,10 +602,10 @@ class TestXrayExploreHandlerOperationType:
 
 
 class TestXrayExploreHandlerOptionalEvaluatorCode:
-    """evaluator_code is optional; default is 'return True'."""
+    """evaluator_code is optional; v10.4.1 default emits one match per Phase 1 hit (dict-return)."""
 
-    def test_explore_accepts_missing_evaluator_code(self):
-        """xray_explore succeeds when evaluator_code is omitted; engine receives 'return True' (M2)."""
+    def test_explore_accepts_missing_evaluator_code_v10_4_1(self):
+        """xray_explore succeeds when evaluator_code is omitted; engine receives _DEFAULT_EVALUATOR_CODE (v10.4.1 dict-return contract)."""
         user = _make_user(UserRole.NORMAL_USER)
         captured_kwargs: Dict[str, Any] = {}
         mock_bjm = MagicMock()
@@ -652,13 +652,14 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
         assert "error" not in data, (
             f"Expected no error when evaluator_code is omitted, got: {data!r}"
         )
-        assert captured_kwargs.get("evaluator_code") == "return True", (
-            f"Engine must receive 'return True' when evaluator_code is omitted, "
-            f"got: {captured_kwargs.get('evaluator_code')!r}"
+        from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+        assert captured_kwargs.get("evaluator_code") == _DEFAULT_EVALUATOR_CODE, (
+            f"Engine must receive _DEFAULT_EVALUATOR_CODE (v10.4.1 dict-return) "
+            f"when evaluator_code is omitted, got: {captured_kwargs.get('evaluator_code')!r}"
         )
 
-    def test_explore_empty_evaluator_code_engine_receives_default(self):
-        """Engine receives 'return True' when evaluator_code is empty string (M2)."""
+    def test_explore_empty_evaluator_code_engine_receives_default_v10_4_1(self):
+        """Engine receives _DEFAULT_EVALUATOR_CODE when evaluator_code is empty string (v10.4.1)."""
         user = _make_user(UserRole.NORMAL_USER)
         captured_kwargs: Dict[str, Any] = {}
         mock_bjm = MagicMock()
@@ -702,9 +703,10 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
         assert "job_id" in data, (
             f"Expected job_id when evaluator_code is empty, got: {data!r}"
         )
-        assert captured_kwargs.get("evaluator_code") == "return True", (
-            f"Engine must receive 'return True' when evaluator_code is empty string, "
-            f"got: {captured_kwargs.get('evaluator_code')!r}"
+        from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+        assert captured_kwargs.get("evaluator_code") == _DEFAULT_EVALUATOR_CODE, (
+            f"Engine must receive _DEFAULT_EVALUATOR_CODE (v10.4.1 dict-return) "
+            f"when evaluator_code is empty string, got: {captured_kwargs.get('evaluator_code')!r}"
         )
 
 
@@ -1389,3 +1391,320 @@ class TestXrayExploreHandlerNewParams:
 
         data = _parse_response(result)
         assert "job_id" in data, f"path='src/' must be accepted, got: {data!r}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: omni multi-repo — repository_alias accepts str OR list (Bug 1 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestXrayExploreHandlerOmni:
+    """repository_alias accepts string OR array of strings in xray_explore.
+
+    Bug 1 (v10.4.1): handle_xray_explore was missing the _parse_json_string_array
+    normalization step, causing AttributeError: 'list' object has no attribute
+    'endswith' when a native list or JSON-encoded array was passed.
+    """
+
+    def _make_bjm(self, job_ids: list) -> MagicMock:
+        """Return a mock BJM whose submit_job returns successive job IDs."""
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.side_effect = job_ids
+        return mock_bjm
+
+    def _run_with_aliases(
+        self, alias_value: Any, resolved_paths: dict
+    ) -> Dict[str, Any]:
+        """Run handle_xray_explore with given repository_alias and path map."""
+        import json as _json
+
+        from code_indexer.server.mcp.handlers.xray import handle_xray_explore
+
+        user = _make_user(UserRole.NORMAL_USER)
+        # Determine the number of repos to provision mock job IDs correctly.
+        if isinstance(alias_value, list):
+            aliases = alias_value
+        elif isinstance(alias_value, str) and alias_value.startswith("["):
+            try:
+                parsed = _json.loads(alias_value)
+                aliases = parsed if isinstance(parsed, list) else [alias_value]
+            except _json.JSONDecodeError:
+                aliases = [alias_value]
+        else:
+            aliases = [alias_value]
+        job_ids = [f"explore-job-{i}" for i in range(len(aliases))]
+        mock_bjm = self._make_bjm(job_ids)
+
+        params = {
+            "repository_alias": alias_value,
+            "pattern": r"TODO",
+            "search_target": "content",
+            # evaluator_code omitted — default 'return True' path
+        }
+
+        def fake_resolve(alias: str) -> Any:
+            return resolved_paths.get(alias)
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                side_effect=fake_resolve,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            return handle_xray_explore(params, user)
+
+    def test_string_alias_single_repo_works_as_before(self):
+        """String alias returns {job_id} dict — unchanged single-repo path (regression)."""
+        result = self._run_with_aliases(
+            "myrepo-global", {"myrepo-global": "/path/repo"}
+        )
+        data = _parse_response(result)
+        assert "job_id" in data, f"Expected job_id for single string alias, got: {data}"
+
+    def test_native_list_alias_does_not_crash(self):
+        """Native list ['repo-a', 'repo-b'] must NOT crash with AttributeError (Bug 1)."""
+        paths = {"repo-a": "/path/a", "repo-b": "/path/b"}
+        # This crashed with AttributeError: 'list' object has no attribute 'endswith'
+        # before the fix because _resolve_repo_path received the raw list.
+        result = self._run_with_aliases(["repo-a", "repo-b"], paths)
+        data = _parse_response(result)
+        assert "job_ids" in data, f"Expected job_ids for list alias, got: {data}"
+        assert len(data["job_ids"]) == 2
+
+    def test_json_string_array_alias_is_parsed(self):
+        """JSON-encoded string '['a','b']' is parsed to list of aliases (Bug 1)."""
+        paths = {"repo-a": "/path/a", "repo-b": "/path/b"}
+        result = self._run_with_aliases('["repo-a", "repo-b"]', paths)
+        data = _parse_response(result)
+        assert "job_ids" in data, f"Expected job_ids after JSON parse, got: {data}"
+        assert len(data["job_ids"]) == 2
+
+    def test_empty_array_alias_returns_alias_required_error(self):
+        """Empty list [] returns alias_required error, not crash (Bug 1)."""
+        result = self._run_with_aliases([], {})
+        data = _parse_response(result)
+        assert data.get("error") == "alias_required", (
+            f"Expected alias_required for empty list, got: {data}"
+        )
+
+    def test_list_with_unknown_repo_returns_errors_entry(self):
+        """Unknown alias in list produces repository_not_found error entry."""
+        paths = {"known-repo": "/path/known"}
+        result = self._run_with_aliases(["known-repo", "unknown-repo"], paths)
+        data = _parse_response(result)
+        assert "errors" in data or "job_ids" in data, f"Unexpected response: {data}"
+        if "errors" in data:
+            errors = data["errors"]
+            assert any("unknown-repo" in str(e) for e in errors), (
+                f"Expected error mentioning 'unknown-repo', got: {errors}"
+            )
+
+    def test_list_does_not_reach_endswith(self):
+        """Feeding a list never reaches .endswith() or any string-only method (Bug 1).
+
+        This is the canonical regression: before the fix, passing a list to
+        handle_xray_explore raised AttributeError: 'list' object has no attribute
+        'endswith'. This test verifies the handler completes without that error.
+        """
+        paths = {"repo-x": "/path/x"}
+        try:
+            result = self._run_with_aliases(["repo-x"], paths)
+            data = _parse_response(result)
+            # Any valid response (job_ids, error codes) is fine — just no crash
+            assert isinstance(data, dict), f"Expected dict response, got: {type(data)}"
+        except AttributeError as exc:
+            raise AssertionError(
+                f"handle_xray_explore crashed with AttributeError when given a list: {exc}"
+            ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Tests: default evaluator produces dict contract (Bug 2 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestXrayExploreHandlerDefaultEvaluator:
+    """When evaluator_code is omitted, xray_explore uses a dict-contract default.
+
+    Bug 2 (v10.4.1): handle_xray_explore defaulted to 'return True' (legacy bool
+    contract). Under v10.4.0, the sandbox treats a bool return as
+    InvalidEvaluatorReturn for every candidate file, producing zero matches.
+
+    The fix replaces the empty default with _DEFAULT_EVALUATOR_CODE which echoes
+    Phase 1 hits as matches using the v10.4.0 dict shape.
+    """
+
+    def _get_engine_evaluator_code(self, params: Dict[str, Any]) -> str:
+        """Submit a valid explore job and capture the evaluator_code forwarded to engine.run()."""
+        user = _make_user(UserRole.NORMAL_USER)
+        captured: Dict[str, Any] = {}
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-default-eval-explore"
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch(
+                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                side_effect=lambda **kw: captured.update(kw)
+                or {
+                    "matches": [],
+                    "evaluation_errors": [],
+                    "files_processed": 0,
+                    "files_total": 0,
+                    "elapsed_seconds": 0.0,
+                },
+            ),
+        ):
+            handler = _import_handler()
+            handler(params, user)
+            submit_call = mock_bjm.submit_job.call_args
+            job_fn = submit_call.kwargs["func"]
+            job_fn(lambda *a: None)
+
+        return captured.get("evaluator_code", "")
+
+    def test_omitted_evaluator_code_uses_non_empty_default(self):
+        """When evaluator_code is omitted, engine receives a non-empty default (Bug 2)."""
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+            # evaluator_code intentionally omitted
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+        assert evaluator, (
+            "Engine must receive a non-empty evaluator_code when evaluator_code is omitted"
+        )
+        assert evaluator != "", (
+            "Empty evaluator_code is the Bug 2 regression — default must be non-empty"
+        )
+
+    def test_omitted_evaluator_code_default_returns_dict_not_bool(self):
+        """Default evaluator must contain dict return shape, not 'return True' bool (Bug 2)."""
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+            # evaluator_code intentionally omitted
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+        # The default must include the dict return contract
+        assert "matches" in evaluator, (
+            f"Default evaluator must return dict with 'matches' key, got: {evaluator!r}"
+        )
+
+    def test_omitted_evaluator_code_default_passes_sandbox_validation(self):
+        """Default evaluator must pass sandbox.validate() — not crash at preflight (Bug 2)."""
+        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+
+        sandbox = PythonEvaluatorSandbox()
+        result = sandbox.validate(evaluator)
+        assert result.ok, (
+            f"Default evaluator must pass sandbox.validate(), got failure: {result.reason!r}"
+        )
+
+    def test_empty_evaluator_code_string_uses_non_empty_default(self):
+        """Explicit empty string evaluator_code is treated same as omitted — non-empty default."""
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+            "evaluator_code": "",
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+        assert evaluator, (
+            "Empty string evaluator_code must be replaced by non-empty default (Bug 2)"
+        )
+
+    def test_explicit_evaluator_code_is_not_replaced_by_default(self):
+        """Explicit non-empty evaluator_code is forwarded as-is (regression guard)."""
+        custom_code = 'return {"matches": [{"line_number": 1}], "value": None}'
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"TODO",
+            "search_target": "content",
+            "evaluator_code": custom_code,
+        }
+        evaluator = self._get_engine_evaluator_code(params)
+        assert evaluator == custom_code, (
+            f"Explicit evaluator_code must not be replaced by default, got: {evaluator!r}"
+        )
+
+    def test_default_evaluator_n_hits_produce_n_matches(self):
+        """Omitting evaluator_code → N regex hits produce N matches[], no InvalidEvaluatorReturn.
+
+        Bug 2 regression test (v10.4.1): the old 'return True' bool default triggered
+        InvalidEvaluatorReturn for every file under the v10.4.0 dict contract.
+        _DEFAULT_EVALUATOR_CODE must echo each match_position entry as a match dict.
+        """
+        from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+
+        # Simulate 3 Phase 1 regex hits on a single candidate file.
+        n_hits = 3
+        match_positions = [
+            {
+                "line_number": i + 1,
+                "line_content": f"TODO item {i + 1}",
+                "column": 0,
+                "byte_offset": i * 20,
+                "context_before": [],
+                "context_after": [],
+            }
+            for i in range(n_hits)
+        ]
+
+        # The sandbox needs a real XRayNode; use a minimal Python file parse.
+        from code_indexer.xray.ast_engine import AstSearchEngine
+
+        engine = AstSearchEngine()
+        source = "x = 1\n" * n_hits
+        root = engine.parse(source.encode(), "python")
+
+        sandbox = PythonEvaluatorSandbox()
+        result = sandbox.run(
+            _DEFAULT_EVALUATOR_CODE,
+            node=root,
+            root=root,
+            source=source,
+            lang="python",
+            file_path="/fake/file.py",
+            match_positions=match_positions,
+        )
+
+        # Must not fail — no InvalidEvaluatorReturn.
+        assert result.failure is None, (
+            f"Default evaluator must not fail (failure={result.failure!r}, "
+            f"detail={result.detail!r}). This is the Bug 2 regression."
+        )
+        assert isinstance(result.value, dict), (
+            f"Default evaluator must return a dict, got {type(result.value).__name__!r}"
+        )
+        matches = result.value.get("matches", [])
+        assert len(matches) == n_hits, (
+            f"Expected {n_hits} matches for {n_hits} Phase 1 hits, got {len(matches)}. "
+            f"matches={matches!r}"
+        )
+        # Each match must carry the line_number from the corresponding hit.
+        for i, match in enumerate(matches):
+            assert match.get("line_number") == i + 1, (
+                f"Match {i} must have line_number={i + 1}, got {match!r}"
+            )

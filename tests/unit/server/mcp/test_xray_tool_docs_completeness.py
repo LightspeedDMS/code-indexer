@@ -461,3 +461,46 @@ def test_xray_md_references_xray_explore(xray_frontmatter_and_body):
 def test_xray_explore_md_references_xray_search(xray_explore_frontmatter_and_body):
     _, body = xray_explore_frontmatter_and_body
     assert "xray_search" in body, "xray_explore.md must cross-reference xray_search"
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: evaluator_code must NOT be in required list of xray_search.md
+# (Bug 2 fix adds a default, making evaluator_code optional)
+# ---------------------------------------------------------------------------
+
+
+class TestXraySearchToolDocEvaluatorOptional:
+    def test_xray_search_evaluator_code_not_in_required_list(
+        self, xray_frontmatter_and_body
+    ):
+        """evaluator_code must be absent from the frontmatter required: list.
+
+        Bug 2 adds _DEFAULT_EVALUATOR_CODE so the parameter is now optional.
+        Leaving it in required: causes claude.ai tool_search to reject calls
+        that omit evaluator_code even though the handler accepts them.
+        """
+        fm, _ = xray_frontmatter_and_body
+        required_list = fm.get("inputSchema", {}).get("required", [])
+        assert "evaluator_code" not in required_list, (
+            f"xray_search.md inputSchema.required must NOT contain 'evaluator_code' "
+            f"(it has a server-side default since Bug 2 fix). Got: {required_list}"
+        )
+
+    def test_xray_search_evaluator_code_param_row_says_no(
+        self, xray_frontmatter_and_body
+    ):
+        """Parameter table row for evaluator_code must show 'no' in the Required column."""
+        _, body = xray_frontmatter_and_body
+        # Find the evaluator_code row in the Parameters table.
+        # Format: | evaluator_code | str | <required> | ... |
+        match = re.search(
+            r"\|\s*evaluator_code\s*\|[^|]+\|\s*(\w+)\s*\|",
+            body,
+        )
+        assert match is not None, (
+            "Could not find 'evaluator_code' row in xray_search.md Parameters table"
+        )
+        required_col = match.group(1).strip().lower()
+        assert required_col == "no", (
+            f"evaluator_code parameter table row Required column must be 'no', got {required_col!r}"
+        )
