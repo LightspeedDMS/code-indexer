@@ -278,9 +278,7 @@ def test_normal_user_repos_list(
     e2e_cli_env: dict[str, str],
 ) -> None:
     """AC1: normal user sees their own activated workspace in repos list."""
-    result = run_cidx(
-        "repos", "list", cwd=str(normal_user_workspace), env=e2e_cli_env
-    )
+    result = run_cidx("repos", "list", cwd=str(normal_user_workspace), env=e2e_cli_env)
     _assert_ok(result, "cidx repos list (normal user)")
     assert registered_golden_repo in result.stdout, (
         f"Expected '{registered_golden_repo}' in normal-user repos list:\n"

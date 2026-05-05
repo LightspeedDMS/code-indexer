@@ -145,12 +145,7 @@ class TestWhitelistBypassAttempts:
 
     def test_while_loop_now_accepted_v10_4_0(self):
         """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
-        code = (
-            "i = 0\n"
-            "while i < 1:\n"
-            "    i = i + 1\n"
-            "return {'matches': [], 'value': i}"
-        )
+        code = "i = 0\nwhile i < 1:\n    i = i + 1\nreturn {'matches': [], 'value': i}"
         sb = PythonEvaluatorSandbox()
         result = sb.validate(code)
         assert result.ok is True
@@ -208,6 +203,37 @@ class TestWhitelistBypassAttempts:
         result = sb.validate(code)
         assert result.ok is True, (
             f"GeneratorExp should be accepted after whitelist expansion; "
+            f"got reason={result.reason!r}"
+        )
+
+    # --- Slice (v10.4.3 Finding 2) ---
+
+    def test_slice_simple_accepted(self):
+        # ast.Slice was missing from ALLOWED_NODES — source[10:20] was rejected
+        # even though ast.Subscript (source[0]) was already whitelisted.
+        # Slice cannot escalate beyond Subscript; dunder blocklist still applies.
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate("return source[10:20]")
+        assert result.ok is True, (
+            f"Slice (source[10:20]) should be accepted after v10.4.3 fix; "
+            f"got reason={result.reason!r}"
+        )
+
+    def test_slice_negative_index_accepted(self):
+        # Negative-index slice: source[-30:] is the canonical "tail of source" pattern.
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate("return source[-30:]")
+        assert result.ok is True, (
+            f"Slice (source[-30:]) should be accepted after v10.4.3 fix; "
+            f"got reason={result.reason!r}"
+        )
+
+    def test_slice_with_step_accepted(self):
+        # Extended slice with step: lines[0:10:2] selects every other line.
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate("return lines[0:10:2]")
+        assert result.ok is True, (
+            f"Slice with step (lines[0:10:2]) should be accepted after v10.4.3 fix; "
             f"got reason={result.reason!r}"
         )
 
@@ -384,11 +410,7 @@ class TestWhitelistBypassAttempts:
 
     def test_pass_now_accepted_v10_4_0(self):
         """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
-        code = (
-            "if True:\n"
-            "    pass\n"
-            "return {'matches': [], 'value': None}"
-        )
+        code = "if True:\n    pass\nreturn {'matches': [], 'value': None}"
         sb = PythonEvaluatorSandbox()
         result = sb.validate(code)
         assert result.ok is True

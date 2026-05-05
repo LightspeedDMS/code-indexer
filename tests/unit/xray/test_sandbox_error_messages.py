@@ -156,7 +156,9 @@ class TestAttributeErrorSuggestions:
     # --- B2: descendants_of (missing _type) → suggests descendants_of_type ---
 
     def test_descendants_of_suggests_descendants_of_type(self):
-        result = self._run_attr_code("return node.descendants_of('method_invocation') == []")
+        result = self._run_attr_code(
+            "return node.descendants_of('method_invocation') == []"
+        )
         assert result.failure == "evaluator_subprocess_died"
         assert result.detail is not None
         assert "Did you mean" in result.detail

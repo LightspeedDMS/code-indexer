@@ -653,6 +653,7 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
             f"Expected no error when evaluator_code is omitted, got: {data!r}"
         )
         from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+
         assert captured_kwargs.get("evaluator_code") == _DEFAULT_EVALUATOR_CODE, (
             f"Engine must receive _DEFAULT_EVALUATOR_CODE (v10.4.1 dict-return) "
             f"when evaluator_code is omitted, got: {captured_kwargs.get('evaluator_code')!r}"
@@ -704,6 +705,7 @@ class TestXrayExploreHandlerOptionalEvaluatorCode:
             f"Expected job_id when evaluator_code is empty, got: {data!r}"
         )
         from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+
         assert captured_kwargs.get("evaluator_code") == _DEFAULT_EVALUATOR_CODE, (
             f"Engine must receive _DEFAULT_EVALUATOR_CODE (v10.4.1 dict-return) "
             f"when evaluator_code is empty string, got: {captured_kwargs.get('evaluator_code')!r}"
@@ -1455,7 +1457,8 @@ class TestXrayExploreHandlerOmni:
                 return_value=mock_bjm,
             ),
         ):
-            return handle_xray_explore(params, user)
+            # cast: MCP handler return type is Any (JSON dispatch); callers expect dict
+            return cast(Dict[str, Any], handle_xray_explore(params, user))
 
     def test_string_alias_single_repo_works_as_before(self):
         """String alias returns {job_id} dict — unchanged single-repo path (regression)."""
@@ -1572,7 +1575,8 @@ class TestXrayExploreHandlerDefaultEvaluator:
             job_fn = submit_call.kwargs["func"]
             job_fn(lambda *a: None)
 
-        return captured.get("evaluator_code", "")
+        # cast: captured dict values are Any; evaluator_code is always str when set
+        return cast(str, captured.get("evaluator_code", ""))
 
     def test_omitted_evaluator_code_uses_non_empty_default(self):
         """When evaluator_code is omitted, engine receives a non-empty default (Bug 2)."""

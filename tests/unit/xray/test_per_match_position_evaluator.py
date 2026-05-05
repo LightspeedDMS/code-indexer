@@ -314,9 +314,7 @@ class TestMatchPositionsKwargInContentMode:
         assert len(mp) == 1
         assert mp[0]["line_number"] == 2  # 'foo()' is on line 2
 
-    def test_match_positions_contains_all_hits_for_file(
-        self, search_engine, tmp_path
-    ):
+    def test_match_positions_contains_all_hits_for_file(self, search_engine, tmp_path):
         """File with 3 hits passes all 3 in match_positions (one sandbox call)."""
         (tmp_path / "f.py").write_text("foo()\nbar = 1\nfoo()\nbaz = 2\nfoo()\n")
 
@@ -343,9 +341,7 @@ class TestMatchPositionsKwargInContentMode:
         line_numbers = [p["line_number"] for p in mp]
         assert line_numbers == [1, 3, 5]
 
-    def test_match_positions_is_empty_in_filename_mode(
-        self, search_engine, tmp_path
-    ):
+    def test_match_positions_is_empty_in_filename_mode(self, search_engine, tmp_path):
         """In filename mode, match_positions must be an empty list."""
         (tmp_path / "foo_module.py").write_text("x = 1\n")
 
@@ -601,9 +597,7 @@ class TestEvaluationErrorFields:
 class TestFunctionalFileAsUnitE2E:
     """End-to-end: evaluator uses match_positions list, returns dict."""
 
-    def test_evaluator_returns_matches_for_all_positions(
-        self, search_engine, tmp_path
-    ):
+    def test_evaluator_returns_matches_for_all_positions(self, search_engine, tmp_path):
         """Evaluator that maps all match_positions produces correct match count."""
         py_file = tmp_path / "multi.py"
         py_file.write_text("a = 1\nb = 2\nfoo()\nfoo()\nfoo()\n")
@@ -678,7 +672,7 @@ class TestFunctionalFileAsUnitE2E:
             repo_path=tmp_path,
             driver_regex=r"foo",
             evaluator_code=(
-                'count = len(match_positions)\n'
+                "count = len(match_positions)\n"
                 'return {"matches": [{"line_number": 1}], "value": count}'
             ),
             search_target="filename",
@@ -700,7 +694,7 @@ class TestFunctionalFileAsUnitE2E:
             repo_path=tmp_path,
             driver_regex=r"foo",
             evaluator_code=(
-                'pos = match_positions[0]\n'
+                "pos = match_positions[0]\n"
                 'return {"matches": [{"line_number": pos["line_number"]}], "value": pos["line_number"]}'
             ),
             search_target="content",

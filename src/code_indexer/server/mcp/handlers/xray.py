@@ -220,6 +220,22 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
 
+    # Pre-validate non-PCRE2 patterns at handler level (v10.4.3 fix).
+    # PCRE2 syntax differs (lookbehind etc.) and is validated by ripgrep
+    # at execution time; surface those errors via the job result.
+    if not pcre2:
+        import re as _re
+
+        try:
+            _re.compile(driver_regex, flags=_re.MULTILINE if multiline else 0)
+        except _re.error as _exc:
+            return _mcp_response(
+                {
+                    "error": "invalid_regex",
+                    "message": f"Invalid regex pattern: {_exc}",
+                }
+            )
+
     # ------------------------------------------------------------------
     # 3. Repository alias resolution — omni-aware (string OR list)
     # ------------------------------------------------------------------
@@ -657,6 +673,22 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 ),
             }
         )
+
+    # Pre-validate non-PCRE2 patterns at handler level (v10.4.3 fix).
+    # PCRE2 syntax differs (lookbehind etc.) and is validated by ripgrep
+    # at execution time; surface those errors via the job result.
+    if not pcre2:
+        import re as _re
+
+        try:
+            _re.compile(driver_regex, flags=_re.MULTILINE if multiline else 0)
+        except _re.error as _exc:
+            return _mcp_response(
+                {
+                    "error": "invalid_regex",
+                    "message": f"Invalid regex pattern: {_exc}",
+                }
+            )
 
     # ------------------------------------------------------------------
     # 3. Alias normalisation — omni-aware (string OR list)

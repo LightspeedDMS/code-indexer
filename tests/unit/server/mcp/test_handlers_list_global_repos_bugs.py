@@ -13,6 +13,7 @@ These tests verify:
   - field_name used for filtering is repo_name (not alias_name), consistent with
     _append_global_repos_to_status reference implementation
 """
+
 import json
 from datetime import datetime
 from unittest.mock import Mock, patch
@@ -42,9 +43,9 @@ def _make_access_service(
     svc = Mock()
     svc.is_admin_user = Mock(return_value=is_admin)
     svc.filter_repo_listing = Mock(
-        side_effect=lambda repos, user_id: repos if is_admin else [
-            r for r in repos if accessible_repos and r in accessible_repos
-        ]
+        side_effect=lambda repos, user_id: repos
+        if is_admin
+        else [r for r in repos if accessible_repos and r in accessible_repos]
     )
     return svc
 
@@ -53,11 +54,27 @@ EIGHT_GLOBAL_REPOS = [
     {"alias_name": "cidx-meta-global", "repo_name": "cidx-meta", "repo_url": None},
     {"alias_name": "humanize-global", "repo_name": "humanize", "repo_url": None},
     {"alias_name": "shortuuid-global", "repo_name": "shortuuid", "repo_url": None},
-    {"alias_name": "python-slugify-global", "repo_name": "python-slugify", "repo_url": None},
+    {
+        "alias_name": "python-slugify-global",
+        "repo_name": "python-slugify",
+        "repo_url": None,
+    },
     {"alias_name": "aspnetimage-global", "repo_name": "aspnetimage", "repo_url": None},
-    {"alias_name": "langfuse-api-global", "repo_name": "langfuse-api", "repo_url": None},
-    {"alias_name": "langfuse-core-global", "repo_name": "langfuse-core", "repo_url": None},
-    {"alias_name": "langfuse-sdk-global", "repo_name": "langfuse-sdk", "repo_url": None},
+    {
+        "alias_name": "langfuse-api-global",
+        "repo_name": "langfuse-api",
+        "repo_url": None,
+    },
+    {
+        "alias_name": "langfuse-core-global",
+        "repo_name": "langfuse-core",
+        "repo_url": None,
+    },
+    {
+        "alias_name": "langfuse-sdk-global",
+        "repo_name": "langfuse-sdk",
+        "repo_url": None,
+    },
 ]
 
 
@@ -80,12 +97,15 @@ class TestHandleListGlobalReposAdminBypass:
             accessible_repos={"cidx-meta"},  # Only cidx-meta accessible via group
         )
 
-        with patch(
-            "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
-            return_value=access_service,
-        ), patch(
-            "code_indexer.server.mcp.handlers.repos._list_global_repos",
-            return_value=EIGHT_GLOBAL_REPOS,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
+                return_value=access_service,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.repos._list_global_repos",
+                return_value=EIGHT_GLOBAL_REPOS,
+            ),
         ):
             result = handle_list_global_repos({}, admin_user)
 
@@ -105,12 +125,15 @@ class TestHandleListGlobalReposAdminBypass:
         # Simulate group-based admin check returning False
         access_service = _make_access_service(is_admin=False, accessible_repos=set())
 
-        with patch(
-            "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
-            return_value=access_service,
-        ), patch(
-            "code_indexer.server.mcp.handlers.repos._list_global_repos",
-            return_value=EIGHT_GLOBAL_REPOS,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
+                return_value=access_service,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.repos._list_global_repos",
+                return_value=EIGHT_GLOBAL_REPOS,
+            ),
         ):
             result = handle_list_global_repos({}, admin_user)
 
@@ -129,12 +152,15 @@ class TestHandleListGlobalReposAdminBypass:
         power_user_in_admin_group = _make_user("power-admin", UserRole.POWER_USER)
         access_service = _make_access_service(is_admin=True)  # In admins group
 
-        with patch(
-            "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
-            return_value=access_service,
-        ), patch(
-            "code_indexer.server.mcp.handlers.repos._list_global_repos",
-            return_value=EIGHT_GLOBAL_REPOS,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
+                return_value=access_service,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.repos._list_global_repos",
+                return_value=EIGHT_GLOBAL_REPOS,
+            ),
         ):
             result = handle_list_global_repos({}, power_user_in_admin_group)
 
@@ -157,12 +183,15 @@ class TestHandleListGlobalReposNonAdminFiltering:
             accessible_repos={"cidx-meta", "humanize"},
         )
 
-        with patch(
-            "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
-            return_value=access_service,
-        ), patch(
-            "code_indexer.server.mcp.handlers.repos._list_global_repos",
-            return_value=EIGHT_GLOBAL_REPOS,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
+                return_value=access_service,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.repos._list_global_repos",
+                return_value=EIGHT_GLOBAL_REPOS,
+            ),
         ):
             result = handle_list_global_repos({}, regular_user)
 
@@ -184,12 +213,15 @@ class TestHandleListGlobalReposNonAdminFiltering:
             accessible_repos=set(),  # Empty
         )
 
-        with patch(
-            "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
-            return_value=access_service,
-        ), patch(
-            "code_indexer.server.mcp.handlers.repos._list_global_repos",
-            return_value=EIGHT_GLOBAL_REPOS,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
+                return_value=access_service,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.repos._list_global_repos",
+                return_value=EIGHT_GLOBAL_REPOS,
+            ),
         ):
             result = handle_list_global_repos({}, regular_user)
 
@@ -203,12 +235,15 @@ class TestHandleListGlobalReposNonAdminFiltering:
         """
         admin_user = _make_user("admin", UserRole.ADMIN)
 
-        with patch(
-            "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
-            return_value=None,
-        ), patch(
-            "code_indexer.server.mcp.handlers.repos._list_global_repos",
-            return_value=EIGHT_GLOBAL_REPOS,
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.repos._get_access_filtering_service",
+                return_value=None,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.repos._list_global_repos",
+                return_value=EIGHT_GLOBAL_REPOS,
+            ),
         ):
             result = handle_list_global_repos({}, admin_user)
 

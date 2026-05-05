@@ -318,16 +318,14 @@ def _check_repository_access(
             f" to the specified acting users"
         )
 
-    # Bug fix (activate_repository): golden_repo_aliases (list) is the composite
-    # activation form. Check each alias in the list before the single-alias scan.
-    # This prevents user_alias (the new alias being created) from being checked.
-    golden_repo_aliases = arguments.get("golden_repo_aliases")
-    if (
-        golden_repo_aliases is not None
-        and isinstance(golden_repo_aliases, list)
-        and golden_repo_aliases
-    ):
-        # Admin bypass
+    def _check_alias_list(aliases: list) -> None:
+        """Check each string entry in a list of aliases.
+
+        Shared by the golden_repo_aliases block and the omni list-form path
+        (v10.4.3 security fix). Admin bypass and scoped_repos are handled
+        identically for both callers.
+        """
+        # Admin bypass (only when scoped_repos is not active)
         if scoped_repos is None and access_service.is_admin_user(
             effective_user.username
         ):
@@ -337,17 +335,48 @@ def _check_repository_access(
             if scoped_repos is not None
             else access_service.get_accessible_repos(effective_user.username)
         )
-        for raw_alias in golden_repo_aliases:
-            if not isinstance(raw_alias, str) or not raw_alias:
-                continue
-            normalized = _normalize(raw_alias)
+        for entry in aliases:
+            if not isinstance(entry, str) or not entry:
+                continue  # skip non-string / empty entries
+            normalized_entry = _normalize(entry)
             if scoped_repos is not None:
-                if normalized not in scoped_repos:
-                    _deny_scoped(raw_alias)
+                if normalized_entry not in scoped_repos:
+                    _deny_scoped(entry)
             else:
                 assert accessible is not None
-                if normalized not in accessible:
-                    _deny_single(raw_alias)
+                if normalized_entry not in accessible:
+                    _deny_single(entry)
+
+    def _try_decode_json_array(value: Any) -> Any:
+        """Return decoded list when value is a JSON-array string, else value.
+
+        v10.4.3: Some MCP clients pass lists as JSON-encoded strings like
+        '["repo-a", "repo-b"]'. Decoding here keeps the access guard consistent
+        with _parse_json_string_array used in the xray handler.
+        """
+        if isinstance(value, str) and value.startswith("["):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return parsed
+            except (ValueError, json.JSONDecodeError):
+                logger.debug(
+                    "_check_repository_access: failed to decode JSON array from %r"
+                    " — treating as plain string",
+                    value,
+                )
+        return value
+
+    # Bug fix (activate_repository): golden_repo_aliases (list) is the composite
+    # activation form. Check each alias in the list before the single-alias scan.
+    # This prevents user_alias (the new alias being created) from being checked.
+    golden_repo_aliases = arguments.get("golden_repo_aliases")
+    if (
+        golden_repo_aliases is not None
+        and isinstance(golden_repo_aliases, list)
+        and golden_repo_aliases
+    ):
+        _check_alias_list(golden_repo_aliases)
         return
 
     # Extract the repo identifier. 'golden_repo_alias' is checked BEFORE
@@ -355,7 +384,15 @@ def _check_repository_access(
     # (golden_repo_alias) not the new alias being created (user_alias).
     # Story #331 AC3: Added "repo_alias" to protect enter_write_mode,
     # exit_write_mode, and wiki_article_analytics tools.
+    #
+    # v10.4.3 security fix (Finding 1): list-form values (native Python list
+    # or JSON-encoded array string) for repository_alias/alias/user_alias/
+    # repo_alias fell through isinstance(value, str) with raw_alias=None —
+    # bypassing the access check entirely. The fix: decode JSON arrays, then
+    # dispatch list-form values to _check_alias_list.
     raw_alias: Optional[str] = None
+    list_aliases: Optional[list] = None
+
     for param_name in (
         "golden_repo_alias",
         "repository_alias",
@@ -364,9 +401,21 @@ def _check_repository_access(
         "repo_alias",
     ):
         value = arguments.get(param_name)
-        if value is not None and isinstance(value, str) and value:
+        if value is None:
+            continue
+        value = _try_decode_json_array(value)
+        if isinstance(value, list):
+            if value:  # non-empty list only
+                list_aliases = value
+            break  # found the param — stop scanning
+        if isinstance(value, str) and value:
             raw_alias = value
             break
+
+    # List-form path — each entry checked via shared _check_alias_list helper
+    if list_aliases is not None:
+        _check_alias_list(list_aliases)
+        return
 
     # No repo param present or empty - nothing to check
     if not raw_alias:

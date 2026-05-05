@@ -202,9 +202,7 @@ def test_pipe_sends_dict_returns_value_v10_4_0() -> None:
     assert result.failure is None, (
         f"Expected success (failure=None) for dict payload, got {result.failure!r}"
     )
-    assert isinstance(result.value, dict), (
-        f"Expected dict value, got {result.value!r}"
-    )
+    assert isinstance(result.value, dict), f"Expected dict value, got {result.value!r}"
 
 
 # ---------------------------------------------------------------------------

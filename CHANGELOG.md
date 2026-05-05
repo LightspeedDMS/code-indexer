@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.3 (2026-05-05) — X-Ray hotfix bundle + sandbox defense-in-depth
+
+Three findings from v10.4.2 arms-length staging test cycle, plus one dunder-in-Slice bypass surfaced by code review of fix #2 before shipping.
+
+- **HIGH-SEVERITY SECURITY**: `_check_repository_access` (`src/code_indexer/server/mcp/protocol.py`) skipped list-form `repository_alias` for non-admin users (omni xray dispatch bypassed access control — verified by staging test agent retrieving 32 matches from a denied repo). Now iterates each entry in native lists and JSON-encoded array strings, applying admin bypass / scoped_repos / accessible-set checks identically to the single-string path. Defense-in-depth fix: protects ALL omni-style tools, not just X-Ray.
+- **MEDIUM**: `ast.Slice` added to sandbox whitelist (`src/code_indexer/xray/sandbox.py`). Evaluators can now use slice syntax (`source[10:20]`, `source[-30:]`, `lines[0:10:2]`).
+- **MEDIUM SECURITY (caught pre-ship)**: Adding `ast.Slice` to the whitelist initially opened a dunder-in-Slice bypass — `obj['__class__':10]` and similar slice-wrapped dunder strings (lower / upper / step components) passed validation because the existing dunder check at `validate()` only inspected `node.slice` when it was a direct `ast.Constant`. Code review caught this before commit. Fix: extend the dunder block to ALSO inspect `Slice.lower`, `Slice.upper`, and `Slice.step` for dunder-string Constants. While not directly exploitable on built-in types (dict/list/str raise TypeError on string slice indices), the gap weakened the defense-in-depth posture and could become exploitable on custom `__getitem__` classes. New regression suite at `tests/unit/xray/test_slice_dunder_bypass_v10_4_3.py` covers all 5 attack vectors plus 3 legit-slice positive cases.
+- **MEDIUM**: Invalid regex patterns pre-validated at handler level for `xray_search` and `xray_explore` (non-PCRE2 mode). Returns `invalid_regex` error immediately instead of silently empty results. PCRE2 patterns continue to be validated by ripgrep at execution time.
+
+Plus pre-existing lint debt cleanup (16 ruff format violations + 6 mypy errors that shipped with v10.4.0/v10.4.1) — `./lint.sh` now exits 0 per Bug #900 prevention rule.
+
 ## v10.4.2 — 2026-05-05
 
 ### Fixed

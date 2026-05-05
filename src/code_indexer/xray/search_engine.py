@@ -410,14 +410,18 @@ class XRaySearchEngine:
         """
         lang = self.ast_engine.detect_language(file_path)
         if lang is None:
-            return [], [
-                {
-                    "file_path": str(file_path),
-                    "line_number": 0,
-                    "error_type": "UnsupportedLanguage",
-                    "error_message": f"No grammar for extension {file_path.suffix!r}",
-                }
-            ], None
+            return (
+                [],
+                [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": "UnsupportedLanguage",
+                        "error_message": f"No grammar for extension {file_path.suffix!r}",
+                    }
+                ],
+                None,
+            )
 
         try:
             source_bytes = file_path.read_bytes()
@@ -446,89 +450,118 @@ class XRaySearchEngine:
             )
 
             if eval_result.failure == "evaluator_timeout":
-                return [], [
-                    {
-                        "file_path": str(file_path),
-                        "line_number": 0,
-                        "error_type": "EvaluatorTimeout",
-                        "error_message": "evaluator exceeded 5s sandbox limit",
-                    }
-                ], None
+                return (
+                    [],
+                    [
+                        {
+                            "file_path": str(file_path),
+                            "line_number": 0,
+                            "error_type": "EvaluatorTimeout",
+                            "error_message": "evaluator exceeded 5s sandbox limit",
+                        }
+                    ],
+                    None,
+                )
 
             if eval_result.failure == "evaluator_subprocess_died":
-                return [], [
-                    {
-                        "file_path": str(file_path),
-                        "line_number": 0,
-                        "error_type": "EvaluatorCrash",
-                        "error_message": eval_result.detail or "Subprocess died",
-                    }
-                ], None
+                return (
+                    [],
+                    [
+                        {
+                            "file_path": str(file_path),
+                            "line_number": 0,
+                            "error_type": "EvaluatorCrash",
+                            "error_message": eval_result.detail or "Subprocess died",
+                        }
+                    ],
+                    None,
+                )
 
             if eval_result.failure == "validation_failed":
-                return [], [
-                    {
-                        "file_path": str(file_path),
-                        "line_number": 0,
-                        "error_type": "ValidationFailed",
-                        "error_message": eval_result.detail or "Evaluator validation failed",
-                    }
-                ], None
+                return (
+                    [],
+                    [
+                        {
+                            "file_path": str(file_path),
+                            "line_number": 0,
+                            "error_type": "ValidationFailed",
+                            "error_message": eval_result.detail
+                            or "Evaluator validation failed",
+                        }
+                    ],
+                    None,
+                )
 
             if eval_result.failure is not None:
-                return [], [
-                    {
-                        "file_path": str(file_path),
-                        "line_number": 0,
-                        "error_type": "EvaluatorCrash",
-                        "error_message": eval_result.detail or eval_result.failure,
-                    }
-                ], None
+                return (
+                    [],
+                    [
+                        {
+                            "file_path": str(file_path),
+                            "line_number": 0,
+                            "error_type": "EvaluatorCrash",
+                            "error_message": eval_result.detail or eval_result.failure,
+                        }
+                    ],
+                    None,
+                )
 
             # Validate dict return contract.
             raw_value = eval_result.value
             if not isinstance(raw_value, dict):
-                return [], [
-                    {
-                        "file_path": str(file_path),
-                        "line_number": 0,
-                        "error_type": "InvalidEvaluatorReturn",
-                        "error_message": (
-                            f"Evaluator must return a dict "
-                            f"{{\"matches\": [...], \"value\": ...}}, "
-                            f"got {type(raw_value).__name__!r}. "
-                            f"Note: bool return (legacy contract) is no longer accepted."
-                        ),
-                    }
-                ], None
+                return (
+                    [],
+                    [
+                        {
+                            "file_path": str(file_path),
+                            "line_number": 0,
+                            "error_type": "InvalidEvaluatorReturn",
+                            "error_message": (
+                                f"Evaluator must return a dict "
+                                f'{{"matches": [...], "value": ...}}, '
+                                f"got {type(raw_value).__name__!r}. "
+                                f"Note: bool return (legacy contract) is no longer accepted."
+                            ),
+                        }
+                    ],
+                    None,
+                )
 
             if "matches" not in raw_value:
-                return [], [
-                    {
-                        "file_path": str(file_path),
-                        "line_number": 0,
-                        "error_type": "InvalidEvaluatorReturn",
-                        "error_message": (
-                            "Evaluator dict missing required 'matches' key. "
-                            "Return: {\"matches\": [...], \"value\": ...}"
-                        ),
-                    }
-                ], None
+                return (
+                    [],
+                    [
+                        {
+                            "file_path": str(file_path),
+                            "line_number": 0,
+                            "error_type": "InvalidEvaluatorReturn",
+                            "error_message": (
+                                "Evaluator dict missing required 'matches' key. "
+                                'Return: {"matches": [...], "value": ...}'
+                            ),
+                        }
+                    ],
+                    None,
+                )
 
             evaluator_matches = raw_value["matches"]
             per_file_value = raw_value.get("value", None)
 
             if not isinstance(evaluator_matches, list):
-                return [], [
-                    {
-                        "file_path": str(file_path),
-                        "line_number": 0,
-                        "error_type": "InvalidEvaluatorReturn",
-                        "error_message": (
-                            f"'matches' must be a list, got {type(evaluator_matches).__name__!r}"
-                        ),
-                    }
-                ], None
+                return (
+                    [],
+                    [
+                        {
+                            "file_path": str(file_path),
+                            "line_number": 0,
+                            "error_type": "InvalidEvaluatorReturn",
+                            "error_message": (
+                                f"'matches' must be a list, got {type(evaluator_matches).__name__!r}"
+                            ),
+                        }
+                    ],
+                    None,
+                )
 
             # Build source lines once for line_content derivation.
             source_lines = source.splitlines()
@@ -562,7 +595,9 @@ class XRaySearchEngine:
                         "start_point": list(raw_root.start_point),
                         "end_point": list(raw_root.end_point),
                     }
-                    match_entry["ast_debug"] = self._serialize_ast(root, max_debug_nodes)
+                    match_entry["ast_debug"] = self._serialize_ast(
+                        root, max_debug_nodes
+                    )
 
                 matches.append(match_entry)
 
@@ -577,14 +612,18 @@ class XRaySearchEngine:
             return matches, [], file_meta
 
         except Exception as exc:  # noqa: BLE001
-            return [], [
-                {
-                    "file_path": str(file_path),
-                    "line_number": 0,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
-            ], None
+            return (
+                [],
+                [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                ],
+                None,
+            )
 
     @staticmethod
     def _check_zero_match_patterns(
@@ -860,7 +899,8 @@ class XRaySearchEngine:
                         # to produce a sentinel byte offset for now. The evaluator
                         # receives the real source in its globals. Store 0 here;
                         # the engine will re-derive from source in _evaluate_file.
-                        "", m.line_number
+                        "",
+                        m.line_number,
                     ),
                     "context_before": getattr(m, "context_before", []) or [],
                     "context_after": getattr(m, "context_after", []) or [],

@@ -153,7 +153,7 @@ class TestXRaySearchEngineFileAsUnit:
             repo_path=tmp_path,
             driver_regex=r"prepareStatement",
             evaluator_code=(
-                'pos = match_positions[0]\n'
+                "pos = match_positions[0]\n"
                 'return {"matches": [{"line_number": pos["line_number"], '
                 '"has_line_content": "line_content" in pos, '
                 '"has_byte_offset": "byte_offset" in pos}], "value": None}'
@@ -185,7 +185,9 @@ class TestXRaySearchEngineFileAsUnit:
 class TestXRaySearchEngineEvaluatorReturnContract:
     """Evaluator must return a dict {matches, value}; other returns are errors."""
 
-    def test_dict_return_with_matches_produces_match_entries(self, search_engine, tmp_path):
+    def test_dict_return_with_matches_produces_match_entries(
+        self, search_engine, tmp_path
+    ):
         """Dict return with matches list produces entries in result matches."""
         (tmp_path / "file.py").write_text("prepareStatement(sql)\n")
         result = search_engine.run(
@@ -221,7 +223,10 @@ class TestXRaySearchEngineEvaluatorReturnContract:
         )
         assert len(result["evaluation_errors"]) >= 1
         err = result["evaluation_errors"][0]
-        assert "InvalidEvaluatorReturn" in err["error_type"] or "MissingMatchesKey" in err["error_type"]
+        assert (
+            "InvalidEvaluatorReturn" in err["error_type"]
+            or "MissingMatchesKey" in err["error_type"]
+        )
 
     def test_bool_return_produces_error(self, search_engine, tmp_path):
         """Bool return (legacy contract) produces an error explaining dict is required."""
@@ -255,7 +260,9 @@ class TestXRaySearchEngineServerEnrichment:
         assert "line_content" in m
         assert "prepareStatement" in m["line_content"]
 
-    def test_server_respects_evaluator_provided_line_content(self, search_engine, tmp_path):
+    def test_server_respects_evaluator_provided_line_content(
+        self, search_engine, tmp_path
+    ):
         """If evaluator provides line_content, server uses it as-is."""
         (tmp_path / "file.py").write_text("x = prepareStatement()\n")
         result = search_engine.run(

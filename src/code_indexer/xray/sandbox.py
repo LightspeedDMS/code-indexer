@@ -334,6 +334,8 @@ class PythonEvaluatorSandbox:
         ast.Attribute,
         ast.Constant,
         ast.Subscript,
+        # Slice expressions inside Subscript: source[10:20], source[-30:], lines[0:10:2]
+        ast.Slice,
         ast.Compare,
         ast.BoolOp,
         ast.UnaryOp,
@@ -362,33 +364,33 @@ class PythonEvaluatorSandbox:
         ast.comprehension,
         # Comprehension expression forms — all share the same clause node
         ast.GeneratorExp,  # (x for x in items)
-        ast.ListComp,      # [x for x in items]
-        ast.SetComp,       # {x for x in items}
-        ast.DictComp,      # {k: v for k, v in items}
+        ast.ListComp,  # [x for x in items]
+        ast.SetComp,  # {x for x in items}
+        ast.DictComp,  # {k: v for k, v in items}
         # IfExp: ternary expression — ``a if cond else b``
         ast.IfExp,
         # Group C — statement-level control flow
         # Infinite loops are bounded by HARD_TIMEOUT_SECONDS subprocess kill;
         # misbehaving evaluators produce EvaluatorTimeout, not validation rejection.
-        ast.If,        # statement-level branching: if/elif/else blocks
-        ast.For,       # statement-level iteration: for x in iterable
-        ast.While,     # statement-level iteration: while condition (bounded by timeout)
-        ast.Break,     # early loop exit
+        ast.If,  # statement-level branching: if/elif/else blocks
+        ast.For,  # statement-level iteration: for x in iterable
+        ast.While,  # statement-level iteration: while condition (bounded by timeout)
+        ast.Break,  # early loop exit
         ast.Continue,  # skip current iteration
-        ast.Pass,      # empty body placeholder: if cond: pass
+        ast.Pass,  # empty body placeholder: if cond: pass
         # Group D — structured exception handling (Directive D, v10.4.0)
         # try/except/finally lets evaluators handle per-node errors gracefully.
         # raise lets evaluators surface clean errors — produces EvaluatorCrash,
         # not validation_failed.
-        ast.Try,           # try/except/finally blocks
-        ast.ExceptHandler, # except clauses (bare and typed)
-        ast.Raise,         # raise statements
+        ast.Try,  # try/except/finally blocks
+        ast.ExceptHandler,  # except clauses (bare and typed)
+        ast.Raise,  # raise statements
         # Group E — arithmetic binary operations
         # BinOp allows x + n, x - n, x * n etc. in evaluator code.
         # ast.operator covers concrete subclasses Add, Sub, Mult, Div etc.
         # via isinstance() — same pattern as ast.boolop, ast.cmpop.
-        ast.BinOp,         # binary arithmetic: x + y, x * y, etc.
-        ast.operator,      # abstract base for Add, Sub, Mult, Div, Mod, etc.
+        ast.BinOp,  # binary arithmetic: x + y, x * y, etc.
+        ast.operator,  # abstract base for Add, Sub, Mult, Div, Mod, etc.
     )
 
     # Dunder attribute names that are blocked at AST validation time.
@@ -560,6 +562,34 @@ class PythonEvaluatorSandbox:
                             reason=(
                                 f"Subscript access to {sl.value!r} blocked "
                                 f"(sandbox escape vector)"
+                            ),
+                        )
+
+            # v10.4.3: Slice expressions (e.g. obj['__class__':10]) can hide dunder
+            # strings inside Slice.lower/upper/step. The original Constant-only check
+            # above misses these because the slice node is ast.Slice, not ast.Constant.
+            # Defense-in-depth: same dunder rule applies to all three components.
+            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
+                sl_node = node.slice
+                for component_name, component in (
+                    ("lower", sl_node.lower),
+                    ("upper", sl_node.upper),
+                    ("step", sl_node.step),
+                ):
+                    if (
+                        component is not None
+                        and isinstance(component, ast.Constant)
+                        and isinstance(component.value, str)
+                        and (
+                            component.value.startswith("__")
+                            or component.value in self.DUNDER_ATTR_BLOCKLIST
+                        )
+                    ):
+                        return ValidationResult(
+                            ok=False,
+                            reason=(
+                                f"Slice {component_name} access to {component.value!r} "
+                                f"blocked (sandbox escape vector)"
                             ),
                         )
 
