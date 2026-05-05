@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.0 — 2026-05-04
+
+### Changed (BREAKING — X-Ray evaluator contract)
+
+- **X-Ray evaluator now operates on the file-as-unit, returns dict** — major redesign of the evaluator contract per field-feedback that the per-regex-match-position model forced inverting predicates and was hard to express. The new contract:
+  - The evaluator runs ONCE per candidate file (not once per regex hit)
+  - It receives `node = root` (file's parse tree) plus a NEW `match_positions: List[Dict]` global containing ALL Phase 1 regex hits in the file `[{line_number, column, line_content, byte_offset}, ...]` (empty list in filename mode)
+  - It returns a DICT: `{"matches": [{"line_number": int, ...optional fields...}], "value": <anything serialisable>}`. The `matches` list can be empty (no matches in this file). The `value` is a per-file open value surfaced in the response as `file_metadata`.
+  - The server enriches each match with `file_path` (always), `line_content` (derived from source if omitted), `context_before`/`context_after` (derived if `context_lines > 0`), and `language` (always).
+  - **MIGRATION**: existing evaluator code that returned `bool` must be rewritten to return the dict shape. The legacy globals `match_byte_offset`/`match_line_number`/`match_line_content` are still present but ALWAYS None — use `match_positions` instead. See xray_search.md cookbook for 15 worked patterns under the new contract.
+
+### Added
+
+- **Sandbox lifts statement-level control flow + structured exception handling**:
+  - Newly allowed: `If`, `For`, `While`, `Break`, `Continue`, `Pass` (statement-level — termination is bounded by the 5s subprocess timeout, not by AST validation)
+  - Newly allowed: `Try`, `ExceptHandler`, `Raise` (defensive evaluators, clean error surfacing)
+  - Still banned: `def`, `class`, `lambda`, `import`/`from import`, `with`/`async with`, `global`/`nonlocal`, `async`/`await`, `yield`/`yield from`
+  - Safe builtins extended with exception types: `Exception`, `ValueError`, `TypeError`, `RuntimeError`, `AttributeError`, `KeyError`, `IndexError`, `NameError`, `StopIteration`
+- **Omni multi-repo support** for `xray_search` and `xray_explore` — `repository_alias` accepts `string` (single repo, returns `{job_id}`), `array of strings` (multi-repo, returns `{job_ids: [...], errors: [...]}` with per-alias error handling), or JSON-string-encoded array (parsed). Mirrors the `regex_search` omni pattern.
+- **Server threadpool capacity bumped to 256** (was anyio default 40) — set at lifespan startup via `anyio.to_thread.current_default_thread_limiter().total_tokens`. Bootstrap-only `server_threadpool_size` knob in ServerConfig (default 256, set to 0 to keep anyio default). Absorbs concurrent X-Ray `await_seconds` long-polls without starving other endpoints.
+
+### Changed
+
+- **regex_search-parity parameter alignment** — X-Ray tools now mirror regex_search inputSchema for transferable mental model:
+  - `driver_regex` renamed to `pattern`
+  - `max_files` renamed to `max_results`
+  - Added: `path` (subdirectory), `case_sensitive` (default true), `multiline` (default false), `pcre2` (default false), `context_lines` (int 0-10, default 0)
+  - Output match envelope adds `column`, `context_before`, `context_after` per regex_search shape; renamed `code_snippet` to `line_content`
+- **Documentation reframe** — dropped "expression" / "boolean expression" / "function body" framing throughout xray_search.md, xray_explore.md, docs/xray-architecture.md, CLAUDE.md. Replaced with "Python code snippet that returns a dict." All 15 cookbook patterns rewritten under the v10.4.0 contract using the lifted-ban constructs naturally where clearer than nested comprehensions; pattern 11 demonstrates `try/except` for defensive evaluation.
+
+### Internals
+
+- New error code `InvalidEvaluatorReturn` for evaluators that return non-dict / malformed dict shapes (replaces `NonBoolReturn` from v10.3.x — bool returns are no longer the contract).
+
 ## v10.3.2 — 2026-05-04
 
 ### Changed (BREAKING for evaluator code)
