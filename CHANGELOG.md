@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.4 (2026-05-05) — X-Ray hotfix bundle (post-v10.4.3 staging findings)
+
+Seven findings from the v10.4.3 arms-length staging test cycle.
+
+- **HIGH (3.5)**: `deactivate_repository` access check denied owners their own activations. Quirk 7's fix to `_check_repository_access` (use `golden_repo_alias` for activate's source-repo check) was never propagated to the symmetric deactivate handler. Fix: add `deactivate_repository` to a small ownership-enforced-tool allowlist that bypasses the protocol-level group-access guard, since the activation manager already enforces ownership at the data layer.
+- **HIGH (3.2)**: `xray_dump_ast` `max_nodes` parameter ignored — every call returned ~142KB regardless of the value, triggering MCP token-cap overflow. Was hardcoded `max_nodes=500` at the call site to `_serialize_ast`. Now properly extracted from params with [1, 2000] range validation.
+- **MEDIUM (3.1)**: PCRE2 invalid regex completed silently with empty results. RegexSearchService at `regex_search.py` was logging-and-swallowing ripgrep errors (Messi Rule 13 violation). Now raises `RipgrepExecutionError`; XRaySearchEngine catches it and surfaces `phase1_failed=True, phase1_error=<msg>` in the job result.
+- **MEDIUM (3.3)**: Matches missing required `line_number` were silently accepted and enriched. Now rejected as `InvalidEvaluatorReturn` for the entire file response.
+- **LOW (3.4)**: String `line_number` (`"42"`) raised raw Python `ValueError` from `int()` coercion. Now wrapped as `InvalidEvaluatorReturn` with actionable message.
+- **LOW (3.6)**: `cidx-meta-global` and similar repos indexed their own `.code-indexer/` directory's internal error logs and vector JSON files as Phase 1 candidates. Both `_run_phase1_filename` and `_run_phase1_content` now exclude `.code-indexer/` unconditionally.
+- **LOW (3.8)**: Validation error message listed 18 value builtins but omitted the 9 exception types that ARE in `SAFE_BUILTIN_NAMES`. Now lists both. CLAUDE.md count reconciled to 27 (18 + 9).
+
 ## v10.4.3 (2026-05-05) — X-Ray hotfix bundle + sandbox defense-in-depth
 
 Three findings from v10.4.2 arms-length staging test cycle, plus one dunder-in-Slice bypass surfaced by code review of fix #2 before shipping.

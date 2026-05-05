@@ -31,6 +31,15 @@ DEFAULT_SEARCH_TIMEOUT_SECONDS = 300
 _PCRE2_CHECK_TIMEOUT_SEC = 5
 
 
+class RipgrepExecutionError(Exception):
+    """Raised when ripgrep/grep exits with a non-zero code AND has stderr output.
+
+    Finding 3.1 (v10.4.4): Previously these errors were swallowed (log + return
+    empty), causing callers to see COMPLETED status with silently empty results.
+    Raising here lets XRaySearchEngine surface phase1_failed in the job result.
+    """
+
+
 @dataclass
 class RegexMatch:
     """A single regex match result."""
@@ -343,12 +352,11 @@ class RegexSearchService:
                         logger.debug("ripgrep found no matches (exit code 1)")
                         return [], 0
                     else:
-                        # Exit code 2+ or stderr present = actual error
-                        logger.warning(
-                            f"ripgrep error (exit code {result.exit_code}): "
-                            f"{result.stderr_output or result.error_message}"
+                        # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
+                        stderr = result.stderr_output or result.error_message or ""
+                        raise RipgrepExecutionError(
+                            f"ripgrep failed: exit_code={result.exit_code}, stderr={stderr}"
                         )
-                        return [], 0
 
                 # Read output from temp file
                 with open(temp_path, "r") as f:
@@ -751,12 +759,11 @@ class RegexSearchService:
                         logger.debug("grep found no matches (exit code 1)")
                         return [], 0
                     else:
-                        # Exit code 2+ or stderr present = actual error
-                        logger.warning(
-                            f"grep error (exit code {result.exit_code}): "
-                            f"{result.stderr_output or result.error_message}"
+                        # Exit code 2+ or stderr present = actual error (Finding 3.1, v10.4.4)
+                        stderr = result.stderr_output or result.error_message or ""
+                        raise RipgrepExecutionError(
+                            f"grep failed: exit_code={result.exit_code}, stderr={stderr}"
                         )
-                        return [], 0
 
                 # Read output from temp file
                 with open(temp_path, "r") as f:

@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 _TIMEOUT_MIN = 10
 _TIMEOUT_MAX = 600
 
+# max_nodes range for xray_dump_ast (Finding 3.2, v10.4.4).
+_DUMP_AST_MAX_NODES_DEFAULT = 500
+_DUMP_AST_MAX_NODES_MIN = 1
+_DUMP_AST_MAX_NODES_MAX = 2000
+
 # Default evaluator used when the caller omits evaluator_code.
 # Returns the v10.4.0 dict contract: echoes every Phase 1 hit as a match entry.
 # For search_target='filename', match_positions is empty so matches is [].
@@ -820,6 +825,28 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     repo_alias: str = params.get("repository_alias", "")
     file_path_raw: str = params.get("file_path", "")
 
+    # max_nodes: optional int, default 500, range [1, 2000] (Finding 3.2, v10.4.4)
+    max_nodes_raw = params.get("max_nodes", _DUMP_AST_MAX_NODES_DEFAULT)
+    try:
+        max_nodes = int(max_nodes_raw)
+    except (TypeError, ValueError):
+        return _mcp_response(
+            {
+                "error": "max_nodes_invalid",
+                "message": f"max_nodes must be int, got {max_nodes_raw!r}",
+            }
+        )
+    if not (_DUMP_AST_MAX_NODES_MIN <= max_nodes <= _DUMP_AST_MAX_NODES_MAX):
+        return _mcp_response(
+            {
+                "error": "max_nodes_out_of_range",
+                "message": (
+                    f"max_nodes must be in "
+                    f"[{_DUMP_AST_MAX_NODES_MIN}, {_DUMP_AST_MAX_NODES_MAX}]"
+                ),
+            }
+        )
+
     if not file_path_raw:
         return _mcp_response(
             {"error": "invalid_file_path", "message": "file_path must not be empty"}
@@ -875,7 +902,7 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         source_bytes = target.read_bytes()
         root = engine.ast_engine.parse(source_bytes, lang)
-        ast_tree = XRaySearchEngine._serialize_ast(root, max_nodes=500)
+        ast_tree = XRaySearchEngine._serialize_ast(root, max_nodes=max_nodes)
         return _mcp_response(
             {
                 "ast_tree": ast_tree,

@@ -159,12 +159,16 @@ _VALIDATION_HINTS: dict[str, str] = {
     "Import": (
         "Imports are not allowed. "
         "Available builtins: len, str, int, bool, list, tuple, dict, "
-        "min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr."
+        "min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr. "
+        "Plus exception types for except clauses: Exception, ValueError, TypeError, "
+        "RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration."
     ),
     "ImportFrom": (
         "Imports are not allowed. "
         "Available builtins: len, str, int, bool, list, tuple, dict, "
-        "min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr."
+        "min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr. "
+        "Plus exception types for except clauses: Exception, ValueError, TypeError, "
+        "RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration."
     ),
     "Global": (
         "Global/nonlocal declarations are not allowed. Use local `=` assignments only."

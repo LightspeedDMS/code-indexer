@@ -11,7 +11,10 @@ import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from code_indexer.global_repos.regex_search import RegexSearchService
+from code_indexer.global_repos.regex_search import (
+    RegexSearchService,
+    RipgrepExecutionError,
+)
 from code_indexer.server.services.subprocess_executor import (
     ExecutionStatus,
     SearchExecutionResult,
@@ -147,13 +150,12 @@ class TestRipgrepExitCodeHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_exit_code_1_with_stderr_logs_warning(
-        self, ripgrep_service, test_repo, caplog
-    ):
-        """Test exit code 1 WITH stderr logs at WARNING level.
+    async def test_exit_code_1_with_stderr_raises(self, ripgrep_service, test_repo):
+        """v10.4.4 Finding 3.1: exit_code=1 WITH stderr now raises RipgrepExecutionError.
 
-        Exit code 1 + stderr could indicate a real problem (invalid regex, etc.)
-        so it should still be logged as WARNING.
+        Previously this logged a WARNING and returned empty results silently,
+        hiding the error from callers. Now it raises so the job result surfaces
+        phase1_failed=True.
         """
         with patch(
             "code_indexer.global_repos.regex_search.SubprocessExecutor"
@@ -161,7 +163,6 @@ class TestRipgrepExitCodeHandling:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
 
-            # Mock exit code 1 with stderr (could be invalid regex)
             mock_result = SearchExecutionResult(
                 status=ExecutionStatus.ERROR,
                 output_file="/tmp/test.txt",
@@ -176,8 +177,8 @@ class TestRipgrepExitCodeHandling:
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
-                with caplog.at_level(logging.DEBUG):
-                    result = await ripgrep_service._search_ripgrep(
+                with pytest.raises(RipgrepExecutionError) as exc_info:
+                    await ripgrep_service._search_ripgrep(
                         pattern="[invalid",
                         search_path=test_repo,
                         include_patterns=None,
@@ -188,32 +189,25 @@ class TestRipgrepExitCodeHandling:
                         timeout_seconds=10,
                     )
 
-        # Should return empty results
-        assert result == ([], 0), "Exit code 1 with stderr should return empty results"
-
-        # Should log at WARNING level (not DEBUG)
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
-
-        assert len(warning_logs) > 0, (
-            "Exit code 1 WITH stderr should log at WARNING level"
-        )
-        assert any("exit code 1" in r.message.lower() for r in warning_logs), (
-            "WARNING should mention exit code 1"
-        )
-        assert any("regex parse error" in r.message.lower() for r in warning_logs), (
-            "WARNING should include stderr content"
+        assert "regex parse error" in str(
+            exc_info.value
+        ).lower() or "exit_code=1" in str(exc_info.value), (
+            f"Error should include stderr content: {exc_info.value}"
         )
 
     @pytest.mark.asyncio
-    async def test_exit_code_2_logs_warning(self, ripgrep_service, test_repo, caplog):
-        """Test exit code 2+ (actual errors) log at WARNING level."""
+    async def test_exit_code_2_raises(self, ripgrep_service, test_repo):
+        """v10.4.4 Finding 3.1: exit_code=2 now raises RipgrepExecutionError.
+
+        Previously logged WARNING and returned empty results silently.
+        Now raises so callers see phase1_failed=True in the job result.
+        """
         with patch(
             "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
 
-            # Mock exit code 2 (actual error - permission denied, etc.)
             mock_result = SearchExecutionResult(
                 status=ExecutionStatus.ERROR,
                 output_file="/tmp/test.txt",
@@ -228,8 +222,8 @@ class TestRipgrepExitCodeHandling:
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
-                with caplog.at_level(logging.DEBUG):
-                    result = await ripgrep_service._search_ripgrep(
+                with pytest.raises(RipgrepExecutionError) as exc_info:
+                    await ripgrep_service._search_ripgrep(
                         pattern="test",
                         search_path=test_repo,
                         include_patterns=None,
@@ -240,19 +234,10 @@ class TestRipgrepExitCodeHandling:
                         timeout_seconds=10,
                     )
 
-        # Should return empty results
-        assert result == ([], 0), "Exit code 2 should return empty results"
-
-        # Should log at WARNING level
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
-
-        assert len(warning_logs) > 0, "Exit code 2 should log at WARNING level"
-        assert any("exit code 2" in r.message.lower() for r in warning_logs), (
-            "WARNING should mention exit code 2"
-        )
-        assert any("permission denied" in r.message.lower() for r in warning_logs), (
-            "WARNING should include stderr content"
-        )
+        assert (
+            "exit_code=2" in str(exc_info.value)
+            or "permission denied" in str(exc_info.value).lower()
+        ), f"Error should include exit code or stderr: {exc_info.value}"
 
     @pytest.mark.asyncio
     async def test_exit_code_1_empty_stderr_logs_debug(
@@ -404,24 +389,35 @@ class TestGrepExitCodeHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_exit_code_1_with_stderr_logs_warning(
-        self, grep_service, test_repo, caplog
+    @pytest.mark.parametrize(
+        "exit_code, stderr, pattern",
+        [
+            (1, "grep: invalid regex", "[invalid"),
+            (2, "grep: /restricted/file: Permission denied", "test"),
+        ],
+        ids=["exit_code_1_with_stderr", "exit_code_2"],
+    )
+    async def test_error_exit_codes_raise(
+        self, grep_service, test_repo, exit_code, stderr, pattern
     ):
-        """Test exit code 1 WITH stderr logs at WARNING level."""
+        """v10.4.4 Finding 3.1: exit_code with stderr now raises RipgrepExecutionError.
+
+        Covers both exit_code=1+stderr and exit_code=2 — both previously silently
+        returned empty results; now raise to surface the error to callers.
+        """
         with patch(
             "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
 
-            # Mock exit code 1 with stderr (could be invalid regex)
             mock_result = SearchExecutionResult(
                 status=ExecutionStatus.ERROR,
                 output_file="/tmp/test.txt",
-                exit_code=1,
+                exit_code=exit_code,
                 timed_out=False,
-                error_message="Command exited with code 1",
-                stderr_output="grep: invalid regex",
+                error_message=f"Command exited with code {exit_code}",
+                stderr_output=stderr,
             )
             mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
             mock_executor.shutdown = MagicMock()
@@ -429,9 +425,9 @@ class TestGrepExitCodeHandling:
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
-                with caplog.at_level(logging.DEBUG):
-                    result = await grep_service._search_grep(
-                        pattern="[invalid",
+                with pytest.raises(RipgrepExecutionError):
+                    await grep_service._search_grep(
+                        pattern=pattern,
                         search_path=test_repo,
                         include_patterns=None,
                         exclude_patterns=None,
@@ -440,63 +436,3 @@ class TestGrepExitCodeHandling:
                         max_results=100,
                         timeout_seconds=10,
                     )
-
-        # Should return empty results
-        assert result == ([], 0), "Exit code 1 with stderr should return empty results"
-
-        # Should log at WARNING level
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
-
-        assert len(warning_logs) > 0, (
-            "Exit code 1 WITH stderr should log at WARNING level"
-        )
-        assert any("exit code 1" in r.message.lower() for r in warning_logs), (
-            "WARNING should mention exit code 1"
-        )
-
-    @pytest.mark.asyncio
-    async def test_exit_code_2_logs_warning(self, grep_service, test_repo, caplog):
-        """Test exit code 2+ (actual errors) log at WARNING level."""
-        with patch(
-            "code_indexer.global_repos.regex_search.SubprocessExecutor"
-        ) as mock_executor_class:
-            mock_executor = MagicMock()
-            mock_executor_class.return_value = mock_executor
-
-            # Mock exit code 2 (actual error)
-            mock_result = SearchExecutionResult(
-                status=ExecutionStatus.ERROR,
-                output_file="/tmp/test.txt",
-                exit_code=2,
-                timed_out=False,
-                error_message="Command exited with code 2",
-                stderr_output="grep: /restricted/file: Permission denied",
-            )
-            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
-            mock_executor.shutdown = MagicMock()
-
-            with patch("builtins.open", create=True) as mock_open:
-                mock_open.return_value.__enter__.return_value.read.return_value = ""
-
-                with caplog.at_level(logging.DEBUG):
-                    result = await grep_service._search_grep(
-                        pattern="test",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
-
-        # Should return empty results
-        assert result == ([], 0), "Exit code 2 should return empty results"
-
-        # Should log at WARNING level
-        warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
-
-        assert len(warning_logs) > 0, "Exit code 2 should log at WARNING level"
-        assert any("exit code 2" in r.message.lower() for r in warning_logs), (
-            "WARNING should mention exit code 2"
-        )
