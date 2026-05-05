@@ -248,6 +248,14 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # string array (e.g. '["repo-a", "repo-b"]').
     repo_alias_parsed = _parse_json_string_array(repo_alias)
 
+    # v10.4.5 (Defect 5): normalize single-element list to single-string for
+    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
+    # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
+    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
+        candidate = repo_alias_parsed[0]
+        if isinstance(candidate, str) and candidate:
+            repo_alias_parsed = candidate
+
     if isinstance(repo_alias_parsed, list):
         # Multi-repo path — submit one job per alias.
         if not repo_alias_parsed:
@@ -703,6 +711,14 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # ('list' object has no attribute 'endswith') on native-list or
     # JSON-encoded-array inputs.
     repo_alias_parsed = _parse_json_string_array(repo_alias)
+
+    # v10.4.5 (Defect 5): normalize single-element list to single-string for
+    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
+    # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
+    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
+        candidate = repo_alias_parsed[0]
+        if isinstance(candidate, str) and candidate:
+            repo_alias_parsed = candidate
 
     # ------------------------------------------------------------------
     # 4. Effective timeout + range check  (shared — runs before alias branch)
