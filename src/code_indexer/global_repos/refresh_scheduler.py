@@ -2347,8 +2347,10 @@ class RefreshScheduler:
             True if description was queued, False if already exists or error
         """
         cidx_meta_dir = self.golden_repos_dir / "cidx-meta"
-        repo_name = alias_name.removesuffix("-global")
-        description_file = cidx_meta_dir / f"{repo_name}.md"
+        # v10.4.9: align to {alias_name}.md convention used by MetaDirectoryUpdater
+        # and the cidx-meta hook. Previously stripped "-global" then looked for
+        # {repo_name}.md — never matched what the hook actually wrote.
+        description_file = cidx_meta_dir / f"{alias_name}.md"
 
         if description_file.exists():
             return False

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.9 (2026-05-05) — CRITICAL HOTFIX: cidx-meta description filename mismatch (production data loss)
+
+`MetaDirectoryUpdater` and `on_repo_added()` used different naming conventions for cidx-meta description files. Every cidx-meta refresh cycle treated all hook-created files as orphaned and deleted them, replacing with 3-line stubs. Production evidence: cidx-meta commit `971850c` deleted 892 files and added 893 stubs in one run (`git diff e0be4bd 971850c --stat`: 1787 files changed, 2682 insertions, 27622 deletions).
+
+Root cause: `meta_description_hook.py:363,455` (and `on_repo_added`'s README fallback) wrote `{repo_name}.md` (e.g. `JSqlParser.md`); `MetaDirectoryUpdater.update()` and 6 other consumers expected `{alias_name}.md` (e.g. `JSqlParser-global.md`). 7 sites used the alias form, 3 used the bare form. Fix: align the 3 minority sites to the dominant alias-form convention. Plus `refresh_scheduler.py:2350-2351` was stripping `-global` then searching for the bare-name file (which doesn't exist) — now uses `alias_name` directly.
+
+Anti-regression test (`tests/unit/global_repos/test_cidx_meta_filename_alignment_v10_4_9.py`) ensures the hook and MetaDirectoryUpdater always agree on filenames.
+
+Likely also closes the upstream cause of GitHub bug #984 (description_refresh_scheduler warning spam — 18,082 "missing description or last_analyzed" warnings since log id 375287). The wipe-and-stub cycle produced descriptions without `last_analyzed` field, which the scheduler then repeatedly tried to refresh and re-warned on every pass. Stop the wipes → stop the warnings. Logging-side suppression in the scheduler (separate fix) tracked as #70.
+
 ## v10.4.8 (2026-05-05) — OAuth Bearer (opaque) pre-elevation — Open 1 FOURTH attempt
 
 v10.4.7 fixed the Basic-auth client-credentials path (Priority 1 in `get_current_user_for_mcp`), but the v10.4.7 field test confirmed Open 1 was STILL broken: Claude.ai's MCP integration uses OAuth Bearer tokens issued via `/oauth/token` (authorization code flow), which are OPAQUE random strings (`secrets.token_urlsafe(48)` stored in `oauth_tokens` table) — NOT JWTs. Those land on Priority 2 (the JWT/Bearer path), where `jwt_manager.validate_token()` silently fails for opaque tokens (caught with debug log), `request.state.user_jti` is never set, and the elevation decorator's Gate 5 fires "No session key on MCP request."

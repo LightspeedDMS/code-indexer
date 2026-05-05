@@ -330,10 +330,10 @@ class TestOnRepoRemovedTriggersRefresh:
 
         set_refresh_scheduler(mock_refresh_scheduler)
 
-        # Create .md file to be deleted
+        # Create .md file to be deleted — v10.4.9: alias form {repo_name}-global.md
         repo_name = "repo-to-remove"
         cidx_meta_path = Path(temp_golden_repos_dir) / "cidx-meta"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         md_file.write_text("# Repo to Remove\nDescription")
         assert md_file.exists()
 
@@ -367,7 +367,8 @@ class TestOnRepoRemovedTriggersRefresh:
         set_refresh_scheduler(mock_refresh_scheduler)
 
         repo_name = "nonexistent-repo"
-        md_file = Path(temp_golden_repos_dir) / "cidx-meta" / f"{repo_name}.md"
+        # v10.4.9: alias form {repo_name}-global.md
+        md_file = Path(temp_golden_repos_dir) / "cidx-meta" / f"{repo_name}-global.md"
         assert not md_file.exists()
 
         on_repo_removed(
@@ -392,7 +393,8 @@ class TestOnRepoRemovedTriggersRefresh:
 
         repo_name = "repo-to-remove"
         cidx_meta_path = Path(temp_golden_repos_dir) / "cidx-meta"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # v10.4.9: alias form {repo_name}-global.md
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         md_file.write_text("# Repo\nContent")
 
         # Should not raise even with no scheduler
@@ -426,7 +428,8 @@ class TestOnRepoRemovedTriggersRefresh:
 
         repo_name = "repo-to-remove"
         cidx_meta_path = Path(temp_golden_repos_dir) / "cidx-meta"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # v10.4.9: alias form {repo_name}-global.md
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         md_file.write_text("# Repo\nContent")
 
         # Should NOT raise exception
@@ -450,7 +453,8 @@ class TestOnRepoRemovedTriggersRefresh:
 
         repo_name = "some-repo"
         cidx_meta_path = Path(temp_golden_repos_dir) / "cidx-meta"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # v10.4.9: alias form {repo_name}-global.md
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         md_file.write_text("# Some Repo")
 
         on_repo_removed(

@@ -360,7 +360,10 @@ def on_repo_added(
             clone_path,
         )
 
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # v10.4.9: align with MetaDirectoryUpdater's {alias_name}.md convention
+        # (alias_name = repo_name + "-global"). Filename mismatch caused every
+        # refresh cycle to treat all hook-created files as orphaned and delete them.
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
 
         # Story #724 v2: optional post-generation verification pass BEFORE atomic write
         from code_indexer.server.services.config_service import (
@@ -452,7 +455,10 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         - Deletes tracking record (if tracking backend available)
     """
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
-    md_file = cidx_meta_path / f"{repo_name}.md"
+    # v10.4.9: align with MetaDirectoryUpdater's {alias_name}.md convention
+    # (alias_name = repo_name + "-global"). Filename mismatch caused every
+    # refresh cycle to treat all hook-created files as orphaned and delete them.
+    md_file = cidx_meta_path / f"{repo_name}-global.md"
 
     # Delete .md file if it exists
     if md_file.exists():
