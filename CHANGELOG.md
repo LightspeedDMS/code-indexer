@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.7 (2026-05-05) — OAuth-MCP sessions pre-elevated (Open 1 ROOT CAUSE)
+
+OAuth-authenticated MCP sessions (e.g. Claude Code via CIDX MCP credentials) could not invoke admin-gated tools (`set_session_impersonation`, `list_users`, `create_user`, etc.) because the OAuth auth path never set `request.state.user_jti`, so the `@require_mcp_elevation` decorator's Gate 5 fired with "No session key on MCP request." End-to-end staging test confirmed the Bearer + TOTP + `/auth/elevate` pipeline works correctly; OAuth was the only gap.
+
+Fix (Variant C — pre-elevated OAuth): `get_mcp_user_from_credentials` now sets `request.state.user_jti = f"oauth:{client_id}"` AND opens an elevation window keyed on that session_key after successful credential verification. OAuth client credentials are long-lived secrets *provisioned by* a TOTP-elevated admin session — they're already a step-up artifact. Forcing per-call TOTP would be defense-in-depth without proportional security gain. Industry pattern matches (AWS IAM service accounts don't MFA per-call). Bearer/cookie sessions still go through the explicit `/auth/elevate` flow.
+
+Operator implications: OAuth credentials confer admin scope persistently until revoked. Scope at issuance time, audit via `session_key=oauth:<client_id>` log lines, revoke via the existing MCP credential management UI when needed.
+
+This is the THIRD attempt at Open 1 — v10.4.5 fixed the impersonation handler's bare-except (didn't help; gate fired upstream); v10.4.6 fixed the gate response shape (didn't help; OAuth path never set session_key). v10.4.7 closes the actual root cause.
+
 ## v10.4.6 (2026-05-05) — Elevation decorator response shape + .git/ exclusion + is_admin field removed
 
 Three defects from the v10.4.5 staging field test.
