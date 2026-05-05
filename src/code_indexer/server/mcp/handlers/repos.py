@@ -1187,20 +1187,29 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
 
 def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for list_global_repos tool."""
+    from code_indexer.server.auth.user_manager import UserRole
+
     try:
         repos = _list_global_repos()
 
-        access_filtering_service = _get_access_filtering_service()
-        if access_filtering_service:
-            repo_aliases = [r.get("repo_name", r.get("alias", "")) for r in repos]
-            accessible_aliases = access_filtering_service.filter_repo_listing(
-                repo_aliases, user.username
-            )
-            repos = [
-                r
-                for r in repos
-                if r.get("repo_name", r.get("alias", "")) in accessible_aliases
-            ]
+        # Admin role bypasses group-based access filtering entirely.
+        # user.role == UserRole.ADMIN is independent of group membership;
+        # access_filtering_service.is_admin_user() checks group membership only,
+        # which can miss admin users not yet assigned to the admins group.
+        # Fix 1: admin role bypass. Fix 2: use repo_name consistently (not alias)
+        # matching _append_global_repos_to_status reference implementation.
+        if user.role != UserRole.ADMIN:
+            access_filtering_service = _get_access_filtering_service()
+            if access_filtering_service:
+                repo_names = [r.get("repo_name", "") for r in repos]
+                accessible_names = access_filtering_service.filter_repo_listing(
+                    repo_names, user.username
+                )
+                repos = [
+                    r
+                    for r in repos
+                    if r.get("repo_name", "") in accessible_names
+                ]
 
         return _mcp_response({"success": True, "repos": repos})
     except Exception as e:
