@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.8 (2026-05-05) — OAuth Bearer (opaque) pre-elevation — Open 1 FOURTH attempt
+
+v10.4.7 fixed the Basic-auth client-credentials path (Priority 1 in `get_current_user_for_mcp`), but the v10.4.7 field test confirmed Open 1 was STILL broken: Claude.ai's MCP integration uses OAuth Bearer tokens issued via `/oauth/token` (authorization code flow), which are OPAQUE random strings (`secrets.token_urlsafe(48)` stored in `oauth_tokens` table) — NOT JWTs. Those land on Priority 2 (the JWT/Bearer path), where `jwt_manager.validate_token()` silently fails for opaque tokens (caught with debug log), `request.state.user_jti` is never set, and the elevation decorator's Gate 5 fires "No session key on MCP request."
+
+Fix: in `get_current_user_for_mcp` Priority 2, when JWT validation didn't set `user_jti` and `oauth_manager.validate_token(token)` succeeds (proving it's an OAuth-issued opaque token, not an arbitrary string), derive `session_key = f"oauth:{sha256(token)[:16]}"`, set `user_jti`, AND open an elevation window via `elevated_session_manager.create()`. Same logical step as v10.4.7's Basic-auth fix, just at the Bearer/opaque path. Bearer JWT login tokens (issued by `/auth/mfa/verify`) keep existing behavior — `user_jti` from JWT `jti` claim, explicit `/auth/elevate` required.
+
+**Open 1 attempt history**: v10.4.5 fixed handler bare-except (didn't reach — gate fires upstream); v10.4.6 fixed gate response shape (didn't reach — OAuth never set session_key); v10.4.7 fixed Basic-auth client-credentials (didn't reach Claude.ai — uses Bearer opaque); v10.4.8 closes the actual user-visible path. Certification this time MUST replicate the field tester's exact auth flow (real OAuth Bearer opaque token from `/oauth/token`, not synthetic credentials).
+
 ## v10.4.7 (2026-05-05) — OAuth-MCP sessions pre-elevated (Open 1 ROOT CAUSE)
 
 OAuth-authenticated MCP sessions (e.g. Claude Code via CIDX MCP credentials) could not invoke admin-gated tools (`set_session_impersonation`, `list_users`, `create_user`, etc.) because the OAuth auth path never set `request.state.user_jti`, so the `@require_mcp_elevation` decorator's Gate 5 fired with "No session key on MCP request." End-to-end staging test confirmed the Bearer + TOTP + `/auth/elevate` pipeline works correctly; OAuth was the only gap.

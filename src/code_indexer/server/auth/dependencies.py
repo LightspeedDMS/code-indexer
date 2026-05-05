@@ -582,16 +582,55 @@ async def get_current_user_for_mcp(request: Request) -> User:
         # fall back to the cookie value so that elevation works for cookie-authed
         # /mcp clients (Issue: cookie-auth /mcp path never sets user_jti).
         _jti_token = token or request.cookies.get(CIDX_SESSION_COOKIE)
+        _user_jti_set = False
         if _jti_token and jwt_manager:
             try:
                 payload = jwt_manager.validate_token(_jti_token)
                 jti = payload.get("jti")
                 if jti:
                     request.state.user_jti = str(jti)
+                    _user_jti_set = True
             except (TokenExpiredError, InvalidTokenError) as e:
                 logger.debug(
                     "MCP jti extraction after auth: %s — elevation unavailable", e
                 )
+        # v10.4.8: OAuth opaque Bearer tokens (issued via /oauth/token) are NOT
+        # JWTs — jwt_manager.validate_token() above silently fails for them.
+        # If JWT validation didn't set user_jti but oauth_manager recognizes the
+        # token, pre-elevate the session by deriving session_key from the token.
+        # OAuth tokens are pre-elevated by virtue of being issued via OAuth flow
+        # (already a step-up artifact). Mirrors v10.4.7's fix at the Basic-auth
+        # client-credentials path. Bearer JWT login tokens keep existing
+        # behavior (user_jti from jti claim, explicit /auth/elevate required).
+        if not _user_jti_set and token and oauth_manager:
+            try:
+                oauth_result = oauth_manager.validate_token(token)
+            except Exception as e:
+                logger.debug("MCP OAuth token validation failed: %s", e)
+                oauth_result = None
+            if oauth_result:
+                import hashlib
+
+                token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+                session_key = f"oauth:{token_hash}"
+                request.state.user_jti = session_key
+                if elevated_session_manager is not None:
+                    try:
+                        client_ip = request.client.host if request.client else "unknown"
+                        elevated_session_manager.create(
+                            session_key=session_key,
+                            username=user.username,
+                            elevated_from_ip=client_ip,
+                            scope="full",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "v10.4.8: failed to pre-elevate OAuth Bearer "
+                            "session for %s: %s",
+                            user.username,
+                            exc,
+                            exc_info=True,
+                        )
         return user
     except HTTPException as exc:
         # Story #563: Let 403 (non-SSO restriction) pass through unchanged
