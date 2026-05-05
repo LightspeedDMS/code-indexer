@@ -224,7 +224,13 @@ def test_elevation_required_path_returns_actionable_error():
             session_key="test-session-key-999",
         )
 
-    # The elevation decorator returns a plain dict (not MCP-envelope-wrapped);
-    # it short-circuits before the handler calls _mcp_response().
-    assert result.get("error") == "elevation_required"
-    assert len(result.get("message", "")) > 0
+    # v10.4.6: the elevation decorator now wraps error responses via _mcp_response
+    # (closing Open 8 root cause where raw dicts were stringified at the MCP
+    # transport layer as "Error occurred during tool execution"). Parse the MCP
+    # envelope to access the underlying structured error.
+    import json as _json
+
+    assert "content" in result
+    payload = _json.loads(result["content"][0]["text"])
+    assert payload.get("error") == "elevation_required"
+    assert len(payload.get("message", "")) > 0

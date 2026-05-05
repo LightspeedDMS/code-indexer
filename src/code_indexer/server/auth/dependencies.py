@@ -437,6 +437,34 @@ async def get_mcp_user_from_credentials(request: Request) -> Optional[User]:
             headers={"WWW-Authenticate": _build_www_authenticate_header()},
         )
 
+    # v10.4.7: OAuth-MCP sessions are pre-elevated by virtue of holding the
+    # credential. The credential was provisioned by a TOTP-elevated admin --
+    # requiring per-call TOTP would double-step-up. Set the client_id as the
+    # session key and open an elevation window so @require_mcp_elevation gates
+    # fire uniformly across Bearer and OAuth paths.
+    # client_id is used directly as the session key: MCP client IDs (mcp_...)
+    # are already distinct from JWT JTI values (UUIDs). No construction needed.
+    request.state.user_jti = client_id
+    if elevated_session_manager is not None:
+        try:
+            client_ip = request.client.host if request.client else "unknown"
+            elevated_session_manager.create(
+                session_key=client_id,
+                username=user.username,
+                elevated_from_ip=client_ip,
+                scope="full",
+            )
+        except Exception as exc:
+            # Defense-in-depth: if elevation manager is misconfigured, log and
+            # let the request proceed. The decorator will surface "No active
+            # elevation window" -- distinguishable from "no session key" (Gate 5).
+            logger.warning(
+                "v10.4.7: failed to pre-elevate oauth session for %s: %s",
+                user.username,
+                exc,
+                exc_info=True,
+            )
+
     # Success - verify_credential() already updated last_used_at (AC5)
     return user
 
