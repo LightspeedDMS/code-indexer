@@ -115,7 +115,11 @@ class TestCidxFetchCachedPayloadValidHandle:
 
         mock_cache.retrieve.assert_called_once()
         call_args = mock_cache.retrieve.call_args
-        assert call_args[0][0] == "my-handle-xyz" or call_args.kwargs.get("handle") == "my-handle-xyz" or "my-handle-xyz" in str(call_args)
+        assert (
+            call_args[0][0] == "my-handle-xyz"
+            or call_args.kwargs.get("handle") == "my-handle-xyz"
+            or "my-handle-xyz" in str(call_args)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +264,7 @@ class TestXrayTruncationMessageNamesTool:
         from code_indexer.server.mcp.handlers.xray import _truncate_xray_result
 
         large_matches = [
-            {"file_path": f"f{i}.py", "code_snippet": "y" * 200}
-            for i in range(15)
+            {"file_path": f"f{i}.py", "code_snippet": "y" * 200} for i in range(15)
         ]
         result = {
             "matches": large_matches,
