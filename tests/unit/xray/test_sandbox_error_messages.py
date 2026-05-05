@@ -181,3 +181,30 @@ class TestAttributeErrorSuggestions:
         assert result.detail is not None
         # Should NOT emit "Did you mean" for completely unknown names
         assert "Did you mean" not in result.detail
+
+
+# ---------------------------------------------------------------------------
+# v10.4.4 — Finding 3.8: exception types listed in validation error messages
+# ---------------------------------------------------------------------------
+
+
+class TestSafeBuiltinNamesV10_4_4:
+    """Validation error for Import must list exception types (Finding 3.8)."""
+
+    def test_import_rejection_lists_exception_types_v10_4_4(self):
+        """Import rejection message must name exception types from SAFE_BUILTIN_NAMES."""
+        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate("import os")
+        assert result.ok is False
+        reason = result.reason
+        assert "Exception" in reason, "Import hint must mention Exception"
+        assert "ValueError" in reason, "Import hint must mention ValueError"
+        assert "StopIteration" in reason, "Import hint must mention StopIteration"
+
+    def test_safe_builtin_names_count_is_27_v10_4_4(self):
+        """SAFE_BUILTIN_NAMES must contain exactly 27 entries (18 value + 9 exception)."""
+        from code_indexer.xray.sandbox import SAFE_BUILTIN_NAMES
+
+        assert len(SAFE_BUILTIN_NAMES) == 27

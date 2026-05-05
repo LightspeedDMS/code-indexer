@@ -175,7 +175,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 `PythonEvaluatorSandbox` securely executes caller-supplied Python evaluator code against AST nodes. Three defense layers (AST whitelist, stripped builtins, multiprocessing isolation) plus dunder-access block at validation time close the confirmed `__class__.__init__.__globals__` exploit.
 
 **Essential invariants**:
-- Three defense layers: AST whitelist validation (Layer 1, rejects before subprocess spawn) + stripped exec() environment (Layer 2, removes `STRIPPED_BUILTINS` and limits to 17 `SAFE_BUILTIN_NAMES`) + `multiprocessing.Process` isolation (Layer 3).
+- Three defense layers: AST whitelist validation (Layer 1, rejects before subprocess spawn) + stripped exec() environment (Layer 2, removes `STRIPPED_BUILTINS` and limits to 27 `SAFE_BUILTIN_NAMES` (18 value builtins + 9 exception types for except clauses)) + `multiprocessing.Process` isolation (Layer 3).
 - 24-name `DUNDER_ATTR_BLOCKLIST` covers `__class__`, `__globals__`, `__builtins__`, `__import__`, `__dict__`, `__subclasses__`, etc. Both `ast.Attribute` and string-`Constant` subscript paths are blocked at validation time.
 - Timeout policy: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), `SIGKILL_GRACE_SECONDS=1.0` (SIGKILL if still alive). Pipe data is read BEFORE `is_alive()` check (waitpid races).
 - `signal.alarm` is NOT used — FastAPI request handlers run in worker threads; `signal.alarm()` only works in the main thread.

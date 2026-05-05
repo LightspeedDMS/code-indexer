@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import logging
 import re
 import threading
 import time
@@ -18,7 +19,12 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from code_indexer.global_repos.regex_search import RegexSearchService
+from code_indexer.global_repos.regex_search import (
+    RegexSearchService,
+    RipgrepExecutionError,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _line_to_byte_offset(source: str, line_number: int) -> int:
@@ -237,18 +243,34 @@ class XRaySearchEngine:
         if progress_callback:
             progress_callback(0, "phase1_driver", "regex driver scan")
 
-        candidate_files = self._run_phase1_driver(
-            repo_path,
-            driver_regex,
-            search_target,
-            include_patterns,
-            exclude_patterns,
-            case_sensitive=case_sensitive,
-            context_lines=context_lines,
-            multiline=multiline,
-            pcre2=pcre2,
-            path=path,
-        )
+        try:
+            candidate_files = self._run_phase1_driver(
+                repo_path,
+                driver_regex,
+                search_target,
+                include_patterns,
+                exclude_patterns,
+                case_sensitive=case_sensitive,
+                context_lines=context_lines,
+                multiline=multiline,
+                pcre2=pcre2,
+                path=path,
+            )
+        except RipgrepExecutionError as exc:
+            # Finding 3.1 (v10.4.4): surface Phase 1 errors (e.g. invalid regex)
+            # instead of completing with silently empty results. Log then return
+            # a partial result so the background job shows phase1_failed.
+            logger.warning("XRaySearchEngine: Phase 1 driver failed: %s", exc)
+            return {
+                "matches": [],
+                "evaluation_errors": [],
+                "files_processed": 0,
+                "files_total": 0,
+                "elapsed_seconds": time.monotonic() - start,
+                "phase1_failed": True,
+                "phase1_error": str(exc),
+                "partial": True,
+            }
 
         files_total = len(candidate_files)
         cap_hit = False
@@ -571,16 +593,54 @@ class XRaySearchEngine:
                 if not isinstance(em, dict):
                     continue  # Skip malformed entries silently
 
+                # Finding 3.3: line_number is required in every match dict.
+                if "line_number" not in em:
+                    return (
+                        [],
+                        [
+                            {
+                                "file_path": str(file_path),
+                                "line_number": 0,
+                                "error_type": "InvalidEvaluatorReturn",
+                                "error_message": (
+                                    "each match must contain 'line_number'; "
+                                    f"got keys: {list(em.keys())!r}"
+                                ),
+                            }
+                        ],
+                        None,
+                    )
+
                 match_entry: Dict[str, Any] = dict(em)  # copy evaluator fields
+
+                # Finding 3.4: coerce line_number to int; non-numeric → InvalidEvaluatorReturn.
+                ln_raw = match_entry["line_number"]
+                try:
+                    ln = int(ln_raw)
+                except (TypeError, ValueError):
+                    return (
+                        [],
+                        [
+                            {
+                                "file_path": str(file_path),
+                                "line_number": 0,
+                                "error_type": "InvalidEvaluatorReturn",
+                                "error_message": (
+                                    f"line_number must be an int, got {ln_raw!r}"
+                                ),
+                            }
+                        ],
+                        None,
+                    )
+                match_entry["line_number"] = ln
 
                 # Server always provides file_path and language.
                 match_entry["file_path"] = str(file_path)
                 match_entry["language"] = lang
 
                 # Server derives line_content from source if evaluator omits it.
-                ln = match_entry.get("line_number")
-                if "line_content" not in match_entry and ln is not None:
-                    idx = int(ln) - 1  # 1-based → 0-based
+                if "line_content" not in match_entry:
+                    idx = ln - 1  # 1-based → 0-based
                     if 0 <= idx < len(source_lines):
                         match_entry["line_content"] = source_lines[idx]
                     else:
@@ -811,6 +871,9 @@ class XRaySearchEngine:
                 continue
 
             rel = str(p.relative_to(repo_path))
+            # Finding 3.6 (v10.4.4): skip CIDX's internal index store.
+            if rel.startswith(".code-indexer/") or rel == ".code-indexer":
+                continue
             all_rel_paths.append(rel)
 
             if include_patterns and not any(
@@ -863,13 +926,17 @@ class XRaySearchEngine:
         Returns:
             Ordered, deduplicated list of matching Path objects.
         """
+        # Finding 3.6 (v10.4.4): always exclude CIDX's internal index store from
+        # content-mode Phase 1 — ripgrep walks it otherwise and surfaces error logs
+        # / vector .json files as candidates.
+        effective_excludes = [".code-indexer/**", *list(exclude_patterns or [])]
         service = RegexSearchService(repo_path)
         search_result = _run_async_in_sync(
             service.search(
                 pattern=driver_regex,
                 path=path,
                 include_patterns=include_patterns or None,
-                exclude_patterns=exclude_patterns or None,
+                exclude_patterns=effective_excludes,
                 case_sensitive=case_sensitive,
                 context_lines=context_lines,
                 max_results=100_000,

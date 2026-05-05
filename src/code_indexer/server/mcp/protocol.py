@@ -40,6 +40,13 @@ security = HTTPBearer(auto_error=False)
 # authenticate: bypasses handle_tools_call() entirely via mcp-public special path.
 _SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
 
+# Tools whose repo identifier refers to a user-OWNED activation (not a golden
+# alias). The activated_repo_manager enforces ownership at the data layer, so
+# the protocol-level group-access check must be skipped for these tools.
+# Finding 3.5 (v10.4.4): deactivate_repository passes user_alias which is NOT
+# a golden alias, causing false "Access denied" for the rightful owner.
+_OWNER_ENFORCED_TOOLS: frozenset = frozenset({"deactivate_repository"})
+
 from code_indexer.server.services.api_metrics_service import (  # noqa: E402
     api_metrics_service,
 )
@@ -415,6 +422,12 @@ def _check_repository_access(
     # List-form path — each entry checked via shared _check_alias_list helper
     if list_aliases is not None:
         _check_alias_list(list_aliases)
+        return
+
+    # Finding 3.5 (v10.4.4): tools in _OWNER_ENFORCED_TOOLS pass a user-owned
+    # activation alias (user_alias), not a golden-repo alias. The manager layer
+    # already enforces ownership — skip the group-access check entirely.
+    if tool_name in _OWNER_ENFORCED_TOOLS:
         return
 
     # No repo param present or empty - nothing to check
