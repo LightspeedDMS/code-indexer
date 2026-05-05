@@ -27,7 +27,7 @@ This document captures the X-Ray search engine architecture and MCP handler shim
 
   Failure modes (`UnsupportedLanguage`, `EvaluatorTimeout`, `EvaluatorCrash`, `InvalidEvaluatorReturn`, `ValidationFailed`, generic file IO errors) append to `evaluation_errors[]` without failing the job.
 
-- **`max_files` cap**: when provided (called `max_results` at the MCP layer), only the first N candidates are evaluated; result includes `partial=True` and `max_files_reached=True`. Job-level timeout takes precedence over the cap (`partial=True`, `timeout=True`).
+- **`max_results` cap**: when provided, only the first N candidates are evaluated; result includes `partial=True` and `max_files_reached=True`. Job-level timeout takes precedence over the cap (`partial=True`, `timeout=True`).
 
 - **`progress_callback(percent, phase_name, phase_detail)`** is called at 0%, 50%, and 100%.
 
@@ -37,10 +37,10 @@ This document captures the X-Ray search engine architecture and MCP handler shim
 
 - **Auth check**: `user.has_permission("query_repos")` or returns `auth_required`.
 - **Parameter validation**:
-  - `pattern` (renamed from `driver_regex` in v10.3.x) is required — empty/missing returns `pattern_required`.
+  - `pattern` is required — empty/missing returns `pattern_required`.
   - `search_target` in `("content", "filename")`.
   - `context_lines` in `[0, 10]`.
-  - `max_results` (renamed from `max_files`) >= 1 when provided.
+  - `max_results` >= 1 when provided.
   - `timeout_seconds` in `[10, 600]`.
   - `await_seconds` in `[0.0, 10.0]` (lowered from 30 in v10.3.2 to keep server-side polling within the FastAPI threadpool capacity cap).
 - **Repository alias resolution — omni-aware (string OR list)**:

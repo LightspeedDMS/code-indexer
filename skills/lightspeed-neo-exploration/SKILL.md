@@ -408,8 +408,9 @@ For understanding project organization:
 
 Use X-Ray when regex or semantic search produces too many false positives because
 the distinction you need is structural, not textual. X-Ray adds an AST filter on
-top of a regex driver — only files where the Python evaluator returns True are
-included in results.
+top of a regex driver — Phase 1 (`pattern`) selects candidate files; Phase 2 (your
+Python `evaluator_code`) walks the file's parse tree and emits the matches you care
+about.
 
 **When to choose X-Ray vs other tools:**
 
@@ -419,6 +420,7 @@ included in results.
 | You know an exact identifier or string | `search_code` (fts) or `regex_search` |
 | You know a pattern that regex finds, but you need to exclude false positives based on surrounding code structure | **`xray_search`** |
 | You want to understand what AST node tree-sitter produces for a construct before writing an evaluator | **`xray_explore`** |
+| You want to inspect the parse tree of one specific file without crafting a regex | **`xray_dump_ast`** |
 | You need to find all callers/usages of a known symbol with call-graph precision | `scip_references` |
 
 X-Ray is not a replacement for semantic search. It is a precision filter for situations where you already know what the code pattern looks like textually and need to make a structural distinction regex cannot express — e.g., "only calls NOT inside a try-with-resources", "only HTTP clients missing a timeout parameter", "only direct DB writes outside a transaction boundary".
@@ -433,10 +435,10 @@ files to see what AST nodes tree-sitter produces for your language and construct
 ```json
 xray_explore(
     repository_alias="evolution-global",
-    driver_regex="prepareStatement",
+    pattern="prepareStatement",
     search_target="content",
     include_patterns=["*.java"],
-    max_files=3,
+    max_results=3,
     max_debug_nodes=30
 )
 ```
@@ -449,71 +451,128 @@ offsets per node. Find the `type` string for the node you care about (e.g.,
 
 **Step 2 — Write and test evaluator on 5 files:**
 
+In v10.4.0 the evaluator runs ONCE per file (not once per regex hit), with the file's
+root parse tree as `node`/`root`. The natural pattern is to walk DOWN from `root`
+via `descendants_of_type`, then return a dict `{"matches": [...], "value": ...}`.
+
 ```json
 xray_search(
     repository_alias="evolution-global",
-    driver_regex="prepareStatement",
-    evaluator_code="return node.type == 'method_invocation' and not node.is_descendant_of('try_with_resources_statement')",
+    pattern="prepareStatement",
+    evaluator_code="""
+calls = root.descendants_of_type('method_invocation')
+matches = []
+for c in calls:
+    if c.text.find('prepareStatement') == -1:
+        continue
+    if c.enclosing('try_with_resources_statement') is not None:
+        continue
+    matches.append({'line_number': c.start_point[0] + 1})
+return {'matches': matches, 'value': len(matches)}
+""",
     search_target="content",
     include_patterns=["*.java"],
-    max_files=5
+    max_results=5
 )
 ```
 
 Poll `get_job_details` to COMPLETED. Read `evaluation_errors` first. `AttributeError`
 entries mean your evaluator referenced a node attribute that does not exist for that
-node type — fix the attribute name and re-run. `EvaluatorTimeout` means the expression
-is too slow — simplify it. Only proceed to the full run when `evaluation_errors` is
-empty on the 5-file test.
+node type — fix the attribute name and re-run. `InvalidEvaluatorReturn` means you
+returned a bool or omitted the `matches` key — switch to the dict contract.
+`EvaluatorTimeout` means the expression is too slow — simplify it. Only proceed to
+the full run when `evaluation_errors` is empty on the 5-file test.
 
-**Step 3 — Full search (remove max_files cap):**
+**Step 3 — Full search (remove max_results cap):**
 
-Same call as Step 2 without `max_files`. Poll to COMPLETED. If the result has
-`truncated: true`, use `get_cached_content(cache_handle="<uuid>", page=1)` to retrieve
-pages of results.
+Same call as Step 2 without `max_results`. Poll to COMPLETED. If the result has
+`truncated: true`, use `cidx_fetch_cached_payload(cache_handle="<uuid>", page=0)`
+to retrieve pages of results.
 
-### Evaluator API — what you need to know
+### Evaluator API — what you need to know (v10.4.0)
 
-The evaluator is a single Python expression that must return a bool. It runs in a
-sandboxed subprocess. Five names are available:
+The evaluator is a Python code snippet that must return a dict
+`{"matches": [...], "value": <any>}`. It runs ONCE per candidate file in a
+sandboxed subprocess. Eight globals are available:
 
 | Name | What it is |
 |------|-----------|
-| `node` | Deepest AST node enclosing the regex match position (the "closest ancestor" at the match site). For `search_target="filename"`, this equals `root`. |
-| `root` | The file's root AST node — use this to traverse the full file tree. |
+| `node` | The file's root AST node (always — file-as-unit contract). Walk DOWN from this via `descendants_of_type`. |
+| `root` | Alias for `node` (same object). |
 | `source` | Full file text as a UTF-8 string. |
 | `lang` | Language string: `java`, `kotlin`, `go`, `python`, `typescript`, `javascript`, `bash`, `csharp`, `html`, `css`. |
 | `file_path` | Absolute path of the file being evaluated. |
+| `match_positions` | **(v10.4.0)** List of dicts, one per Phase 1 regex hit in this file. Each dict carries `line_number`, `column`, `line_content`, `byte_offset`, `context_before`, `context_after`. Empty list in `search_target="filename"` mode. Use this when you want to scope your AST analysis to the regex-matched positions. |
+| `match_byte_offset` | **(legacy compat — always `None` in v10.4.0)** Use `match_positions` instead. |
+| `match_line_number` | **(legacy compat — always `None` in v10.4.0)** Use `match_positions` instead. |
+| `match_line_content` | **(legacy compat — always `None` in v10.4.0)** Use `match_positions` instead. |
 
-Key methods on `node` and `root`:
-- `node.type` — tree-sitter node type string (what you see in `ast_debug`)
-- `node.is_descendant_of("node_type_string")` — True if any ancestor in the tree has that type
-- `node.named_children` — list of named child nodes
-- `node.text` — source text of the node (use `source[node.start_byte:node.end_byte]` as equivalent)
+**Return value contract**: the evaluator returns a dict with shape
+`{"matches": [{"line_number": int, ...}], "value": <anything>}`.
+- `matches` — a list of dicts. Each match dict requires `line_number: int` and may carry any open keys (`column`, `line_content`, `context_before`, `context_after`, plus arbitrary application-specific fields).
+- `value` — open-typed per-file payload. When non-`None`, it is collected into the response `file_metadata[]` list as `{file_path, value}`. Use this for file-level statistics like total counts, severity scores, or summary objects.
 
-**Safe builtins:** `len`, `str`, `int`, `bool`, `list`, `tuple`, `dict`, `min`, `max`,
-`sum`, `any`, `all`, `range`, `enumerate`, `zip`, `sorted`, `reversed`, `hasattr`.
+The server enriches each match dict before returning: `file_path` (always), `language`
+(always), `line_content` (derived from `source` if you omit it), and
+`context_before`/`context_after` (derived from your `context_lines` parameter).
 
-**Not available:** `getattr`, `setattr`, `open`, `eval`, `exec`, `__import__`, and
-all dunder attribute access (e.g., `node.__class__` is blocked). Import statements,
-loops (`for`, `while`), and `with` blocks are rejected at AST validation time before
-any subprocess is spawned.
+Returning a bool (the legacy v10.3.x contract) is REJECTED with
+`InvalidEvaluatorReturn` in `evaluation_errors[]` — always return a dict.
 
-The hard per-invocation timeout is 5 seconds. Keep evaluators simple — a single
-boolean expression on `node.type` and `node.is_descendant_of()` is the typical pattern.
+Key methods on `node` / `root` (XRayNode):
+- `node.type` — tree-sitter node type string (what you see in `ast_debug`).
+- `node.text` — source text of the node, decoded UTF-8.
+- `node.children`, `node.named_children` — child node lists.
+- `node.parent` — parent node, or `None` at root.
+- `node.is_descendant_of("type_name")` — True if any ANCESTOR has that type. Walks UP.
+- `node.descendants_of_type("type_name")` — list of all descendants matching that type, DFS pre-order. Walks DOWN. **The primary v10.4.0 traversal idiom.**
+- `node.count_descendants_of_type("type_name")` — fast count without materializing wrappers.
+- `node.enclosing("type_name")` — first ancestor (inclusive of self) matching that type, or `None`. Walks UP.
+- `node.child_by_field_name("name")` — child with the given grammar field name, or `None`.
+- `node.start_point` / `node.end_point` — `(row, column)` tuples.
+- `node.start_byte` / `node.end_byte` — byte offsets into `source`.
 
-### Async reminder
+**Safe builtins (27 total):** `len`, `str`, `int`, `bool`, `list`, `tuple`, `dict`,
+`min`, `max`, `sum`, `any`, `all`, `range`, `enumerate`, `zip`, `sorted`, `reversed`,
+`hasattr`, plus exception types for `except` clauses: `Exception`, `ValueError`,
+`TypeError`, `RuntimeError`, `AttributeError`, `KeyError`, `IndexError`, `NameError`,
+`StopIteration`.
 
-Both `xray_search` and `xray_explore` return `{job_id}` immediately. The job runs
-in the background. You MUST poll:
+**Lifted bans in v10.4.0**: statement-level `if`/`elif`/`else`, `for`, `while`,
+`break`, `continue`, `pass`, `try`/`except`/`finally`, `raise`, and arithmetic
+binary ops (`+`, `-`, `*`, `/`, etc.) are now ALLOWED. Termination is bounded by
+the 5-second subprocess timeout — infinite loops surface as `EvaluatorTimeout`,
+not validation rejection.
+
+**Still banned** (rejected at AST validation time before any subprocess is spawned):
+`def`, `class`, `lambda`, `import` / `from ... import`, `with`, `global`, `nonlocal`,
+`async` / `await`, `yield` / `yield from`. Plus all dunder attribute access (e.g.,
+`node.__class__`) and dangerous builtins (`getattr`, `setattr`, `open`, `eval`,
+`exec`, `__import__`, `compile`).
+
+The hard per-invocation timeout is 5 seconds. Keep evaluators simple and prefer
+`descendants_of_type` traversal over hand-rolled recursion.
+
+### Async reminder (and sync mode alternative)
+
+Both `xray_search` and `xray_explore` return `{job_id}` by default. The job runs
+in the background. The standard pattern is to poll:
 
 ```
 get_job_details(job_id="<returned_job_id>")
 ```
 
-Repeat until `status == "completed"` or `status == "failed"`. Do not assume the result
-is ready after a single poll. Default timeout is 120 seconds; increase `timeout_seconds`
-for large repositories (max 600).
+Repeat until `status == "completed"` or `status == "failed"`. Default job timeout
+is 120 seconds; increase `timeout_seconds` for large repositories (max 600).
+
+**Sync mode** (interactive use): pass `await_seconds: 2.0` (range `0.0..10.0`) and
+the server polls internally for up to that many seconds before returning. If the
+job finishes within the window you get the inline result directly; otherwise you
+get `{job_id}` and fall back to async polling. For interactive workflows over small
+repos, `await_seconds=2.0` is usually faster than client-side polling.
+
+The cap was lowered from 30 to 10 in v10.3.2 to bound FastAPI threadpool
+occupancy — for waits beyond 10s, use the async `{job_id}` path.
 
 ### Paged results reminder
 
@@ -521,49 +580,139 @@ X-Ray results from large repositories often exceed the inline preview threshold 
 chars). When the polled result has `truncated: true`:
 
 1. Note the `cache_handle` value.
-2. Call `get_cached_content(cache_handle="<uuid>", page=1)` for the first page.
-3. Increment `page` until the response indicates no further pages.
+2. Call `cidx_fetch_cached_payload(cache_handle="<uuid>", page=0)` for the first page.
+3. Increment `page` until `has_more: false` in the response.
 
 The `matches_and_errors_preview` field and the first 3 inline `matches[]` entries give
 a quick scan without fetching the cache.
 
-### LightspeedDMS-specific X-Ray examples
+### xray_dump_ast: single-file AST inspection
 
-**Unsafe SQL — prepareStatement outside try-with-resources (Java):**
+Use `xray_dump_ast` when you want to inspect the parse tree of one specific file
+without crafting a regex driver. It is **synchronous** (returns the AST inline,
+no `job_id` to poll) and accepts only two parameters:
+
+```json
+xray_dump_ast(
+    repository_alias="evolution-global",
+    file_path="src/main/java/com/lightspeed/dms/InventoryService.java"
+)
+```
+
+Returns `{ast_tree: <BFS-serialised root node>, file_path, language}`. Useful when
+exploring an unfamiliar file's structure to design an `xray_search` evaluator. The
+serialiser caps at 500 nodes and emits a `{"type": "...truncated"}` sentinel if the
+tree exceeds that.
+
+### Omni multi-repo X-Ray
+
+`xray_search` and `xray_explore` accept `repository_alias` as a string OR a list of
+strings OR a JSON-encoded array — same omni pattern as `search_code`. Multi-repo
+mode submits one background job per resolved alias and returns:
+
+```json
+{
+  "job_ids": ["<uuid-1>", "<uuid-2>", "<uuid-3>"],
+  "errors": [
+    {"repository_alias": "missing-repo", "error": "repository_not_found", "message": "..."}
+  ]
+}
+```
+
+Per-alias resolution failures append to `errors[]`; the batch continues for
+resolvable aliases. Poll each `job_id` independently via `get_job_details`. Pre-flight
+evaluator validation runs ONCE before any job is submitted — a single bad evaluator
+fails the whole batch fast.
+
+```json
+xray_search(
+    repository_alias=["evolution-global", "integration-services-global"],
+    pattern="prepareStatement",
+    evaluator_code="...",
+    search_target="content",
+    include_patterns=["*.java"]
+)
+```
+
+### LightspeedDMS-specific X-Ray examples (v10.4.0)
+
+**Example 1 — Unsafe SQL: `prepareStatement` outside try-with-resources (Java):**
 
 ```json
 xray_search(
     repository_alias="evolution-global",
-    driver_regex="prepareStatement",
-    evaluator_code="return node.type == 'method_invocation' and not node.is_descendant_of('try_with_resources_statement')",
+    pattern="prepareStatement",
+    evaluator_code="""
+calls = root.descendants_of_type('method_invocation')
+matches = []
+for c in calls:
+    if c.text.find('prepareStatement') == -1:
+        continue
+    if c.enclosing('try_with_resources_statement') is not None:
+        continue
+    matches.append({'line_number': c.start_point[0] + 1})
+return {'matches': matches, 'value': len(matches)}
+""",
     search_target="content",
     include_patterns=["*.java"],
     exclude_patterns=["*/test/*"]
 )
 ```
 
-Finds every JDBC prepared statement call that is not resource-managed. False positives
-from comments or string literals are filtered by the `node.type` check.
+Finds every JDBC prepared-statement call that is not resource-managed. The per-file
+`value` field carries the unsafe-call count, surfaced in `file_metadata[]`.
 
-**Hardcoded credentials — string literals that look like passwords:**
+**Example 2 — Hardcoded credentials: regex-scoped via `match_positions` (any language):**
+
+This example demonstrates the v10.4.0 `match_positions` pattern: only emit matches
+at lines where the Phase 1 regex actually hit. Useful when the regex is precise but
+you want one match-record per hit instead of one per file.
 
 ```json
 xray_search(
     repository_alias="evolution-global",
-    driver_regex="(?i)(password|passwd|secret|api_key)\\s*=\\s*[\"'][^\"']{6,}[\"']",
-    evaluator_code="return node.type in ('string_literal', 'string', 'assignment_expression') and lang in ('java', 'kotlin', 'python')",
+    pattern="(?i)(password|passwd|secret|api_key)\\s*=\\s*[\"'][^\"']{6,}[\"']",
+    evaluator_code="""
+matches = []
+for pos in match_positions:
+    matches.append({
+        'line_number': pos['line_number'],
+        'column': pos['column'],
+        'line_content': pos['line_content'],
+    })
+return {'matches': matches, 'value': len(matches)}
+""",
     search_target="content",
     exclude_patterns=["*/test/*", "*/resources/i18n/*"]
 )
 ```
 
-**HTTP calls without a timeout (Java/Kotlin):**
+**Example 3 — HTTP calls without a timeout (Java/Kotlin), with `try/except` for grammar drift:**
+
+This example uses the v10.4.0 lifted `try`/`except` ban to handle grammar
+inconsistencies between Java and Kotlin tree-sitter parsers gracefully. Without
+the try/except, a single missing field would crash the evaluator on every file.
 
 ```json
 xray_search(
     repository_alias="integration-services-global",
-    driver_regex="HttpClient|OkHttpClient|RestTemplate",
-    evaluator_code="return node.type == 'object_creation_expression' and not any(c.type == 'argument_list' and 'timeout' in source[c.start_byte:c.end_byte].lower() for c in node.named_children)",
+    pattern="HttpClient|OkHttpClient|RestTemplate",
+    evaluator_code="""
+ctors = root.descendants_of_type('object_creation_expression')
+matches = []
+for c in ctors:
+    try:
+        args = c.child_by_field_name('arguments')
+        if args is None:
+            continue
+        body = source[args.start_byte:args.end_byte].lower()
+        if 'timeout' in body:
+            continue
+    except AttributeError:
+        continue
+    matches.append({'line_number': c.start_point[0] + 1})
+return {'matches': matches, 'value': len(matches)}
+""",
     search_target="content",
     include_patterns=["*.java", "*.kt"]
 )
@@ -573,20 +722,47 @@ Note: run `xray_explore` first on 2-3 files to confirm the `object_creation_expr
 node type name for the target language — Kotlin's tree-sitter grammar may use a
 different type string.
 
-**Direct DB writes outside a transaction (Java — detecting raw update/insert calls):**
+**Example 4 — Multi-repo direct DB writes (omni mode):**
+
+This example shows omni multi-repo X-Ray plus a richer per-file `value` payload
+that breaks down findings by call type. The `file_metadata[]` list in the merged
+results lets the caller rank files by severity.
 
 ```json
 xray_search(
-    repository_alias="evolution-global",
-    driver_regex="executeUpdate|executeInsert|executeBatch",
-    evaluator_code="return node.type == 'method_invocation' and not node.is_descendant_of('try_statement') and not node.is_descendant_of('method_declaration')",
+    repository_alias=["evolution-global", "integration-services-global"],
+    pattern="executeUpdate|executeInsert|executeBatch",
+    evaluator_code="""
+calls = root.descendants_of_type('method_invocation')
+matches = []
+counts = {'executeUpdate': 0, 'executeInsert': 0, 'executeBatch': 0}
+for c in calls:
+    text = c.text
+    kind = None
+    for k in counts:
+        if text.find(k) != -1:
+            kind = k
+            break
+    if kind is None:
+        continue
+    if c.enclosing('try_statement') is not None:
+        continue
+    counts[kind] += 1
+    matches.append({'line_number': c.start_point[0] + 1, 'kind': kind})
+return {'matches': matches, 'value': counts}
+""",
     search_target="content",
     include_patterns=["*.java"],
     exclude_patterns=["*/test/*"]
 )
 ```
 
-This evaluator finds raw `executeUpdate`/`executeInsert`/`executeBatch` calls that are NOT inside a try-block (suggesting no transaction-rollback safety) AND NOT inside a method declaration body (filtering out lambda/closure contexts). For full transaction-detection, follow up with a second X-Ray pass that checks for `@Transactional` annotations or surrounding `try`/`finally` blocks — see "Iterating on Your Evaluator" in the per-tool docs at `tool_docs/search/xray.md`.
+This evaluator finds raw `executeUpdate`/`executeInsert`/`executeBatch` calls that
+are NOT inside a try-block (suggesting no transaction-rollback safety), tracks
+per-kind counts in `value`, and runs across two repositories in one call. Returns
+`{job_ids: [...], errors: [...]}` — poll each job independently. For full
+transaction-detection, follow up with a second X-Ray pass that checks for
+`@Transactional` annotations or surrounding `try`/`finally` blocks.
 
 ## Example Query Patterns
 
@@ -809,6 +985,7 @@ Results include `wiki_url`, `real_views`, `first_viewed_at`, and `last_viewed_at
 - Concepts → `search_code` (semantic) + reranking
 - Exact strings → `search_code` (fts) or `regex_search`
 - Structural patterns (AST-level) → `xray_explore` then `xray_search`
+- Single-file AST dump → `xray_dump_ast` (synchronous, no `pattern` required)
 - Symbol navigation → `scip_definition`, `scip_references`, `scip_callchain`
 - Time-travel → `git_log`, `git_diff`, `git_blame`
 
@@ -819,8 +996,10 @@ Results include `wiki_url`, `real_views`, `first_viewed_at`, and `last_viewed_at
 
 **Rerank by default for 2+ word queries in semantic/hybrid mode.**
 
-**Async tools:** `activate_repository`, `xray_search`, `xray_explore` return `{job_id}` — poll `get_job_details` until COMPLETED.
+**Async tools:** `activate_repository`, `xray_search`, `xray_explore` return `{job_id}` and run in the background — poll `get_job_details` until COMPLETED. Optional sync mode: pass `await_seconds: 2.0` (range `0.0..10.0`) to receive the inline result if the job finishes within the window; otherwise falls back to `{job_id}`.
 
-**Paged retrieval:** when result has `truncated: true`, use `get_cached_content(cache_handle, page=N)`.
+**Omni multi-repo for X-Ray:** pass `repository_alias` as a list — returns `{job_ids: [...], errors: [...]}` instead of a single `{job_id}`.
+
+**Paged retrieval:** when a result has `truncated: true`, use `cidx_fetch_cached_payload(cache_handle, page=N)` (page is 0-indexed; check `has_more` to know when to stop).
 
 **KB responses:** prepend `https://codeindexer.lightspeedtools.cloud` to the `wiki_url` field; always include a References section when drawing on KB articles.
