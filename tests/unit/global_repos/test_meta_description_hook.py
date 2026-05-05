@@ -63,8 +63,8 @@ class TestOnRepoAdded:
                     golden_repos_dir=temp_golden_repos_dir,
                 )
 
-        # Verify: .md file was created
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # Verify: .md file was created — v10.4.9: filename uses alias form {repo_name}-global.md
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         assert md_file.exists(), f"Expected .md file at {md_file}"
 
         # Verify: File contains expected content
@@ -135,9 +135,9 @@ class TestOnRepoRemoved:
         """Test that .md file is deleted when a golden repo is removed."""
         from code_indexer.global_repos.meta_description_hook import on_repo_removed
 
-        # Setup: Create an existing .md file
+        # Setup: Create an existing .md file — v10.4.9: alias form {repo_name}-global.md
         repo_name = "test-repo"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         md_file.write_text("# Test Repo\nDescription")
 
         assert md_file.exists(), "Setup: .md file should exist"
@@ -160,7 +160,8 @@ class TestOnRepoRemoved:
         from code_indexer.global_repos.meta_description_hook import on_repo_removed
 
         repo_name = "nonexistent-repo"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # v10.4.9: alias form {repo_name}-global.md
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
 
         assert not md_file.exists(), "Setup: .md file should not exist"
 

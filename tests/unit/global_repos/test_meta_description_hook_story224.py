@@ -106,7 +106,8 @@ class TestReindexRemovedFromMetaDescriptionHook:
         cidx_meta_path.mkdir()
 
         repo_name = "test-repo"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # v10.4.9: alias form {repo_name}-global.md
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         md_file.write_text("# Test Repo description")
 
         cidx_calls = []
