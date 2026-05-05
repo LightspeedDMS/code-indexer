@@ -874,6 +874,10 @@ class XRaySearchEngine:
             # Finding 3.6 (v10.4.4): skip CIDX's internal index store.
             if rel.startswith(".code-indexer/") or rel == ".code-indexer":
                 continue
+            # v10.4.6 (Defect 2): also exclude .git/ — git internals
+            # (FETCH_HEAD, COMMIT_EDITMSG, objects/, etc.) are never code candidates.
+            if rel.startswith(".git/") or rel == ".git":
+                continue
             all_rel_paths.append(rel)
 
             if include_patterns and not any(
@@ -929,7 +933,11 @@ class XRaySearchEngine:
         # Finding 3.6 (v10.4.4): always exclude CIDX's internal index store from
         # content-mode Phase 1 — ripgrep walks it otherwise and surfaces error logs
         # / vector .json files as candidates.
-        effective_excludes = [".code-indexer/**", *list(exclude_patterns or [])]
+        effective_excludes = [
+            ".code-indexer/**",
+            ".git/**",
+            *list(exclude_patterns or []),
+        ]
         service = RegexSearchService(repo_path)
         search_result = _run_async_in_sync(
             service.search(

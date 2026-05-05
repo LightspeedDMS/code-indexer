@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.6 (2026-05-05) — Elevation decorator response shape + .git/ exclusion + is_admin field removed
+
+Three defects from the v10.4.5 staging field test.
+
+- **CRITICAL (Open 8 ROOT CAUSE)**: `set_session_impersonation` and other elevation-gated admin tools (`list_users`, `create_user`, etc.) returned generic "Error occurred during tool execution" with no diagnostic. v10.4.5 fixed the impersonation handler's bare-except, but the fix never executed because the `@require_mcp_elevation` decorator fires FIRST and was returning RAW dicts (not `_mcp_response`-wrapped). The MCP protocol layer expects `{"content":[{"type":"text","text":...}]}` shape; raw dicts get surfaced as generic errors at the higher transport layer. Now `_disabled_error`, `_elevation_required_error`, `_totp_setup_required_error` all wrap via `_mcp_response` (lazy import to avoid circularity). Structured codes — `elevation_required`, `totp_setup_required`, `elevation_enforcement_disabled` — now reach the MCP client as documented.
+- **LOW (Obs 3.3)**: `cidx-meta-global` filename Phase 1 returned `.git/FETCH_HEAD` and `.git/COMMIT_EDITMSG` as candidates. Extended v10.4.4's `.code-indexer/` exclusion to also cover `.git/` in both filename and content Phase 1.
+- **LOW (Obs 3.2)**: `is_admin` field removed from public job-result responses. v10.4.5 added a docstring explaining the field is a `BackgroundJobManager` priority/ownership-bypass flag (NOT submitter role), but field testers continued to misread it because they read response dicts, not source. Both leak paths in `BackgroundJobManager` — `get_job_status` SQLite fallback and `list_jobs` SQLite-merge — now scrub `is_admin` before returning. The internal `BackgroundJob.is_admin` field and SQLite storage remain unchanged for scheduling/ownership-bypass logic.
+
 ## v10.4.5 (2026-05-05) — Field-test follow-ups + UX cleanup
 
 Five defects from the v10.4.3 / v10.4.4 staging field-test cycles.
