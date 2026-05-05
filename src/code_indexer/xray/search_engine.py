@@ -174,6 +174,11 @@ class XRaySearchEngine:
         search_target: str,
         include_patterns: Optional[List[str]] = None,
         exclude_patterns: Optional[List[str]] = None,
+        case_sensitive: bool = True,
+        context_lines: int = 0,
+        multiline: bool = False,
+        pcre2: bool = False,
+        path: Optional[str] = None,
         timeout_seconds: int = 120,
         worker_threads: int = 2,
         progress_callback: Optional[Callable[[int, str, str], None]] = None,
@@ -190,6 +195,16 @@ class XRaySearchEngine:
             search_target: ``"content"`` or ``"filename"``.
             include_patterns: Glob patterns; only matching files are considered.
             exclude_patterns: Glob patterns; matching files are excluded.
+            case_sensitive: Whether Phase 1 regex matching is case-sensitive.
+                Passed to RegexSearchService for content searches. Default True.
+            context_lines: Number of context lines before/after each match to
+                include in match envelopes. Range 0..10; default 0.
+            multiline: Enable multi-line regex matching in Phase 1 content
+                driver. Passed to RegexSearchService. Default False.
+            pcre2: Enable PCRE2 regex engine for advanced features (lookahead,
+                lookbehind) in Phase 1 content driver. Default False.
+            path: Subdirectory within the repository to restrict the search to.
+                Relative to repo root. None means the full repository. Default None.
             timeout_seconds: Wall-clock cap (unused in #972; #978 enforces it).
             worker_threads: Thread-pool size (unused in #972; #978 uses it).
             progress_callback: Called with ``(percent, phase_name, phase_detail)``
@@ -223,7 +238,16 @@ class XRaySearchEngine:
             progress_callback(0, "phase1_driver", "regex driver scan")
 
         candidate_files = self._run_phase1_driver(
-            repo_path, driver_regex, search_target, include_patterns, exclude_patterns
+            repo_path,
+            driver_regex,
+            search_target,
+            include_patterns,
+            exclude_patterns,
+            case_sensitive=case_sensitive,
+            context_lines=context_lines,
+            multiline=multiline,
+            pcre2=pcre2,
+            path=path,
         )
 
         files_total = len(candidate_files)
@@ -240,6 +264,7 @@ class XRaySearchEngine:
 
         matches: List[Dict[str, Any]] = []
         evaluation_errors: List[Dict[str, Any]] = []
+        file_metadata: List[Dict[str, Any]] = []
         files_processed = 0
         timeout_hit = False
 
@@ -278,9 +303,11 @@ class XRaySearchEngine:
                 for fut in done:
                     fp = pending.pop(fut)
                     try:
-                        file_matches, file_errors = fut.result()
+                        file_matches, file_errors, file_meta = fut.result()
                         matches.extend(file_matches)
                         evaluation_errors.extend(file_errors)
+                        if file_meta is not None:
+                            file_metadata.append(file_meta)
                     except Exception as exc:  # noqa: BLE001
                         evaluation_errors.append(
                             {
@@ -304,6 +331,7 @@ class XRaySearchEngine:
         result: Dict[str, Any] = {
             "matches": matches,
             "evaluation_errors": evaluation_errors,
+            "file_metadata": file_metadata,
             "files_processed": files_processed,
             "files_total": files_total,
             "elapsed_seconds": elapsed,
@@ -350,30 +378,35 @@ class XRaySearchEngine:
         evaluator_code: str,
         include_ast_debug: bool,
         max_debug_nodes: int,
-        match_positions: Optional[List[Tuple[int, str]]] = None,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Evaluate a candidate file once per Phase 1 match position.
+        match_positions: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Evaluate a candidate file ONCE with the file-as-unit contract (v10.4.0).
 
-        Parses the file once, then calls sandbox.run once per (line_number,
-        line_content) position from Phase 1.  The ``node`` passed to the
-        evaluator is always the file root — evaluators walk DOWN from root via
-        ``descendants_of_type``.  Per-match position information is exposed as
-        additional globals: ``match_byte_offset``, ``match_line_number``, and
-        ``match_line_content`` (all ``None`` in filename-target mode).
+        Parses the file once, then calls sandbox.run ONCE with the full
+        ``match_positions`` list (all Phase 1 hits for this file).  The
+        evaluator receives:
+          - ``node`` / ``root``: file root AST node
+          - ``source``: raw file text
+          - ``lang``: language string
+          - ``file_path``: absolute file path
+          - ``match_positions``: list of dicts, one per Phase 1 hit:
+              {line_number, line_content, column, byte_offset,
+               context_before, context_after}
+            Empty list in filename-target mode.
 
-        Called from Phase 2 via ThreadPoolExecutor workers.
+        Evaluator MUST return a dict with shape:
+          ``{"matches": [{"line_number": int, ...}, ...], "value": <any>}``
 
-        Args:
-            file_path: Absolute path to the candidate file.
-            evaluator_code: Python expression evaluated by the sandbox.
-            include_ast_debug: When True, accepted matches carry ast_debug payload.
-            max_debug_nodes: BFS node cap for ast_debug serialisation.
-            match_positions: List of (line_number, line_content) tuples from
-                Phase 1.  When None (filename-target or legacy call), falls
-                back to a single call with root and all match globals set to None.
+        Server enriches each match with server-provided fields:
+          - ``file_path`` (always — evaluator sees one file)
+          - ``language`` (always)
+          - ``line_content`` (derived from source if evaluator omits it)
 
         Returns:
-            Tuple of (matches, errors) where each is a list of dicts.
+            Tuple of (matches, errors, file_meta_or_none) where:
+            - matches: list of enriched match dicts
+            - errors: list of error dicts
+            - file_meta_or_none: {"file_path": ..., "value": ...} or None
         """
         lang = self.ast_engine.detect_language(file_path)
         if lang is None:
@@ -384,107 +417,164 @@ class XRaySearchEngine:
                     "error_type": "UnsupportedLanguage",
                     "error_message": f"No grammar for extension {file_path.suffix!r}",
                 }
-            ]
+            ], None
 
         try:
             source_bytes = file_path.read_bytes()
             source = source_bytes.decode("utf-8", errors="replace")
             root = self.ast_engine.parse(source_bytes, lang)
 
-            # Determine the set of positions to evaluate.
-            # For content search: one entry per Phase 1 regex match.
-            # For filename search (no positions): one call with root, line_number=None.
-            if match_positions:
-                positions_to_eval: List[Tuple[Optional[int], Optional[str]]] = [
-                    (ln, lc) for ln, lc in match_positions
-                ]
-            else:
-                positions_to_eval = [(None, None)]
+            # Normalize match_positions to list of dicts (file-as-unit contract).
+            # In filename-target mode, match_positions is None → empty list.
+            positions: List[Dict[str, Any]] = match_positions if match_positions else []
+
+            # Enrich each position with byte_offset derived from source.
+            # _run_phase1_content stored 0 as a sentinel; re-derive here.
+            for pos in positions:
+                ln = pos.get("line_number", 1) or 1
+                pos["byte_offset"] = _line_to_byte_offset(source, ln)
+
+            # Call evaluator ONCE per file with the full positions list.
+            eval_result = self.sandbox.run(
+                evaluator_code,
+                node=root,
+                root=root,
+                source=source,
+                lang=lang,
+                file_path=str(file_path),
+                match_positions=positions,
+            )
+
+            if eval_result.failure == "evaluator_timeout":
+                return [], [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": "EvaluatorTimeout",
+                        "error_message": "evaluator exceeded 5s sandbox limit",
+                    }
+                ], None
+
+            if eval_result.failure == "evaluator_subprocess_died":
+                return [], [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": "EvaluatorCrash",
+                        "error_message": eval_result.detail or "Subprocess died",
+                    }
+                ], None
+
+            if eval_result.failure == "validation_failed":
+                return [], [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": "ValidationFailed",
+                        "error_message": eval_result.detail or "Evaluator validation failed",
+                    }
+                ], None
+
+            if eval_result.failure is not None:
+                return [], [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": "EvaluatorCrash",
+                        "error_message": eval_result.detail or eval_result.failure,
+                    }
+                ], None
+
+            # Validate dict return contract.
+            raw_value = eval_result.value
+            if not isinstance(raw_value, dict):
+                return [], [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": "InvalidEvaluatorReturn",
+                        "error_message": (
+                            f"Evaluator must return a dict "
+                            f"{{\"matches\": [...], \"value\": ...}}, "
+                            f"got {type(raw_value).__name__!r}. "
+                            f"Note: bool return (legacy contract) is no longer accepted."
+                        ),
+                    }
+                ], None
+
+            if "matches" not in raw_value:
+                return [], [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": "InvalidEvaluatorReturn",
+                        "error_message": (
+                            "Evaluator dict missing required 'matches' key. "
+                            "Return: {\"matches\": [...], \"value\": ...}"
+                        ),
+                    }
+                ], None
+
+            evaluator_matches = raw_value["matches"]
+            per_file_value = raw_value.get("value", None)
+
+            if not isinstance(evaluator_matches, list):
+                return [], [
+                    {
+                        "file_path": str(file_path),
+                        "line_number": 0,
+                        "error_type": "InvalidEvaluatorReturn",
+                        "error_message": (
+                            f"'matches' must be a list, got {type(evaluator_matches).__name__!r}"
+                        ),
+                    }
+                ], None
+
+            # Build source lines once for line_content derivation.
+            source_lines = source.splitlines()
 
             matches: List[Dict[str, Any]] = []
-            errors: List[Dict[str, Any]] = []
+            for em in evaluator_matches:
+                if not isinstance(em, dict):
+                    continue  # Skip malformed entries silently
 
-            for line_number, line_content in positions_to_eval:
-                # node is ALWAYS the file root — evaluators walk DOWN via
-                # descendants_of_type.  Per-match position is exposed as
-                # additional globals instead of narrowing the node.
-                if line_number is not None:
-                    match_byte_offset: Optional[int] = _line_to_byte_offset(
-                        source, line_number
-                    )
-                else:
-                    match_byte_offset = None
+                match_entry: Dict[str, Any] = dict(em)  # copy evaluator fields
 
-                eval_result = self.sandbox.run(
-                    evaluator_code,
-                    node=root,
-                    root=root,
-                    source=source,
-                    lang=lang,
-                    file_path=str(file_path),
-                    match_byte_offset=match_byte_offset,
-                    match_line_number=line_number,
-                    match_line_content=line_content,
-                )
+                # Server always provides file_path and language.
+                match_entry["file_path"] = str(file_path)
+                match_entry["language"] = lang
 
-                err_line = line_number if line_number is not None else 0
+                # Server derives line_content from source if evaluator omits it.
+                ln = match_entry.get("line_number")
+                if "line_content" not in match_entry and ln is not None:
+                    idx = int(ln) - 1  # 1-based → 0-based
+                    if 0 <= idx < len(source_lines):
+                        match_entry["line_content"] = source_lines[idx]
+                    else:
+                        match_entry["line_content"] = ""
 
-                if eval_result.failure is None and eval_result.value is True:
-                    match_entry: Dict[str, Any] = {
-                        "file_path": str(file_path),
-                        "line_number": line_number,
-                        "code_snippet": line_content,
-                        "language": lang,
-                        "evaluator_decision": True,
+                if include_ast_debug:
+                    raw_root = getattr(root, "_node", root)
+                    match_entry["matched_node"] = {
+                        "type": raw_root.type,
+                        "start_byte": raw_root.start_byte,
+                        "end_byte": raw_root.end_byte,
+                        "start_point": list(raw_root.start_point),
+                        "end_point": list(raw_root.end_point),
                     }
-                    if include_ast_debug:
-                        raw_root = getattr(root, "_node", root)
-                        match_entry["matched_node"] = {
-                            "type": raw_root.type,
-                            "start_byte": raw_root.start_byte,
-                            "end_byte": raw_root.end_byte,
-                            "start_point": list(raw_root.start_point),
-                            "end_point": list(raw_root.end_point),
-                        }
-                        match_entry["ast_debug"] = self._serialize_ast(
-                            root, max_debug_nodes
-                        )
-                    matches.append(match_entry)
+                    match_entry["ast_debug"] = self._serialize_ast(root, max_debug_nodes)
 
-                elif eval_result.failure == "evaluator_timeout":
-                    errors.append(
-                        {
-                            "file_path": str(file_path),
-                            "line_number": err_line,
-                            "error_type": "EvaluatorTimeout",
-                            "error_message": "evaluator exceeded 5s sandbox limit",
-                        }
-                    )
+                matches.append(match_entry)
 
-                elif eval_result.failure == "evaluator_subprocess_died":
-                    errors.append(
-                        {
-                            "file_path": str(file_path),
-                            "line_number": err_line,
-                            "error_type": "EvaluatorCrash",
-                            "error_message": eval_result.detail or "Subprocess died",
-                        }
-                    )
+            # Build file_metadata entry (only when value is not None).
+            file_meta: Optional[Dict[str, Any]] = None
+            if per_file_value is not None:
+                file_meta = {
+                    "file_path": str(file_path),
+                    "value": per_file_value,
+                }
 
-                elif eval_result.failure == "evaluator_returned_non_bool":
-                    errors.append(
-                        {
-                            "file_path": str(file_path),
-                            "line_number": err_line,
-                            "error_type": "NonBoolReturn",
-                            "error_message": (
-                                eval_result.detail or "Evaluator did not return bool"
-                            ),
-                        }
-                    )
-                # eval_result.value is False (or falsy non-failure) — not a match.
-
-            return matches, errors
+            return matches, [], file_meta
 
         except Exception as exc:  # noqa: BLE001
             return [], [
@@ -494,7 +584,7 @@ class XRaySearchEngine:
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
                 }
-            ]
+            ], None
 
     @staticmethod
     def _check_zero_match_patterns(
@@ -597,13 +687,19 @@ class XRaySearchEngine:
         search_target: str,
         include_patterns: List[str],
         exclude_patterns: List[str],
+        *,
+        case_sensitive: bool = True,
+        context_lines: int = 0,
+        multiline: bool = False,
+        pcre2: bool = False,
+        path: Optional[str] = None,
     ) -> List[Path]:
         """Phase 1: regex-based candidate file selection.
 
         For ``search_target="content"``, delegates to ``RegexSearchService``
         (ripgrep-backed) for performance and PCRE2 support.  Per-match line
         positions are stored in ``self._last_phase1_positions`` for use by
-        issue #983 without changing the Phase 2 call-sites.
+        Phase 2 without changing the call-sites.
 
         For ``search_target="filename"``, uses the inline path-match walker
         because ``RegexSearchService`` is a content-only service and has no
@@ -615,12 +711,19 @@ class XRaySearchEngine:
             search_target: ``"filename"`` or ``"content"``.
             include_patterns: Glob include filters (empty = include all).
             exclude_patterns: Glob exclude filters (empty = exclude none).
+            case_sensitive: Whether content regex is case-sensitive.
+            context_lines: Lines of context before/after each hit.
+            multiline: Enable multi-line regex.
+            pcre2: Enable PCRE2 engine.
+            path: Optional subdirectory restriction within repo.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
         """
-        # Reset per-call side-channels consumed by issue #983 and fix #3.
-        self._last_phase1_positions: Dict[Path, List[Tuple[int, str]]] = {}
+        # Reset per-call side-channels.
+        # Positions are dicts: {line_number, line_content, column, byte_offset,
+        # context_before, context_after}
+        self._last_phase1_positions: Dict[Path, List[Dict[str, Any]]] = {}
         self._last_phase1_warnings: List[Dict[str, Any]] = []
 
         if search_target == "filename":
@@ -629,7 +732,15 @@ class XRaySearchEngine:
             )
 
         return self._run_phase1_content(
-            repo_path, driver_regex, include_patterns, exclude_patterns
+            repo_path,
+            driver_regex,
+            include_patterns,
+            exclude_patterns,
+            case_sensitive=case_sensitive,
+            context_lines=context_lines,
+            multiline=multiline,
+            pcre2=pcre2,
+            path=path,
         )
 
     def _run_phase1_filename(
@@ -687,6 +798,12 @@ class XRaySearchEngine:
         driver_regex: str,
         include_patterns: List[str],
         exclude_patterns: List[str],
+        *,
+        case_sensitive: bool = True,
+        context_lines: int = 0,
+        multiline: bool = False,
+        pcre2: bool = False,
+        path: Optional[str] = None,
     ) -> List[Path]:
         """Content driver via RegexSearchService (ripgrep-backed, async-bridged).
 
@@ -698,6 +815,11 @@ class XRaySearchEngine:
                 Warnings are emitted for any pattern that matches zero files
                 in the repository, regardless of whether the regex matched.
             exclude_patterns: Glob exclude filters (empty = exclude none).
+            case_sensitive: Whether the regex match is case-sensitive.
+            context_lines: Lines of context before/after each match (0..10).
+            multiline: Enable multi-line regex matching.
+            pcre2: Enable PCRE2 regex engine.
+            path: Optional subdirectory restriction relative to repo root.
 
         Returns:
             Ordered, deduplicated list of matching Path objects.
@@ -706,13 +828,20 @@ class XRaySearchEngine:
         search_result = _run_async_in_sync(
             service.search(
                 pattern=driver_regex,
+                path=path,
                 include_patterns=include_patterns or None,
                 exclude_patterns=exclude_patterns or None,
+                case_sensitive=case_sensitive,
+                context_lines=context_lines,
                 max_results=100_000,
+                multiline=multiline,
+                pcre2=pcre2,
             )
         )
 
         # Build deduplicated candidate list and populate positions side-channel.
+        # Positions are dicts with line_number, line_content, column, byte_offset,
+        # context_before, context_after — exposed to evaluators as match_positions.
         seen: Dict[Path, bool] = {}
         candidates: List[Path] = []
         for m in search_result.matches:
@@ -722,7 +851,20 @@ class XRaySearchEngine:
                 candidates.append(abs_path)
                 self._last_phase1_positions[abs_path] = []
             self._last_phase1_positions[abs_path].append(
-                (m.line_number, m.line_content)
+                {
+                    "line_number": m.line_number,
+                    "line_content": m.line_content,
+                    "column": getattr(m, "column", 0) or 0,
+                    "byte_offset": _line_to_byte_offset(
+                        # Defer actual source read to Phase 2; use line_number
+                        # to produce a sentinel byte offset for now. The evaluator
+                        # receives the real source in its globals. Store 0 here;
+                        # the engine will re-derive from source in _evaluate_file.
+                        "", m.line_number
+                    ),
+                    "context_before": getattr(m, "context_before", []) or [],
+                    "context_after": getattr(m, "context_after", []) or [],
+                }
             )
 
         # Probe each include_pattern to detect zero-match patterns.

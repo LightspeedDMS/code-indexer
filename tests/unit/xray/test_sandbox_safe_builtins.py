@@ -165,7 +165,10 @@ def test_safe_builtin_available_and_returns_expected(
 
 
 def test_safe_builtin_names_set_matches_spec() -> None:
-    """Verify SAFE_BUILTIN_NAMES contains exactly the 18 specified builtins (hasattr added in M1)."""
+    """Verify SAFE_BUILTIN_NAMES contains exactly the 27 specified builtins.
+
+    v10.4.0 added 9 exception types needed for try/except blocks (Group D).
+    """
     expected = frozenset(
         {
             "len",
@@ -186,6 +189,16 @@ def test_safe_builtin_names_set_matches_spec() -> None:
             "sorted",
             "reversed",
             "hasattr",  # moved from STRIPPED_BUILTINS in M1 Codex review finding
+            # Exception types added in v10.4.0 for try/except support (Group D)
+            "Exception",
+            "ValueError",
+            "TypeError",
+            "RuntimeError",
+            "AttributeError",
+            "KeyError",
+            "IndexError",
+            "NameError",
+            "StopIteration",
         }
     )
     assert SAFE_BUILTIN_NAMES == expected, (
@@ -239,8 +252,12 @@ def test_hasattr_works_in_evaluator() -> None:
     )
 
 
-def test_safe_builtin_names_set_has_18_entries() -> None:
-    """After M1, SAFE_BUILTIN_NAMES must contain exactly 18 builtins (17 + hasattr)."""
+def test_safe_builtin_names_set_has_27_entries() -> None:
+    """After v10.4.0, SAFE_BUILTIN_NAMES must contain exactly 27 builtins.
+
+    18 original entries (17 + hasattr from M1) plus 9 exception types added
+    in v10.4.0 for try/except block support (Group D).
+    """
     expected = frozenset(
         {
             "len",
@@ -261,10 +278,20 @@ def test_safe_builtin_names_set_has_18_entries() -> None:
             "sorted",
             "reversed",
             "hasattr",
+            # Exception types added in v10.4.0 for try/except support (Group D)
+            "Exception",
+            "ValueError",
+            "TypeError",
+            "RuntimeError",
+            "AttributeError",
+            "KeyError",
+            "IndexError",
+            "NameError",
+            "StopIteration",
         }
     )
     assert SAFE_BUILTIN_NAMES == expected, (
-        f"SAFE_BUILTIN_NAMES mismatch after M1. "
+        f"SAFE_BUILTIN_NAMES mismatch after v10.4.0. "
         f"Extra: {SAFE_BUILTIN_NAMES - expected}, "
         f"Missing: {expected - SAFE_BUILTIN_NAMES}"
     )

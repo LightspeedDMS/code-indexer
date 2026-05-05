@@ -53,13 +53,14 @@ class TestEvaluateFileHelper:
         )
 
     def test_evaluate_file_returns_tuple_of_two_lists(self, search_engine, tmp_path):
-        """_evaluate_file returns (matches_list, errors_list) for a simple file."""
+        """_evaluate_file returns (matches_list, errors_list, file_meta) for a simple file."""
         fpath = tmp_path / "simple.py"
         fpath.write_text("x = 1\n")
 
-        matches, errors = search_engine._evaluate_file(
+        # v10.4.0: evaluator must return dict {"matches": [...], "value": ...}
+        matches, errors, _ = search_engine._evaluate_file(
             fpath,
-            "return True",
+            'return {"matches": [], "value": None}',
             include_ast_debug=False,
             max_debug_nodes=50,
         )
@@ -69,13 +70,15 @@ class TestEvaluateFileHelper:
     def test_evaluate_file_truthy_evaluator_produces_match(
         self, search_engine, tmp_path
     ):
-        """_evaluate_file with return True yields one match entry."""
+        """_evaluate_file with a match-producing evaluator yields one match entry."""
         fpath = tmp_path / "simple.py"
         fpath.write_text("x = 1\n")
 
-        matches, errors = search_engine._evaluate_file(
+        # v10.4.0: evaluator must return dict with "matches" list.
+        # Include evaluator_decision in each match dict for downstream assertions.
+        matches, errors, _ = search_engine._evaluate_file(
             fpath,
-            "return True",
+            'return {"matches": [{"line_number": 1, "evaluator_decision": True}], "value": True}',
             include_ast_debug=False,
             max_debug_nodes=50,
         )
@@ -89,13 +92,14 @@ class TestEvaluateFileHelper:
     def test_evaluate_file_falsy_evaluator_produces_no_match(
         self, search_engine, tmp_path
     ):
-        """_evaluate_file with return False yields no matches."""
+        """_evaluate_file with an empty matches list yields no matches."""
         fpath = tmp_path / "simple.py"
         fpath.write_text("x = 1\n")
 
-        matches, errors = search_engine._evaluate_file(
+        # v10.4.0: evaluator must return dict; empty matches list = no match.
+        matches, errors, _ = search_engine._evaluate_file(
             fpath,
-            "return False",
+            'return {"matches": [], "value": False}',
             include_ast_debug=False,
             max_debug_nodes=50,
         )
@@ -109,9 +113,9 @@ class TestEvaluateFileHelper:
         fpath = tmp_path / "unknown.xyz"
         fpath.write_text("target_pattern here\n")
 
-        matches, errors = search_engine._evaluate_file(
+        matches, errors, _ = search_engine._evaluate_file(
             fpath,
-            "return True",
+            'return {"matches": [], "value": None}',
             include_ast_debug=False,
             max_debug_nodes=50,
         )
@@ -572,7 +576,7 @@ class TestEvaluatorTimeoutMessage:
 
         # Use a sandbox-valid busy loop that will hit the 5s sandbox timeout.
         # sum(range(500000000)) runs for well over 5s, triggering evaluator_timeout.
-        _, errors = search_engine._evaluate_file(
+        _, errors, _meta = search_engine._evaluate_file(
             fpath,
             "sum(range(500000000)); return True",
             include_ast_debug=False,

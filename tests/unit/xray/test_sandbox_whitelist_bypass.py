@@ -115,26 +115,45 @@ class TestWhitelistBypassAttempts:
 
     # --- Try / ExceptHandler ---
 
-    def test_try_except_rejected(self):
-        code = "try:\n    x = 1\nexcept Exception:\n    x = 2"
-        # Python 3.9 uses ast.Try; newer may emit TryStar
+    def test_try_except_now_accepted_v10_4_0(self):
+        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        code = (
+            "try:\n"
+            "    return {'matches': [], 'value': None}\n"
+            "except Exception:\n"
+            "    return {'matches': [], 'value': None}"
+        )
         sb = PythonEvaluatorSandbox()
         result = sb.validate(code)
-        assert result.ok is False
-        assert "Try" in result.reason or "ExceptHandler" in result.reason
-        _assert_no_subprocess_spawned(code)
+        assert result.ok is True
 
     # --- For loop ---
 
-    def test_for_loop_rejected(self):
-        _assert_rejected("for x in range(10): pass", "For")
-        _assert_no_subprocess_spawned("for x in range(10): pass")
+    def test_for_loop_now_accepted_v10_4_0(self):
+        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        code = (
+            "result = []\n"
+            "for c in node.named_children:\n"
+            "    result.append(c)\n"
+            "return {'matches': [], 'value': result}"
+        )
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate(code)
+        assert result.ok is True
 
     # --- While loop ---
 
-    def test_while_loop_rejected(self):
-        _assert_rejected("while True: pass", "While")
-        _assert_no_subprocess_spawned("while True: pass")
+    def test_while_loop_now_accepted_v10_4_0(self):
+        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        code = (
+            "i = 0\n"
+            "while i < 1:\n"
+            "    i = i + 1\n"
+            "return {'matches': [], 'value': i}"
+        )
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate(code)
+        assert result.ok is True
 
     # --- With ---
 
@@ -251,10 +270,12 @@ class TestWhitelistBypassAttempts:
 
     # --- Raise ---
 
-    def test_raise_rejected(self):
-        code = "raise ValueError()"
-        _assert_rejected(code, "Raise")
-        _assert_no_subprocess_spawned(code)
+    def test_raise_now_accepted_v10_4_0(self):
+        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        code = "raise ValueError('test')"
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate(code)
+        assert result.ok is True
 
     # --- Assert ---
 
@@ -335,10 +356,16 @@ class TestWhitelistBypassAttempts:
 
     # --- If statement ---
 
-    def test_if_statement_rejected(self):
-        code = "if x: pass"
-        _assert_rejected(code, "If")
-        _assert_no_subprocess_spawned(code)
+    def test_if_statement_now_accepted_v10_4_0(self):
+        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        code = (
+            "if node.type == 'module':\n"
+            "    return {'matches': [], 'value': True}\n"
+            "return {'matches': [], 'value': False}"
+        )
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate(code)
+        assert result.ok is True
 
     # --- IfExp (ternary) ---
 
@@ -355,27 +382,37 @@ class TestWhitelistBypassAttempts:
 
     # --- Pass ---
 
-    def test_pass_rejected(self):
-        code = "pass"
-        _assert_rejected(code, "Pass")
-        _assert_no_subprocess_spawned(code)
+    def test_pass_now_accepted_v10_4_0(self):
+        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        code = (
+            "if True:\n"
+            "    pass\n"
+            "return {'matches': [], 'value': None}"
+        )
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate(code)
+        assert result.ok is True
 
     # --- Break and Continue ---
 
-    def test_break_rejected(self):
-        # break outside loop is a SyntaxError or ast.Break node rejection
-        code = "break"
+    def test_break_now_accepted_v10_4_0(self):
+        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        code = (
+            "for c in node.named_children:\n"
+            "    break\n"
+            "return {'matches': [], 'value': None}"
+        )
         sb = PythonEvaluatorSandbox()
         result = sb.validate(code)
-        assert result.ok is False
-        assert result.reason is not None
-        _assert_no_subprocess_spawned(code)
+        assert result.ok is True
 
-    def test_continue_rejected(self):
-        # continue outside loop is a SyntaxError or ast.Continue node rejection
-        code = "continue"
+    def test_continue_now_accepted_v10_4_0(self):
+        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        code = (
+            "for c in node.named_children:\n"
+            "    continue\n"
+            "return {'matches': [], 'value': None}"
+        )
         sb = PythonEvaluatorSandbox()
         result = sb.validate(code)
-        assert result.ok is False
-        assert result.reason is not None
-        _assert_no_subprocess_spawned(code)
+        assert result.ok is True

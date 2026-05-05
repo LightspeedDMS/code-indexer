@@ -169,18 +169,19 @@ def _run_evaluator_sends_dict(
     conn: Any,
     *args: Any,
 ) -> None:
-    """Replacement for _run_evaluator that sends a dict instead of a bool."""
+    """Replacement for _run_evaluator that sends a dict (new file-as-unit contract)."""
     try:
-        conn.send({"unexpected": "payload"})
+        conn.send({"matches": [], "value": None})
     finally:
         conn.close()
 
 
-def test_pipe_corruption_non_bool_returns_evaluator_returned_non_bool() -> None:
-    """Subprocess sends non-bool payload -> evaluator_returned_non_bool failure.
+def test_pipe_sends_dict_returns_value_v10_4_0() -> None:
+    """v10.4.0 contract: subprocess dict payload is accepted as success value.
 
-    Monkey-patches _run_evaluator at the sandbox module level to send a dict
-    instead of a bool. The parent must map this to the correct failure mode.
+    In v10.4.0 the file-as-unit contract expects dicts from evaluators.
+    sandbox.run() accepts any pipe value and returns EvalResult(value=raw).
+    The evaluator_returned_non_bool failure mode is no longer emitted.
     """
     sb = PythonEvaluatorSandbox()
     node, root = _make_node_root()
@@ -190,7 +191,7 @@ def test_pipe_corruption_non_bool_returns_evaluator_returned_non_bool() -> None:
         side_effect=_run_evaluator_sends_dict,
     ):
         result = sb.run(
-            "return True",
+            "return {'matches': [], 'value': None}",
             node=node,
             root=root,
             source="x = 1",
@@ -198,10 +199,12 @@ def test_pipe_corruption_non_bool_returns_evaluator_returned_non_bool() -> None:
             file_path="/src/main.py",
         )
 
-    assert result.failure == "evaluator_returned_non_bool", (
-        f"Expected evaluator_returned_non_bool, got {result.failure!r}"
+    assert result.failure is None, (
+        f"Expected success (failure=None) for dict payload, got {result.failure!r}"
     )
-    assert result.detail == "dict", f"Expected detail='dict', got {result.detail!r}"
+    assert isinstance(result.value, dict), (
+        f"Expected dict value, got {result.value!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

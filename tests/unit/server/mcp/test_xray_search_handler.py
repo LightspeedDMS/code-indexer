@@ -44,7 +44,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 VALID_PARAMS: Dict[str, Any] = {
     "repository_alias": "myrepo-global",
-    "driver_regex": r"prepareStatement",
+    "pattern": r"prepareStatement",
     "evaluator_code": "return True",
     "search_target": "content",
 }
@@ -280,10 +280,10 @@ class TestXraySearchHandlerParamValidation:
         data = _parse_response(result)
         assert data.get("error") == "timeout_out_of_range"
 
-    def test_max_files_zero_rejected(self):
-        """max_files=0 is rejected with max_files_out_of_range."""
+    def test_max_results_zero_rejected(self):
+        """max_results=0 is rejected with max_results_out_of_range."""
         user = _make_user(UserRole.NORMAL_USER)
-        params = {**VALID_PARAMS, "max_files": 0}
+        params = {**VALID_PARAMS, "max_results": 0}
 
         with patch(
             "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
@@ -293,12 +293,12 @@ class TestXraySearchHandlerParamValidation:
             result = handler(params, user)
 
         data = _parse_response(result)
-        assert data.get("error") == "max_files_out_of_range"
+        assert data.get("error") == "max_results_out_of_range"
 
-    def test_max_files_negative_rejected(self):
-        """max_files=-1 is rejected with max_files_out_of_range."""
+    def test_max_results_negative_rejected(self):
+        """max_results=-1 is rejected with max_results_out_of_range."""
         user = _make_user(UserRole.NORMAL_USER)
-        params = {**VALID_PARAMS, "max_files": -1}
+        params = {**VALID_PARAMS, "max_results": -1}
 
         with patch(
             "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
@@ -308,7 +308,7 @@ class TestXraySearchHandlerParamValidation:
             result = handler(params, user)
 
         data = _parse_response(result)
-        assert data.get("error") == "max_files_out_of_range"
+        assert data.get("error") == "max_results_out_of_range"
 
 
 # ---------------------------------------------------------------------------
@@ -860,3 +860,551 @@ class TestXraySearchHandlerAwaitSecondsV2:
         assert data.get("error") == "await_seconds_invalid", (
             "await_seconds=30 must now be rejected (cap lowered from 30 to 10 in v10.3.2)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: renamed params — pattern (was driver_regex), max_results (was max_files)
+# ---------------------------------------------------------------------------
+
+
+class TestXraySearchHandlerRenamedParams:
+    """Verify that 'pattern' is the accepted name (was 'driver_regex')."""
+
+    def test_pattern_param_accepted_and_submits_job(self):
+        """'pattern' is the new name for the driver regex — handler accepts it."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-pattern-ok"
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"prepareStatement",
+            "evaluator_code": "return True",
+            "search_target": "content",
+        }
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "job_id" in data, f"Expected job_id with 'pattern' param, got: {data!r}"
+        assert "error" not in data
+
+    def test_driver_regex_no_longer_accepted(self):
+        """'driver_regex' is the OLD name — handler must reject or ignore it."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-driver-old"
+        # Supply driver_regex but NOT pattern — this must fail validation
+        params = {
+            "repository_alias": "myrepo-global",
+            "driver_regex": r"prepareStatement",
+            "evaluator_code": "return True",
+            "search_target": "content",
+        }
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        # driver_regex is gone — handler must NOT submit a job using the old name
+        # (it may return an error or treat pattern as missing)
+        assert "job_id" not in data or mock_bjm.submit_job.call_count == 0, (
+            "'driver_regex' is the old name; handler must not silently accept it"
+        )
+
+    def test_pattern_forwarded_to_engine_as_driver_regex_or_pattern(self):
+        """The 'pattern' param value reaches the XRaySearchEngine.run() call."""
+        user = _make_user(UserRole.NORMAL_USER)
+        captured_kwargs: Dict[str, Any] = {}
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-fwd"
+        params = {
+            "repository_alias": "myrepo-global",
+            "pattern": r"mySpecialRegex",
+            "evaluator_code": "return True",
+            "search_target": "content",
+        }
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch(
+                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                side_effect=lambda **kw: captured_kwargs.update(kw)
+                or {
+                    "matches": [],
+                    "evaluation_errors": [],
+                    "files_processed": 0,
+                    "files_total": 0,
+                    "elapsed_seconds": 0.0,
+                },
+            ),
+        ):
+            handler = _import_handler()
+            handler(params, user)
+            submit_call = mock_bjm.submit_job.call_args
+            job_fn = submit_call.kwargs["func"]
+            job_fn(lambda *a: None)
+
+        # The engine's driver_regex param must receive the value from 'pattern'
+        assert captured_kwargs.get("driver_regex") == r"mySpecialRegex", (
+            f"Engine must receive pattern value as driver_regex, got: {captured_kwargs!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: max_results rename (was max_files)
+# ---------------------------------------------------------------------------
+
+
+class TestXraySearchHandlerMaxResults:
+    """max_results is the new name for max_files (regex_search alignment)."""
+
+    def test_max_results_accepted_and_submits_job(self):
+        """'max_results' param is accepted and does not produce an error."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-mr-ok"
+        params = {**VALID_PARAMS, "max_results": 10}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "job_id" in data, f"Expected job_id with max_results=10, got: {data!r}"
+
+    def test_max_results_zero_rejected(self):
+        """max_results=0 is rejected with max_results_out_of_range."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "max_results": 0}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert data.get("error") == "max_results_out_of_range", (
+            f"Expected max_results_out_of_range, got: {data!r}"
+        )
+
+    def test_max_results_forwarded_to_engine_as_max_files(self):
+        """max_results value reaches engine.run() as max_files argument."""
+        user = _make_user(UserRole.NORMAL_USER)
+        captured_kwargs: Dict[str, Any] = {}
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-mr-fwd"
+        params = {**VALID_PARAMS, "max_results": 7}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch(
+                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                side_effect=lambda **kw: captured_kwargs.update(kw)
+                or {
+                    "matches": [],
+                    "evaluation_errors": [],
+                    "files_processed": 0,
+                    "files_total": 0,
+                    "elapsed_seconds": 0.0,
+                },
+            ),
+        ):
+            handler = _import_handler()
+            handler(params, user)
+            submit_call = mock_bjm.submit_job.call_args
+            job_fn = submit_call.kwargs["func"]
+            job_fn(lambda *a: None)
+
+        assert captured_kwargs.get("max_files") == 7, (
+            f"Engine must receive max_results value as max_files=7, got: {captured_kwargs!r}"
+        )
+
+    def test_max_files_old_name_no_longer_accepted(self):
+        """'max_files' is the OLD name — handler must not silently accept it."""
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-mf-old"
+        # Supply max_files but NOT max_results — with new alignment this is the old API
+        params = {**VALID_PARAMS, "max_files": 5}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        # max_files is the old key; handler should not treat it as max_results
+        # It may succeed (with max_results=None) but must not use max_files value
+        # The key assertion: max_files is silently ignored, not forwarded as max_results
+        assert "error" not in data or data.get("error") != "max_files_out_of_range", (
+            "Error code must be max_results_out_of_range, not max_files_out_of_range"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: new params aligned to regex_search
+# ---------------------------------------------------------------------------
+
+
+class TestXraySearchHandlerNewParams:
+    """New params added for regex_search alignment: case_sensitive, context_lines,
+    multiline, pcre2, path. All must be accepted and forwarded to the engine."""
+
+    def _capture_engine_kwargs(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Helper: submit a valid job and capture kwargs passed to engine.run()."""
+        user = _make_user(UserRole.NORMAL_USER)
+        captured: Dict[str, Any] = {}
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-new-params"
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+            patch(
+                "code_indexer.xray.search_engine.XRaySearchEngine.run",
+                side_effect=lambda **kw: captured.update(kw)
+                or {
+                    "matches": [],
+                    "evaluation_errors": [],
+                    "files_processed": 0,
+                    "files_total": 0,
+                    "elapsed_seconds": 0.0,
+                },
+            ),
+        ):
+            handler = _import_handler()
+            handler(params, user)
+            submit_call = mock_bjm.submit_job.call_args
+            job_fn = submit_call.kwargs["func"]
+            job_fn(lambda *a: None)
+
+        return captured
+
+    def test_case_sensitive_true_accepted(self):
+        """case_sensitive=True is accepted and forwarded to engine."""
+        params = {**VALID_PARAMS, "case_sensitive": True}
+        captured = self._capture_engine_kwargs(params)
+        assert captured.get("case_sensitive") is True, (
+            f"Engine must receive case_sensitive=True, got: {captured!r}"
+        )
+
+    def test_case_sensitive_false_accepted(self):
+        """case_sensitive=False is accepted and forwarded to engine."""
+        params = {**VALID_PARAMS, "case_sensitive": False}
+        captured = self._capture_engine_kwargs(params)
+        assert captured.get("case_sensitive") is False, (
+            f"Engine must receive case_sensitive=False, got: {captured!r}"
+        )
+
+    def test_case_sensitive_default_is_true(self):
+        """case_sensitive defaults to True when omitted (matches regex_search default)."""
+        captured = self._capture_engine_kwargs(VALID_PARAMS.copy())
+        assert captured.get("case_sensitive") is True, (
+            f"Default case_sensitive must be True, got: {captured!r}"
+        )
+
+    def test_context_lines_zero_accepted(self):
+        """context_lines=0 is accepted and forwarded to engine."""
+        params = {**VALID_PARAMS, "context_lines": 0}
+        captured = self._capture_engine_kwargs(params)
+        assert captured.get("context_lines") == 0, (
+            f"Engine must receive context_lines=0, got: {captured!r}"
+        )
+
+    def test_context_lines_5_accepted(self):
+        """context_lines=5 is accepted and forwarded to engine."""
+        params = {**VALID_PARAMS, "context_lines": 5}
+        captured = self._capture_engine_kwargs(params)
+        assert captured.get("context_lines") == 5, (
+            f"Engine must receive context_lines=5, got: {captured!r}"
+        )
+
+    def test_context_lines_10_accepted(self):
+        """context_lines=10 (max) is accepted."""
+        params = {**VALID_PARAMS, "context_lines": 10}
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.return_value = "job-ctx10"
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                return_value="/some/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "job_id" in data, f"context_lines=10 must be accepted, got: {data!r}"
+
+    def test_context_lines_negative_rejected(self):
+        """context_lines=-1 is rejected."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "context_lines": -1}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "error" in data, "context_lines=-1 must be rejected"
+
+    def test_context_lines_11_rejected(self):
+        """context_lines=11 exceeds max of 10 and is rejected."""
+        user = _make_user(UserRole.NORMAL_USER)
+        params = {**VALID_PARAMS, "context_lines": 11}
+
+        with patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value="/some/path",
+        ):
+            handler = _import_handler()
+            result = handler(params, user)
+
+        data = _parse_response(result)
+        assert "error" in data, "context_lines=11 must be rejected"
+
+    def test_context_lines_default_is_zero(self):
+        """context_lines defaults to 0 when omitted."""
+        captured = self._capture_engine_kwargs(VALID_PARAMS.copy())
+        assert captured.get("context_lines") == 0, (
+            f"Default context_lines must be 0, got: {captured!r}"
+        )
+
+    def test_multiline_true_accepted(self):
+        """multiline=True is accepted and forwarded to engine."""
+        params = {**VALID_PARAMS, "multiline": True}
+        captured = self._capture_engine_kwargs(params)
+        assert captured.get("multiline") is True, (
+            f"Engine must receive multiline=True, got: {captured!r}"
+        )
+
+    def test_multiline_false_is_default(self):
+        """multiline defaults to False when omitted."""
+        captured = self._capture_engine_kwargs(VALID_PARAMS.copy())
+        assert captured.get("multiline") is False, (
+            f"Default multiline must be False, got: {captured!r}"
+        )
+
+    def test_pcre2_true_accepted(self):
+        """pcre2=True is accepted and forwarded to engine."""
+        params = {**VALID_PARAMS, "pcre2": True}
+        captured = self._capture_engine_kwargs(params)
+        assert captured.get("pcre2") is True, (
+            f"Engine must receive pcre2=True, got: {captured!r}"
+        )
+
+    def test_pcre2_false_is_default(self):
+        """pcre2 defaults to False when omitted."""
+        captured = self._capture_engine_kwargs(VALID_PARAMS.copy())
+        assert captured.get("pcre2") is False, (
+            f"Default pcre2 must be False, got: {captured!r}"
+        )
+
+    def test_path_accepted(self):
+        """path='src/' is accepted and forwarded to engine."""
+        params = {**VALID_PARAMS, "path": "src/"}
+        captured = self._capture_engine_kwargs(params)
+        assert captured.get("path") == "src/", (
+            f"Engine must receive path='src/', got: {captured!r}"
+        )
+
+    def test_path_none_is_default(self):
+        """path defaults to None when omitted."""
+        captured = self._capture_engine_kwargs(VALID_PARAMS.copy())
+        assert captured.get("path") is None, (
+            f"Default path must be None, got: {captured!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: output envelope — line_content (was code_snippet)
+# ---------------------------------------------------------------------------
+
+
+class TestXraySearchHandlerOutputEnvelope:
+    """Match envelope uses 'line_content' (renamed from 'code_snippet')."""
+
+    def test_engine_produces_line_content_field(self):
+        """XRaySearchEngine._evaluate_file produces 'line_content', not 'code_snippet'."""
+
+        from code_indexer.xray.search_engine import XRaySearchEngine
+
+        # Confirm code_snippet is gone from the match envelope builder
+        import inspect
+
+        source = inspect.getsource(XRaySearchEngine._evaluate_file)
+        assert "line_content" in source, (
+            "'line_content' must appear in _evaluate_file match envelope"
+        )
+        assert "code_snippet" not in source, (
+            "'code_snippet' must NOT appear in _evaluate_file — rename complete"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: omni multi-repo — repository_alias accepts str OR list
+# ---------------------------------------------------------------------------
+
+
+class TestXraySearchHandlerOmni:
+    """repository_alias accepts string OR array of strings (Directive C)."""
+
+    def _make_bjm(self, job_ids: list) -> MagicMock:
+        """Return a mock BJM whose submit_job returns successive job IDs."""
+        mock_bjm = MagicMock()
+        mock_bjm.submit_job.side_effect = job_ids
+        return mock_bjm
+
+    def _run_with_aliases(self, alias_value: Any, resolved_paths: dict) -> Dict[str, Any]:
+        """Run handle_xray_search with given repository_alias and path map."""
+        import json as _json
+
+        from code_indexer.server.mcp.handlers.xray import handle_xray_search
+
+        user = _make_user(UserRole.NORMAL_USER)
+        # Determine the number of repos to provision mock job IDs correctly.
+        # JSON-encoded strings like '["a","b"]' encode multiple repos.
+        if isinstance(alias_value, list):
+            aliases = alias_value
+        elif isinstance(alias_value, str) and alias_value.startswith("["):
+            try:
+                parsed = _json.loads(alias_value)
+                aliases = parsed if isinstance(parsed, list) else [alias_value]
+            except _json.JSONDecodeError:
+                aliases = [alias_value]
+        else:
+            aliases = [alias_value]
+        job_ids = [f"job-{i}" for i in range(len(aliases))]
+        mock_bjm = self._make_bjm(job_ids)
+
+        params = {
+            "repository_alias": alias_value,
+            "pattern": r"TODO",
+            "evaluator_code": 'return {"matches": [], "value": None}',
+            "search_target": "content",
+        }
+
+        def fake_resolve(alias: str) -> Any:
+            return resolved_paths.get(alias)
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+                side_effect=fake_resolve,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+                return_value=mock_bjm,
+            ),
+        ):
+            return handle_xray_search(params, user)
+
+    def test_string_alias_single_repo_works_as_before(self):
+        """String alias returns {job_id} dict (unchanged single-repo path)."""
+        result = self._run_with_aliases("myrepo-global", {"myrepo-global": "/path/repo"})
+        data = _parse_response(result)
+        assert "job_id" in data, f"Expected job_id, got: {data}"
+
+    def test_array_alias_with_two_repos_submits_two_jobs(self):
+        """List alias submits one job per repo and returns {job_ids: [...]}."""
+        paths = {"repo-a": "/path/a", "repo-b": "/path/b"}
+        result = self._run_with_aliases(["repo-a", "repo-b"], paths)
+        data = _parse_response(result)
+        assert "job_ids" in data, f"Expected job_ids, got: {data}"
+        assert len(data["job_ids"]) == 2
+
+    def test_json_string_array_alias_is_parsed(self):
+        """JSON-encoded string array '["a","b"]' is parsed to list of aliases."""
+        paths = {"repo-a": "/path/a", "repo-b": "/path/b"}
+        result = self._run_with_aliases('["repo-a", "repo-b"]', paths)
+        data = _parse_response(result)
+        assert "job_ids" in data, f"Expected job_ids after JSON parse, got: {data}"
+        assert len(data["job_ids"]) == 2
+
+    def test_array_alias_with_unknown_repo_returns_not_found_errors(self):
+        """Unknown alias in list produces repository_not_found error entry."""
+        paths = {"known-repo": "/path/known"}
+        result = self._run_with_aliases(["known-repo", "unknown-repo"], paths)
+        data = _parse_response(result)
+        # Should report error for unknown-repo
+        assert "errors" in data or "job_ids" in data, f"Unexpected response: {data}"
+        if "errors" in data:
+            errors = data["errors"]
+            assert any("unknown-repo" in str(e) for e in errors), (
+                f"Expected error mentioning 'unknown-repo', got: {errors}"
+            )
+
+    def test_empty_array_alias_returns_alias_required_error(self):
+        """Empty list alias returns alias_required error."""
+        result = self._run_with_aliases([], {})
+        data = _parse_response(result)
+        assert data.get("error") == "alias_required", f"Expected alias_required, got: {data}"

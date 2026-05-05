@@ -29,26 +29,6 @@ def _make_root(source: str = "x = 1", language: str = "python"):
 class TestValidationErrorMessages:
     """Validation error messages include the forbidden node, allowed list, and hints."""
 
-    # --- A1: For loop rejection includes 'comprehension' workaround hint ---
-
-    def test_for_loop_rejection_mentions_comprehension(self):
-        sb = PythonEvaluatorSandbox()
-        result = sb.validate("for x in items: pass")
-        assert result.ok is False
-        assert "For" in result.reason
-        assert "comprehension" in result.reason.lower()
-
-    # --- A2: While loop rejection includes a workaround hint ---
-
-    def test_while_loop_rejection_has_workaround_hint(self):
-        sb = PythonEvaluatorSandbox()
-        result = sb.validate("while True: pass")
-        assert result.ok is False
-        assert "While" in result.reason
-        # Hint should mention comprehension or count_descendants_of_type
-        lower = result.reason.lower()
-        assert "comprehension" in lower or "count_descendants_of_type" in lower
-
     # --- A3: Lambda rejection mentions inlining ---
 
     def test_lambda_rejection_mentions_inlining(self):
@@ -128,14 +108,6 @@ class TestValidationErrorMessages:
         assert "Call" in reason
         assert "Compare" in reason
         assert "ListComp" in reason
-
-    def test_for_loop_rejection_includes_allowed_node_names(self):
-        sb = PythonEvaluatorSandbox()
-        result = sb.validate("for x in items: pass")
-        assert result.ok is False
-        reason = result.reason
-        assert "Call" in reason
-        assert "Name" in reason
 
     # --- A9: Pointer to docs is present ---
 
