@@ -401,6 +401,9 @@ class XRaySearchEngine:
         include_ast_debug: bool,
         max_debug_nodes: int,
         match_positions: Optional[List[Dict[str, Any]]] = None,
+        lang: Optional[str] = None,
+        source: Optional[str] = None,
+        context_lines: int = 0,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Evaluate a candidate file ONCE with the file-as-unit contract (v10.4.0).
 
@@ -419,10 +422,25 @@ class XRaySearchEngine:
         Evaluator MUST return a dict with shape:
           ``{"matches": [{"line_number": int, ...}, ...], "value": <any>}``
 
+        Optional evaluator extensions (ignored if absent):
+          - ``"skip": True`` — signals the evaluator wants this file skipped
+            entirely; returns ([], [], None) immediately.
+          - ``"file_role": str`` — per-file tag surfaced in file_metadata.
+
         Server enriches each match with server-provided fields:
           - ``file_path`` (always — evaluator sees one file)
           - ``language`` (always)
           - ``line_content`` (derived from source if evaluator omits it)
+
+        Args:
+            lang: Language string override.  When provided, bypasses
+                ``ast_engine.detect_language``; used by unit tests and callers
+                that already know the language.
+            source: Source text override.  When provided, bypasses file I/O;
+                the file is still used for ``file_path`` in results.
+            context_lines: Reserved for future context expansion; accepted but
+                not used at this layer (context is already embedded in
+                ``match_positions`` by Phase 1).
 
         Returns:
             Tuple of (matches, errors, file_meta_or_none) where:
@@ -430,7 +448,9 @@ class XRaySearchEngine:
             - errors: list of error dicts
             - file_meta_or_none: {"file_path": ..., "value": ...} or None
         """
-        lang = self.ast_engine.detect_language(file_path)
+        # Allow callers to supply lang/source directly (e.g. unit tests).
+        if lang is None:
+            lang = self.ast_engine.detect_language(file_path)
         if lang is None:
             return (
                 [],
@@ -446,8 +466,11 @@ class XRaySearchEngine:
             )
 
         try:
-            source_bytes = file_path.read_bytes()
-            source = source_bytes.decode("utf-8", errors="replace")
+            if source is None:
+                source_bytes = file_path.read_bytes()
+                source = source_bytes.decode("utf-8", errors="replace")
+            else:
+                source_bytes = source.encode("utf-8")
             root = self.ast_engine.parse(source_bytes, lang)
 
             # Normalize match_positions to list of dicts (file-as-unit contract).
@@ -459,6 +482,14 @@ class XRaySearchEngine:
             for pos in positions:
                 ln = pos.get("line_number", 1) or 1
                 pos["byte_offset"] = _line_to_byte_offset(source, ln)
+
+            # Enrich each position with ast_node (smallest named AST node at byte_offset).
+            for pos in positions:
+                byte_off = pos.get("byte_offset")
+                if byte_off is not None:
+                    pos["ast_node"] = root.node_at_byte_offset(byte_off)
+                else:
+                    pos["ast_node"] = None
 
             # Call evaluator ONCE per file with the full positions list.
             eval_result = self.sandbox.run(
@@ -548,6 +579,10 @@ class XRaySearchEngine:
                     ],
                     None,
                 )
+
+            # Early bail-out: evaluator signals "skip this file".
+            if raw_value.get("skip") is True:
+                return ([], [], None)
 
             if "matches" not in raw_value:
                 return (
@@ -661,13 +696,15 @@ class XRaySearchEngine:
 
                 matches.append(match_entry)
 
-            # Build file_metadata entry (only when value is not None).
+            # Build file_metadata entry (value and/or file_role, when present).
+            per_file_role = raw_value.get("file_role", None)
             file_meta: Optional[Dict[str, Any]] = None
-            if per_file_value is not None:
-                file_meta = {
-                    "file_path": str(file_path),
-                    "value": per_file_value,
-                }
+            if per_file_value is not None or per_file_role is not None:
+                file_meta = {"file_path": str(file_path)}
+                if per_file_value is not None:
+                    file_meta["value"] = per_file_value
+                if per_file_role is not None:
+                    file_meta["file_role"] = per_file_role
 
             return matches, [], file_meta
 

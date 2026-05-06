@@ -380,16 +380,16 @@ class TestBoundaryRejections:
         _validate_fails("class Foo: pass", "ClassDef")
 
     def test_function_def_still_rejected(self):
-        """FunctionDef must remain blocked after expansion."""
-        _validate_fails("def foo(): pass", "FunctionDef")
+        """FunctionDef is now ALLOWED (Story #993 Group G) — was previously blocked."""
+        _validate_ok("def foo(): pass")
 
     def test_import_still_rejected(self):
         """Import must remain blocked after expansion."""
         _validate_fails("import os", "Import")
 
     def test_lambda_still_rejected(self):
-        """Lambda must remain blocked after expansion."""
-        _validate_fails("lambda x: x", "Lambda")
+        """Lambda is now ALLOWED (Story #993 Group G) — was previously blocked."""
+        _validate_ok("lambda x: x")
 
 
 # ---------------------------------------------------------------------------
@@ -521,16 +521,16 @@ class TestGroupCControlFlow:
         _validate_ok("raise ValueError()")
 
     def test_function_def_still_rejected_in_group_c(self):
-        """FunctionDef must remain blocked (re-confirmed in group C context)."""
-        _validate_fails("def foo(): pass", "FunctionDef")
+        """FunctionDef is now ALLOWED (Story #993 Group G) — was previously blocked."""
+        _validate_ok("def foo(): pass")
 
     def test_class_def_still_rejected_in_group_c(self):
         """ClassDef must remain blocked (re-confirmed in group C context)."""
         _validate_fails("class Foo: pass", "ClassDef")
 
     def test_lambda_still_rejected_in_group_c(self):
-        """Lambda must remain blocked (re-confirmed in group C context)."""
-        _validate_fails("lambda x: x", "Lambda")
+        """Lambda is now ALLOWED (Story #993 Group G) — was previously blocked."""
+        _validate_ok("lambda x: x")
 
     def test_import_still_rejected_in_group_c(self):
         """Import must remain blocked (re-confirmed in group C context)."""

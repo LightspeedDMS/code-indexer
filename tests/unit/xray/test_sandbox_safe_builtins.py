@@ -165,9 +165,10 @@ def test_safe_builtin_available_and_returns_expected(
 
 
 def test_safe_builtin_names_set_matches_spec() -> None:
-    """Verify SAFE_BUILTIN_NAMES contains exactly the 27 specified builtins.
+    """Verify SAFE_BUILTIN_NAMES contains exactly the 34 specified builtins.
 
     v10.4.0 added 9 exception types needed for try/except blocks (Group D).
+    Story #993 added 7 more: isinstance, type, set, frozenset, float, repr, print.
     """
     expected = frozenset(
         {
@@ -199,6 +200,14 @@ def test_safe_builtin_names_set_matches_spec() -> None:
             "IndexError",
             "NameError",
             "StopIteration",
+            # Added in Story #993 for expanded evaluator expressiveness
+            "isinstance",
+            "type",
+            "set",
+            "frozenset",
+            "float",
+            "repr",
+            "print",
         }
     )
     assert SAFE_BUILTIN_NAMES == expected, (
@@ -252,11 +261,12 @@ def test_hasattr_works_in_evaluator() -> None:
     )
 
 
-def test_safe_builtin_names_set_has_27_entries() -> None:
-    """After v10.4.0, SAFE_BUILTIN_NAMES must contain exactly 27 builtins.
+def test_safe_builtin_names_set_has_34_entries() -> None:
+    """After Story #993, SAFE_BUILTIN_NAMES must contain exactly 34 builtins.
 
     18 original entries (17 + hasattr from M1) plus 9 exception types added
-    in v10.4.0 for try/except block support (Group D).
+    in v10.4.0 for try/except block support (Group D), plus 7 more added in
+    Story #993: isinstance, type, set, frozenset, float, repr, print.
     """
     expected = frozenset(
         {
@@ -288,10 +298,18 @@ def test_safe_builtin_names_set_has_27_entries() -> None:
             "IndexError",
             "NameError",
             "StopIteration",
+            # Added in Story #993 for expanded evaluator expressiveness
+            "isinstance",
+            "type",
+            "set",
+            "frozenset",
+            "float",
+            "repr",
+            "print",
         }
     )
     assert SAFE_BUILTIN_NAMES == expected, (
-        f"SAFE_BUILTIN_NAMES mismatch after v10.4.0. "
+        f"SAFE_BUILTIN_NAMES mismatch after Story #993. "
         f"Extra: {SAFE_BUILTIN_NAMES - expected}, "
         f"Missing: {expected - SAFE_BUILTIN_NAMES}"
     )
