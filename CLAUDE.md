@@ -27,19 +27,20 @@ No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, do
 
 | Branch | Purpose | Direct Commits | Auto-deploy |
 |--------|---------|----------------|-------------|
-| `development` | Active work, version bumps | YES | No |
+| `development` | Active work, MINOR version bumps | YES | No |
 | `staging` | Staging env | NO (merge only) | staging server |
-| `master` | Production | NO (merge only) | production |
+| `master` | Production | HOTFIX ONLY (see below) | production |
 
 Tags transfer automatically during merges. Before ANY work: `git branch --show-current`. OK on `development`/`feature/*`/`bugfix/*`. On `staging` or `master` — STOP, ask user.
 
-### Workflow: dev → staging → master
+### Normal Workflow: dev -> staging -> master
 
 ```bash
-# 1. On development: code, test, bump version, tag
+# 1. On development: code, test, bump MINOR version, tag
 git checkout development
+# bump MINOR: e.g. 10.4.0 -> 10.5.0 (resets HOTFIX to 0)
 # edit src/code_indexer/__init__.py, CHANGELOG.md, README.md
-git tag vX.Y.Z
+git tag vX.Y.0
 git push origin development --tags
 
 # 2. Staging (auto-deploys to staging server)
@@ -50,7 +51,41 @@ git checkout staging && git merge development && git push origin staging
 git checkout master && git merge staging && git push origin master
 ```
 
-NEVER commit directly to `master` or `staging`. All changes flow through `development`. See memory: `feedback_bump_version_before_staging.md`.
+NEVER merge `development` into `master` for normal releases — always go through `staging`. See memory: `feedback_bump_version_before_staging.md`.
+
+### Hotfix Workflow: surgical fix directly on master
+
+**ABSOLUTE RULE**: A hotfix NEVER merges development into master. Development code does NOT flow into master during a hotfix. Only the surgical fix touches production.
+
+```bash
+# 1. Start from master — the current production state
+git checkout master
+
+# 2. Make ONLY the surgical fix on master (or a hotfix/* branch for larger fixes)
+#    - Touch ONLY the files needed for the fix
+#    - Do NOT merge from development, staging, or any other branch
+#    - Bump HOTFIX version: e.g. 10.5.0 -> 10.5.1
+git checkout -b hotfix/v10.5.1  # optional: branch for larger fixes
+# edit src/code_indexer/__init__.py, CHANGELOG.md, README.md
+# run targeted tests + E2E on this machine
+
+# 3. Commit, tag, push master (production auto-deploys)
+git checkout master && git merge hotfix/v10.5.1  # if branched
+git tag v10.5.1
+git push origin master --tags
+
+# 4. Back-merge master INTO development (so dev picks up the hotfix)
+git checkout development
+git merge master  # development absorbs the hotfix
+git push origin development
+```
+
+**Hotfix rules**:
+- Master is sacred production state — only the fix touches it
+- NEVER `git merge development` while on master during a hotfix
+- Bump the HOTFIX component (third number), never MINOR
+- After pushing master, always back-merge master into development
+- The back-merge is master -> development, NEVER development -> master
 
 ### Push-to-master Authorization (HIGHEST SEVERITY)
 
@@ -473,6 +508,30 @@ Runtime loader with caching: `tool_doc_loader.py`. Tests: `tests/unit/tools/test
 ---
 
 ## Version Bump
+
+### Versioning Scheme: MAJOR.MINOR.HOTFIX
+
+Format: `X.Y.Z` where each component has a distinct owner:
+
+| Component | When to bump | Who bumps it | Example |
+|-----------|-------------|--------------|---------|
+| **MAJOR** (X) | Only when user explicitly says "major version" | User decision | `10.x.x` -> `11.0.0` |
+| **MINOR** (Y) | On development during normal dev cycles (bugs, features, refactors going through dev -> staging -> master) | Development workflow | `10.4.0` -> `10.5.0` |
+| **HOTFIX** (Z) | Production hotfixes applied directly on master | Hotfix workflow | `10.5.0` -> `10.5.1` |
+
+**Rules**:
+- MINOR bump resets HOTFIX to 0: `10.5.3` -> `10.6.0`
+- MAJOR bump resets both MINOR and HOTFIX to 0: `10.6.2` -> `11.0.0`
+- HOTFIX NEVER increments on development — only on master during hotfixes
+- MINOR NEVER increments on master — only on development during normal workflow
+- This prevents version collisions: development and hotfixes use different components
+
+**Examples**:
+- Normal dev cycle: `10.5.0` -> `10.6.0` -> `10.7.0` (MINOR bumps on development)
+- Hotfix on production: `10.5.0` -> `10.5.1` -> `10.5.2` (HOTFIX bumps on master)
+- Dev release after hotfixes: `10.5.2` -> `10.6.0` (MINOR bump resets HOTFIX)
+
+### Files to Update
 
 Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/server-deployment.md`.
 
