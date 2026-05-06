@@ -891,6 +891,11 @@ def make_lifespan(
             )
             set_refresh_scheduler(refresh_scheduler)
 
+            # Bug #v10.4.11 fix (Tier 1): wire _golden_repos_dir unconditionally —
+            # it is derived from server_data_dir which is always available regardless
+            # of whether global_lifecycle_manager initialised successfully.
+            description_refresh_scheduler._golden_repos_dir = Path(golden_repos_dir)
+
             # Wire debouncer for coalescing batch-registration refresh triggers (Story #345)
             if refresh_scheduler is not None:
                 cidx_meta_debouncer = CidxMetaRefreshDebouncer(
@@ -916,15 +921,17 @@ def make_lifespan(
                     golden_repo_manager.lifecycle_invoker = lifecycle_invoker_singleton
                     golden_repo_manager.lifecycle_tracking_backend = tracking_backend
 
-                # Story #876 D3 — wire the same quartet onto the description
-                # refresh scheduler so refresh_task can route every stale repo
-                # through LifecycleBatchRunner.  All four slots are mandatory;
-                # a missing slot emits a WARNING and skips the runner
-                # (Messi Rule #2 anti-fallback, verified by the D3 test suite).
+                # Story #876 D3 — wire the three lifecycle-dependent collaborators
+                # onto the description refresh scheduler so refresh_task can route
+                # every stale repo through LifecycleBatchRunner.  All four slots are
+                # mandatory; a missing slot causes the scheduler to bail out via
+                # _check_lifecycle_backfill_wiring().  A missing-slot condition is
+                # surfaced at ERROR level below (APP-GENERAL-051) so operators see it
+                # at startup, not 60 s into the first loop pass.
+                # _golden_repos_dir is wired unconditionally above (Bug #v10.4.11).
                 description_refresh_scheduler._lifecycle_invoker = (
                     lifecycle_invoker_singleton
                 )
-                description_refresh_scheduler._golden_repos_dir = Path(golden_repos_dir)
                 description_refresh_scheduler._lifecycle_debouncer = cidx_meta_debouncer
                 description_refresh_scheduler._refresh_scheduler = refresh_scheduler
 
@@ -980,6 +987,35 @@ def make_lifespan(
                 logger.info(
                     "MemoryStoreService initialized for Story #877 (cache wired to AccessFilteringService)",
                     extra={"correlation_id": get_correlation_id()},
+                )
+
+            # Bug #v10.4.11 (Tier 2): startup-time misconfiguration check.
+            # _check_lifecycle_backfill_wiring() silently returns False if any slot
+            # is None, causing the scheduler to be a no-op for its entire lifetime.
+            # Log at ERROR level here so operators see the problem immediately at
+            # startup, not 60 s into the first loop pass.
+            _missing_slots = [
+                slot
+                for slot in (
+                    "_lifecycle_invoker",
+                    "_golden_repos_dir",
+                    "_lifecycle_debouncer",
+                    "_refresh_scheduler",
+                )
+                if getattr(description_refresh_scheduler, slot, None) is None
+            ]
+            if _missing_slots:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-051",
+                        f"DescriptionRefreshScheduler missing required collaborators: "
+                        f"{_missing_slots}. Scheduler will be a SILENT NO-OP — "
+                        f"background job runs every 60s but bails at "
+                        f"_check_lifecycle_backfill_wiring(). Fix: ensure "
+                        f"global_lifecycle_manager initializes successfully BEFORE "
+                        f"the description scheduler wiring block (lifespan.py ~895).",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
                 )
 
             # Start scheduler (internally checks if enabled)

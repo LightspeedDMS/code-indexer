@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.12 (2026-05-05) — CRITICAL: DescriptionRefreshScheduler unwired in production (silent no-op)
+
+Production user reported the description refresh job had NEVER been seen running in dashboard or logs (beyond "Description refresh scheduler started"). Root cause: `global_lifecycle_manager` is initialized inside a try/except at `lifespan.py:509`. If `GlobalReposLifecycleManager(...)` or `.start()` raises, the exception is caught at line 579, logged at `APP-GENERAL-015`, but `global_lifecycle_manager` stays `None`. The description scheduler block at lines 887-935 then computed `refresh_scheduler = None` and the ENTIRE D3 wiring block (lines 896-935) was guarded by `if refresh_scheduler is not None:` — meaning ALL four collaborator assignments (`_lifecycle_invoker`, `_golden_repos_dir`, `_lifecycle_debouncer`, `_refresh_scheduler`) were skipped. The scheduler's `_check_lifecycle_backfill_wiring()` then returned `False` on every 60s loop pass, silently bailed out. Bug invisible in production logs.
+
+Fix (Tier 1 + Tier 2 combination):
+- Moved `description_refresh_scheduler._golden_repos_dir = Path(golden_repos_dir)` OUT of the conditional — `golden_repos_dir` is always available so this slot can always be wired.
+- Added explicit startup-time check before `description_refresh_scheduler.start()` that scans for missing collaborator slots and logs at ERROR level with code `APP-GENERAL-051` if any are None. The error message names the missing slots and explains the no-op consequence + the recovery hint (ensure global_lifecycle_manager initialization succeeds). Operators now see the misconfiguration immediately at startup, not 60s into a silent loop.
+
+Anti-regression test suite (`tests/unit/server/startup/test_description_refresh_scheduler_wiring_v10_4_11.py`) ensures: (a) all 4 slots wired when global_lifecycle_manager present; (b) APP-GENERAL-051 ERROR logged when missing; (c) golden_repos_dir always wired regardless.
+
 ## v10.4.11 (2026-05-05) — Bug #984 logging dedup + xray dashboard verification
 
 - **Bug #984 logging fix (#70)**: even after v10.4.9 cratered the warning rate 94% (3,010/24h → 4 in 30 min by stopping the wipe upstream cause), residual stub descriptions still re-emitted "Cannot generate refresh prompt for &lt;repo&gt;: missing description or last_analyzed" on every scheduler pass because the warning fires BEFORE the quarantine branch can suppress it. Fix in `description_refresh_scheduler.py`: per-repo "warned-already" flag set on first WARNING emission, downgrades subsequent emissions to DEBUG level. Flag re-armed after a successful refresh so legit failures still warn. Quarantine state is also checked before `_get_refresh_prompt()` to short-circuit the call entirely on already-quarantined repos.
