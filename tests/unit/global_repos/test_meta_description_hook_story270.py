@@ -17,7 +17,24 @@ import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
+
 import pytest
+
+from code_indexer.global_repos.repo_analyzer import RepoInfo
+
+
+def _make_mock_repo_analyzer():
+    """Return a MagicMock RepoAnalyzer whose extract_info() gives a minimal RepoInfo."""
+    mock_analyzer = MagicMock()
+    mock_analyzer.extract_info.return_value = RepoInfo(
+        summary="Test summary.",
+        technologies=["python"],
+        features=["feature-a"],
+        use_cases=["use-case-a"],
+        purpose="Testing.",
+    )
+    return mock_analyzer
 
 
 @pytest.fixture(autouse=True)
@@ -151,12 +168,18 @@ class TestOnRepoAddedTriggersRefresh:
         clone_path.mkdir(parents=True)
         (clone_path / "README.md").write_text("# My Golden Repo\nDescription")
 
-        mock_cli_manager = MagicMock()
-        mock_cli_manager.check_cli_available.return_value = False  # Use README fallback
+        mock_cli_manager = MagicMock(spec=ClaudeCliManager)
+        mock_cli_manager.check_cli_available.return_value = True
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-            return_value=mock_cli_manager,
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=mock_cli_manager,
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                return_value=_make_mock_repo_analyzer(),
+            ),
         ):
             on_repo_added(
                 repo_name=repo_name,
@@ -187,13 +210,19 @@ class TestOnRepoAddedTriggersRefresh:
         clone_path.mkdir(parents=True)
         (clone_path / "README.md").write_text("# My Golden Repo\nDescription")
 
-        mock_cli_manager = MagicMock()
-        mock_cli_manager.check_cli_available.return_value = False
+        mock_cli_manager = MagicMock(spec=ClaudeCliManager)
+        mock_cli_manager.check_cli_available.return_value = True
 
         # Should not raise any exception
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-            return_value=mock_cli_manager,
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=mock_cli_manager,
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                return_value=_make_mock_repo_analyzer(),
+            ),
         ):
             on_repo_added(
                 repo_name=repo_name,
@@ -220,12 +249,18 @@ class TestOnRepoAddedTriggersRefresh:
         clone_path.mkdir(parents=True)
         (clone_path / "README.md").write_text("# Another Repo")
 
-        mock_cli_manager = MagicMock()
-        mock_cli_manager.check_cli_available.return_value = False
+        mock_cli_manager = MagicMock(spec=ClaudeCliManager)
+        mock_cli_manager.check_cli_available.return_value = True
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-            return_value=mock_cli_manager,
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=mock_cli_manager,
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                return_value=_make_mock_repo_analyzer(),
+            ),
         ):
             on_repo_added(
                 repo_name=repo_name,
@@ -265,12 +300,18 @@ class TestOnRepoAddedTriggersRefresh:
         clone_path.mkdir(parents=True)
         (clone_path / "README.md").write_text("# My Repo")
 
-        mock_cli_manager = MagicMock()
-        mock_cli_manager.check_cli_available.return_value = False
+        mock_cli_manager = MagicMock(spec=ClaudeCliManager)
+        mock_cli_manager.check_cli_available.return_value = True
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-            return_value=mock_cli_manager,
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=mock_cli_manager,
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                return_value=_make_mock_repo_analyzer(),
+            ),
         ):
             # Should NOT raise exception despite scheduler failure
             on_repo_added(

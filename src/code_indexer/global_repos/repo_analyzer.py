@@ -535,30 +535,32 @@ If no material changes: return existing description with updated last_analyzed t
 
     def extract_info(self) -> RepoInfo:
         """
-        Extract information from the repository.
+        Extract information from the repository via Claude CLI.
 
-        Uses Claude CLI for AI-powered analysis if available and enabled,
-        otherwise falls back to static regex-based analysis.
+        v10.4.13: Claude CLI is REQUIRED. Per Messi Rule #2 anti-fallback,
+        no static-extraction fallback — silent terse output masks Claude
+        unavailability. If Claude returns no result, raise RuntimeError so
+        caller can surface the failure (admin retries when Claude is back).
 
         Returns:
-            RepoInfo object containing extracted metadata
+            RepoInfo object containing extracted metadata.
+
+        Raises:
+            RuntimeError: if Claude CLI extraction returns no result
+                (manager unavailable, CLI not on PATH, API key missing,
+                or Claude returned non-parseable output).
         """
-        # Check if Claude is enabled (default: true)
-        use_claude = (
-            os.environ.get("CIDX_USE_CLAUDE_FOR_META", "true").lower() == "true"
-        )
-
-        if use_claude:
-            claude_result = self._extract_info_with_claude()
-            if claude_result is not None:
-                return claude_result
-            logger.info(
-                "Claude analysis failed or unavailable, "
-                "falling back to static analysis for %s",
-                self.repo_path,
+        claude_result = self._extract_info_with_claude()
+        if claude_result is None:
+            raise RuntimeError(
+                f"Claude CLI extraction returned no result for "
+                f"{self.repo_path}. Possible causes: ClaudeCliManager not "
+                f"provided, CLI not on PATH, API key missing, or Claude "
+                f"returned non-parseable output. Per v10.4.13 anti-fallback "
+                f"contract, NOT falling back to static regex extraction "
+                f"(which produced terse 10-feature/5-use-case output)."
             )
-
-        return self._extract_info_static()
+        return claude_result
 
     def _extract_info_with_claude(self) -> Optional[RepoInfo]:
         """

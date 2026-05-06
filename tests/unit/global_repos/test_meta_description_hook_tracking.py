@@ -6,10 +6,13 @@ Verifies that on_repo_added creates tracking records and on_repo_removed deletes
 
 import pytest
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
 from code_indexer.global_repos.meta_description_hook import (
     on_repo_added,
     on_repo_removed,
 )
+from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
 )
@@ -79,13 +82,21 @@ def mock_repo(tmp_path):
 def test_on_repo_added_creates_tracking_record(
     temp_db, mock_golden_repos_dir, mock_repo, monkeypatch
 ):
-    """Test that on_repo_added creates a tracking record with status=pending."""
+    """Test that on_repo_added creates a tracking record with status=pending.
+
+    v10.4.13 anti-fallback: Claude CLI is REQUIRED. We provide a working
+    ClaudeCliManager mock and patch RepoAnalyzer to skip actual Claude
+    invocation while still letting on_repo_added run end-to-end through
+    description generation and tracking-record creation.
+    """
     backend, db_path = temp_db
 
-    # Mock get_claude_cli_manager to return None (use fallback path)
+    # Provide a valid ClaudeCliManager mock that reports CLI as available
+    cli_manager = MagicMock(spec=ClaudeCliManager)
+    cli_manager.check_cli_available.return_value = True
     monkeypatch.setattr(
         "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-        lambda: None,
+        lambda: cli_manager,
     )
 
     # Mock the tracking backend module-level variable
@@ -94,14 +105,27 @@ def test_on_repo_added_creates_tracking_record(
 
     hook_module._tracking_backend = backend
 
-    # Call on_repo_added
-    repo_alias = "test-repo"
-    on_repo_added(
-        repo_name=repo_alias,
-        repo_url="https://github.com/test/test-repo.git",
-        clone_path=mock_repo,
-        golden_repos_dir=mock_golden_repos_dir,
-    )
+    # Patch RepoAnalyzer.extract_info to bypass real Claude call
+    mock_info = MagicMock()
+    mock_info.technologies = ["Python"]
+    mock_info.purpose = "library"
+    mock_info.summary = "A test library"
+    mock_info.features = ["feature1"]
+    mock_info.use_cases = ["use case 1"]
+
+    with patch(
+        "code_indexer.global_repos.meta_description_hook.RepoAnalyzer"
+    ) as MockAnalyzer:
+        MockAnalyzer.return_value.extract_info.return_value = mock_info
+
+        # Call on_repo_added
+        repo_alias = "test-repo"
+        on_repo_added(
+            repo_name=repo_alias,
+            repo_url="https://github.com/test/test-repo.git",
+            clone_path=mock_repo,
+            golden_repos_dir=mock_golden_repos_dir,
+        )
 
     # Verify tracking record was created
     record = backend.get_tracking_record(repo_alias)
@@ -194,11 +218,19 @@ def test_on_repo_added_skips_cidx_meta(
 def test_on_repo_added_handles_missing_backend_gracefully(
     mock_golden_repos_dir, mock_repo, monkeypatch
 ):
-    """Test that on_repo_added doesn't crash if tracking backend is None."""
-    # Mock get_claude_cli_manager to return None
+    """Test that on_repo_added doesn't crash if tracking backend is None.
+
+    v10.4.13 anti-fallback: Claude CLI is REQUIRED. We provide a working
+    ClaudeCliManager mock and patch RepoAnalyzer to skip actual Claude
+    invocation; the actual SUT under test here is the `_tracking_backend
+    is None` graceful-handling branch (NOT the cli_manager guard).
+    """
+    # Provide a valid ClaudeCliManager mock that reports CLI as available
+    cli_manager = MagicMock(spec=ClaudeCliManager)
+    cli_manager.check_cli_available.return_value = True
     monkeypatch.setattr(
         "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-        lambda: None,
+        lambda: cli_manager,
     )
 
     # Mock tracking backend as None
@@ -206,12 +238,25 @@ def test_on_repo_added_handles_missing_backend_gracefully(
 
     hook_module._tracking_backend = None
 
-    # Call on_repo_added (should not crash)
-    on_repo_added(
-        repo_name="test-repo",
-        repo_url="https://github.com/test/test-repo.git",
-        clone_path=mock_repo,
-        golden_repos_dir=mock_golden_repos_dir,
-    )
+    # Patch RepoAnalyzer.extract_info to bypass real Claude call
+    mock_info = MagicMock()
+    mock_info.technologies = ["Python"]
+    mock_info.purpose = "library"
+    mock_info.summary = "A test library"
+    mock_info.features = ["feature1"]
+    mock_info.use_cases = ["use case 1"]
+
+    with patch(
+        "code_indexer.global_repos.meta_description_hook.RepoAnalyzer"
+    ) as MockAnalyzer:
+        MockAnalyzer.return_value.extract_info.return_value = mock_info
+
+        # Call on_repo_added (should not crash even with _tracking_backend=None)
+        on_repo_added(
+            repo_name="test-repo",
+            repo_url="https://github.com/test/test-repo.git",
+            clone_path=mock_repo,
+            golden_repos_dir=mock_golden_repos_dir,
+        )
 
     # Test passes if no exception was raised
