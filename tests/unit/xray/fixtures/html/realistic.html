@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="User management dashboard" />
+  <title>User Dashboard</title>
+  <link rel="stylesheet" href="/css/main.css" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+</head>
+<body>
+  <header class="site-header" role="banner">
+    <nav class="nav" aria-label="Main navigation">
+      <a href="/" class="nav__logo">MyApp</a>
+      <ul class="nav__links" role="list">
+        <li><a href="/dashboard" class="nav__link nav__link--active" aria-current="page">Dashboard</a></li>
+        <li><a href="/users" class="nav__link">Users</a></li>
+        <li><a href="/settings" class="nav__link">Settings</a></li>
+      </ul>
+      <button class="nav__menu-btn" aria-expanded="false" aria-controls="mobile-menu" type="button">
+        <span class="sr-only">Toggle menu</span>
+      </button>
+    </nav>
+  </header>
+
+  <main id="main-content" class="main" role="main">
+    <section class="hero" aria-labelledby="hero-heading">
+      <h1 id="hero-heading" class="hero__title">User Management</h1>
+      <p class="hero__subtitle">Manage users, roles, and permissions</p>
+      <div class="hero__actions">
+        <a href="/users/new" class="btn btn--primary">Add User</a>
+        <a href="/users/export" class="btn btn--secondary">Export CSV</a>
+      </div>
+    </section>
+
+    <section class="stats" aria-label="User statistics">
+      <div class="stats__grid">
+        <article class="stat-card" aria-label="Total users">
+          <span class="stat-card__value" id="total-users">0</span>
+          <span class="stat-card__label">Total Users</span>
+        </article>
+        <article class="stat-card" aria-label="Active users">
+          <span class="stat-card__value" id="active-users">0</span>
+          <span class="stat-card__label">Active</span>
+        </article>
+        <article class="stat-card" aria-label="Admin users">
+          <span class="stat-card__value" id="admin-users">0</span>
+          <span class="stat-card__label">Admins</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="user-table-section" aria-labelledby="table-heading">
+      <div class="table-header">
+        <h2 id="table-heading" class="section-title">Users</h2>
+        <form class="search-form" role="search" action="/users" method="get">
+          <label class="sr-only" for="search-input">Search users</label>
+          <input
+            id="search-input"
+            class="search-form__input"
+            type="search"
+            name="q"
+            placeholder="Search by name or email"
+            autocomplete="off"
+            aria-label="Search users"
+          />
+          <button class="search-form__btn" type="submit">Search</button>
+        </form>
+      </div>
+
+      <div class="table-container" role="region" aria-label="Users table" tabindex="0">
+        <table class="data-table" aria-label="Users list">
+          <thead>
+            <tr>
+              <th scope="col" class="data-table__th" aria-sort="none">Name</th>
+              <th scope="col" class="data-table__th" aria-sort="none">Email</th>
+              <th scope="col" class="data-table__th" aria-sort="none">Role</th>
+              <th scope="col" class="data-table__th" aria-sort="descending">Created</th>
+              <th scope="col" class="data-table__th">Status</th>
+              <th scope="col" class="data-table__th"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="users-tbody">
+            <tr class="data-table__row">
+              <td class="data-table__td"><a href="/users/1" class="user-link">Alice Smith</a></td>
+              <td class="data-table__td">alice@example.com</td>
+              <td class="data-table__td"><span class="badge badge--admin">Admin</span></td>
+              <td class="data-table__td"><time datetime="2024-01-15">Jan 15, 2024</time></td>
+              <td class="data-table__td"><span class="status status--active">Active</span></td>
+              <td class="data-table__td data-table__td--actions">
+                <a href="/users/1/edit" class="action-link">Edit</a>
+                <button class="action-btn action-btn--danger" type="button" data-user-id="1">Delete</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <nav class="pagination" aria-label="Pagination">
+        <button class="pagination__btn" type="button" aria-label="Previous page" disabled>Previous</button>
+        <span class="pagination__info" aria-live="polite">Page 1 of 5</span>
+        <button class="pagination__btn" type="button" aria-label="Next page">Next</button>
+      </nav>
+    </section>
+  </main>
+
+  <footer class="site-footer" role="contentinfo">
+    <p class="site-footer__text">
+      <small>&copy; 2024 MyApp. All rights reserved.</small>
+    </p>
+  </footer>
+
+  <script src="/js/app.js" defer></script>
+</body>
+</html>

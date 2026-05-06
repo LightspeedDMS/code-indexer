@@ -806,6 +806,20 @@ async def switch_branch(
         HTTPException 422: Missing branch_name
         HTTPException 500: Failed to start branch switch job
     """
+    # AC4 (Story #981): global aliases represent shared golden repos; branch-switching
+    # them is a golden-repo admin operation, not a personal-workspace operation.
+    # Reject *-global aliases for all non-admin callers before touching any state.
+    if user_alias.endswith("-global") and current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Cannot switch branch on global alias '{user_alias}'. "
+                "Global aliases are shared golden repositories. "
+                "Use change_golden_repo_branch (admin only) to change a golden repo branch, "
+                "or activate a personal workspace and switch branches there."
+            ),
+        )
+
     try:
         # Get managers
         activated_manager = _get_activated_repo_manager()

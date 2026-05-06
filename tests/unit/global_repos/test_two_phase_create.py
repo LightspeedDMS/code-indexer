@@ -26,6 +26,8 @@ SRC_ROOT = Path(__file__).parent.parent.parent.parent / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from code_indexer.server.services.claude_cli_manager import ClaudeCliManager  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -107,6 +109,10 @@ class TestGenerateRepoDescriptionPhaseB:
         mock_info.features = ["feature1"]
         mock_info.use_cases = ["use case 1"]
 
+        # v10.4.13: cli_manager is REQUIRED with isinstance(ClaudeCliManager) guard
+        cli_manager = MagicMock(spec=ClaudeCliManager)
+        cli_manager.check_cli_available.return_value = True
+
         with patch(
             "code_indexer.global_repos.meta_description_hook.RepoAnalyzer"
         ) as MockAnalyzer:
@@ -115,6 +121,7 @@ class TestGenerateRepoDescriptionPhaseB:
                 "fake-repo",
                 "https://github.com/test/fake-repo",
                 str(fake_repo),
+                cli_manager,
             )
 
         assert isinstance(content, str), (

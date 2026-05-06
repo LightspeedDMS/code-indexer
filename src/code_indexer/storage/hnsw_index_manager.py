@@ -259,7 +259,7 @@ class HNSWIndexManager:
         # than a hard failure.  A WARNING is emitted when entering the first retry
         # so operators see the degraded-index signal regardless of retry outcome.
         # Unrelated RuntimeErrors propagate immediately without retry.
-        first_exc: RuntimeError | None = None
+        first_exc: Optional[RuntimeError] = None
         labels = distances = None
         for attempt_idx, attempt_k in enumerate(
             [k_actual, max(1, k_actual // 2), max(1, k_actual // 4), 1]
@@ -283,7 +283,9 @@ class HNSWIndexManager:
         if first_exc is not None and labels is None:
             raise first_exc
 
-        # Convert labels to IDs
+        # Convert labels to IDs — labels/distances are non-None here: the raise above
+        # exits if labels is still None after all retries.
+        assert labels is not None and distances is not None
         result_ids = [id_mapping.get(int(label), f"vec_{label}") for label in labels[0]]
         result_distances = [float(d) for d in distances[0]]
 

@@ -35,6 +35,7 @@ class TestOnRepoAdded:
         """Test that .md file is created when a golden repo is added."""
         from code_indexer.global_repos.meta_description_hook import on_repo_added
         from unittest.mock import MagicMock
+        from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 
         # Setup: Create a mock repository
         repo_name = "test-repo"
@@ -45,17 +46,32 @@ class TestOnRepoAdded:
         # Create a README.md to analyze
         (clone_path / "README.md").write_text("# Test Repo\nA test repository")
 
-        # Mock global ClaudeCliManager singleton (Story #23 AC4)
-        mock_cli_manager = MagicMock()
+        # v10.4.13 anti-fallback: Mock global ClaudeCliManager singleton with spec
+        # so isinstance(ClaudeCliManager) guard accepts it
+        mock_cli_manager = MagicMock(spec=ClaudeCliManager)
         mock_cli_manager.check_cli_available.return_value = True
+
+        # v10.4.13: bypass real Claude invocation by mocking RepoAnalyzer
+        mock_info = MagicMock()
+        mock_info.technologies = ["Python"]
+        mock_info.purpose = "library"
+        mock_info.summary = "A test repository"
+        mock_info.features = ["feature1"]
+        mock_info.use_cases = ["use case 1"]
 
         # Execute: Call hook
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0)
-            with patch(
-                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-                return_value=mock_cli_manager,
+            with (
+                patch(
+                    "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                    return_value=mock_cli_manager,
+                ),
+                patch(
+                    "code_indexer.global_repos.meta_description_hook.RepoAnalyzer"
+                ) as MockAnalyzer,
             ):
+                MockAnalyzer.return_value.extract_info.return_value = mock_info
                 on_repo_added(
                     repo_name=repo_name,
                     repo_url=repo_url,
@@ -63,8 +79,8 @@ class TestOnRepoAdded:
                     golden_repos_dir=temp_golden_repos_dir,
                 )
 
-        # Verify: .md file was created
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # Verify: .md file was created — v10.4.9: filename uses alias form {repo_name}-global.md
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         assert md_file.exists(), f"Expected .md file at {md_file}"
 
         # Verify: File contains expected content
@@ -106,24 +122,37 @@ class TestOnRepoAdded:
     def test_handles_missing_clone_path_gracefully(
         self, cidx_meta_path, temp_golden_repos_dir
     ):
-        """Test that hook handles missing clone path without crashing."""
+        """Test that hook fails loudly with explicit error when prerequisites missing.
+
+        v10.4.13 anti-fallback: "graceful" no longer means "silently write a stub
+        and pretend success" — it means "raise an explicit RuntimeError so admin
+        sees the failure and can fix the underlying cause (e.g. missing Claude
+        CLI)." Per Messi Rule #2: graceful failure over forced success.
+        """
         from code_indexer.global_repos.meta_description_hook import on_repo_added
 
         repo_name = "missing-repo"
         repo_url = "https://github.com/test/missing"
         clone_path = Path(temp_golden_repos_dir) / "nonexistent"
 
-        # Execute and verify: Should not crash
+        # No cli_manager configured → expect explicit RuntimeError. The reason
+        # substring "ClaudeCliManager not initialized at startup" identifies the
+        # specific anti-fallback branch; production wraps it in a templated
+        # sentence with stub-warning prose, so substring match is correct.
         with patch("subprocess.run"):
-            on_repo_added(
-                repo_name=repo_name,
-                repo_url=repo_url,
-                clone_path=str(clone_path),
-                golden_repos_dir=temp_golden_repos_dir,
-            )
-
-        # Verify: No indexing was attempted (file creation failed gracefully)
-        # (Actual behavior depends on implementation - we expect graceful handling)
+            with patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=None,
+            ):
+                with pytest.raises(
+                    RuntimeError, match="ClaudeCliManager not initialized at startup"
+                ):
+                    on_repo_added(
+                        repo_name=repo_name,
+                        repo_url=repo_url,
+                        clone_path=str(clone_path),
+                        golden_repos_dir=temp_golden_repos_dir,
+                    )
 
 
 class TestOnRepoRemoved:
@@ -135,9 +164,9 @@ class TestOnRepoRemoved:
         """Test that .md file is deleted when a golden repo is removed."""
         from code_indexer.global_repos.meta_description_hook import on_repo_removed
 
-        # Setup: Create an existing .md file
+        # Setup: Create an existing .md file — v10.4.9: alias form {repo_name}-global.md
         repo_name = "test-repo"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
         md_file.write_text("# Test Repo\nDescription")
 
         assert md_file.exists(), "Setup: .md file should exist"
@@ -160,7 +189,8 @@ class TestOnRepoRemoved:
         from code_indexer.global_repos.meta_description_hook import on_repo_removed
 
         repo_name = "nonexistent-repo"
-        md_file = cidx_meta_path / f"{repo_name}.md"
+        # v10.4.9: alias form {repo_name}-global.md
+        md_file = cidx_meta_path / f"{repo_name}-global.md"
 
         assert not md_file.exists(), "Setup: .md file should not exist"
 

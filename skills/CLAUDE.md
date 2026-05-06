@@ -1,38 +1,36 @@
-# Skills Folder
+# Claude.ai Skills
 
-Skill files for Claude.ai / Claude Code.
+This directory contains source files for Claude.ai skills that get uploaded to Claude.ai as `.skill` zip bundles.
 
-## File Representation
+## Source vs bundle
 
-Each skill has two representations that MUST be kept in sync:
+For each skill:
+- Source folder: `skills/<skill-slug>/SKILL.md` (the editable source)
+- Compressed bundle: `skills/<Friendly Name>.skill` (zip uploaded to Claude.ai)
 
-| File | Purpose |
-|------|---------|
-| `<skill-name>/SKILL.md` | Human-readable source — edit this |
-| `<Display Name>.skill` | ZIP archive — upload to Claude.ai |
+## Editing workflow
 
-Never commit one without the other.
+1. Edit `skills/<slug>/SKILL.md`
+2. Rebuild the bundle: `./skills/build.sh` (or `./skills/build.sh <slug>` for one)
+3. Re-upload `*.skill` to Claude.ai (Settings -> Skills)
+4. Commit both the SKILL.md change AND the rebuilt .skill zip
 
-## Editing a Skill
+## Sync enforcement
 
-1. Edit the `SKILL.md` source file directly.
-2. Recompress into the `.skill` archive **before committing**:
+A pre-commit hook checks that SKILL.md is not newer than the .skill bundle. If you forget to rebuild, the commit will be blocked with a hint to run `./skills/build.sh`.
 
-```bash
-# From the skills/ directory
-cd skills/
-zip "Lightspeed Neo Exploration.skill" lightspeed-neo-exploration/SKILL.md
-cd ..
+The hook is wired in `.pre-commit-config.yaml` as the `skill-bundle-sync` entry and runs `skills/build.sh --check`.
+
+## build.sh reference
+
+```
+./skills/build.sh                    # rebuild all .skill zips
+./skills/build.sh <slug>             # rebuild one zip (e.g. lightspeed-neo-exploration)
+./skills/build.sh --check            # exit 1 if any SKILL.md is newer than its zip
+./skills/build.sh --check <slug>     # check one zip only
 ```
 
-3. Commit both files together:
-
-```bash
-git add skills/
-git commit -m "..."
-```
-
-## Adding a New Skill
+## Adding a new skill
 
 1. Create the source folder and file:
 
@@ -41,17 +39,15 @@ mkdir -p skills/<skill-name>
 # write skills/<skill-name>/SKILL.md
 ```
 
-2. Compress into a `.skill` archive:
+2. Build the .skill archive:
 
 ```bash
-cd skills/
-zip "<Display Name>.skill" <skill-name>/SKILL.md
-cd ..
+./skills/build.sh <skill-name>
 ```
 
 3. Commit both files.
 
-## Current Skills
+## Available skills
 
 | Display Name | Source |
 |---|---|

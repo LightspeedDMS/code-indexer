@@ -7,7 +7,7 @@ name = "code-indexer"
 dynamic = ["version"]
 description = "AI-powered semantic code search with local models"
 authors = [
-    {name = "Seba Battig", email = "jsbattig@gmail.com"}
+    {name = "LightspeedDMS", email = "seba.battig@lightspeeddms.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
@@ -79,6 +79,9 @@ dependencies = [
     "pyotp>=2.9.0",
     "qrcode>=7.4.0",
     "pillow>=10.0.0",
+    # X-Ray AST-aware code search (core since v10.2.1)
+    "tree-sitter>=0.21,<0.22",
+    "tree-sitter-languages==1.10.2",
 ]
 
 [project.optional-dependencies]
@@ -188,6 +191,7 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = "pydantic._internal.*"
 ignore_errors = true
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -712,6 +712,38 @@ class DataRetentionConfig:
 
 
 @dataclass
+class ActivatedReaperConfig:
+    """
+    Configuration for the Activated Repository Reaper (Story #967).
+
+    Controls automatic deactivation of idle activated repositories.
+    """
+
+    # TTL in days after which an idle activated repo is deactivated (default: 30 days)
+    ttl_days: int = 30
+
+    # How often the reaper cycle runs in hours (default: every 24 hours)
+    cadence_hours: int = 24
+
+
+@dataclass
+class XRayConfig:
+    """
+    Configuration for X-Ray precision AST-aware code search (Story #977).
+
+    Controls the default per-job timeout and ThreadPoolExecutor worker count
+    used by XRaySearchEngine. Both values are runtime-tunable via the Web UI
+    Config Screen and persist via get_config_service().get_config().
+    """
+
+    # Default per-job wall-clock timeout in seconds (range 10..600)
+    xray_timeout_seconds: int = 120
+
+    # ThreadPoolExecutor worker count for Phase 2 AST evaluation (range 1..8)
+    xray_worker_threads: int = 2
+
+
+@dataclass
 class ContentLimitsConfig:
     """
     Unified content limits configuration (Story #32).
@@ -1053,6 +1085,13 @@ class ServerConfig:
 
     # Story #400 - Unified data retention configuration
     data_retention_config: Optional[DataRetentionConfig] = None
+
+    # Story #967 - Activated repository reaper configuration
+    activated_reaper_config: Optional[ActivatedReaperConfig] = None
+
+    # Story #977 - X-Ray precision AST-aware code search configuration (runtime, not bootstrap)
+    xray_config: Optional[XRayConfig] = None
+
     password_expiry_config: Optional[PasswordExpiryConfig] = None  # Story #565
 
     # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
@@ -1101,6 +1140,11 @@ class ServerConfig:
     # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
     enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
     enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
+
+    # Bootstrap-only: anyio threadpool size for sync FastAPI handlers.
+    # Default 256 (anyio default is 40). Bumped to absorb concurrent long-polls
+    # without starving other endpoints. Set to 0 or negative to leave at anyio default.
+    server_threadpool_size: int = 256
 
     # Story #908 / Epic #907 - Graph-channel anomaly repair (bootstrap-only, never DB).
     # Default True so fresh installs automatically run Phase 3.7 SELF_LOOP repair.
@@ -1183,6 +1227,12 @@ class ServerConfig:
         # Story #400 - Initialize data retention config
         if self.data_retention_config is None:
             self.data_retention_config = DataRetentionConfig()
+        # Story #967 - Initialize activated reaper config
+        if self.activated_reaper_config is None:
+            self.activated_reaper_config = ActivatedReaperConfig()
+        # Story #977 - Initialize X-Ray config
+        if self.xray_config is None:
+            self.xray_config = XRayConfig()
         # Story #565 - Initialize password expiry config
         if self.password_expiry_config is None:
             self.password_expiry_config = PasswordExpiryConfig()
@@ -1766,6 +1816,20 @@ class ServerConfigManager:
             config_dict["data_retention_config"] = DataRetentionConfig(
                 **config_dict["data_retention_config"]
             )
+
+        # Story #967: Convert activated_reaper_config dict to ActivatedReaperConfig
+        if "activated_reaper_config" in config_dict and isinstance(
+            config_dict["activated_reaper_config"], dict
+        ):
+            config_dict["activated_reaper_config"] = ActivatedReaperConfig(
+                **config_dict["activated_reaper_config"]
+            )
+
+        # Story #977: Convert xray_config dict to XRayConfig
+        if "xray_config" in config_dict and isinstance(
+            config_dict["xray_config"], dict
+        ):
+            config_dict["xray_config"] = XRayConfig(**config_dict["xray_config"])
 
         # Epic #408: Convert ontap dict to OntapConfig
         if "ontap" in config_dict and isinstance(config_dict["ontap"], dict):

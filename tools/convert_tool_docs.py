@@ -68,6 +68,14 @@ CATEGORY_PATTERNS = [
         r"^execute_delegation_function$|^list_delegation_functions$|^poll_delegation_job$",
         "admin",
     ),
+    (r"^depmap_", "depmap"),
+    (r"^create_memory$|^delete_memory$|^edit_memory$", "memory"),
+    (r"^start_trace$|^end_trace$", "tracing"),
+    (r"^enter_write_mode$|^exit_write_mode$", "files"),
+    (r"^bulk_add_provider_index$|^change_golden_repo_branch$|^check_hnsw_health$|^get_provider_health$|^list_repo_categories$|^manage_provider_indexes$|^trigger_dependency_analysis$", "repos"),
+    (r"^close_pull_request$|^comment_on_pull_request$|^create_pull_request$|^get_pull_request$|^list_pull_request_comments$|^list_pull_requests$|^merge_pull_request$|^update_pull_request$", "git"),
+    (r"^dependency_analysis_workflow$", "guides"),
+    (r"^wiki_article_analytics$", "admin"),  # explicit admin (not stub) — keep here so future runs route correctly
 ]
 
 

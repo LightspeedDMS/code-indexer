@@ -1,7 +1,7 @@
 ---
 name: cidx_ssh_key_show_public
 category: ssh
-required_permission: activate_repos
+required_permission: repository:admin
 tl_dr: Get public key content for copying to remote servers.
 inputSchema:
   type: object

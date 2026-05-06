@@ -5,6 +5,276 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.13 (2026-05-05) — Anti-fallback: descriptions require Claude CLI (no static regex, no README copy)
+
+Production user reported "descriptions look very terse and relatively short" vs the richer historical state. Root cause: two silent fallback paths in the description-generation pipeline produced degraded output whenever Claude CLI was unavailable or returned no result, yet still wrote a description file (so operators saw "success" with terse content):
+
+1. `meta_description_hook.on_repo_added` had a README-copy fallback (`_create_readme_fallback`) when `cli_manager` was `None` or CLI was off PATH.
+2. `RepoAnalyzer.extract_info` fell back to static regex extraction (capped at 10 features + 5 use cases) when Claude returned `None`.
+
+Both violated Messi Rule #2 (anti-fallback): graceful failure over forced success. Per the user's explicit mandate, v10.4.13 enforces hard-fail on missing Claude CLI:
+
+- `meta_description_hook.on_repo_added`: raises `RuntimeError` when `cli_manager` is `None` or `check_cli_available()` returns `False`. Caller (golden repo registration job) logs ERROR; description file is NOT written; admin retries when CLI is restored.
+- `meta_description_hook._generate_repo_description`: now REQUIRES a `cli_manager: ClaudeCliManager` positional parameter. Runtime `isinstance` guard raises `TypeError` on `None` or wrong type (negative test verifies bare `MagicMock` is rejected).
+- `repo_analyzer.RepoAnalyzer.extract_info`: raises `RuntimeError` when `_extract_info_with_claude()` returns `None`. The static regex fallback is deleted entirely. `CIDX_USE_CLAUDE_FOR_META` env-var feature flag also removed (Claude is now mandatory, not optional).
+- `_create_readme_fallback` function deleted from `meta_description_hook.py` (anti-orphan-code per Messi Rule #12).
+
+Anti-regression test suite: `tests/unit/global_repos/test_description_no_fallback_v10_4_13.py` (8 tests across 4 ACs):
+- AC1: `_generate_repo_description` raises `TypeError` on `None` / wrong-type cli_manager AND forwards valid manager to RepoAnalyzer (observable via `check_cli_available` call).
+- AC2: `RepoAnalyzer.extract_info` raises `RuntimeError` when subprocess (mocked at the boundary) reports no result.
+- AC3: `_create_readme_fallback` is absent from module namespace (`hasattr` check, not just `FunctionDef`).
+- AC4: `on_repo_added` raises `RuntimeError` with specific reason (`ClaudeCliManager not initialized` / `Claude CLI not available on PATH`) when cli_manager unavailable.
+
+Test fixture cleanup: 9 existing tests were relying on the now-removed fallback (bare `MagicMock()` for `cli_manager`, calls to `_generate_repo_description` without the new positional, expectations on README-copy outputs). All updated to use `MagicMock(spec=ClaudeCliManager)` with `check_cli_available=True` and patch `RepoAnalyzer` at the meta_description_hook import path.
+
+Operator behavior change: when Claude CLI is unavailable, golden repo registration logs ERROR with code path `meta_description_hook.on_repo_added` and the repo registration completes WITHOUT a description file in cidx-meta. Refresh scheduler then picks the repo up for retry on subsequent passes once CLI is restored. No silent terse-output state any more.
+
+## v10.4.12 (2026-05-05) — CRITICAL: DescriptionRefreshScheduler unwired in production (silent no-op)
+
+Production user reported the description refresh job had NEVER been seen running in dashboard or logs (beyond "Description refresh scheduler started"). Root cause: `global_lifecycle_manager` is initialized inside a try/except at `lifespan.py:509`. If `GlobalReposLifecycleManager(...)` or `.start()` raises, the exception is caught at line 579, logged at `APP-GENERAL-015`, but `global_lifecycle_manager` stays `None`. The description scheduler block at lines 887-935 then computed `refresh_scheduler = None` and the ENTIRE D3 wiring block (lines 896-935) was guarded by `if refresh_scheduler is not None:` — meaning ALL four collaborator assignments (`_lifecycle_invoker`, `_golden_repos_dir`, `_lifecycle_debouncer`, `_refresh_scheduler`) were skipped. The scheduler's `_check_lifecycle_backfill_wiring()` then returned `False` on every 60s loop pass, silently bailed out. Bug invisible in production logs.
+
+Fix (Tier 1 + Tier 2 combination):
+- Moved `description_refresh_scheduler._golden_repos_dir = Path(golden_repos_dir)` OUT of the conditional — `golden_repos_dir` is always available so this slot can always be wired.
+- Added explicit startup-time check before `description_refresh_scheduler.start()` that scans for missing collaborator slots and logs at ERROR level with code `APP-GENERAL-051` if any are None. The error message names the missing slots and explains the no-op consequence + the recovery hint (ensure global_lifecycle_manager initialization succeeds). Operators now see the misconfiguration immediately at startup, not 60s into a silent loop.
+
+Anti-regression test suite (`tests/unit/server/startup/test_description_refresh_scheduler_wiring_v10_4_11.py`) ensures: (a) all 4 slots wired when global_lifecycle_manager present; (b) APP-GENERAL-051 ERROR logged when missing; (c) golden_repos_dir always wired regardless.
+
+## v10.4.11 (2026-05-05) — Bug #984 logging dedup + xray dashboard verification
+
+- **Bug #984 logging fix (#70)**: even after v10.4.9 cratered the warning rate 94% (3,010/24h → 4 in 30 min by stopping the wipe upstream cause), residual stub descriptions still re-emitted "Cannot generate refresh prompt for &lt;repo&gt;: missing description or last_analyzed" on every scheduler pass because the warning fires BEFORE the quarantine branch can suppress it. Fix in `description_refresh_scheduler.py`: per-repo "warned-already" flag set on first WARNING emission, downgrades subsequent emissions to DEBUG level. Flag re-armed after a successful refresh so legit failures still warn. Quarantine state is also checked before `_get_refresh_prompt()` to short-circuit the call entirely on already-quarantined repos.
+- **#67 dashboard xray-visibility verification**: investigation confirmed `xray_search` and `xray_explore` jobs already appear correctly in the dashboard recent-jobs widget. Neither `BackgroundJobManager.get_recent_jobs_with_filter` nor `JobTracker.get_recent_jobs` filter by operation_type, and `dashboard_recent_jobs.html` has no exclusion list. No production change needed; 3 anti-regression tests added at `tests/unit/server/web/test_dashboard_xray_visibility_v10_4_11.py` to lock the contract.
+
+## v10.4.10 (2026-05-05) — Health badge data-volume fix + auth test cleanup (partial)
+
+- **Bug #71**: dashboard health badge (HEALTHY / DEGRADED / UNHEALTHY) and the system_metrics alert cache used `psutil.disk_usage("/")` (root volume only). If `/mnt/codeindexer-data` filled up while `/` stayed fine, the health indicator stayed green and no alert fired. Fix: both `health_service.py:298` (`_check_storage_health`) and `system_metrics_collector.py:97,151` (`_get_system_info`) now resolve `data_path` from `ServerConfig.server_dir`, validated via `os.path.isdir()`, with `/` fallback when config is unavailable. Per-volume progressbars (line 753) were already correct via `psutil.disk_usage(partition.mountpoint)` and remain unchanged.
+- **Test cleanup #68 (partial — 5 of 47)**: `test_mcp_session_state.py` had a stale assertion that `NORMAL_USER` lacked `activate_repos` permission — Story #981 (commit `860db6dc`) granted it; assertion updated. `test_totp_service.py` 4 errors fixed via `@pytest.mark.timeout(65)` on classes whose fixtures sleep 31s to advance the TOTP window (default 30s pytest timeout). The remaining 42 failures categorized as Class B (test infrastructure: account-lockout state contamination, SQLite fixture setup, real-login fixture failures — 22 items) and Class C (test-side stale paths: `app.password_change_rate_limiter` should be `code_indexer.server.auth.rate_limiter.password_change_rate_limiter` after rate-limiter modularization; some tests use stale endpoint URLs — production code is INTACT — 18 items). Cleanup tracked as v10.4.11 (#72).
+
+## v10.4.9 (2026-05-05) — CRITICAL HOTFIX: cidx-meta description filename mismatch (production data loss)
+
+`MetaDirectoryUpdater` and `on_repo_added()` used different naming conventions for cidx-meta description files. Every cidx-meta refresh cycle treated all hook-created files as orphaned and deleted them, replacing with 3-line stubs. Production evidence: cidx-meta commit `971850c` deleted 892 files and added 893 stubs in one run (`git diff e0be4bd 971850c --stat`: 1787 files changed, 2682 insertions, 27622 deletions).
+
+Root cause: `meta_description_hook.py:363,455` (and `on_repo_added`'s README fallback) wrote `{repo_name}.md` (e.g. `JSqlParser.md`); `MetaDirectoryUpdater.update()` and 6 other consumers expected `{alias_name}.md` (e.g. `JSqlParser-global.md`). 7 sites used the alias form, 3 used the bare form. Fix: align the 3 minority sites to the dominant alias-form convention. Plus `refresh_scheduler.py:2350-2351` was stripping `-global` then searching for the bare-name file (which doesn't exist) — now uses `alias_name` directly.
+
+Anti-regression test (`tests/unit/global_repos/test_cidx_meta_filename_alignment_v10_4_9.py`) ensures the hook and MetaDirectoryUpdater always agree on filenames.
+
+Likely also closes the upstream cause of GitHub bug #984 (description_refresh_scheduler warning spam — 18,082 "missing description or last_analyzed" warnings since log id 375287). The wipe-and-stub cycle produced descriptions without `last_analyzed` field, which the scheduler then repeatedly tried to refresh and re-warned on every pass. Stop the wipes → stop the warnings. Logging-side suppression in the scheduler (separate fix) tracked as #70.
+
+## v10.4.8 (2026-05-05) — OAuth Bearer (opaque) pre-elevation — Open 1 FOURTH attempt
+
+v10.4.7 fixed the Basic-auth client-credentials path (Priority 1 in `get_current_user_for_mcp`), but the v10.4.7 field test confirmed Open 1 was STILL broken: Claude.ai's MCP integration uses OAuth Bearer tokens issued via `/oauth/token` (authorization code flow), which are OPAQUE random strings (`secrets.token_urlsafe(48)` stored in `oauth_tokens` table) — NOT JWTs. Those land on Priority 2 (the JWT/Bearer path), where `jwt_manager.validate_token()` silently fails for opaque tokens (caught with debug log), `request.state.user_jti` is never set, and the elevation decorator's Gate 5 fires "No session key on MCP request."
+
+Fix: in `get_current_user_for_mcp` Priority 2, when JWT validation didn't set `user_jti` and `oauth_manager.validate_token(token)` succeeds (proving it's an OAuth-issued opaque token, not an arbitrary string), derive `session_key = f"oauth:{sha256(token)[:16]}"`, set `user_jti`, AND open an elevation window via `elevated_session_manager.create()`. Same logical step as v10.4.7's Basic-auth fix, just at the Bearer/opaque path. Bearer JWT login tokens (issued by `/auth/mfa/verify`) keep existing behavior — `user_jti` from JWT `jti` claim, explicit `/auth/elevate` required.
+
+**Open 1 attempt history**: v10.4.5 fixed handler bare-except (didn't reach — gate fires upstream); v10.4.6 fixed gate response shape (didn't reach — OAuth never set session_key); v10.4.7 fixed Basic-auth client-credentials (didn't reach Claude.ai — uses Bearer opaque); v10.4.8 closes the actual user-visible path. Certification this time MUST replicate the field tester's exact auth flow (real OAuth Bearer opaque token from `/oauth/token`, not synthetic credentials).
+
+## v10.4.7 (2026-05-05) — OAuth-MCP sessions pre-elevated (Open 1 ROOT CAUSE)
+
+OAuth-authenticated MCP sessions (e.g. Claude Code via CIDX MCP credentials) could not invoke admin-gated tools (`set_session_impersonation`, `list_users`, `create_user`, etc.) because the OAuth auth path never set `request.state.user_jti`, so the `@require_mcp_elevation` decorator's Gate 5 fired with "No session key on MCP request." End-to-end staging test confirmed the Bearer + TOTP + `/auth/elevate` pipeline works correctly; OAuth was the only gap.
+
+Fix (Variant C — pre-elevated OAuth): `get_mcp_user_from_credentials` now sets `request.state.user_jti = f"oauth:{client_id}"` AND opens an elevation window keyed on that session_key after successful credential verification. OAuth client credentials are long-lived secrets *provisioned by* a TOTP-elevated admin session — they're already a step-up artifact. Forcing per-call TOTP would be defense-in-depth without proportional security gain. Industry pattern matches (AWS IAM service accounts don't MFA per-call). Bearer/cookie sessions still go through the explicit `/auth/elevate` flow.
+
+Operator implications: OAuth credentials confer admin scope persistently until revoked. Scope at issuance time, audit via `session_key=oauth:<client_id>` log lines, revoke via the existing MCP credential management UI when needed.
+
+This is the THIRD attempt at Open 1 — v10.4.5 fixed the impersonation handler's bare-except (didn't help; gate fired upstream); v10.4.6 fixed the gate response shape (didn't help; OAuth path never set session_key). v10.4.7 closes the actual root cause.
+
+## v10.4.6 (2026-05-05) — Elevation decorator response shape + .git/ exclusion + is_admin field removed
+
+Three defects from the v10.4.5 staging field test.
+
+- **CRITICAL (Open 8 ROOT CAUSE)**: `set_session_impersonation` and other elevation-gated admin tools (`list_users`, `create_user`, etc.) returned generic "Error occurred during tool execution" with no diagnostic. v10.4.5 fixed the impersonation handler's bare-except, but the fix never executed because the `@require_mcp_elevation` decorator fires FIRST and was returning RAW dicts (not `_mcp_response`-wrapped). The MCP protocol layer expects `{"content":[{"type":"text","text":...}]}` shape; raw dicts get surfaced as generic errors at the higher transport layer. Now `_disabled_error`, `_elevation_required_error`, `_totp_setup_required_error` all wrap via `_mcp_response` (lazy import to avoid circularity). Structured codes — `elevation_required`, `totp_setup_required`, `elevation_enforcement_disabled` — now reach the MCP client as documented.
+- **LOW (Obs 3.3)**: `cidx-meta-global` filename Phase 1 returned `.git/FETCH_HEAD` and `.git/COMMIT_EDITMSG` as candidates. Extended v10.4.4's `.code-indexer/` exclusion to also cover `.git/` in both filename and content Phase 1.
+- **LOW (Obs 3.2)**: `is_admin` field removed from public job-result responses. v10.4.5 added a docstring explaining the field is a `BackgroundJobManager` priority/ownership-bypass flag (NOT submitter role), but field testers continued to misread it because they read response dicts, not source. Both leak paths in `BackgroundJobManager` — `get_job_status` SQLite fallback and `list_jobs` SQLite-merge — now scrub `is_admin` before returning. The internal `BackgroundJob.is_admin` field and SQLite storage remain unchanged for scheduling/ownership-bypass logic.
+
+## v10.4.5 (2026-05-05) — Field-test follow-ups + UX cleanup
+
+Five defects from the v10.4.3 / v10.4.4 staging field-test cycles.
+
+- **Defect 1 — `set_session_impersonation` returned generic "internal error"**: bare `except Exception` in `handle_set_session_impersonation` swallowed the real cause (often `session_state=None` from MCP transport, or the `@require_mcp_elevation` decorator firing with structured 403 errors). Now surfaces specific error codes (`session_state_unavailable`, `elevation_required`, etc.) instead of stringifying.
+- **Defect 2 — `xray_search` vs `xray_explore` dedup gate inconsistency**: BackgroundJobManager.submit_job's dedup fires identically for both (operation_type + repo_alias scoped, in-flight jobs only — completed jobs do NOT block resubmission). The field-test observation was a timing artifact (xray_search jobs complete fast on small repos and don't collide). Documented behavior in tool docs and added concurrency test to lock the contract.
+- **Defect 3 — Admin-mask risk on C3.5 / C3.7**: added explicit non-admin protocol-level access tests proving v10.4.4's deactivate_repository fix and v10.4.4's nonexistent-repo wording both work for non-admins, not just via admin bypass.
+- **Defect 4 — `is_admin` field naming confusion**: test agents repeatedly misread job-result `is_admin: false` as "this user is not an admin". Added clarifying docstring to `BackgroundJob` dataclass and tool docs explaining `is_admin` is a job-priority opt-in flag (bypasses ownership check on cancel/get-job), NOT the submitter's role. Xray handlers don't request the priority lane so `is_admin` always reports False regardless of who submitted.
+- **Defect 5 — Single-element list returned multi-repo shape**: `repository_alias=["cidx-meta-global"]` returned `{job_ids:[...], errors:[]}` instead of `{job_id:"..."}`. Now normalized: 1-element list → single-repo shape; multi-element list → multi-repo shape unchanged. Plain-string alias unchanged.
+
+## v10.4.4 (2026-05-05) — X-Ray hotfix bundle (post-v10.4.3 staging findings)
+
+Seven findings from the v10.4.3 arms-length staging test cycle.
+
+- **HIGH (3.5)**: `deactivate_repository` access check denied owners their own activations. Quirk 7's fix to `_check_repository_access` (use `golden_repo_alias` for activate's source-repo check) was never propagated to the symmetric deactivate handler. Fix: add `deactivate_repository` to a small ownership-enforced-tool allowlist that bypasses the protocol-level group-access guard, since the activation manager already enforces ownership at the data layer.
+- **HIGH (3.2)**: `xray_dump_ast` `max_nodes` parameter ignored — every call returned ~142KB regardless of the value, triggering MCP token-cap overflow. Was hardcoded `max_nodes=500` at the call site to `_serialize_ast`. Now properly extracted from params with [1, 2000] range validation.
+- **MEDIUM (3.1)**: PCRE2 invalid regex completed silently with empty results. RegexSearchService at `regex_search.py` was logging-and-swallowing ripgrep errors (Messi Rule 13 violation). Now raises `RipgrepExecutionError`; XRaySearchEngine catches it and surfaces `phase1_failed=True, phase1_error=<msg>` in the job result.
+- **MEDIUM (3.3)**: Matches missing required `line_number` were silently accepted and enriched. Now rejected as `InvalidEvaluatorReturn` for the entire file response.
+- **LOW (3.4)**: String `line_number` (`"42"`) raised raw Python `ValueError` from `int()` coercion. Now wrapped as `InvalidEvaluatorReturn` with actionable message.
+- **LOW (3.6)**: `cidx-meta-global` and similar repos indexed their own `.code-indexer/` directory's internal error logs and vector JSON files as Phase 1 candidates. Both `_run_phase1_filename` and `_run_phase1_content` now exclude `.code-indexer/` unconditionally.
+- **LOW (3.8)**: Validation error message listed 18 value builtins but omitted the 9 exception types that ARE in `SAFE_BUILTIN_NAMES`. Now lists both. CLAUDE.md count reconciled to 27 (18 + 9).
+
+## v10.4.3 (2026-05-05) — X-Ray hotfix bundle + sandbox defense-in-depth
+
+Three findings from v10.4.2 arms-length staging test cycle, plus one dunder-in-Slice bypass surfaced by code review of fix #2 before shipping.
+
+- **HIGH-SEVERITY SECURITY**: `_check_repository_access` (`src/code_indexer/server/mcp/protocol.py`) skipped list-form `repository_alias` for non-admin users (omni xray dispatch bypassed access control — verified by staging test agent retrieving 32 matches from a denied repo). Now iterates each entry in native lists and JSON-encoded array strings, applying admin bypass / scoped_repos / accessible-set checks identically to the single-string path. Defense-in-depth fix: protects ALL omni-style tools, not just X-Ray.
+- **MEDIUM**: `ast.Slice` added to sandbox whitelist (`src/code_indexer/xray/sandbox.py`). Evaluators can now use slice syntax (`source[10:20]`, `source[-30:]`, `lines[0:10:2]`).
+- **MEDIUM SECURITY (caught pre-ship)**: Adding `ast.Slice` to the whitelist initially opened a dunder-in-Slice bypass — `obj['__class__':10]` and similar slice-wrapped dunder strings (lower / upper / step components) passed validation because the existing dunder check at `validate()` only inspected `node.slice` when it was a direct `ast.Constant`. Code review caught this before commit. Fix: extend the dunder block to ALSO inspect `Slice.lower`, `Slice.upper`, and `Slice.step` for dunder-string Constants. While not directly exploitable on built-in types (dict/list/str raise TypeError on string slice indices), the gap weakened the defense-in-depth posture and could become exploitable on custom `__getitem__` classes. New regression suite at `tests/unit/xray/test_slice_dunder_bypass_v10_4_3.py` covers all 5 attack vectors plus 3 legit-slice positive cases.
+- **MEDIUM**: Invalid regex patterns pre-validated at handler level for `xray_search` and `xray_explore` (non-PCRE2 mode). Returns `invalid_regex` error immediately instead of silently empty results. PCRE2 patterns continue to be validated by ripgrep at execution time.
+
+Plus pre-existing lint debt cleanup (16 ruff format violations + 6 mypy errors that shipped with v10.4.0/v10.4.1) — `./lint.sh` now exits 0 per Bug #900 prevention rule.
+
+## v10.4.2 — 2026-05-05
+
+### Fixed
+
+- **`list_global_repos` returned only 1 of N repos for admin users** (HIGH severity, pre-existing — discovered during v10.4.1 staging test setup): `handle_list_global_repos` (`src/code_indexer/server/mcp/handlers/repos.py`) applied `AccessFilteringService.filter_repo_listing` to all callers including admins. The filter checks group membership; admins by role (e.g. `Seba.Battig@lightspeeddms.com` with `role='admin'`) but not yet assigned to an explicit "admins group" saw only `cidx-meta-global` despite 8 repos existing. Fix: bypass the access filter when `user.role == UserRole.ADMIN`. Bug dates back to commit `6b914ab73` (Story #496 handler refactor, 2026-04-14) but was dormant until today's OAuth-authenticated admin-role testing surfaced it.
+
+- **`activate_repository` denied access to `user_alias` before creating it** (HIGH severity, pre-existing): `_check_repository_access` (`src/code_indexer/server/mcp/protocol.py`) extracted the repository identifier from `user_alias` (the NEW alias being created — doesn't exist yet) instead of `golden_repo_alias` (the existing source repo to activate from). Result: every activation attempt returned `Access denied: repository '<user_alias>' is not accessible to user '<username>'`. Fix: the access check now correctly extracts `golden_repo_aliases` (composite form, list — each entry checked individually), `golden_repo_alias` (single form, str), or falls through to `repository_alias`/`alias`/`user_alias`/`repo_alias` for tools that operate on existing repos. The `user_alias` is the new alias being CREATED in `activate_repository` and must NOT be checked.
+
+
+
+### Fixed
+
+- **X-Ray omni multi-repo crashed at MCP dispatch** (HIGH severity from production field testing): `repository_alias` as a native list or JSON-encoded array threw `AttributeError: 'list' object has no attribute 'endswith'` before the job was even queued. The v10.4.0 schema declared array support but handlers only had the string path wired. Fix: both `handle_xray_search` and `handle_xray_explore` now route through `_parse_json_string_array` and dispatch via `isinstance(..., list)`. Multi-repo response shape mirrors `regex_search`: `{job_ids: [...], errors: [...]}` with per-alias error handling.
+- **Default evaluator returned bool, broke under v10.4.0 dict contract** (HIGH severity from production field testing): when `evaluator_code` was omitted, both `xray_search` and `xray_explore` defaulted to `"return True"` (legacy v10.3.x contract), which under v10.4.0 yielded `InvalidEvaluatorReturn` for every file → zero matches. Both handlers now default to `_DEFAULT_EVALUATOR_CODE` — a v10.4.0-compliant snippet that emits one match per Phase 1 regex hit: `matches = [{"line_number": mp["line_number"]} for mp in match_positions]; return {"matches": matches, "value": None}`.
+
+## v10.4.0 — 2026-05-04
+
+### Changed (BREAKING — X-Ray evaluator contract)
+
+- **X-Ray evaluator now operates on the file-as-unit, returns dict** — major redesign of the evaluator contract per field-feedback that the per-regex-match-position model forced inverting predicates and was hard to express. The new contract:
+  - The evaluator runs ONCE per candidate file (not once per regex hit)
+  - It receives `node = root` (file's parse tree) plus a NEW `match_positions: List[Dict]` global containing ALL Phase 1 regex hits in the file `[{line_number, column, line_content, byte_offset}, ...]` (empty list in filename mode)
+  - It returns a DICT: `{"matches": [{"line_number": int, ...optional fields...}], "value": <anything serialisable>}`. The `matches` list can be empty (no matches in this file). The `value` is a per-file open value surfaced in the response as `file_metadata`.
+  - The server enriches each match with `file_path` (always), `line_content` (derived from source if omitted), `context_before`/`context_after` (derived if `context_lines > 0`), and `language` (always).
+  - **MIGRATION**: existing evaluator code that returned `bool` must be rewritten to return the dict shape. The legacy globals `match_byte_offset`/`match_line_number`/`match_line_content` are still present but ALWAYS None — use `match_positions` instead. See xray_search.md cookbook for 15 worked patterns under the new contract.
+
+### Added
+
+- **Sandbox lifts statement-level control flow + structured exception handling**:
+  - Newly allowed: `If`, `For`, `While`, `Break`, `Continue`, `Pass` (statement-level — termination is bounded by the 5s subprocess timeout, not by AST validation)
+  - Newly allowed: `Try`, `ExceptHandler`, `Raise` (defensive evaluators, clean error surfacing)
+  - Still banned: `def`, `class`, `lambda`, `import`/`from import`, `with`/`async with`, `global`/`nonlocal`, `async`/`await`, `yield`/`yield from`
+  - Safe builtins extended with exception types: `Exception`, `ValueError`, `TypeError`, `RuntimeError`, `AttributeError`, `KeyError`, `IndexError`, `NameError`, `StopIteration`
+- **Omni multi-repo support** for `xray_search` and `xray_explore` — `repository_alias` accepts `string` (single repo, returns `{job_id}`), `array of strings` (multi-repo, returns `{job_ids: [...], errors: [...]}` with per-alias error handling), or JSON-string-encoded array (parsed). Mirrors the `regex_search` omni pattern.
+- **Server threadpool capacity bumped to 256** (was anyio default 40) — set at lifespan startup via `anyio.to_thread.current_default_thread_limiter().total_tokens`. Bootstrap-only `server_threadpool_size` knob in ServerConfig (default 256, set to 0 to keep anyio default). Absorbs concurrent X-Ray `await_seconds` long-polls without starving other endpoints.
+
+### Changed
+
+- **regex_search-parity parameter alignment** — X-Ray tools now mirror regex_search inputSchema for transferable mental model:
+  - `driver_regex` renamed to `pattern`
+  - `max_files` renamed to `max_results`
+  - Added: `path` (subdirectory), `case_sensitive` (default true), `multiline` (default false), `pcre2` (default false), `context_lines` (int 0-10, default 0)
+  - Output match envelope adds `column`, `context_before`, `context_after` per regex_search shape; renamed `code_snippet` to `line_content`
+- **Documentation reframe** — dropped "expression" / "boolean expression" / "function body" framing throughout xray_search.md, xray_explore.md, docs/xray-architecture.md, CLAUDE.md. Replaced with "Python code snippet that returns a dict." All 15 cookbook patterns rewritten under the v10.4.0 contract using the lifted-ban constructs naturally where clearer than nested comprehensions; pattern 11 demonstrates `try/except` for defensive evaluation.
+
+### Internals
+
+- New error code `InvalidEvaluatorReturn` for evaluators that return non-dict / malformed dict shapes (replaces `NonBoolReturn` from v10.3.x — bool returns are no longer the contract).
+
+## v10.3.2 — 2026-05-04
+
+### Changed (BREAKING for evaluator code)
+
+- **X-Ray evaluator contract: `node` is now ALWAYS the file root** — corrects the design mistake from v10.3.0 (the "Bug #983 fix" wrongly passed the smallest enclosing match node). Both content-mode and filename-mode evaluators now receive `node = root`. Phase 1 regex match position is exposed as THREE NEW evaluator globals: `match_byte_offset` (int|None), `match_line_number` (int|None), `match_line_content` (str|None) — all `None` in filename mode. **MIGRATION**: evaluators that walked UP via `node.enclosing(...)` should be rewritten to walk DOWN via `node.descendants_of_type(...)` and (if positional precision matters) filter via `match_byte_offset`. The `root` global is preserved as an alias for `node` for explicit code. Field-test feedback: previous contract forced inverting every predicate from "this match is leaky" to "block contains a leaky thing"; the corrected contract restores the natural top-down walking pattern.
+
+### Added
+
+- **`await_seconds` accepts FLOAT values** — for sub-second sync mode (e.g., `await_seconds=0.5` = 500ms wait). Single parameter, expanded type — backward compatible (integer values still work). Previously int-only.
+- **7 new cookbook patterns** in xray_search.md tool docs — bringing the total from 8 to 15: functions with N+ branches, returns inside ifs, calls without error handling, TODO/FIXME comments, public functions missing return-type annotations (Python), bare except clauses, classes with no docstring. All examples rewritten to use the v10.3.2 node=root contract.
+
+### Changed
+
+- **`await_seconds` ceiling lowered from 30s to 10s** — bounds threadpool occupancy. FastAPI sync handlers run in a finite thread pool (default ~40 threads); `await_seconds=30` at modest concurrency could starve other endpoints. For longer waits, use the async `{job_id}` path. Operators who need a different cap can adjust the constant in `handlers/xray.py` or tune uvicorn `--limit-concurrency`.
+
+### Documentation
+
+- Comprehensive evaluator-contract documentation update across `xray_search.md`, `xray_explore.md`, `docs/xray-architecture.md`, and `CLAUDE.md`. New "Globals exposed to your evaluator" subsection documents all 8 globals (was 5). XRayNode reference table clarified to apply to any node reachable from `node`. inputSchema for `await_seconds` updated: `type: number`, `maximum: 10.0`.
+
+## v10.3.1 — 2026-05-04
+
+### Documentation
+
+- **X-Ray docs: explicit ban on statement-level `if`** (post-v10.3.0 field-test follow-up): `xray_search.md` and `xray_explore.md` now explicitly call out that `if` / `for` / `while` / `try` statements are banned alongside the previously-documented banned constructs, with guidance to use `IfExp` ternary (`a if cond else b`) for conditional logic and comprehensions for iteration.
+- **X-Ray docs: Evaluator code structure subsection**: a new "Evaluator code structure" section explains that the evaluator code is parsed as a Python **Module** (function body), not a bare expression. Multi-statement evaluators are first-class — bind locals with `=` (`Assign`) or `+=` (`AugAssign`), then return a final boolean. The previous documentation implied bare expressions were the only valid form, hiding the multi-statement capability that the v10.3.0 sandbox expansion enabled.
+
+## v10.3.0 — 2026-05-04
+
+### Added
+
+- **X-Ray field-feedback bundle (21 issues, 14 work items)** — comprehensive response to real-world claude.ai testing feedback on the v10.2.0 X-Ray engine.
+
+  **Sandbox whitelist expansion** (issue #7): the evaluator sandbox now accepts comprehensions (`comprehension`, `GeneratorExp`, `ListComp`, `SetComp`, `DictComp`), local variable binding (`Assign`, `AugAssign`, `operator`), and ternary expressions (`IfExp`). Top-level `for`/`while` statements remain banned (use a comprehension instead). This unlocks the canonical AST-search use case ("find functions with N elif clauses") which previously required client-side aggregation.
+
+  **New XRayNode methods**: `descendants_of_type(name) -> list[XRayNode]` (DFS pre-order, excludes self), `count_descendants_of_type(name) -> int` (fast accumulator that doesn't materialise wrapper objects), `enclosing(type_name) -> XRayNode | None` (walks up parent chain, inclusive of self — solves the "regex landed on `def` keyword instead of `function_definition`" gotcha), and `node.text` property (raw source text decoded UTF-8 with `errors='replace'` — required for string-literal pattern checks like SQL injection detection).
+
+  **xray_explore matched_node** (issue #14): every match in `xray_explore` output now includes a `matched_node` block with `type`, `start_byte`, `end_byte`, `start_point`, `end_point` — describes what the evaluator actually received, complementing the existing file-rooted `ast_debug` field.
+
+  **xray_dump_ast MCP tool** (issue #19): new synchronous tool for single-file AST exploration without requiring a `driver_regex`. Returns the file's parse tree in the same serialisation format as `xray_explore`'s `ast_debug` field. 5s timeout. Auth: `query_repos`.
+
+  **await_seconds parameter** (issue #17): `xray_search` and `xray_explore` now accept `await_seconds` (int, 0..30, default 0). When >0, the server polls job status for up to N seconds before falling through to the async `{job_id}` envelope. For fast queries (<5s), this halves the round-trip count vs the previous always-async pattern.
+
+  **cidx_fetch_cached_payload MCP tool** (issue #20): the cache fetch endpoint (`GET /api/cache/{cache_handle}`) is now exposed as a discoverable MCP tool. Truncation messages in `xray_search`/`xray_explore` now name the tool by its registered name so clients can find it.
+
+### Fixed
+
+- **Glob zero-match warnings** (issue #3): when an `include_patterns` entry matches zero files in Phase 1, the response now includes a `warnings[]` array with a `zero_match_include_pattern` entry naming the pattern and explaining the `*` vs `**` distinction. Previously `*/time.py` silently produced `files_total: 0` with no diagnostic.
+
+- **Sandbox validation error messages** (issue #18): rejection messages now include (a) the full current whitelist, (b) targeted workaround hints for common mistakes (e.g., `For` rejection now reads "Use a comprehension (ListComp/GeneratorExp/SetComp/DictComp) instead of a top-level `for` statement"), and (c) a pointer to the evaluator API documentation. Evaluator AttributeError messages now include `Did you mean: <closest valid attribute>?` suggestions via `difflib.get_close_matches`.
+
+- **Doc accuracy** (issues #1, #2, #4, #10): the `xray_search` example using `any(n.type == 'X' for n in root.named_children)` now actually works (was previously rejected by the sandbox before #21). The `line_number` and `code_snippet` fields are correctly documented as populated for `search_target='content'` (was previously claimed null pending Story #978).
+
+### Documentation
+
+- **XRayNode reference table** (issues #8, #11): every public attribute and method on `XRayNode` is now documented in a single reference table in both `xray_search.md` and `xray_explore.md`. Users no longer need to probe with `hasattr` to discover the API.
+- **Common patterns cookbook** (issue #12): 8 worked evaluator patterns covering the most common questions — filter to function bodies, exclude comments/docstrings, walk to ancestor, count structural property, string-literal pattern check, parameter count, deep nesting detection, comprehension presence.
+- **Cross-language node type table** (issue #13): a 6-language reference covering 10 construct categories (function definition, function call, class definition, if statement, else-if, for loop, try block, variable declaration, string literal, comment) so users coming from one language can apply patterns to another.
+- **evaluation_errors[] payload examples** (issue #15): one realistic payload per error_type (`EvaluatorTimeout`, `EvaluatorCrash`, `NonBoolReturn`, `UnsupportedLanguage`) plus the synchronous `validation_failed` rejection path that fires before job submission.
+
+## v10.2.1 — 2026-05-04
+
+### Fixed
+
+- **X-Ray dependencies promoted to core (deployment fix)** — v10.2.0 shipped `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` as `[xray]` optional extras, but the CIDX server auto-updater installs the base package only. Result: `xray_search` and `xray_explore` MCP tools were registered in the schema but failed at runtime on staging with `XRayExtrasNotInstalled` because tree-sitter wasn't installed. Both dependencies are now core (in `[project] dependencies`); the `[xray]` extras block is removed. The `XRayExtrasNotInstalled` exception class and all its error-handling branches in CLI, MCP handlers, and HTTP routes are deleted (per Anti-Fallback rule — tree-sitter is a system invariant now). Five tests that verified the optional-extras error path are deleted.
+
+## v10.2.0 — 2026-05-04
+
+### Added
+
+- **Epic #968 — X-Ray AST-Aware Code Search (full implementation)** — v10.1.0 shipped only the `[xray]` optional install group; v10.2.0 delivers the actual two-phase search engine, sandboxed evaluator, MCP tools, CLI commands, and full test suite (Stories #969–#979, 11 stories). Phase 1 driver runs a regex walk over content or filenames (gated by `include_patterns`/`exclude_patterns`); Phase 2 evaluator runs caller-supplied Python against a `XRayNode` AST wrapper inside a hardened sandbox. New MCP tools `xray_search` (production search) and `xray_explore` (debug mode that serialises full AST trees to help authors understand tree-sitter output). Async job pattern returns `{job_id}` immediately; clients poll `GET /api/jobs/{job_id}`. Long results route through `PayloadCache` (`store(content) -> handle`, retrieved via `GET /api/cache/{handle}`) so MCP responses stay under transport limits. New CLI: `cidx xray search` and `cidx xray explore`. 10 mandatory languages: Java, Kotlin, Go, Python, TypeScript, JavaScript, Bash, C#, HTML, CSS — Terraform optional via `tree-sitter-hcl`. Lazy-load discipline preserved: importing `code_indexer.xray.ast_engine` does NOT trigger tree-sitter import (CLI startup ~0.57s, well under 2.0s budget). `ThreadPoolExecutor` parallelises Phase 2 evaluator runs across candidate files for throughput on large repos. New Web UI Config Screen entries for X-Ray runtime settings (max-files cap, timeout, parallelism).
+
+- **Hardened Python evaluator sandbox** — `PythonEvaluatorSandbox` enforces three defense layers: (1) `ast.parse()` + walk against `ALLOWED_NODES` whitelist; (2) stripped builtins (`getattr`, `setattr`, `delattr`, `__import__`, `eval`, `exec`, `open`, `compile` removed; only 17 safe names like `len`, `str`, `min`, `max`, `sorted` remain); (3) `multiprocessing.Process` isolation with SIGTERM at 5.0s and SIGKILL at +1.0s. `DUNDER_ATTR_BLOCKLIST` (frozenset, 39 names) blocks every dunder attribute and `__`-prefixed Subscript at validation time so attempts like `node.__class__.__init__.__globals__['__builtins__']['open'](...)` are rejected before subprocess spawn. Four explicit failure modes returned as `EvalResult.failure`: `validation_failed`, `evaluator_timeout`, `evaluator_subprocess_died`, `evaluator_returned_non_bool`. 112+ canary tests in `tests/unit/xray/test_sandbox*.py` exercise positive, negative, and corner-poking patterns including the confirmed exploit. Architecture invariants: raw `tree_sitter.Node` objects are wrapped in `XRayNode` before exposure to evaluator code; `__slots__ = ("_node",)` and normal assignment (no `object.__setattr__` workaround that would break mypy tracking).
+
+- **Lightspeed Neo Exploration skill — X-Ray section** — `skills/lightspeed-neo-exploration/SKILL.md` extended with a dedicated X-Ray usage section that teaches Claude.ai when to reach for `xray_search` vs `xray_explore`, how to compose driver regex + evaluator code, common evaluator patterns, and how to interpret AST exploration output. Plus 10 general improvements to clarity, examples, and accuracy across the rest of the skill (acronym preservation, paste-ready snippets, error-handling guidance, etc.).
+
+- **`skills/build.sh`** — New build script for `.skill` zip bundles with `--check` mode for pre-commit verification. Wired into `.pre-commit-config.yaml` as `skill-bundle-sync` hook so `SKILL.md` changes that aren't bundled are caught before commit.
+
+### Fixed
+
+- **Bug #982 — `RegexSearchService` not wired into X-Ray Phase 1 driver** — `XRaySearchEngine._run_phase1_driver` for `search_target=content` now delegates to `RegexSearchService` instead of inline file walking, gaining the same `include_patterns`/`exclude_patterns` semantics, gitignore handling, and binary-file detection used elsewhere in CIDX. `search_target=filename` retains its inline path walker (the regex applies to relative paths, not file content). Bug #982 closed.
+
+- **Bug #983 — Per-match-position evaluator missing** — `XRaySearchEngine` Phase 2 now uses `find_enclosing_node` to locate the smallest AST node enclosing each Phase 1 regex match, then evaluates the user's `evaluator_code` against THAT node — not the file's root node. This is what makes X-Ray "precision" search: a regex hit on `func_call(arg)` evaluates against the `call_expression` AST node, not the entire file. Bug #983 closed.
+
+### Changed
+
+- **MCP tool documentation cleanup** — Cleared 30 stub `tool_docs/admin/*.md` files that were generated mid-session by an earlier accidental `convert_tool_docs.py` run; these duplicated canonical docs in `depmap/`, `memory/`, `tracing/`, `files/`, `repos/`, `git/`, and `guides/` subdirectories with no `inputSchema`. Extended `tools/convert_tool_docs.py::CATEGORY_PATTERNS` with explicit routing for `depmap_*`, memory tools, tracing tools, write-mode tools, repo provider tools, PR tools, and `dependency_analysis_workflow` — so future regenerations correctly bucket these instead of dumping them into `admin/`. Re-tightened `src/code_indexer/server/mcp/tool_doc_loader.py` from `logger.warning + continue` (band-aid) back to `raise FrontmatterValidationError` for duplicate tool names — duplicates now fail loud at startup instead of silently being absorbed. Renamed `tool_docs/search/xray.md` → `tool_docs/search/xray_search.md` to match its `TOOL_REGISTRY` entry name; updated 23 references in `tests/unit/server/mcp/test_xray_tool_docs_completeness.py`.
+
+### Security
+
+- **Sandbox dunder-attribute escape closed** — A confirmed exploit pattern (`node.__class__.__init__.__globals__['__builtins__']['open'](path, 'w')`) could write to arbitrary files inside the evaluator subprocess, bypassing both the `STRIPPED_BUILTINS` defense (open was stripped from the dict but reachable via dunder traversal) and the AST node whitelist (`Attribute`, `Subscript`, `Constant`, `Call` all allowed). Fix: `DUNDER_ATTR_BLOCKLIST` now rejects any `ast.Attribute` whose `.attr` is dunder-listed AND any `ast.Subscript` whose slice is a string `Constant` starting with `__`, both at validation time before subprocess spawn. Verified by canary tests in `tests/unit/xray/test_sandbox_dunder_escapes.py`.
+
+## v10.1.0 — 2026-05-02
+
+### Added
+
+- **X-Ray Engine (Epic #968)** — Added `[xray]` optional install group: `pip install code-indexer[xray]` pulls `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` for AST-aware search. Without `[xray]`, `cidx xray` commands emit a graceful `XRayExtrasNotInstalled` error pointing to the install command. CLI startup time unaffected (lazy-load discipline preserves the existing baseline).
+- **Story #967 — Activated Repository Reaper** — New background service that periodically scans activated repositories and auto-deactivates those that have been idle beyond a configurable TTL. `ActivatedReaperService` reads `last_accessed` timestamps from activated repos and submits `deactivate_repository` background jobs for any repo whose last-accessed time is older than `activated_reaper_config.ttl_days` (default 30 days); repos with a missing or null `last_accessed` are treated as never-accessed and always eligible for reaping (AC5). `ActivatedReaperScheduler` runs as a daemon thread, submits reap cycles via `BackgroundJobManager` so they appear in the job dashboard (AC3), and re-reads cadence and TTL from config on every cycle so Web UI changes take effect without a server restart (AC4). Manual trigger available via `POST /api/admin/reaper/trigger` (admin-only). New `activated_reaper_config` block in `ServerConfig` with `ttl_days: int = 30` and `cadence_hours: int = 24` configurable from the Web UI Config Screen.
+- **Story #981 — Branch-aware exploration for normal users** — `UserRole.NORMAL_USER` now includes the `activate_repos` permission, allowing normal users to activate, deactivate, switch branches on, and sync their own workspace repositories without requiring admin access (AC1). The `switch_branch` route now enforces a guard preventing normal users from switching branches on `*-global` aliases — only admins may mutate global repositories (AC2). The Lightspeed Neo Exploration skill was extended with a Context Discovery Phase (Steps 0a–0e) that guides normal users through asking context questions, listing available branches from `cidx-meta-global`, activating their workspace with the correct branch, waiting for the activation job to complete, and scoping all searches to their workspace alias.
+
+### Fixed
+
+- **Bug #962 — HNSW double-delete crash on reload cycle** — `HNSWIndexManager.remove_vector` and `add_or_update_vector` raised `RuntimeError: "The requested to delete element is already deleted"` when `temporal_indexer.close()` triggered `_apply_incremental_hnsw_batch_update` on a point whose HNSW label had already been soft-deleted in a previous batch. The `load_for_incremental_update` path rebuilds `id_to_label` from persisted metadata which carries no soft-delete state, so a reload after a delete would silently re-expose the deleted label and cause the second `mark_deleted` call to raise. Fix: both `mark_deleted` call sites now wrap the call in a narrow `try/except RuntimeError` that re-raises if the message does not contain "already deleted" and logs a WARNING otherwise. Mapping cleanup (`id_to_label`, `label_to_id` eviction) proceeds regardless. Regression tests cover the exact Bug #962 stack trace path (delete → reload → delete again) plus add/update path and re-raise behavior for unrelated errors.
+- **Bug #963 — Empty document strings crash FTS indexer** — The FTS (Tantivy) indexer raised during indexing when a document's `content` field was an empty string. Fix: the chunker now replaces empty string content with a single-space placeholder (`" "`) before writing to the FTS index. Regression tests verify both the empty-string and whitespace-only cases.
+
+### Security
+
+- **SSH key tool docs re-gated to `repository:admin`** — Five SSH key management MCP tools (`cidx_ssh_key_create`, `cidx_ssh_key_delete`, `cidx_ssh_key_list`, `cidx_ssh_key_show_public`, `cidx_ssh_key_assign_host`) had their `required_permission` set to `activate_repos`. Granting `activate_repos` to `NORMAL_USER` (Story #981) would have exposed these server-wide credential-management tools to all authenticated users. Permission gate updated to `repository:admin` (requires admin role) before the normal-user grant was applied.
+
 ## v10.0.16 — 2026-05-02
 
 ### Fixed

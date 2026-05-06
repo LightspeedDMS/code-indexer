@@ -165,7 +165,10 @@ class VoyageRerankerClient(RerankerClient):
 
         Document truncation:
           Each document is truncated to self.max_chars before sending.
-          Empty documents are sent as-is.
+          Empty documents are replaced with a single space to satisfy API
+          constraints (Voyage rejects payloads containing empty strings).
+          Index alignment is preserved — the single space occupies the same
+          position as the original empty string in the response.
 
         Args:
             query: Search query string. Must be non-empty.
@@ -285,8 +288,12 @@ class VoyageRerankerClient(RerankerClient):
         return query
 
     def _truncate_documents(self, documents: List[str]) -> List[str]:
-        """Truncate each document to max_chars; empty docs are sent as-is."""
-        return [doc[: self.max_chars] if doc else doc for doc in documents]
+        """Truncate each document to max_chars; empty docs are replaced with a single space.
+
+        Voyage AI rejects payloads containing empty strings (HTTP 400).
+        Replacing with ' ' preserves index alignment in the API response.
+        """
+        return [doc[: self.max_chars] if doc else " " for doc in documents]
 
     def _build_request_body(
         self, query: str, documents: List[str], top_k: Optional[int]
@@ -616,8 +623,12 @@ class CohereRerankerClient(RerankerClient):
         return query
 
     def _truncate_documents(self, documents: List[str]) -> List[str]:
-        """Truncate each document to max_chars; empty docs are sent as-is."""
-        return [doc[: self.max_chars] if doc else doc for doc in documents]
+        """Truncate each document to max_chars; empty docs are replaced with a single space.
+
+        Replacing '' with ' ' prevents API rejections caused by empty strings
+        while preserving index alignment in the response.
+        """
+        return [doc[: self.max_chars] if doc else " " for doc in documents]
 
     def _build_request_body(
         self, query: str, documents: List[str], top_k: Optional[int]

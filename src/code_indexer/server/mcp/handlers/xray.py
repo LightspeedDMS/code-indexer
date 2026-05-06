@@ -1,0 +1,1095 @@
+"""xray_search MCP handler.
+
+Thin shim: validate inputs, pre-flight check evaluator, submit background job.
+Heavy lifting lives in XRaySearchEngine (src/code_indexer/xray/search_engine.py).
+
+Story #972: synchronous single-threaded XRaySearchEngine baseline.
+Story #978: will add ThreadPoolExecutor parallelism and job-level timeout.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional, cast
+
+from code_indexer.server.auth.user_manager import User
+from code_indexer.xray.search_engine import XRaySearchEngine
+
+from . import _utils
+from ._utils import _mcp_response, _parse_json_string_array
+
+logger = logging.getLogger(__name__)
+
+# Timeout range enforced by the handler (seconds).
+_TIMEOUT_MIN = 10
+_TIMEOUT_MAX = 600
+
+# max_nodes range for xray_dump_ast (Finding 3.2, v10.4.4).
+_DUMP_AST_MAX_NODES_DEFAULT = 500
+_DUMP_AST_MAX_NODES_MIN = 1
+_DUMP_AST_MAX_NODES_MAX = 2000
+
+# Default evaluator used when the caller omits evaluator_code.
+# Returns the v10.4.0 dict contract: echoes every Phase 1 hit as a match entry.
+# For search_target='filename', match_positions is empty so matches is [].
+# Semantically equivalent to the legacy "return True" (accept all files), but
+# satisfies the dict return contract introduced in v10.4.0.
+_DEFAULT_EVALUATOR_CODE = (
+    'matches = [{"line_number": mp["line_number"]} for mp in match_positions]\n'
+    'return {"matches": matches, "value": None}'
+)
+
+# Default timeout when the caller omits timeout_seconds.
+_DEFAULT_TIMEOUT_SECONDS = 120
+
+# await_seconds range and poll interval.
+# _AWAIT_SECONDS_MAX lowered from 30 to 10 in v10.3.2 (Task #39): FastAPI sync
+# handlers run in a finite threadpool (default ~40 threads). With await_seconds=30
+# at modest concurrency, the pool can be exhausted, starving every other endpoint.
+# Capping at 10s bounds worst-case per-thread occupancy.
+# Operator tuning: increase uvicorn --limit-concurrency or anyio threadpool size
+# (ANYIO_THREADPOOL_WORKERS env var) if longer inline waits are required, and
+# use the async {job_id} polling path for waits beyond this ceiling.
+# Task #35 (v10.3.2): await_seconds accepts int OR float — typed as float.
+_AWAIT_SECONDS_MIN: float = 0.0
+_AWAIT_SECONDS_MAX: float = 10.0
+_AWAIT_POLL_INTERVAL = 0.05
+
+
+def _resolve_repo_path(alias: str) -> Optional[str]:
+    """Resolve a global repo alias to its versioned snapshot path.
+
+    Delegates to repos._resolve_golden_repo_path so the alias manager is
+    exercised through the canonical code path.
+
+    Returns None when the alias is unknown.
+    """
+    from code_indexer.server.mcp.handlers.repos import _resolve_golden_repo_path
+
+    return cast(Optional[str], _resolve_golden_repo_path(alias))
+
+
+def _get_background_job_manager():
+    """Return the live BackgroundJobManager from the app module.
+
+    Extracted for easy mocking in unit tests.
+    """
+    return _utils.app_module.background_job_manager
+
+
+def _await_job_result(
+    bjm: Any, job_id: str, username: str, await_seconds: float
+) -> Optional[Dict[str, Any]]:
+    """Poll BackgroundJobManager until the job completes or the window expires.
+
+    Args:
+        bjm: BackgroundJobManager instance.
+        job_id: The job to poll.
+        username: Username of the submitter (required by get_job_status).
+        await_seconds: Maximum seconds to poll.
+
+    Returns:
+        The job ``result`` dict when job reaches ``completed`` status within
+        the window, or ``None`` if the window expires first.
+    """
+    deadline = time.monotonic() + await_seconds
+    while time.monotonic() < deadline:
+        status = bjm.get_job_status(job_id, username)
+        if status is not None and status.get("status") == "completed":
+            return cast(Optional[Dict[str, Any]], status.get("result"))
+        time.sleep(_AWAIT_POLL_INTERVAL)
+    return None
+
+
+def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """MCP handler for the xray_search tool.
+
+    1. Auth + permission check (query_repos).
+    2. Parameter parse + validation.
+    3. Repository alias resolution.
+    4. Pre-flight evaluator validation via PythonEvaluatorSandbox.
+    5. Job submission via BackgroundJobManager.
+    6. Return {job_id}.
+
+    Error codes:
+        auth_required           — unauthenticated or missing query_repos.
+        invalid_search_target   — search_target not 'content' or 'filename'.
+        timeout_out_of_range    — timeout_seconds outside [10, 600].
+        max_files_out_of_range  — max_files provided but < 1.
+        repository_not_found    — alias cannot be resolved.
+        xray_extras_not_installed — tree-sitter extras not available.
+        xray_evaluator_validation_failed — evaluator AST whitelist violation.
+    """
+    # ------------------------------------------------------------------
+    # 1. Auth + permission check
+    # ------------------------------------------------------------------
+    if user is None or not user.has_permission("query_repos"):
+        return _mcp_response({"error": "auth_required"})
+
+    # ------------------------------------------------------------------
+    # 2. Parameter parse + validation
+    # ------------------------------------------------------------------
+    repo_alias: str = params.get("repository_alias", "")
+    # 'pattern' is the regex_search-aligned name (was 'driver_regex')
+    driver_regex: str = params.get("pattern", "")
+    # evaluator_code is optional; default to _DEFAULT_EVALUATOR_CODE when
+    # omitted or empty so the engine receives a valid v10.4.0 dict-contract
+    # evaluator (Bug 2 fix: empty string produced InvalidEvaluatorReturn for
+    # every candidate file).
+    raw_evaluator_code: str = params.get("evaluator_code") or ""
+    evaluator_code: str = (
+        raw_evaluator_code if raw_evaluator_code.strip() else _DEFAULT_EVALUATOR_CODE
+    )
+    search_target: str = params.get("search_target", "")
+    include_patterns = params.get("include_patterns") or []
+    exclude_patterns = params.get("exclude_patterns") or []
+    # regex_search-aligned params
+    case_sensitive: bool = params.get("case_sensitive", True)
+    context_lines_raw = params.get("context_lines", 0)
+    multiline: bool = params.get("multiline", False)
+    pcre2: bool = params.get("pcre2", False)
+    path: Optional[str] = params.get("path")
+    timeout_override = params.get("timeout_seconds")
+    # 'max_results' is the regex_search-aligned name (was 'max_files')
+    max_results = params.get("max_results")
+    await_seconds_raw = params.get("await_seconds", 0)
+
+    # 'pattern' is required — reject if missing or empty (catches old 'driver_regex' callers)
+    if not driver_regex:
+        return _mcp_response(
+            {
+                "error": "pattern_required",
+                "message": "pattern is required (formerly 'driver_regex' — use 'pattern')",
+            }
+        )
+
+    # await_seconds accepts int or float in [0.0, 10.0]. Cap lowered from 30
+    # to 10 in v10.3.2 to bound threadpool occupancy (see top-of-file comment).
+    if isinstance(await_seconds_raw, bool) or not isinstance(
+        await_seconds_raw, (int, float)
+    ):
+        return _mcp_response(
+            {
+                "error": "await_seconds_invalid",
+                "message": (
+                    f"await_seconds must be a number (int or float) in "
+                    f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}], "
+                    f"got {await_seconds_raw!r}"
+                ),
+            }
+        )
+    await_seconds: float = float(await_seconds_raw)
+    if not (_AWAIT_SECONDS_MIN <= await_seconds <= _AWAIT_SECONDS_MAX):
+        return _mcp_response(
+            {
+                "error": "await_seconds_invalid",
+                "message": (
+                    f"await_seconds must be in "
+                    f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}] "
+                    f"(cap lowered from 30 in v10.3.2 — for longer waits "
+                    f"use the async {{job_id}} path), got {await_seconds}"
+                ),
+            }
+        )
+
+    if search_target not in ("content", "filename"):
+        return _mcp_response(
+            {
+                "error": "invalid_search_target",
+                "message": (
+                    f"search_target must be 'content' or 'filename', got {search_target!r}"
+                ),
+            }
+        )
+
+    # context_lines: must be int in [0, 10]
+    try:
+        context_lines: int = int(context_lines_raw)
+    except (TypeError, ValueError):
+        context_lines = 0
+    if not (0 <= context_lines <= 10):
+        return _mcp_response(
+            {
+                "error": "context_lines_out_of_range",
+                "message": "context_lines must be between 0 and 10",
+            }
+        )
+
+    if max_results is not None and max_results < 1:
+        return _mcp_response(
+            {
+                "error": "max_results_out_of_range",
+                "message": "max_results must be >= 1 when provided",
+            }
+        )
+
+    # Pre-validate non-PCRE2 patterns at handler level (v10.4.3 fix).
+    # PCRE2 syntax differs (lookbehind etc.) and is validated by ripgrep
+    # at execution time; surface those errors via the job result.
+    if not pcre2:
+        import re as _re
+
+        try:
+            _re.compile(driver_regex, flags=_re.MULTILINE if multiline else 0)
+        except _re.error as _exc:
+            return _mcp_response(
+                {
+                    "error": "invalid_regex",
+                    "message": f"Invalid regex pattern: {_exc}",
+                }
+            )
+
+    # ------------------------------------------------------------------
+    # 3. Repository alias resolution — omni-aware (string OR list)
+    # ------------------------------------------------------------------
+    # Parse alias: accepts plain string, list of strings, or JSON-encoded
+    # string array (e.g. '["repo-a", "repo-b"]').
+    repo_alias_parsed = _parse_json_string_array(repo_alias)
+
+    # v10.4.5 (Defect 5): normalize single-element list to single-string for
+    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
+    # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
+    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
+        candidate = repo_alias_parsed[0]
+        if isinstance(candidate, str) and candidate:
+            repo_alias_parsed = candidate
+
+    if isinstance(repo_alias_parsed, list):
+        # Multi-repo path — submit one job per alias.
+        if not repo_alias_parsed:
+            return _mcp_response(
+                {
+                    "error": "alias_required",
+                    "message": "repository_alias must not be empty",
+                }
+            )
+
+        # ------------------------------------------------------------------
+        # 4. Effective timeout + range check (multi-repo path)
+        # ------------------------------------------------------------------
+        effective_timeout_multi: int = (
+            timeout_override
+            if timeout_override is not None
+            else _DEFAULT_TIMEOUT_SECONDS
+        )
+        if not (_TIMEOUT_MIN <= effective_timeout_multi <= _TIMEOUT_MAX):
+            return _mcp_response(
+                {
+                    "error": "timeout_out_of_range",
+                    "message": (
+                        f"timeout_seconds must be between {_TIMEOUT_MIN} and "
+                        f"{_TIMEOUT_MAX}, got {effective_timeout_multi}"
+                    ),
+                }
+            )
+
+        # ------------------------------------------------------------------
+        # 5. Pre-flight evaluator validation (multi-repo path)
+        # ------------------------------------------------------------------
+        engine_multi = XRaySearchEngine()
+        validation_multi = engine_multi.sandbox.validate(evaluator_code)
+        if not validation_multi.ok:
+            return _mcp_response(
+                {
+                    "error": "xray_evaluator_validation_failed",
+                    "message": validation_multi.reason,
+                }
+            )
+
+        # ------------------------------------------------------------------
+        # 6. Submit one background job per alias
+        # ------------------------------------------------------------------
+        bjm_multi = _get_background_job_manager()
+        job_ids: list = []
+        errors: list = []
+
+        for single_alias in repo_alias_parsed:
+            single_path_str = _resolve_repo_path(single_alias)
+            if single_path_str is None:
+                errors.append(
+                    {
+                        "repository_alias": single_alias,
+                        "error": "repository_not_found",
+                        "message": f"Repository alias {single_alias!r} not found",
+                    }
+                )
+                continue
+
+            single_repo_path = Path(single_path_str)
+            timeout_capture = effective_timeout_multi
+
+            def _make_job_fn(rp: Path, t: int):  # type: ignore[no-untyped-def]
+                def _job(progress_callback):  # type: ignore[no-untyped-def]
+                    from code_indexer.xray.search_engine import XRaySearchEngine as _E
+
+                    result = _E().run(
+                        repo_path=rp,
+                        driver_regex=driver_regex,
+                        evaluator_code=evaluator_code,
+                        search_target=search_target,
+                        include_patterns=list(include_patterns),
+                        exclude_patterns=list(exclude_patterns),
+                        case_sensitive=case_sensitive,
+                        context_lines=context_lines,
+                        multiline=multiline,
+                        pcre2=pcre2,
+                        path=path,
+                        timeout_seconds=t,
+                        progress_callback=progress_callback,
+                        max_files=max_results,
+                    )
+                    return _truncate_xray_result(result)
+
+                return _job
+
+            jid: str = bjm_multi.submit_job(
+                operation_type="xray_search",
+                func=_make_job_fn(single_repo_path, timeout_capture),
+                submitter_username=user.username,
+                repo_alias=single_alias,
+            )
+            job_ids.append(jid)
+
+        return _mcp_response({"job_ids": job_ids, "errors": errors})
+
+    # ------------------------------------------------------------------
+    # Single-repo path (string alias)
+    # ------------------------------------------------------------------
+    repo_path_str = _resolve_repo_path(repo_alias_parsed)
+    if repo_path_str is None:
+        return _mcp_response(
+            {
+                "error": "repository_not_found",
+                "message": f"Repository alias {repo_alias_parsed!r} not found",
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Effective timeout + range check
+    # ------------------------------------------------------------------
+    effective_timeout: int = (
+        timeout_override if timeout_override is not None else _DEFAULT_TIMEOUT_SECONDS
+    )
+    if not (_TIMEOUT_MIN <= effective_timeout <= _TIMEOUT_MAX):
+        return _mcp_response(
+            {
+                "error": "timeout_out_of_range",
+                "message": (
+                    f"timeout_seconds must be between {_TIMEOUT_MIN} and "
+                    f"{_TIMEOUT_MAX}, got {effective_timeout}"
+                ),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Pre-flight evaluator validation
+    # ------------------------------------------------------------------
+    engine = XRaySearchEngine()
+
+    validation = engine.sandbox.validate(evaluator_code)
+    if not validation.ok:
+        return _mcp_response(
+            {
+                "error": "xray_evaluator_validation_failed",
+                "message": validation.reason,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Submit background job
+    # ------------------------------------------------------------------
+    repo_path = Path(repo_path_str)
+
+    def job_fn(progress_callback):  # type: ignore[no-untyped-def]
+        from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
+
+        result = _Engine().run(
+            repo_path=repo_path,
+            driver_regex=driver_regex,
+            evaluator_code=evaluator_code,
+            search_target=search_target,
+            include_patterns=list(include_patterns),
+            exclude_patterns=list(exclude_patterns),
+            case_sensitive=case_sensitive,
+            context_lines=context_lines,
+            multiline=multiline,
+            pcre2=pcre2,
+            path=path,
+            timeout_seconds=effective_timeout,
+            progress_callback=progress_callback,
+            max_files=max_results,
+        )
+        return _truncate_xray_result(result)
+
+    bjm = _get_background_job_manager()
+    job_id: str = bjm.submit_job(
+        operation_type="xray_search",
+        func=job_fn,
+        submitter_username=user.username,
+        repo_alias=repo_alias_parsed,
+    )
+
+    if await_seconds > 0:
+        inline = _await_job_result(bjm, job_id, user.username, await_seconds)
+        if inline is not None:
+            return _mcp_response(inline)
+
+    return _mcp_response({"job_id": job_id})
+
+
+# Default and range constants for max_debug_nodes (xray_explore).
+_MAX_DEBUG_NODES_DEFAULT = 50
+_MAX_DEBUG_NODES_MIN = 1
+_MAX_DEBUG_NODES_MAX = 500
+
+
+def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
+    repo_path: "Path",
+    driver_regex: str,
+    evaluator_code: str,
+    search_target: str,
+    include_patterns: list,
+    exclude_patterns: list,
+    case_sensitive: bool,
+    context_lines: int,
+    multiline: bool,
+    pcre2: bool,
+    path: "Optional[str]",
+    effective_timeout: int,
+    max_results: "Optional[int]",
+    max_debug_nodes: int,
+):
+    """Return a job function closure for xray_explore.
+
+    Extracted to eliminate duplication between the single-repo and multi-repo
+    job-submission paths in handle_xray_explore.
+    """
+
+    def job_fn(progress_callback):  # type: ignore[no-untyped-def]
+        from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
+
+        return _Engine().run(
+            repo_path=repo_path,
+            driver_regex=driver_regex,
+            evaluator_code=evaluator_code,
+            search_target=search_target,
+            include_patterns=list(include_patterns),
+            exclude_patterns=list(exclude_patterns),
+            case_sensitive=case_sensitive,
+            context_lines=context_lines,
+            multiline=multiline,
+            pcre2=pcre2,
+            path=path,
+            timeout_seconds=effective_timeout,
+            progress_callback=progress_callback,
+            max_files=max_results,
+            include_ast_debug=True,
+            max_debug_nodes=max_debug_nodes,
+        )
+
+    return job_fn
+
+
+def _submit_xray_explore_omni(  # type: ignore[no-untyped-def]
+    aliases: list,
+    user: "Any",
+    driver_regex: str,
+    evaluator_code: str,
+    search_target: str,
+    include_patterns: list,
+    exclude_patterns: list,
+    case_sensitive: bool,
+    context_lines: int,
+    multiline: bool,
+    pcre2: bool,
+    path: "Optional[str]",
+    effective_timeout: int,
+    max_results: "Optional[int]",
+    max_debug_nodes: int,
+) -> Dict[str, Any]:
+    """Submit one xray_explore background job per alias.
+
+    Extracted from handle_xray_explore to keep that handler concise.
+    Returns a {job_ids, errors} response dict (not yet wrapped in _mcp_response).
+    """
+    bjm = _get_background_job_manager()
+    job_ids: list = []
+    errors: list = []
+
+    for single_alias in aliases:
+        single_path_str = _resolve_repo_path(single_alias)
+        if single_path_str is None:
+            errors.append(
+                {
+                    "repository_alias": single_alias,
+                    "error": "repository_not_found",
+                    "message": f"Repository alias {single_alias!r} not found",
+                }
+            )
+            continue
+
+        jid: str = bjm.submit_job(
+            operation_type="xray_explore",
+            func=_make_xray_explore_job_fn(
+                repo_path=Path(single_path_str),
+                driver_regex=driver_regex,
+                evaluator_code=evaluator_code,
+                search_target=search_target,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                case_sensitive=case_sensitive,
+                context_lines=context_lines,
+                multiline=multiline,
+                pcre2=pcre2,
+                path=path,
+                effective_timeout=effective_timeout,
+                max_results=max_results,
+                max_debug_nodes=max_debug_nodes,
+            ),
+            submitter_username=user.username,
+            repo_alias=single_alias,
+        )
+        job_ids.append(jid)
+
+    return {"job_ids": job_ids, "errors": errors}
+
+
+def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """MCP handler for the xray_explore tool.
+
+    Identical to handle_xray_search but additionally:
+    - Validates max_debug_nodes (range 1..500, default 50).
+    - Passes include_ast_debug=True and max_debug_nodes to XRaySearchEngine.run().
+
+    Error codes:
+        auth_required                  — unauthenticated or missing query_repos.
+        invalid_search_target          — search_target not 'content' or 'filename'.
+        timeout_out_of_range           — timeout_seconds outside [10, 600].
+        max_files_out_of_range         — max_files provided but < 1.
+        max_debug_nodes_out_of_range   — max_debug_nodes outside [1, 500].
+        repository_not_found           — alias cannot be resolved.
+        xray_extras_not_installed      — tree-sitter extras not available.
+        xray_evaluator_validation_failed — evaluator AST whitelist violation.
+    """
+    # ------------------------------------------------------------------
+    # 1. Auth + permission check
+    # ------------------------------------------------------------------
+    if user is None or not user.has_permission("query_repos"):
+        return _mcp_response({"error": "auth_required"})
+
+    # ------------------------------------------------------------------
+    # 2. Parameter parse + validation
+    # ------------------------------------------------------------------
+    repo_alias: str = params.get("repository_alias", "")
+    # 'pattern' is the regex_search-aligned name (was 'driver_regex')
+    driver_regex: str = params.get("pattern", "")
+    # evaluator_code is optional for xray_explore; default emits one match per
+    # Phase 1 regex hit so AST debug output attaches to each. v10.4.0 dict-return
+    # contract — see _DEFAULT_EVALUATOR_CODE near the top of this file.
+    raw_evaluator_code: str = params.get("evaluator_code") or ""
+    evaluator_code: str = (
+        raw_evaluator_code if raw_evaluator_code.strip() else _DEFAULT_EVALUATOR_CODE
+    )
+    search_target: str = params.get("search_target", "")
+    include_patterns = params.get("include_patterns") or []
+    exclude_patterns = params.get("exclude_patterns") or []
+    # regex_search-aligned params
+    case_sensitive: bool = params.get("case_sensitive", True)
+    context_lines_raw = params.get("context_lines", 0)
+    multiline: bool = params.get("multiline", False)
+    pcre2: bool = params.get("pcre2", False)
+    path: Optional[str] = params.get("path")
+    timeout_override = params.get("timeout_seconds")
+    # 'max_results' is the regex_search-aligned name (was 'max_files')
+    max_results = params.get("max_results")
+    max_debug_nodes = params.get("max_debug_nodes", _MAX_DEBUG_NODES_DEFAULT)
+    await_seconds_raw = params.get("await_seconds", 0)
+
+    # await_seconds accepts int or float in [0.0, 10.0]. Cap lowered from 30
+    # to 10 in v10.3.2 to bound threadpool occupancy (see top-of-file comment).
+    if isinstance(await_seconds_raw, bool) or not isinstance(
+        await_seconds_raw, (int, float)
+    ):
+        return _mcp_response(
+            {
+                "error": "await_seconds_invalid",
+                "message": (
+                    f"await_seconds must be a number (int or float) in "
+                    f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}], "
+                    f"got {await_seconds_raw!r}"
+                ),
+            }
+        )
+    await_seconds: float = float(await_seconds_raw)
+    if not (_AWAIT_SECONDS_MIN <= await_seconds <= _AWAIT_SECONDS_MAX):
+        return _mcp_response(
+            {
+                "error": "await_seconds_invalid",
+                "message": (
+                    f"await_seconds must be in "
+                    f"[{_AWAIT_SECONDS_MIN}, {_AWAIT_SECONDS_MAX}] "
+                    f"(cap lowered from 30 in v10.3.2 — for longer waits "
+                    f"use the async {{job_id}} path), got {await_seconds}"
+                ),
+            }
+        )
+
+    # 'pattern' is required — reject if missing or empty (catches old 'driver_regex' callers)
+    if not driver_regex:
+        return _mcp_response(
+            {
+                "error": "pattern_required",
+                "message": "pattern is required (formerly 'driver_regex' — use 'pattern')",
+            }
+        )
+
+    if search_target not in ("content", "filename"):
+        return _mcp_response(
+            {
+                "error": "invalid_search_target",
+                "message": (
+                    f"search_target must be 'content' or 'filename', got {search_target!r}"
+                ),
+            }
+        )
+
+    # context_lines: must be int in [0, 10]
+    try:
+        context_lines: int = int(context_lines_raw)
+    except (TypeError, ValueError):
+        context_lines = 0
+    if not (0 <= context_lines <= 10):
+        return _mcp_response(
+            {
+                "error": "context_lines_out_of_range",
+                "message": "context_lines must be between 0 and 10",
+            }
+        )
+
+    if max_results is not None and max_results < 1:
+        return _mcp_response(
+            {
+                "error": "max_results_out_of_range",
+                "message": "max_results must be >= 1 when provided",
+            }
+        )
+
+    if not (_MAX_DEBUG_NODES_MIN <= max_debug_nodes <= _MAX_DEBUG_NODES_MAX):
+        return _mcp_response(
+            {
+                "error": "max_debug_nodes_out_of_range",
+                "message": (
+                    f"max_debug_nodes must be between {_MAX_DEBUG_NODES_MIN} and "
+                    f"{_MAX_DEBUG_NODES_MAX}, got {max_debug_nodes}"
+                ),
+            }
+        )
+
+    # Pre-validate non-PCRE2 patterns at handler level (v10.4.3 fix).
+    # PCRE2 syntax differs (lookbehind etc.) and is validated by ripgrep
+    # at execution time; surface those errors via the job result.
+    if not pcre2:
+        import re as _re
+
+        try:
+            _re.compile(driver_regex, flags=_re.MULTILINE if multiline else 0)
+        except _re.error as _exc:
+            return _mcp_response(
+                {
+                    "error": "invalid_regex",
+                    "message": f"Invalid regex pattern: {_exc}",
+                }
+            )
+
+    # ------------------------------------------------------------------
+    # 3. Alias normalisation — omni-aware (string OR list)
+    # ------------------------------------------------------------------
+    # Bug 1 fix (v10.4.1): the original code passed repo_alias directly to
+    # _resolve_repo_path without normalisation, crashing with AttributeError
+    # ('list' object has no attribute 'endswith') on native-list or
+    # JSON-encoded-array inputs.
+    repo_alias_parsed = _parse_json_string_array(repo_alias)
+
+    # v10.4.5 (Defect 5): normalize single-element list to single-string for
+    # ergonomic single-repo response shape ({"job_id":"..."}). Multi-element
+    # lists still take the multi-repo path ({"job_ids":[...], "errors":[...]}).
+    if isinstance(repo_alias_parsed, list) and len(repo_alias_parsed) == 1:
+        candidate = repo_alias_parsed[0]
+        if isinstance(candidate, str) and candidate:
+            repo_alias_parsed = candidate
+
+    # ------------------------------------------------------------------
+    # 4. Effective timeout + range check  (shared — runs before alias branch)
+    # ------------------------------------------------------------------
+    effective_timeout: int = (
+        timeout_override if timeout_override is not None else _DEFAULT_TIMEOUT_SECONDS
+    )
+    if not (_TIMEOUT_MIN <= effective_timeout <= _TIMEOUT_MAX):
+        return _mcp_response(
+            {
+                "error": "timeout_out_of_range",
+                "message": (
+                    f"timeout_seconds must be between {_TIMEOUT_MIN} and "
+                    f"{_TIMEOUT_MAX}, got {effective_timeout}"
+                ),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Pre-flight evaluator validation  (shared — runs before alias branch)
+    # ------------------------------------------------------------------
+    validation = XRaySearchEngine().sandbox.validate(evaluator_code)
+    if not validation.ok:
+        return _mcp_response(
+            {
+                "error": "xray_evaluator_validation_failed",
+                "message": validation.reason,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Job submission — multi-repo OR single-repo
+    # ------------------------------------------------------------------
+    explore_kwargs: Dict[str, Any] = dict(
+        driver_regex=driver_regex,
+        evaluator_code=evaluator_code,
+        search_target=search_target,
+        include_patterns=list(include_patterns),
+        exclude_patterns=list(exclude_patterns),
+        case_sensitive=case_sensitive,
+        context_lines=context_lines,
+        multiline=multiline,
+        pcre2=pcre2,
+        path=path,
+        effective_timeout=effective_timeout,
+        max_results=max_results,
+        max_debug_nodes=max_debug_nodes,
+    )
+
+    if isinstance(repo_alias_parsed, list):
+        if not repo_alias_parsed:
+            return _mcp_response(
+                {
+                    "error": "alias_required",
+                    "message": "repository_alias must not be empty",
+                }
+            )
+        return _mcp_response(
+            _submit_xray_explore_omni(
+                aliases=repo_alias_parsed, user=user, **explore_kwargs
+            )
+        )
+
+    # Single-repo path
+    repo_path_str = _resolve_repo_path(repo_alias_parsed)
+    if repo_path_str is None:
+        return _mcp_response(
+            {
+                "error": "repository_not_found",
+                "message": f"Repository alias {repo_alias_parsed!r} not found",
+            }
+        )
+
+    bjm = _get_background_job_manager()
+    job_id: str = bjm.submit_job(
+        operation_type="xray_explore",
+        func=_make_xray_explore_job_fn(repo_path=Path(repo_path_str), **explore_kwargs),
+        submitter_username=user.username,
+        repo_alias=repo_alias_parsed,
+    )
+
+    if await_seconds > 0:
+        inline = _await_job_result(bjm, job_id, user.username, await_seconds)
+        if inline is not None:
+            return _mcp_response(inline)
+
+    return _mcp_response({"job_id": job_id})
+
+
+def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """MCP handler for the xray_dump_ast tool (Issue #19).
+
+    Synchronous single-file AST dump — no background job.  Returns the
+    parse tree of a single file within a repository snapshot inline.
+
+    Auth: query_repos permission required.
+
+    Inputs:
+        repository_alias (str): Global repository alias.
+        file_path (str): Relative path within the repository.
+
+    Output:
+        {ast_tree: <BFS-serialised root node>} on success, or an error dict.
+
+    Error codes:
+        auth_required              — unauthenticated or missing query_repos.
+        repository_not_found       — alias cannot be resolved.
+        invalid_file_path          — file_path is empty or absolute.
+        path_traversal_rejected    — file_path escapes the repository root.
+        file_not_found             — resolved path does not exist.
+        unsupported_language       — no tree-sitter grammar for the extension.
+        xray_extras_not_installed  — tree-sitter extras not installed.
+        parse_error                — unexpected failure during AST parsing.
+    """
+    # 1. Auth + permission check
+    if user is None or not user.has_permission("query_repos"):
+        return _mcp_response({"error": "auth_required"})
+
+    # 2. Parameter extraction
+    repo_alias: str = params.get("repository_alias", "")
+    file_path_raw: str = params.get("file_path", "")
+
+    # max_nodes: optional int, default 500, range [1, 2000] (Finding 3.2, v10.4.4)
+    max_nodes_raw = params.get("max_nodes", _DUMP_AST_MAX_NODES_DEFAULT)
+    try:
+        max_nodes = int(max_nodes_raw)
+    except (TypeError, ValueError):
+        return _mcp_response(
+            {
+                "error": "max_nodes_invalid",
+                "message": f"max_nodes must be int, got {max_nodes_raw!r}",
+            }
+        )
+    if not (_DUMP_AST_MAX_NODES_MIN <= max_nodes <= _DUMP_AST_MAX_NODES_MAX):
+        return _mcp_response(
+            {
+                "error": "max_nodes_out_of_range",
+                "message": (
+                    f"max_nodes must be in "
+                    f"[{_DUMP_AST_MAX_NODES_MIN}, {_DUMP_AST_MAX_NODES_MAX}]"
+                ),
+            }
+        )
+
+    if not file_path_raw:
+        return _mcp_response(
+            {"error": "invalid_file_path", "message": "file_path must not be empty"}
+        )
+
+    # 3. Repository alias resolution
+    repo_path_str = _resolve_repo_path(repo_alias)
+    if repo_path_str is None:
+        return _mcp_response(
+            {
+                "error": "repository_not_found",
+                "message": f"Repository alias {repo_alias!r} not found",
+            }
+        )
+
+    repo_root = Path(repo_path_str)
+
+    # 4. Path traversal protection — resolve and verify the path stays within repo root.
+    target = (repo_root / file_path_raw).resolve()
+    try:
+        target.relative_to(repo_root.resolve())
+    except ValueError:
+        return _mcp_response(
+            {
+                "error": "path_traversal_rejected",
+                "message": (
+                    f"file_path {file_path_raw!r} resolves outside the repository root"
+                ),
+            }
+        )
+
+    # 5. File existence check
+    if not target.is_file():
+        return _mcp_response(
+            {
+                "error": "file_not_found",
+                "message": f"File not found: {file_path_raw!r}",
+            }
+        )
+
+    # 6. Parse and serialise
+    try:
+        engine = XRaySearchEngine()
+        lang = engine.ast_engine.detect_language(target)
+        if lang is None:
+            return _mcp_response(
+                {
+                    "error": "unsupported_language",
+                    "message": (
+                        f"No tree-sitter grammar for extension {target.suffix!r}"
+                    ),
+                }
+            )
+        source_bytes = target.read_bytes()
+        root = engine.ast_engine.parse(source_bytes, lang)
+        ast_tree = XRaySearchEngine._serialize_ast(root, max_nodes=max_nodes)
+        return _mcp_response(
+            {
+                "ast_tree": ast_tree,
+                "file_path": file_path_raw,
+                "language": lang,
+            }
+        )
+    except ImportError as exc:
+        return _mcp_response(
+            {
+                "error": "xray_extras_not_installed",
+                "message": str(exc),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("xray_dump_ast parse error for %s: %s", file_path_raw, exc)
+        return _mcp_response(
+            {
+                "error": "parse_error",
+                "message": str(exc),
+            }
+        )
+
+
+def handle_cidx_fetch_cached_payload(
+    params: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """MCP handler for the cidx_fetch_cached_payload tool (Issue #20).
+
+    Retrieves a full payload stored in PayloadCache by its cache_handle.
+    This is the discoverable tool to use when xray_search / xray_explore
+    (or any other tool) returns a truncated result with a cache_handle.
+
+    Auth: query_repos permission required.
+
+    Inputs:
+        cache_handle (str): Opaque handle returned in a truncated result.
+        page (int, optional): 0-indexed page number. Defaults to 0.
+
+    Output:
+        {success: True, content: str, page: int, total_pages: int, has_more: bool}
+        or {success: False, error: str, message: str}
+
+    Error codes:
+        auth_required   — unauthenticated or missing query_repos.
+        missing_handle  — cache_handle parameter not provided.
+        cache_expired   — handle not found or expired.
+        cache_unavailable — PayloadCache not configured.
+    """
+    if user is None or not user.has_permission("query_repos"):
+        return _mcp_response({"error": "auth_required"})
+
+    cache_handle: str = params.get("cache_handle", "")
+    page: int = max(0, int(params.get("page", 0) or 0))
+
+    if not cache_handle:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "missing_handle",
+                "message": "cache_handle parameter is required",
+            }
+        )
+
+    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
+    if payload_cache is None:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "cache_unavailable",
+                "message": "Cache service not configured",
+            }
+        )
+
+    try:
+        result = payload_cache.retrieve(cache_handle, page=page)
+        return _mcp_response(
+            {
+                "success": True,
+                "content": result.content,
+                "page": result.page,
+                "total_pages": result.total_pages,
+                "has_more": result.has_more,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        from code_indexer.server.cache.payload_cache import CacheNotFoundError as _CNF
+
+        if isinstance(exc, _CNF):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "cache_expired",
+                    "message": str(exc),
+                    "cache_handle": cache_handle,
+                }
+            )
+        logger.warning("cidx_fetch_cached_payload error for %s: %s", cache_handle, exc)
+        return _mcp_response({"success": False, "error": str(exc)})
+
+
+def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply PayloadCache truncation to the large fields of an X-Ray result.
+
+    Serialises matches[] and evaluation_errors[] as a single JSON blob and
+    delegates to PayloadCache.truncate_result().  When the combined payload
+    exceeds payload_preview_size_chars (default 2000 chars) the full blob is
+    stored in the cache and the response carries:
+      - cache_handle: str           — use GET /api/cache/{handle} for full data
+      - has_more: True
+      - total_size: int             — full payload byte size
+      - matches_and_errors_preview  — first N chars of the JSON
+      - matches[]: first 3 entries  — inline quick-scan subset
+      - evaluation_errors[]: first 3 entries — inline quick-scan subset
+      - truncated: True
+
+    When the payload is small (fits within preview_size_chars) the full
+    matches and evaluation_errors arrays are returned inline:
+      - cache_handle: None
+      - has_more: False
+      - truncated: False
+
+    When PayloadCache is unavailable (not configured in app.state) the
+    original result dict is returned unchanged.
+    """
+    import json
+
+    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
+    if payload_cache is None:
+        return result
+
+    large_payload = json.dumps(
+        {
+            "matches": result.get("matches", []),
+            "evaluation_errors": result.get("evaluation_errors", []),
+        }
+    )
+
+    truncation = payload_cache.truncate_result(large_payload)
+
+    # Build base dict: preserve all top-level fields except matches/evaluation_errors
+    truncated_result = {
+        k: v for k, v in result.items() if k not in ("matches", "evaluation_errors")
+    }
+
+    if truncation.get("has_more"):
+        truncated_result["matches_and_errors_preview"] = truncation["preview"]
+        truncated_result["cache_handle"] = truncation["cache_handle"]
+        truncated_result["has_more"] = True
+        truncated_result["total_size"] = truncation["total_size"]
+        truncated_result["matches"] = result.get("matches", [])[:3]
+        truncated_result["evaluation_errors"] = result.get("evaluation_errors", [])[:3]
+        truncated_result["truncated"] = True
+        truncated_result["fetch_tool_hint"] = (
+            f"Result truncated to first 3 entries; full result available at "
+            f"cache_handle '{truncation['cache_handle']}' — fetch via the "
+            f"`cidx_fetch_cached_payload` MCP tool with that handle."
+        )
+    else:
+        truncated_result["matches"] = result.get("matches", [])
+        truncated_result["evaluation_errors"] = result.get("evaluation_errors", [])
+        truncated_result["cache_handle"] = None
+        truncated_result["has_more"] = False
+        truncated_result["truncated"] = False
+
+    return truncated_result
+
+
+def _register(registry: Dict[str, Any]) -> None:
+    """Register xray handlers in the HANDLER_REGISTRY."""
+    registry["xray_search"] = handle_xray_search
+    registry["xray_explore"] = handle_xray_explore
+    registry["xray_dump_ast"] = handle_xray_dump_ast
+    registry["cidx_fetch_cached_payload"] = handle_cidx_fetch_cached_payload

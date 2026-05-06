@@ -586,8 +586,11 @@ from .admin import (  # noqa: F401, E402
     handle_trigger_dependency_analysis,
 )
 
+from .xray import _register as _xray_register  # noqa: E402
+
 _admin_register(HANDLER_REGISTRY)
 _depmap_register(HANDLER_REGISTRY)
+_xray_register(HANDLER_REGISTRY)
 
 
 # ---------------------------------------------------------------------------

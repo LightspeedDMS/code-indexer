@@ -10,11 +10,14 @@ This module provides:
 - FrontmatterValidationError: Raised for invalid frontmatter
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 class ToolDocNotFoundError(Exception):
@@ -50,6 +53,7 @@ class ToolDoc:
     inputSchema: Optional[Dict[str, Any]] = None
     outputSchema: Optional[Dict[str, Any]] = None
     requires_config: Optional[str] = None  # Story #185: Conditional tool visibility
+    source_path: Optional[Path] = None  # Path of the .md file this doc was loaded from
 
 
 # Module-level singleton for ToolDocLoader to avoid per-request disk I/O
@@ -107,6 +111,15 @@ class ToolDocLoader:
                 continue
             for md_file in category_dir.glob("*.md"):
                 tool_doc = self._parse_md_file(md_file)
+                if tool_doc.name in self._cache:
+                    existing_path = (
+                        self._cache[tool_doc.name].source_path or "<previous file>"
+                    )
+                    raise FrontmatterValidationError(
+                        f"Duplicate tool name {tool_doc.name!r}: declared in both "
+                        f"{existing_path} and {md_file}. "
+                        f"Remove one of these files."
+                    )
                 self._cache[tool_doc.name] = tool_doc
 
         self._loaded = True
@@ -187,6 +200,7 @@ class ToolDocLoader:
             inputSchema=frontmatter.get("inputSchema"),
             outputSchema=frontmatter.get("outputSchema"),
             requires_config=frontmatter.get("requires_config"),  # Story #185
+            source_path=md_file,
         )
 
     def get_description(self, tool_name: str) -> str:

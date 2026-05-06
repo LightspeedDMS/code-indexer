@@ -10,7 +10,7 @@ import os
 import pytest
 
 
-# Single source of truth for all 120 expected HANDLER_REGISTRY keys (AC7)
+# Single source of truth for all 122 expected HANDLER_REGISTRY keys (AC7)
 # Note: enter_maintenance_mode and exit_maintenance_mode were removed per Story #924
 # (maintenance mode write endpoints are now localhost-only and auto-updater driven;
 # system processes cannot satisfy TOTP step-up, so MCP registrations were deleted).
@@ -186,6 +186,12 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "create_memory",
         "edit_memory",
         "delete_memory",
+        # Epic #968: X-Ray AST-aware search handlers
+        "xray_search",
+        "xray_explore",
+        "xray_dump_ast",
+        # Payload cache retrieval handler (added post-v10)
+        "cidx_fetch_cached_payload",
     }
 )
 

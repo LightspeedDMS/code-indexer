@@ -1409,6 +1409,7 @@ Actual analysis content here."""
 class TestInsufficientOutputThreshold:
     """Test Fix 1: Raise Pass 2 insufficient output threshold to 1000 chars."""
 
+    @pytest.mark.slow
     @patch("subprocess.run")
     def test_pass_2_retries_on_insufficient_output_1000_chars(
         self, mock_subprocess, tmp_path

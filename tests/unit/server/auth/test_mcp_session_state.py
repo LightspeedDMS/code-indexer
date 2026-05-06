@@ -258,9 +258,11 @@ class TestMCPSessionStateWithGroups:
         assert session.effective_user.has_permission("manage_golden_repos") is False
         assert session.effective_user.has_permission("repository:admin") is False
 
-        # Power user permissions should be denied
-        assert session.effective_user.has_permission("activate_repos") is False
+        # Power user exclusive permissions should be denied
         assert session.effective_user.has_permission("repository:write") is False
+
+        # Normal user permissions should be granted (activate_repos granted to NORMAL_USER in Story #981)
+        assert session.effective_user.has_permission("activate_repos") is True
 
         # Normal user permissions should be granted
         assert session.effective_user.has_permission("query_repos") is True

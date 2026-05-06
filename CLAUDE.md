@@ -155,50 +155,78 @@ Zero tolerance — never leave GitHub Actions failed. Fix in the same session. S
 
 Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, deduplication of indexing. If refactoring removes any of these, STOP. See memory: `project_query_is_everything.md`.
 
+### X-Ray Module Lazy-Load Invariant (Epic #968 / Story #969)
+
+`src/code_indexer/xray/` is the AST-aware code search engine wrapping tree-sitter. The lazy-load discipline mirrors the existing FTS/Tantivy pattern: `tree_sitter` and `tree_sitter_languages` are imported ONLY inside `AstSearchEngine.__init__()`. Importing `code_indexer.xray.ast_engine` at module level does NOT trigger the heavy tree-sitter import. CLI startup is unaffected — `cidx --help` measured at ~0.57s with X-Ray code present (budget 2.0s).
+
+**CI gate**: `tests/unit/xray/test_lazy_load.py` runs a SUBPROCESS test asserting `tree_sitter` and `tree_sitter_languages` are absent from `sys.modules` after `from code_indexer.cli import cli`. The subprocess form is required because pytest's session may pre-load tree-sitter via other tests, polluting the in-process check. This test is BLOCKING — if it fails, X-Ray has regressed CLI startup.
+
+**Architecture invariants**:
+- All raw `tree_sitter.Node` objects are wrapped in `XRayNode` before exposure to evaluator code; raw nodes NEVER reach user-supplied evaluator scripts (`xray_node.py` uses `__slots__ = ("_node",)` and normal `self._node = node` assignment — DO NOT reintroduce `object.__setattr__` workaround, which breaks mypy tracking).
+- `AstSearchEngine.supported_languages` and `extension_map` are INSTANCE-level dynamic registries (`self._supported_languages`, `self._extension_map`) — they conditionally include `terraform` / `.tf` when `tree_sitter_hcl` is importable at engine construction time.
+- 10 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css. Terraform is the optional 11th when HCL grammar is present.
+
+**Dependency**: `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` (pinned for grammar version stability) — both are CORE dependencies since v10.2.1 (previously [xray] optional extras, but the auto-updater installs the base package only, so X-Ray was broken on staging — promoted to core in v10.2.1).
+
+**Files**: `src/code_indexer/xray/{ast_engine,xray_node,languages}.py`. Tests: `tests/unit/xray/` (>=95% coverage per module).
+
+### X-Ray Sandbox Security Boundary (Epic #968 / Story #970)
+
+`PythonEvaluatorSandbox` securely executes caller-supplied Python evaluator code against AST nodes. Three defense layers (AST whitelist, stripped builtins, multiprocessing isolation) plus dunder-access block at validation time close the confirmed `__class__.__init__.__globals__` exploit.
+
+**Essential invariants**:
+- Three defense layers: AST whitelist validation (Layer 1, rejects before subprocess spawn) + stripped exec() environment (Layer 2, removes `STRIPPED_BUILTINS` and limits to 27 `SAFE_BUILTIN_NAMES` (18 value builtins + 9 exception types for except clauses)) + `multiprocessing.Process` isolation (Layer 3).
+- 24-name `DUNDER_ATTR_BLOCKLIST` covers `__class__`, `__globals__`, `__builtins__`, `__import__`, `__dict__`, `__subclasses__`, etc. Both `ast.Attribute` and string-`Constant` subscript paths are blocked at validation time.
+- Timeout policy: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), `SIGKILL_GRACE_SECONDS=1.0` (SIGKILL if still alive). Pipe data is read BEFORE `is_alive()` check (waitpid races).
+- `signal.alarm` is NOT used — FastAPI request handlers run in worker threads; `signal.alarm()` only works in the main thread.
+
+**Files**: `src/code_indexer/xray/sandbox.py`. Tests: `tests/unit/xray/test_sandbox*.py` (8 files, 112+ tests).
+
+→ Full reference: `docs/xray-sandbox.md`
+
+### X-Ray Search Engine and MCP Tool (Epic #968 / Story #972)
+
+`XRaySearchEngine` is a two-phase orchestrator (regex driver Phase 1 → sandboxed Python evaluator Phase 2 over `XRayNode` ASTs). The MCP handler `handle_xray_search` is a thin shim that validates params, runs sandbox pre-flight validation, then submits an async background job.
+
+**Essential invariants**:
+- Two-phase pipeline: Phase 1 regex walk (RegexSearchService for content, inline path walker for filename) produces candidate `Path` list with per-file Phase 1 hit positions; Phase 2 parses each candidate ONCE and sandbox-evaluates the evaluator code ONCE per file. Failure modes (UnsupportedLanguage, EvaluatorTimeout, EvaluatorCrash, InvalidEvaluatorReturn, ValidationFailed) accumulate in `evaluation_errors` and never fail the job.
+- **v10.4.0 file-as-unit evaluator contract (BREAKING)**: sandbox passes 6 active globals — `node` (file root, always), `root` (alias), `source`, `lang`, `file_path`, plus `match_positions` (list of dicts: one per Phase 1 hit, each with `line_number`/`column`/`line_content`/`byte_offset`/`context_before`/`context_after`; empty list in filename mode). Legacy `match_byte_offset`/`match_line_number`/`match_line_content` are still passed but always `None` — new evaluators must use `match_positions`. Evaluator MUST return `{"matches": [...], "value": <any>}` — bool return is REJECTED with `InvalidEvaluatorReturn`. Each match dict requires `line_number`; may carry open keys. Server enriches every match with `file_path`/`language`/`line_content` (line_content derived if omitted). Per-file `value` collected into response `file_metadata[]`.
+- **v10.4.0 lifted sandbox bans**: ALLOWED_NODES now admits statement-level `If`/`For`/`While`/`Break`/`Continue`/`Pass` (Group C) and `Try`/`ExceptHandler`/`Raise` (Group D) plus `BinOp`/`operator` (Group E). Iteration is bounded by HARD_TIMEOUT_SECONDS=5.0s (SIGTERM, +1s SIGKILL grace) — infinite loops surface as EvaluatorTimeout, NOT validation rejection. Common exception types added to SAFE_BUILTIN_NAMES for `except` clauses: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`. Still banned: `def`/`class`/`lambda`/`import`/`with`/`global`/`nonlocal`/`async`/`await`/`yield`.
+- **Omni multi-repo (v10.4.0)**: `repository_alias` accepts string OR list-of-strings OR JSON-encoded array (e.g. `'["repo-a","repo-b"]'` parsed via `_parse_json_string_array`). Single-repo returns `{job_id}`; multi-repo submits one background job per resolved alias and returns `{job_ids, errors}`. Per-alias resolution failures append to `errors[]`; batch continues for resolvable aliases.
+- **regex_search-aligned param names**: `pattern`, `max_results`. Plus content-driver params `path`, `case_sensitive`, `multiline`, `pcre2`, `context_lines` (0..10).
+- Async job pattern: handler returns `{"job_id": "<uuid>"}` (or `{"job_ids":[...],"errors":[...]}`) immediately; clients poll `GET /api/jobs/{job_id}`. Pre-flight runs `sandbox.validate(evaluator_code)` to reject malformed evaluator code BEFORE submitting the job. Optional inline-await window via `await_seconds` ∈ [0.0, 10.0] (lowered from 30 in v10.3.2 to keep server-side polling within the FastAPI threadpool capacity cap).
+- Tree-sitter is a CORE dependency since v10.2.1 (no longer optional); `XRayExtrasNotInstalled` was deleted along with the `[xray]` extras.
+- `max_results` cap surfaces `partial=True` together with the result-cap flag (`max_files_reached=True`); job-level timeout takes precedence (`partial=True` / `timeout=True`).
+
+**Files**: `src/code_indexer/xray/search_engine.py`, `src/code_indexer/xray/sandbox.py`, `src/code_indexer/server/mcp/handlers/xray.py`. Tests: `tests/unit/xray/test_search_engine.py`, `tests/unit/xray/test_sandbox*.py`, `tests/unit/server/mcp/test_xray_search_handler.py`.
+
+→ Full reference: `docs/xray-architecture.md`
+
 ### TOTP Step-Up Elevation (Epic #922 / Story #923)
 
-**ElevatedSessionManager** (`src/code_indexer/server/auth/elevated_session_manager.py`):
-- Dual-backend (SQLite solo / PostgreSQL cluster), mirrors `MfaChallengeManager`
-- Atomic touch: PostgreSQL `UPDATE...WHERE last_touched_at > cutoff RETURNING`; SQLite `BEGIN EXCLUSIVE`
-- session_key = JWT `jti` (Bearer) OR `cidx_session` cookie (Web UI)
-- Rolling 5-min idle timeout, 30-min absolute max age (both runtime-configurable via Web UI Config Screen)
-- `INSERT ... ON CONFLICT (session_key) DO UPDATE` for atomic re-elevation (Codex M1)
-- SQLite db lives at `~/.cidx-server/elevated_sessions.db` (NOT tempfile — survives restarts)
+`ElevatedSessionManager` implements server-side step-up admin elevation with rolling 5-min idle timeout and 30-min absolute max age. Dual-backend (SQLite solo / PostgreSQL cluster), session_key keyed off JWT `jti` (Bearer) or `cidx_session` cookie (Web UI), atomic re-elevation via `INSERT ... ON CONFLICT DO UPDATE`.
 
-**Three error codes** (NEVER refactor to two or four):
-- `totp_setup_required` (403, with `setup_url`) — admin has no TOTP secret enabled
-- `elevation_required` (403) — no active elevation window for this session
-- `elevation_failed` (401) — wrong code / replay / expired
-
-**Kill switch returns HTTP 503 NOT 403** when `elevation_enforcement_enabled=false`. 403 misleadingly implies "forbidden"; 503 correctly signals "feature administratively off" (Codex M4/M12).
-
-**Recovery code narrow elevation**: 10 codes generated at TOTP registration, stored as bcrypt hashes in `totp_recovery_codes` table (separate table, not column). Recovery code grants `scope=totp_repair` window — usable ONLY for TOTP reset/regenerate/disable. Full-scope endpoints reject. `verify_recovery_code` uses atomic CAS via single `UPDATE ... WHERE used_at IS NULL` (Codex M1) — no TOCTOU race.
-
-**TOTP replay prevention**: `last_used_otp_timestamp` column on totp_secrets table. Atomic CAS rejects same-window replay (Codex C1). `verify_enabled_code()` rejects unactivated secrets (Codex C4).
-
-**Rate limiting**: `POST /auth/elevate` chains through `login_rate_limiter` (per-IP+username key) — 429 when locked out, counter cleared on success (Codex H3).
-
-**Revocation hooks**: `revoke_all_for_username()` called on logout / password change / role change to immediately invalidate active windows (Codex H2).
-
-**Cluster deployment order**:
-1. Apply `022_elevated_sessions.sql` + `023_totp_replay_prevention.sql` to all nodes (additive `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` — harmless on old code)
-2. Deploy new code to all nodes (kill switch OFF by default — no behavior change)
-3. Confirm version on every node via `/health`
-4. Flip `elevation_enforcement_enabled=true` in Web UI Config Screen (hot-reload via 30s reload thread, no restart needed)
+**Essential invariants**:
+- Three error codes — NEVER refactor to two or four: `totp_setup_required` (403, with `setup_url`), `elevation_required` (403), `elevation_failed` (401).
+- Kill switch returns HTTP **503 NOT 403** when `elevation_enforcement_enabled=false` — 403 misleadingly implies "forbidden"; 503 correctly signals "feature administratively off".
+- Recovery codes (10, bcrypt-hashed in separate `totp_recovery_codes` table) grant a narrow `scope=totp_repair` window — usable ONLY for TOTP reset/regenerate/disable, never full-scope endpoints. Atomic CAS via `UPDATE ... WHERE used_at IS NULL` prevents TOCTOU.
+- TOTP replay prevention via atomic CAS on `last_used_otp_timestamp`. Rate limiting via `login_rate_limiter` (429 on lockout). Revocation hooks invalidate windows on logout/password change/role change.
 
 Files: `src/code_indexer/server/auth/elevated_session_manager.py`, `src/code_indexer/server/auth/elevation_routes.py`, `src/code_indexer/server/web/elevation_web_routes.py`, `src/code_indexer/server/auth/dependencies.py::require_elevation`.
 
+→ Full reference: `docs/totp-elevation.md`
+
 ### CLI Elevation Retry (Story #980)
 
-CLI admin commands in remote mode auto-elevate when the server returns 403 `elevation_required`. The retry helper is in `src/code_indexer/api_clients/elevation.py`.
+CLI admin commands in remote mode auto-elevate when the server returns 403 `elevation_required`. The retry helper `with_elevation_retry` wraps API calls: on `ElevationRequiredError` → prompt user for TOTP → call `POST /auth/elevate` → single retry. On `totp_setup_required` or `elevation_failed`: clear error + `sys.exit(1)` (no retry loop).
 
-**Pattern** (`with_elevation_retry`): try API call → on `ElevationRequiredError` → prompt user for TOTP → call `POST /auth/elevate` → single retry. On `totp_setup_required` or `elevation_failed`: print clear error and `sys.exit(1)` (no retry loop).
-
-**Error detection**: `AdminAPIClient` and `GroupAPIClient` both raise `ElevationRequiredError` when they see `{"detail": {"error": "elevation_required"}}` or `{"detail": {"error": "totp_setup_required"}}` in a 403 response. FastAPI wraps `HTTPException(detail={...})` as `{"detail": {...}}` — always unwrap via `body.get("detail", {})`.
-
-**Scope**: All `cidx admin users` commands (create, list, show, update, delete, change-password) and all `cidx admin groups` commands are wrapped with `with_elevation_retry`.
+**Essential invariants**:
+- `with_elevation_retry` wraps ALL `cidx admin users` commands (create, list, show, update, delete, change-password) AND all `cidx admin groups` commands.
+- `AdminAPIClient` and `GroupAPIClient` both raise `ElevationRequiredError` for 403 responses with `{"detail": {"error": "elevation_required"}}` or `{"detail": {"error": "totp_setup_required"}}` — always unwrap via `body.get("detail", {})` (FastAPI wraps `HTTPException(detail={...})`).
 
 Files: `src/code_indexer/api_clients/elevation.py`, `src/code_indexer/api_clients/admin_client.py`, `src/code_indexer/api_clients/group_client.py`, `src/code_indexer/cli.py` (admin users + groups sections).
+
+→ Full reference: `docs/totp-elevation.md` (CLI Elevation Retry section)
 
 ### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
 
@@ -256,86 +284,48 @@ Pattern in `deployment_executor.py`: each config step is `_ensure_X_config()` �
 
 ### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
 
-**FD/connection hygiene (Bug #878)**: A single `DatabaseConnectionManager-cleanup-daemon` thread runs for the app lifetime, sweeping stale SQLite connections across all registered singletons every 60s. Started/stopped in lifespan (error codes `APP-GENERAL-034`/`035`). Idempotent. Identity-guarded clear.
+The server runs a `DatabaseConnectionManager-cleanup-daemon` thread for the app lifetime sweeping stale SQLite connections across all registered singletons every 60s. HNSW/FTS singletons always carry a finite `max_cache_size_mb` (default 4096). Bug #881 omni fan-out caps and Bug #897 glibc arena fragmentation mitigations are both default ON.
 
-NEVER: re-introduce the piggyback cleanup trigger in `get_connection()` (lost races to thread churn in production, RC-3); call `_cleanup_all_instances()` from the daemon loop (double-throttle); remove the `try/finally` that calls `_close_thread_connections_on_all_managers(job_id)` in `BackgroundJobManager._execute_job` (Fix A.3 closes at source); remove the close-on-clobber guard in `get_connection()` (Linux TID recycling silently leaks FDs otherwise).
+**Essential invariants**:
+- Cleanup daemon runs once per app lifetime, started/stopped in lifespan (error codes `APP-GENERAL-034`/`035`). NEVER re-introduce the piggyback cleanup trigger in `get_connection()`, NEVER call `_cleanup_all_instances()` from the daemon loop, NEVER remove the `try/finally` cleanup in `BackgroundJobManager._execute_job`, NEVER remove the close-on-clobber guard (Linux TID recycling leaks FDs otherwise).
+- HNSW/FTS cache cap: `DEFAULT_MAX_CACHE_SIZE_MB = 4096` overlaid when config is `None`. Hot-reload via `ConfigService._hot_reload_cache_size_cap()` is narrow-scoped to `index_cache_max_size_mb` and `fts_cache_max_size_mb` only.
+- Bug #881 omni fan-out: two caps in sequence — `omni_wildcard_expansion_cap` (per-pattern, default 50) and `omni_max_repos_per_search` (total fan-out, default 50). Fan-out searches pass `hnsw_cache=None` to bypass global HNSW cache.
+- Bug #897 mitigations both default ON since v9.23.3 (bootstrap-only flags in `config.json`): `enable_malloc_trim` (calls `glibc malloc_trim(0)` after cleanup cycles), `enable_malloc_arena_max` (injects `MALLOC_ARENA_MAX=2` into systemd unit via auto-updater).
+- Codex CLI auto-install (Story #845, step 6.7) and Codex auth modes (Story #846: `api_key` / `subscription` / `none`) both run idempotently on every auto-updater cycle.
 
-**HNSW/FTS cache cap (Bug #878)**: Singletons always carry a finite `max_cache_size_mb`. When config has `None`, `DEFAULT_MAX_CACHE_SIZE_MB = 4096` is overlaid at `get_global_cache()` / `get_global_fts_cache()` init. Dataclass defaults stay `None` (sentinel distinguishes explicit operator value from unset). Hot-reload via `ConfigService._hot_reload_cache_size_cap()` is narrow-scoped to `index_cache_max_size_mb` and `fts_cache_max_size_mb` only — `TestHotReloadScopeIsolation` asserts the boundary.
+Files: `src/code_indexer/server/storage/database_manager.py`, `src/code_indexer/server/startup/lifespan.py`, `src/code_indexer/server/repositories/background_jobs.py`, `src/code_indexer/server/cache/__init__.py`, `src/code_indexer/server/services/config_service.py`, `src/code_indexer/server/mcp/handlers/_utils.py`, `src/code_indexer/server/cache/hnsw_index_cache.py`.
 
-**Bug #881 omni fan-out mitigations**: two caps enforced in sequence — (1) `omni_wildcard_expansion_cap` (default 50, Web UI): per-pattern wildcard expansion cap, enforced inside `_expand_wildcard_patterns`, error code `wildcard_cap_exceeded`; (2) `omni_max_repos_per_search` (default 50, Web UI, Bug #894): total alias fan-out cap after wildcard expansion + literal union, enforced by `_enforce_repo_count_cap` in `_omni_search_code` and `_omni_regex_search`, error code `repo_count_cap_exceeded`. Both return `Union[List[str], CapBreach]` and callers handle via `cap_breach_response` / `cap_breach_http_exception`. Fan-out searches pass `hnsw_cache=None` to bypass the global HNSW cache; `sys.getsizeof(id_mapping)` added to `index_size_bytes` so label→id dict is no longer invisible to the size cap.
-
-**Bug #897 glibc arena fragmentation mitigations** (both default ON since v9.23.3, bootstrap-only flags in `config.json`): After a bulk lifecycle backfill that cycles 500+ HNSW indexes through the LRU cache, process RSS can pin ~23 GB because glibc's multi-arena brk segments hold small `label_lookup_` / `linkLists_` allocations. Two mitigations behind feature flags (operators can disable either by setting to false in `config.json`):
-
-- `enable_malloc_trim: bool = True` -- calls `glibc malloc_trim(0)` at the end of each `_cleanup_expired_entries()` cycle (implemented in `_maybe_malloc_trim()` in `hnsw_index_cache.py`). Linux + glibc only; silently no-ops on musl/macOS. Default ON since v9.23.3.
-- `enable_malloc_arena_max: bool = True` -- idempotently injects `Environment=MALLOC_ARENA_MAX=2` into the cidx-server systemd unit file on each auto-updater run (`_ensure_malloc_arena_max()` in `deployment_executor.py`, step 6.6, error code `DEPLOY-GENERAL-143`). Reverting the flag removes the line on the next auto-updater cycle. Default ON since v9.23.3.
-
-**Codex CLI auto-install (Story #845)**: `_ensure_codex_cli_installed()` in `deployment_executor.py`, step 6.7, error code `DEPLOY-GENERAL-144`. Runs `npm install -g @openai/codex` on every auto-updater cycle (idempotent — both first install and updates). If npm is not on PATH, logs WARNING and returns True (optional-feature semantics — CIDX starts fine without Codex). After install, probes `codex --version` and logs result at INFO. Non-fatal: a failed install logs WARNING and returns False but does not abort the auto-updater. Tests: `tests/unit/server/auto_update/test_ensure_codex_cli_installed_845.py`.
-
-**Codex auth modes (Story #846)**: Two distinct paths in `src/code_indexer/server/startup/codex_cli_startup.py`. `api_key` mode: delegates auth.json population to `codex login --with-api-key` (key read from stdin) via `_login_codex_with_api_key()` — codex owns the auth.json schema for this mode, preventing the OAuth-schema mismatch that caused WebSocket 401s. Also sets `OPENAI_API_KEY` env var as belt-and-suspenders fallback. `subscription` mode: uses the OAuth lease-loop path via `CodexCredentialsFileManager` + `CodexLeaseLoop` (unchanged). `none` mode: no-op. Tests: `tests/unit/server/startup/test_codex_cli_startup_846.py`, `tests/unit/server/startup/test_codex_login_with_api_key.py`.
-
-Both flags are bootstrap-only (read from `config.json` before DB is available) and default True since v9.23.3 so fresh installs and existing installs that don't pin the flags automatically get the protection. Tests: `tests/unit/server/cache/test_malloc_trim_flag_bug_897.py`, `tests/unit/server/auto_update/test_malloc_arena_max_bug_897.py`.
-
-Files: `src/code_indexer/server/storage/database_manager.py`, `src/code_indexer/server/startup/lifespan.py`, `src/code_indexer/server/repositories/background_jobs.py`, `src/code_indexer/server/cache/__init__.py`, `src/code_indexer/server/services/config_service.py`, `src/code_indexer/server/mcp/handlers/_utils.py`, `src/code_indexer/server/cache/hnsw_index_cache.py`. Tests: `tests/unit/server/mcp/test_wildcard_cap.py`, `test_cap_breach_helper.py`, `test_repo_count_cap.py`, `test_cache_bypass_on_fanout.py`, `tests/unit/server/cache/test_id_mapping_size_bytes.py`.
-
-Operational check:
-```bash
-sqlite3 ~/.cidx-server/logs.db \
-  "SELECT timestamp, message FROM logs WHERE message LIKE '%cleanup daemon%' ORDER BY timestamp DESC LIMIT 5;"
-# Expect one 'started' per process + periodic 'Cleaned up N stale SQLite connections' under churn.
-```
+→ Full reference: `docs/server-memory-invariants.md`
 
 ### Depmap Parser Module Split and Anomaly Channels (Story #887, Epic #886)
 
-The depmap parser was split from a single 1042-line `dep_map_mcp_parser.py` into four cohesive modules under the MESSI rule 6 soft cap (500 lines). Each module has a single responsibility:
+The depmap parser was split into four cohesive modules (mcp_parser orchestration, parser_tables extraction, parser_hygiene normalization/dataclasses, parser_graph aggregation) under the MESSI rule 6 cap. Anomalies route through a self-classifying `AnomalyType` enum into `parser_anomalies[]` (structural file defects) vs `data_anomalies[]` (source-graph drift) channels.
 
-| Module | Responsibility | Lines |
-|--------|----------------|-------|
-| `dep_map_mcp_parser.py` | Orchestration + public API (2-tuple legacy + 4-tuple with-channels) | ~440 |
-| `dep_map_parser_tables.py` | Markdown table extraction | ~354 |
-| `dep_map_parser_hygiene.py` | Identifier normalization, `AnomalyEntry`/`AnomalyAggregate`/`AnomalyType` dataclasses, dedup + aggregation helpers | ~279 |
-| `dep_map_parser_graph.py` | Graph edge aggregation, filter hooks (reserved for Story #889), channel split | ~365 |
-
-**Public API dual-surface** (both are stable contracts):
-- `get_cross_domain_graph(output_dir) -> Tuple[List[Dict], List[Dict[str, str]]]` — legacy 2-tuple, anomalies as `{file, error}` dicts (backward-compat).
-- `get_cross_domain_graph_with_channels(output_dir) -> Tuple[List[Dict], List[Union[AnomalyEntry, AnomalyAggregate]], List[Union[AnomalyEntry, AnomalyAggregate]], List[Union[AnomalyEntry, AnomalyAggregate]]]` — rich 4-tuple `(edges, all, parser_anomalies, data_anomalies)` for callers that need channel separation.
-
-**Anomaly channel structure** (response envelope for all 5 `depmap_*` tools):
-- `parser_anomalies[]` — structural file defects: malformed YAML, truncated table, unreadable bytes, path-traversal rejected, missing required frontmatter keys, section-present-but-empty.
-- `data_anomalies[]` — source-graph drift: bidirectional mismatch, dual-source inconsistency (JSON↔markdown), garbage-domain rejected, self-loop, edge with no derivable types, case normalization applied.
-- `anomalies[]` — legacy concatenation of both, preserved for ONE release after Epic #886 completes (to be dropped in vN+1 per epic BREAKING CHANGES).
-
-**AnomalyType self-classifying enum**: each variant carries a bound `channel: Literal["parser", "data"]` attribute. Routing is `AnomalyType.channel` lookup — no manual classification logic. Aggregates route identically (the aggregate's `.type.channel` determines the channel).
-
-**Frozenset-keyed bidirectional dedup**: `_check_bidirectional_consistency` aggregates by `frozenset({normalize(source), normalize(target)})` so one anomaly emits per unordered edge pair. Prevents the pre-Story-#887 pattern of ~170 anomalies for ~150 edges. Both sides of the frozenset are normalized (strip_backticks + lowercase) to prevent case/backtick drift from producing false mismatches.
-
-**Invariants (MESSI rule 15, stripped under `python -O`)**:
-- `strip_backticks()` postcondition: `assert not s.startswith("\`") and not s.endswith("\`")` — all wrapper backticks stripped via `while` loops (not just one pair).
-- Self-loop preservation unconditional: `finalize_graph_edges()` excludes self-loops from the empty-types drop filter (self-loops with empty types still emit the `GARBAGE_DOMAIN_REJECTED` anomaly AND are preserved as edges).
-- Late-anomaly routing: `finalize_graph_edges()` anomalies flow through `aggregate_anomalies()` + channel split before response assembly — no silent drops (MESSI rule 13).
-
-**Handler serialization**: `src/code_indexer/server/mcp/handlers/depmap.py::_anomaly_to_dict()` handles both `AnomalyEntry` and `AnomalyAggregate` — the same helper is reused at every response assembly site. Aggregates serialize as `{"file": "<aggregated>", "error": "N occurrences: <type>"}`.
+**Essential invariants**:
+- Public API dual-surface (both stable contracts): `get_cross_domain_graph()` returns legacy 2-tuple; `get_cross_domain_graph_with_channels()` returns 4-tuple `(edges, all, parser_anomalies, data_anomalies)`.
+- `AnomalyType` self-classifying: each variant carries bound `channel: Literal["parser", "data"]`. Routing is enum lookup — no manual classification logic. Aggregates route identically.
+- Frozenset-keyed bidirectional dedup: `_check_bidirectional_consistency` aggregates by `frozenset({normalize(source), normalize(target)})` so one anomaly emits per unordered edge pair (both sides normalized via strip_backticks + lowercase).
+- Self-loop preservation is unconditional: `finalize_graph_edges()` excludes self-loops from the empty-types drop filter (still emits GARBAGE_DOMAIN_REJECTED anomaly AND preserves the edge).
+- `_anomaly_to_dict()` in `handlers/depmap.py` handles both `AnomalyEntry` and `AnomalyAggregate` — reused at every response assembly site.
 
 Files: `src/code_indexer/server/services/dep_map_{mcp_parser,parser_tables,parser_hygiene,parser_graph}.py`, `src/code_indexer/server/mcp/handlers/depmap.py`. Tests: `tests/unit/server/services/test_dep_map_887_*.py` (70 tests across 8 ACs + 4 remediation blocker files).
 
+→ Full reference: `docs/depmap-parser-architecture.md`
+
 ### cidx-meta backup contract (Story #926)
 
-The server can maintain a continuous git backup of the cidx-meta directory to a remote repository. Key invariants:
+The server can maintain a continuous git backup of the cidx-meta directory to a remote repository. Sync runs BEFORE indexing in the refresh path; push/fetch failures defer (surface as `RuntimeError` after indexing) while conflict failures short-circuit immediately. URL changes are idempotent: bootstrap runs at Save time AND at the start of every backup-enabled refresh cycle.
 
-**Mutable base path only**: All git operations (bootstrap, sync, rebase, push) execute against `<server_data_dir>/data/golden-repos/cidx-meta/`. NEVER operate inside `.versioned/cidx-meta/v_{timestamp}/` snapshot directories. Use `get_cidx_meta_path(server_data_dir)` from `src/code_indexer/server/services/cidx_meta_backup/paths.py` — single source of truth for both the route and the refresh scheduler.
-
-**Index always runs after sync**: `CidxMetaBackupSync.sync()` runs BEFORE indexing in the refresh path. If sync succeeds (or partially fails with push-only error), indexing still runs. This is the deferred-failure pattern — a push failure becomes a `sync_failure` on the `SyncResult`, which causes the job to be marked FAILED after indexing completes.
-
-**Push/fetch failure is deferred, conflict failure is immediate**: Network errors (fetch fail, push fail) are captured in `SyncResult.sync_failure` and surfaced as `RuntimeError` at the end of the refresh job. Conflict resolution failure raises `RuntimeError` immediately (after `git rebase --abort`) and short-circuits indexing.
-
-**URL-change idempotency**: Changing the remote URL in the Web UI triggers `CidxMetaBackupBootstrap.bootstrap()` at Save time. The refresh scheduler also calls bootstrap at the start of every backup-enabled refresh cycle (idempotent — reads `git remote get-url origin`, no-ops on match). URL changes applied via direct DB edits are thus applied on the next refresh without requiring a Save.
-
-**Externalized conflict-resolution prompt**: `src/code_indexer/server/mcp/prompts/cidx_meta_conflict_resolution.md` — editable by operators. Must contain `{conflict_files}`, `{branch}`, and `{repo_path}` format placeholders.
-
-**Claude CLI routing**: Conflict resolution invokes Claude via `invoke_claude_cli()` in `src/code_indexer/global_repos/repo_analyzer.py` (Story #885 A10 boundary). On 600 s timeout, SIGTERM is sent first; SIGKILL follows after `_CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS` (30 s).
-
-**Branch detection**: `detect_default_branch(master_path)` from `src/code_indexer/server/services/cidx_meta_backup/branch_detect.py` is called at the start of each backup sync to support remotes with `main` as default. Falls back to `"master"` when detection fails.
+**Essential invariants**:
+- Mutable base path only: all git ops execute against `<server_data_dir>/data/golden-repos/cidx-meta/`. NEVER operate inside `.versioned/cidx-meta/v_{timestamp}/` snapshot directories. Use `get_cidx_meta_path(server_data_dir)` as the single source of truth.
+- Index always runs after sync: deferred-failure pattern — push failure becomes `SyncResult.sync_failure` and is raised AFTER indexing completes (job marked FAILED). Conflict failure raises `RuntimeError` immediately (after `git rebase --abort`) and short-circuits indexing.
+- Conflict resolution invokes Claude via `invoke_claude_cli()` (Story #885 A10 boundary). 600s timeout → SIGTERM → 30s grace → SIGKILL.
+- Externalized conflict-resolution prompt at `src/code_indexer/server/mcp/prompts/cidx_meta_conflict_resolution.md` (operator-editable; must contain `{conflict_files}`, `{branch}`, `{repo_path}` placeholders).
+- `detect_default_branch()` honors remotes with `main` as default; falls back to `master` on failure.
 
 Files: `src/code_indexer/server/services/cidx_meta_backup/` (bootstrap, sync, conflict_resolver, branch_detect, paths), `src/code_indexer/global_repos/refresh_scheduler.py` (backup branch), `src/code_indexer/server/web/routes.py` (config save route).
+
+→ Full reference: `docs/cidx-meta-backup.md`
 
 ---
 
@@ -528,43 +518,17 @@ Files: `src/code_indexer/server/mcp/memory_retrieval_pipeline.py`, `src/code_ind
 
 ### Phase 3.7 Dep-Map Graph-Channel Repair (Stories #908/#910/#911/#912, Epic #907)
 
-Phase 3.7 is inserted in `_run_branch_a_dep_map` between Phase 3.5 (metadata backfill) and Phase 4 (index regeneration), at progress percent 78. It repairs graph-channel anomalies detected by the dep-map parser (SELF_LOOP in Story #908; MALFORMED_YAML in Story #910; GARBAGE_DOMAIN_REJECTED in Story #911; BIDIRECTIONAL_MISMATCH in Story #912).
+Phase 3.7 is inserted in `_run_branch_a_dep_map` between Phase 3.5 (metadata backfill) and Phase 4 (index regeneration), at progress percent 78. It repairs graph-channel anomalies detected by the dep-map parser: SELF_LOOP, MALFORMED_YAML, GARBAGE_DOMAIN_REJECTED (deterministic) and BIDIRECTIONAL_MISMATCH (Claude-audited, only when `invoke_claude_fn` is provided).
 
-**Bootstrap flag**: `enable_graph_channel_repair` in `config.json` (bootstrap-only, not DB). Default `True`. Pattern follows Bug #897 `enable_malloc_trim`. When `False`, `_run_phase37` returns immediately without reading parser anomalies or touching the journal. Passed to `DepMapRepairExecutor.__init__` as `enable_graph_channel_repair: bool = True`.
+**Essential invariants**:
+- Bootstrap flag `enable_graph_channel_repair` in `config.json` (bootstrap-only, NOT DB), default `True` — pattern follows Bug #897 `enable_malloc_trim`. When `False`, `_run_phase37` returns immediately.
+- Append-only JSONL journal at `~/.cidx-server/dep_map_repair_journal.jsonl` (CIDX_DATA_DIR honored per Bug #879). 12-field JSON object per line, atomic writes via module-scope `_write_lock`. `RepairJournal` class in `dep_map_repair_phase37.py`.
+- Action enum master list grows per story: `self_loop_deleted`, `malformed_yaml_reemitted`, `auto_backfilled`, `claude_refuted_pending_operator_approval`, `inconclusive_manual_review`, `claude_cited_but_unverifiable`, `pleaser_effect_caught`, `repo_not_in_domain`, `verification_timeout`, `claude_output_unparseable`.
+- Verdict enum: `CONFIRMED | REFUTED | INCONCLUSIVE | N_A` (deterministic repairs use `N_A`).
+- File split (MESSI Rule 6): executor (orchestration), phase37 (journal types + SELF_LOOP), malformed_yaml, bidirectional + bidirectional_parser + bidirectional_verify.
+- BIDIRECTIONAL_MISMATCH prompt template externalized to `src/code_indexer/server/mcp/prompts/bidirectional_mismatch_audit.md`. Timeouts overridable via `CIDX_BIDI_CLAUDE_SHELL_TIMEOUT` / `CIDX_BIDI_CLAUDE_OUTER_TIMEOUT` (defaults 270s/330s).
 
-**Journal**: Append-only JSONL at `~/.cidx-server/dep_map_repair_journal.jsonl` (CIDX_DATA_DIR env var honored per Bug #879 IPC alignment). Each line is a 12-field JSON object: `timestamp`, `anomaly_type`, `source_domain`, `target_domain`, `source_repos`, `target_repos`, `verdict`, `action`, `citations`, `file_writes`, `claude_response_raw`, `effective_mode`. Atomic per-line writes via module-scope `_write_lock` (threading.Lock). `RepairJournal` class in `dep_map_repair_phase37.py`.
-
-**Action enum master list** (grows per story):
-- `self_loop_deleted` (Story #908) — deterministic; no Claude involved
-- `malformed_yaml_reemitted` (Story #910) — deterministic surgical frontmatter re-emit from `_domains.json`
-- `auto_backfilled` (Story #912) — Claude CONFIRMED; mirror row written to target incoming table
-- `claude_refuted_pending_operator_approval` (Story #912) — Claude REFUTED; no file written
-- `inconclusive_manual_review` (Story #912) — Claude INCONCLUSIVE; no file written
-- `claude_cited_but_unverifiable` (Story #912) — CONFIRMED but cited file absent; downgraded
-- `pleaser_effect_caught` (Story #912) — CONFIRMED but symbol absent from source repos; downgraded
-- `repo_not_in_domain` (Story #912) — cited repo not a member of either domain; downgraded
-- `verification_timeout` (Story #912) — rg subprocess timed out during AC6/AC7 check
-- `claude_output_unparseable` (Story #912) — Claude response did not match expected format
-
-**Verdict enum**: `CONFIRMED | REFUTED | INCONCLUSIVE | N_A` (deterministic repairs use `N_A`).
-
-**MALFORMED_YAML repair** (Story #910): `run_malformed_yaml_repairs()` in `dep_map_repair_malformed_yaml.py` called by `_run_phase37` after SELF_LOOP pass. Uses `_domains.json` as authoritative source for `name`/`participating_repos`/`last_analyzed`. Preserves body bytes using `body_byte_offset()` byte-level splice (mixed line-endings safe). Falls back to Phase 1 full re-analysis when `_locate_frontmatter_bounds` returns `None` (body unrecoverable). Body of `_repair_malformed_yaml` in executor is a thin shim (~12 lines) that delegates to `repair_single_malformed_yaml_anomaly()` — no orchestration logic in the executor.
-
-**File split** (MESSI Rule 6 extraction):
-- `src/code_indexer/server/services/dep_map_repair_executor.py` — orchestration, phase shims (~1040 lines)
-- `src/code_indexer/server/services/dep_map_repair_phase37.py` — journal types (`Action`, `JournalEntry`, `RepairJournal`), SELF_LOOP step functions, byte-level helpers (`body_byte_offset`, `reemit_frontmatter_from_domain_info`) (~472 lines)
-- `src/code_indexer/server/services/dep_map_repair_malformed_yaml.py` — MALFORMED_YAML repair cluster: `run_malformed_yaml_repairs`, `repair_single_malformed_yaml_anomaly`, `resolve_malformed_yaml_target`, `rewrite_malformed_yaml_file`, `apply_malformed_yaml_fallback` (~238 lines)
-- `src/code_indexer/server/services/dep_map_repair_bidirectional.py` — BIDIRECTIONAL_MISMATCH orchestration + re-exports; public entry point `audit_one_bidirectional_mismatch` (~370 lines)
-- `src/code_indexer/server/services/dep_map_repair_bidirectional_parser.py` — `CitationLine`, `EdgeAuditVerdict` dataclasses; `parse_audit_verdict` parser (~200 lines)
-- `src/code_indexer/server/services/dep_map_repair_bidirectional_verify.py` — `run_verification_gate`: AC6 (file existence), AC7 (source reverse check), AC10 (rg timeout), AC11 (repo membership) (~150 lines)
-
-**BIDIRECTIONAL_MISMATCH audit pipeline** (Story #912): `_run_phase37` invokes `audit_one_bidirectional_mismatch` for each BIDIRECTIONAL_MISMATCH anomaly **only when `invoke_claude_fn` is not None** (executors without Claude DI skip the pass). DI parameters `repo_path_resolver: Callable[[str], str]` and `invoke_claude_fn: Callable[[str, str, int, int], Tuple[bool, str]]` are passed to `DepMapRepairExecutor.__init__`. Prompt template externalized to `src/code_indexer/server/mcp/prompts/bidirectional_mismatch_audit.md`. Timeouts overridable via `CIDX_BIDI_CLAUDE_SHELL_TIMEOUT` and `CIDX_BIDI_CLAUDE_OUTER_TIMEOUT` env vars (defaults 270s/330s).
-
-The executor re-exports `Action`, `JournalEntry`, `RepairJournal` from phase37 for backward compat. Tests that import these symbols from the executor continue to work.
-
-`_repair_self_loop` stays on the executor class (tests call it there). `run_phase37` in phase37 module is the SELF_LOOP orchestrator. `_run_phase37` in executor is a thin shim that checks the enable flag, delegates to `run_phase37`, then calls `run_malformed_yaml_repairs`, then processes GARBAGE_DOMAIN_REJECTED and BIDIRECTIONAL_MISMATCH in a single anomaly loop.
-
-Tests: `tests/unit/server/services/test_dep_map_908_*.py` (29 tests, 8 ACs); `tests/unit/server/services/test_dep_map_910_*.py` (24 tests, 5 ACs + builder/helpers); `tests/unit/server/services/test_dep_map_912_*.py` (44 tests, 5 ACs: AC1 prompt template, AC2 handler, AC4 parser, AC5/AC6/AC7/AC10/AC11 verification gate, executor wiring).
+→ Full reference: `docs/depmap-phase37-architecture.md`
 
 ---
 

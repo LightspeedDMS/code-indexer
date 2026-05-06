@@ -4,6 +4,17 @@
 # Run manually: pre-commit run --all-files
 
 repos:
+  # Skill bundle sync — block commits where SKILL.md is newer than its .skill zip
+  - repo: local
+    hooks:
+      - id: skill-bundle-sync
+        name: SKILL.md sync with .skill bundle
+        entry: skills/build.sh --check
+        language: script
+        pass_filenames: false
+        always_run: false
+        files: ^skills/
+
   # Ruff - Fast Python linter (replaces flake8, isort, etc.)
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.1

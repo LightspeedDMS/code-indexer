@@ -38,6 +38,7 @@ from .cli_cicd import cicd_group
 from .cli_help import help_group
 from .cli_keys import keys_group
 from .cli_index import index_remote_group
+from .cli_xray import xray_group
 
 # Module-level imports for test mocking (noqa: F401 = intentionally unused for test patching)
 from .api_clients.admin_client import AdminAPIClient  # noqa: F401
@@ -1981,6 +1982,9 @@ cli.add_command(keys_group)
 
 # Story #656: Register Remote index management commands (implemented in cli_index.py)
 cli.add_command(index_remote_group)
+
+# Story #975: Register X-Ray CLI commands (implemented in cli_xray.py)
+cli.add_command(xray_group)
 
 
 @cli.group("groups")

@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+import anyio.to_thread
 import logging
 import os
 import time
@@ -185,6 +186,23 @@ def make_lifespan(
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
                 )
+            )
+
+        # Bootstrap-only: bump anyio threadpool size so concurrent sync handlers
+        # do not starve one another. Default 256 vs anyio's built-in default of 40.
+        # Runs inside the async lifespan so current_default_thread_limiter() resolves correctly.
+        _threadpool_size = (
+            getattr(startup_config, "server_threadpool_size", 256)
+            if startup_config is not None
+            else 256
+        )
+        if _threadpool_size > 0:
+            anyio.to_thread.current_default_thread_limiter().total_tokens = (
+                _threadpool_size
+            )
+            logger.info(
+                f"Threadpool sized to {_threadpool_size} tokens (anyio default 40)",
+                extra={"correlation_id": get_correlation_id()},
             )
 
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
@@ -873,6 +891,11 @@ def make_lifespan(
             )
             set_refresh_scheduler(refresh_scheduler)
 
+            # Bug #v10.4.11 fix (Tier 1): wire _golden_repos_dir unconditionally —
+            # it is derived from server_data_dir which is always available regardless
+            # of whether global_lifecycle_manager initialised successfully.
+            description_refresh_scheduler._golden_repos_dir = Path(golden_repos_dir)
+
             # Wire debouncer for coalescing batch-registration refresh triggers (Story #345)
             if refresh_scheduler is not None:
                 cidx_meta_debouncer = CidxMetaRefreshDebouncer(
@@ -898,15 +921,17 @@ def make_lifespan(
                     golden_repo_manager.lifecycle_invoker = lifecycle_invoker_singleton
                     golden_repo_manager.lifecycle_tracking_backend = tracking_backend
 
-                # Story #876 D3 — wire the same quartet onto the description
-                # refresh scheduler so refresh_task can route every stale repo
-                # through LifecycleBatchRunner.  All four slots are mandatory;
-                # a missing slot emits a WARNING and skips the runner
-                # (Messi Rule #2 anti-fallback, verified by the D3 test suite).
+                # Story #876 D3 — wire the three lifecycle-dependent collaborators
+                # onto the description refresh scheduler so refresh_task can route
+                # every stale repo through LifecycleBatchRunner.  All four slots are
+                # mandatory; a missing slot causes the scheduler to bail out via
+                # _check_lifecycle_backfill_wiring().  A missing-slot condition is
+                # surfaced at ERROR level below (APP-GENERAL-051) so operators see it
+                # at startup, not 60 s into the first loop pass.
+                # _golden_repos_dir is wired unconditionally above (Bug #v10.4.11).
                 description_refresh_scheduler._lifecycle_invoker = (
                     lifecycle_invoker_singleton
                 )
-                description_refresh_scheduler._golden_repos_dir = Path(golden_repos_dir)
                 description_refresh_scheduler._lifecycle_debouncer = cidx_meta_debouncer
                 description_refresh_scheduler._refresh_scheduler = refresh_scheduler
 
@@ -962,6 +987,35 @@ def make_lifespan(
                 logger.info(
                     "MemoryStoreService initialized for Story #877 (cache wired to AccessFilteringService)",
                     extra={"correlation_id": get_correlation_id()},
+                )
+
+            # Bug #v10.4.11 (Tier 2): startup-time misconfiguration check.
+            # _check_lifecycle_backfill_wiring() silently returns False if any slot
+            # is None, causing the scheduler to be a no-op for its entire lifetime.
+            # Log at ERROR level here so operators see the problem immediately at
+            # startup, not 60 s into the first loop pass.
+            _missing_slots = [
+                slot
+                for slot in (
+                    "_lifecycle_invoker",
+                    "_golden_repos_dir",
+                    "_lifecycle_debouncer",
+                    "_refresh_scheduler",
+                )
+                if getattr(description_refresh_scheduler, slot, None) is None
+            ]
+            if _missing_slots:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-051",
+                        f"DescriptionRefreshScheduler missing required collaborators: "
+                        f"{_missing_slots}. Scheduler will be a SILENT NO-OP — "
+                        f"background job runs every 60s but bails at "
+                        f"_check_lifecycle_backfill_wiring(). Fix: ensure "
+                        f"global_lifecycle_manager initializes successfully BEFORE "
+                        f"the description scheduler wiring block (lifespan.py ~895).",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
                 )
 
             # Start scheduler (internally checks if enabled)
@@ -1028,6 +1082,54 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-033",
                     f"Failed to initialize data retention scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize Activated Repository Reaper Scheduler (Story #967)
+        activated_reaper_scheduler = None
+        logger.info(
+            "Server startup: Initializing activated reaper scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.activated_reaper_service import (
+                ActivatedReaperService as _ActivatedReaperService,
+            )
+            from code_indexer.server.services.activated_reaper_scheduler import (
+                ActivatedReaperScheduler as _ActivatedReaperScheduler,
+            )
+            from code_indexer.server.services.config_service import get_config_service
+
+            if not (
+                hasattr(golden_repo_manager, "activated_repo_manager")
+                and golden_repo_manager.activated_repo_manager is not None
+            ):
+                raise RuntimeError(
+                    "golden_repo_manager.activated_repo_manager is not available"
+                )
+            _reaper_config_service = get_config_service()
+            _reaper_service = _ActivatedReaperService(
+                activated_repo_manager=golden_repo_manager.activated_repo_manager,
+                background_job_manager=background_job_manager,
+                config_service=_reaper_config_service,
+            )
+            activated_reaper_scheduler = _ActivatedReaperScheduler(
+                service=_reaper_service,
+                background_job_manager=background_job_manager,
+                config_service=_reaper_config_service,
+            )
+            activated_reaper_scheduler.start()
+            app.state.activated_reaper_scheduler = activated_reaper_scheduler
+            logger.info(
+                "Activated reaper scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-036",
+                    f"Failed to initialize activated reaper scheduler: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
@@ -2402,6 +2504,27 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-034",
                         f"Error stopping data retention scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop activated reaper scheduler (Story #967)
+        activated_reaper_scheduler_state = getattr(
+            app.state, "activated_reaper_scheduler", None
+        )
+        if activated_reaper_scheduler_state is not None:
+            try:
+                activated_reaper_scheduler_state.stop()
+                logger.info(
+                    "Activated reaper scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-037",
+                        f"Error stopping activated reaper scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

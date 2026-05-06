@@ -484,10 +484,10 @@ class TestDescriptionGeneration:
 
         (golden_repos_dir / repo_name).mkdir(parents=True)
 
-        # Create the description file
+        # Create the description file — v10.4.9: alias form {alias_name}.md
         cidx_meta_dir = golden_repos_dir / "cidx-meta"
         cidx_meta_dir.mkdir(parents=True, exist_ok=True)
-        (cidx_meta_dir / f"{repo_name}.md").write_text(
+        (cidx_meta_dir / f"{alias_name}.md").write_text(
             "# Description\nThis is my-repo."
         )
 

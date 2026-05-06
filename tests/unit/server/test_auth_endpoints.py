@@ -433,13 +433,14 @@ class TestRoleBasedAccessControl:
         response = client.get("/api/admin/golden-repos", headers=headers)
         assert response.status_code == 403
 
-        # Normal user should NOT access activation endpoints
+        # Normal user CAN access activation endpoints (Story #981: activate_repos
+        # granted to NORMAL_USER — workspace activation is a personal, read-only op)
         response = client.post(
             "/api/repos/activate",
             headers=headers,
             json={"goldenRepoName": "test-repo", "alias": "my-repo"},
         )
-        assert response.status_code == 403
+        assert response.status_code != 403
 
         # Normal user should access query endpoints
         response = client.get("/api/repos", headers=headers)

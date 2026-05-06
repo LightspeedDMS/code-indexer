@@ -115,7 +115,7 @@ class TestMissingFileWarningOnce:
         output_dir.mkdir()
 
         base_dir = output_dir.resolve()
-        captured: List[Tuple[str, bool]] = []
+        captured: List[Tuple[str, str]] = []
 
         class _Handler(logging.Handler):
             def emit(self, record: logging.LogRecord) -> None:

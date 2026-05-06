@@ -40,6 +40,13 @@ security = HTTPBearer(auto_error=False)
 # authenticate: bypasses handle_tools_call() entirely via mcp-public special path.
 _SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
 
+# Tools whose repo identifier refers to a user-OWNED activation (not a golden
+# alias). The activated_repo_manager enforces ownership at the data layer, so
+# the protocol-level group-access check must be skipped for these tools.
+# Finding 3.5 (v10.4.4): deactivate_repository passes user_alias which is NOT
+# a golden alias, causing false "Access denied" for the rightful owner.
+_OWNER_ENFORCED_TOOLS: frozenset = frozenset({"deactivate_repository"})
+
 from code_indexer.server.services.api_metrics_service import (  # noqa: E402
     api_metrics_service,
 )
@@ -266,8 +273,17 @@ def _check_repository_access(
 ) -> None:
     """Check if user has access to the repository specified in tool arguments.
 
-    Extracts the repository identifier from the arguments dict using the three
-    parameter names tools use: 'repository_alias', 'alias', or 'user_alias'.
+    Extracts the repository identifier from the arguments dict using known
+    parameter names. Checks in this priority order:
+      1. 'golden_repo_aliases' (list) — activate_repository composite form;
+         each entry in the list is checked individually.
+      2. 'golden_repo_alias' (str) — activate_repository single form;
+         checked against accessible repos for the SOURCE repo, not the new
+         user_alias being created (Bug fix: user_alias is the new alias being
+         created and must NOT be checked here).
+      3. 'repository_alias', 'alias', 'user_alias', 'repo_alias' — all other
+         tools that identify an existing repo by these names.
+
     Skips the check if no repo param is present or if the param is empty/None.
 
     Strips the '-global' suffix from aliases before checking, since accessible
@@ -289,33 +305,142 @@ def _check_repository_access(
         scoped_repos: Optional set of repos from acting_users resolution.
             When provided, overrides normal access checks (Story #568).
     """
-    # Extract the repo identifier using the three known parameter names
-    raw_alias: Optional[str] = None
+
+    def _normalize(alias: str) -> str:
+        """Strip -global suffix to match stored repo names."""
+        if alias.endswith("-global"):
+            return alias[: -len("-global")]
+        return alias
+
+    def _deny_single(raw_alias: str) -> None:
+        """Raise ValueError with the standard access-denied message."""
+        raise ValueError(
+            f"Access denied: repository '{raw_alias}' is not accessible to user"
+            f" '{effective_user.username}'"
+        )
+
+    def _deny_scoped(raw_alias: str) -> None:
+        raise ValueError(
+            f"Access denied: repository '{raw_alias}' is not accessible"
+            f" to the specified acting users"
+        )
+
+    def _check_alias_list(aliases: list) -> None:
+        """Check each string entry in a list of aliases.
+
+        Shared by the golden_repo_aliases block and the omni list-form path
+        (v10.4.3 security fix). Admin bypass and scoped_repos are handled
+        identically for both callers.
+        """
+        # Admin bypass (only when scoped_repos is not active)
+        if scoped_repos is None and access_service.is_admin_user(
+            effective_user.username
+        ):
+            return
+        accessible = (
+            None
+            if scoped_repos is not None
+            else access_service.get_accessible_repos(effective_user.username)
+        )
+        for entry in aliases:
+            if not isinstance(entry, str) or not entry:
+                continue  # skip non-string / empty entries
+            normalized_entry = _normalize(entry)
+            if scoped_repos is not None:
+                if normalized_entry not in scoped_repos:
+                    _deny_scoped(entry)
+            else:
+                assert accessible is not None
+                if normalized_entry not in accessible:
+                    _deny_single(entry)
+
+    def _try_decode_json_array(value: Any) -> Any:
+        """Return decoded list when value is a JSON-array string, else value.
+
+        v10.4.3: Some MCP clients pass lists as JSON-encoded strings like
+        '["repo-a", "repo-b"]'. Decoding here keeps the access guard consistent
+        with _parse_json_string_array used in the xray handler.
+        """
+        if isinstance(value, str) and value.startswith("["):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return parsed
+            except (ValueError, json.JSONDecodeError):
+                logger.debug(
+                    "_check_repository_access: failed to decode JSON array from %r"
+                    " — treating as plain string",
+                    value,
+                )
+        return value
+
+    # Bug fix (activate_repository): golden_repo_aliases (list) is the composite
+    # activation form. Check each alias in the list before the single-alias scan.
+    # This prevents user_alias (the new alias being created) from being checked.
+    golden_repo_aliases = arguments.get("golden_repo_aliases")
+    if (
+        golden_repo_aliases is not None
+        and isinstance(golden_repo_aliases, list)
+        and golden_repo_aliases
+    ):
+        _check_alias_list(golden_repo_aliases)
+        return
+
+    # Extract the repo identifier. 'golden_repo_alias' is checked BEFORE
+    # 'user_alias' so that activate_repository checks the source repo
+    # (golden_repo_alias) not the new alias being created (user_alias).
     # Story #331 AC3: Added "repo_alias" to protect enter_write_mode,
     # exit_write_mode, and wiki_article_analytics tools.
-    for param_name in ("repository_alias", "alias", "user_alias", "repo_alias"):
+    #
+    # v10.4.3 security fix (Finding 1): list-form values (native Python list
+    # or JSON-encoded array string) for repository_alias/alias/user_alias/
+    # repo_alias fell through isinstance(value, str) with raw_alias=None —
+    # bypassing the access check entirely. The fix: decode JSON arrays, then
+    # dispatch list-form values to _check_alias_list.
+    raw_alias: Optional[str] = None
+    list_aliases: Optional[list] = None
+
+    for param_name in (
+        "golden_repo_alias",
+        "repository_alias",
+        "alias",
+        "user_alias",
+        "repo_alias",
+    ):
         value = arguments.get(param_name)
-        if value is not None and isinstance(value, str) and value:
+        if value is None:
+            continue
+        value = _try_decode_json_array(value)
+        if isinstance(value, list):
+            if value:  # non-empty list only
+                list_aliases = value
+            break  # found the param — stop scanning
+        if isinstance(value, str) and value:
             raw_alias = value
             break
+
+    # List-form path — each entry checked via shared _check_alias_list helper
+    if list_aliases is not None:
+        _check_alias_list(list_aliases)
+        return
+
+    # Finding 3.5 (v10.4.4): tools in _OWNER_ENFORCED_TOOLS pass a user-owned
+    # activation alias (user_alias), not a golden-repo alias. The manager layer
+    # already enforces ownership — skip the group-access check entirely.
+    if tool_name in _OWNER_ENFORCED_TOOLS:
+        return
 
     # No repo param present or empty - nothing to check
     if not raw_alias:
         return
 
-    # Strip -global suffix to match stored repo names
-    normalized = raw_alias
-    if normalized.endswith("-global"):
-        normalized = normalized[: -len("-global")]
+    normalized = _normalize(raw_alias)
 
     # Story #568: When scoped_repos is provided (acting_users flow),
     # check against the scoped set. This overrides admin bypass.
     if scoped_repos is not None:
         if normalized not in scoped_repos:
-            raise ValueError(
-                f"Access denied: repository '{raw_alias}' is not accessible"
-                f" to the specified acting users"
-            )
+            _deny_scoped(raw_alias)
         return
 
     # Admin users bypass the check entirely (original behavior)
@@ -325,10 +450,7 @@ def _check_repository_access(
     # Check access
     accessible = access_service.get_accessible_repos(effective_user.username)
     if normalized not in accessible:
-        raise ValueError(
-            f"Access denied: repository '{raw_alias}' is not accessible to user"
-            f" '{effective_user.username}'"
-        )
+        _deny_single(raw_alias)
 
 
 async def handle_tools_call(

@@ -91,10 +91,43 @@ class SystemMetricsCollector:
             # Sleep for TTL before next refresh; check stop_event periodically
             self._stop_event.wait(timeout=self._cache_ttl)
 
+    def _resolve_data_path(self) -> str:
+        """Return the data directory path to use for disk metrics.
+
+        Resolves server_dir from config and validates it is an existing directory.
+        Falls back to '/' with logging when config is unavailable or the path is
+        invalid, so disk metrics always succeed even during early startup.
+        v10.4.10 (#71): fixes health badge + alert cache reading root instead of data volume.
+        """
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
+            candidate = getattr(config, "server_dir", None) or "/"
+            if os.path.isdir(candidate):
+                return candidate
+            logger.debug(
+                "SystemMetricsCollector: server_dir '%s' is not a directory, "
+                "falling back to '/'",
+                candidate,
+            )
+        except RuntimeError as exc:
+            logger.debug(
+                "SystemMetricsCollector: config not available, falling back to '/': %s",
+                exc,
+            )
+        except Exception as exc:
+            logger.warning(
+                "SystemMetricsCollector: unexpected error resolving data_path, "
+                "falling back to '/': %s",
+                exc,
+            )
+        return "/"
+
     def _refresh_cache_background(self) -> None:
         """Refresh all cached metrics from psutil (called from background thread)."""
         memory = psutil.virtual_memory()
-        disk_usage = psutil.disk_usage("/")
+        disk_usage = psutil.disk_usage(self._resolve_data_path())
         disk_io = psutil.disk_io_counters()
         net_io = psutil.net_io_counters()
 
@@ -148,7 +181,7 @@ class SystemMetricsCollector:
     def _refresh_cache(self) -> None:
         """Refresh all cached metrics from psutil (legacy, for direct callers)."""
         memory = psutil.virtual_memory()
-        disk_usage = psutil.disk_usage("/")
+        disk_usage = psutil.disk_usage(self._resolve_data_path())
         disk_io = psutil.disk_io_counters()
         net_io = psutil.net_io_counters()
 
