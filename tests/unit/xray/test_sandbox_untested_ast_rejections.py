@@ -25,10 +25,10 @@ class TestUntestedASTRejections:
         v = _validate("return dict(**{'a': 1})")
         assert not v.ok
 
-    def test_slice_in_subscript_rejected(self) -> None:
+    def test_slice_in_subscript_allowed(self) -> None:
+        """v10.4.0 lifted the Slice ban — node.text[1:2] is now allowed."""
         v = _validate("return node.text[1:2]")
-        assert not v.ok
-        assert "Slice" in (v.reason or "")
+        assert v.ok, f"Expected Slice allowed, got reason: {v.reason}"
 
     def test_starred_in_call_rejected(self) -> None:
         v = _validate("return min(*[1, 2, 3])")

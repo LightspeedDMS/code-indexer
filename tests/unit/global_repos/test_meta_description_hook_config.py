@@ -61,7 +61,13 @@ class TestMetaDescriptionHookConfigIntegration:
 
         Story #23 AC4 changed on_repo_added to use the global singleton which is
         initialized during server startup with config values. This test verifies
-        the global manager's max_workers is used.
+        the global manager's max_workers is used and check_cli_available is the
+        gate consulted before any work proceeds.
+
+        v10.4.13 anti-fallback: when check_cli_available returns False, on_repo_added
+        raises RuntimeError instead of taking the deleted README/static fallback path.
+        The assertions about manager use still hold because check_cli_available is
+        invoked BEFORE the RuntimeError is raised.
         """
         from code_indexer.global_repos.meta_description_hook import on_repo_added
 
@@ -75,21 +81,26 @@ class TestMetaDescriptionHookConfigIntegration:
         # Mock global ClaudeCliManager singleton with configured max_workers
         mock_cli_manager = MagicMock()
         mock_cli_manager._max_workers = 7  # Config value from server startup
-        mock_cli_manager.check_cli_available.return_value = False  # Force fallback path
+        mock_cli_manager.check_cli_available.return_value = (
+            False  # Triggers v10.4.13 raise
+        )
 
         with patch(
             "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
             return_value=mock_cli_manager,
         ):
             with patch("subprocess.run"):
-                on_repo_added(
-                    repo_name=repo_name,
-                    repo_url=repo_url,
-                    clone_path=str(clone_path),
-                    golden_repos_dir=temp_golden_repos_dir,
-                )
+                with pytest.raises(
+                    RuntimeError, match="Claude CLI not available on PATH"
+                ):
+                    on_repo_added(
+                        repo_name=repo_name,
+                        repo_url=repo_url,
+                        clone_path=str(clone_path),
+                        golden_repos_dir=temp_golden_repos_dir,
+                    )
 
-        # Verify: global manager was used
+        # Verify: global manager was used (check_cli_available is the gate)
         mock_cli_manager.check_cli_available.assert_called_once()
         # The manager's max_workers should be the configured value
         assert mock_cli_manager._max_workers == 7

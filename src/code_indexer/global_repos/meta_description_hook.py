@@ -18,6 +18,7 @@ import yaml
 
 from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
 from code_indexer.server.services.claude_cli_manager import (
+    ClaudeCliManager,
     get_claude_cli_manager,
 )
 
@@ -340,77 +341,87 @@ def on_repo_added(
     # This ensures consistent API key handling and avoids creating multiple instances
     cli_manager = get_claude_cli_manager()
 
-    # Determine whether to use Claude CLI or README fallback
-    if cli_manager is None:
-        logger.info(
-            f"ClaudeCliManager not initialized, using README fallback for {repo_name}"
+    # v10.4.13: Claude CLI is REQUIRED for description generation.
+    # No README fallback — silent terse output masks misconfiguration.
+    # If CLI is unavailable, raise so the caller logs ERROR and skips writing
+    # any description. Admin retries when CLI is restored. Per Messi Rule #2
+    # (anti-fallback): graceful failure over forced success.
+    if cli_manager is None or not cli_manager.check_cli_available():
+        reason = (
+            "ClaudeCliManager not initialized at startup"
+            if cli_manager is None
+            else "Claude CLI not available on PATH"
         )
-        _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
-
-    elif not cli_manager.check_cli_available():
-        logger.info(f"Claude CLI unavailable, using README fallback for {repo_name}")
-        _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
-
-    else:
-        # Generate .md file using Claude CLI (Phase 1 analysis only;
-        # lifecycle detection handled separately by LifecycleBatchRunner)
-        md_content = _generate_repo_description(
-            repo_name,
-            repo_url,
-            clone_path,
-        )
-
-        # v10.4.9: align with MetaDirectoryUpdater's {alias_name}.md convention
-        # (alias_name = repo_name + "-global"). Filename mismatch caused every
-        # refresh cycle to treat all hook-created files as orphaned and delete them.
-        md_file = cidx_meta_path / f"{repo_name}-global.md"
-
-        # Story #724 v2: optional post-generation verification pass BEFORE atomic write
-        from code_indexer.server.services.config_service import (
-            get_config_service,
+        raise RuntimeError(
+            f"Cannot generate description for {repo_name}: {reason}. "
+            f"NOT writing any stub or static fallback per v10.4.13 anti-fallback "
+            f"contract. Description will be missing until the underlying issue is "
+            f"fixed; admin can retry generation when ClaudeCliManager / Claude CLI "
+            f"is restored."
         )
 
-        ci_config = get_config_service().get_config().claude_integration_config
-        verified_content = md_content  # default: unverified content when flag is off
+    # Generate .md file using Claude CLI (Phase 1 analysis only;
+    # lifecycle detection handled separately by LifecycleBatchRunner).
+    # cli_manager passed through so RepoAnalyzer invokes Claude (rich output)
+    # instead of falling back to static regex extraction (terse output).
+    md_content = _generate_repo_description(
+        repo_name,
+        repo_url,
+        clone_path,
+        cli_manager,
+    )
 
-        if ci_config is not None and ci_config.dep_map_fact_check_enabled:
-            import tempfile
+    # v10.4.9: align with MetaDirectoryUpdater's {alias_name}.md convention
+    # (alias_name = repo_name + "-global"). Filename mismatch caused every
+    # refresh cycle to treat all hook-created files as orphaned and delete them.
+    md_file = cidx_meta_path / f"{repo_name}-global.md"
 
-            from code_indexer.global_repos.dependency_map_analyzer import (
-                DependencyMapAnalyzer,
+    # Story #724 v2: optional post-generation verification pass BEFORE atomic write
+    from code_indexer.server.services.config_service import (
+        get_config_service,
+    )
+
+    ci_config = get_config_service().get_config().claude_integration_config
+    verified_content = md_content  # default: unverified content when flag is off
+
+    if ci_config is not None and ci_config.dep_map_fact_check_enabled:
+        import tempfile
+
+        from code_indexer.global_repos.dependency_map_analyzer import (
+            DependencyMapAnalyzer,
+        )
+
+        # Write to a temp file inside cidx_meta_path so same-filesystem rename works later
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".md",
+            dir=str(cidx_meta_path),
+            delete=False,
+            encoding="utf-8",
+        ) as tmp:
+            tmp.write(md_content)
+            tmp_path = Path(tmp.name)
+
+        try:
+            _analyzer = DependencyMapAnalyzer(
+                golden_repos_root=Path(golden_repos_dir),
+                cidx_meta_path=cidx_meta_path,
+                pass_timeout=ci_config.dependency_map_pass_timeout_seconds,
             )
+            _analyzer.invoke_verification_pass(
+                document_path=tmp_path,
+                repo_list=[{"alias": repo_name, "clone_path": clone_path}],
+                config=ci_config,
+            )
+            # Verification succeeded — read the now-edited temp file as verified content
+            verified_content = tmp_path.read_text(encoding="utf-8")
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
-            # Write to a temp file inside cidx_meta_path so same-filesystem rename works later
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=".md",
-                dir=str(cidx_meta_path),
-                delete=False,
-                encoding="utf-8",
-            ) as tmp:
-                tmp.write(md_content)
-                tmp_path = Path(tmp.name)
+    # Single atomic write with (verified or original) content — always ONCE
+    atomic_write_description(md_file, verified_content)
 
-            try:
-                _analyzer = DependencyMapAnalyzer(
-                    golden_repos_root=Path(golden_repos_dir),
-                    cidx_meta_path=cidx_meta_path,
-                    pass_timeout=ci_config.dependency_map_pass_timeout_seconds,
-                )
-                _analyzer.invoke_verification_pass(
-                    document_path=tmp_path,
-                    repo_list=[{"alias": repo_name, "clone_path": clone_path}],
-                    config=ci_config,
-                )
-                # Verification succeeded — read the now-edited temp file as verified content
-                verified_content = tmp_path.read_text(encoding="utf-8")
-            finally:
-                tmp_path.unlink(missing_ok=True)
-
-        # Single atomic write with (verified or original) content — always ONCE
-        atomic_write_description(md_file, verified_content)
-
-        logger.info(f"Created meta description file: {md_file}")
+    logger.info(f"Created meta description file: {md_file}")
 
     # Trigger cidx-meta reindex to make the new description searchable
     if _refresh_scheduler is not None:
@@ -537,58 +548,18 @@ def _find_readme(repo_path: Path) -> Optional[Path]:
     return None
 
 
-def _create_readme_fallback(
-    repo_path: Path, alias: str, meta_dir: Path
-) -> Optional[Path]:
-    """
-    Create README fallback file in meta directory.
-
-    Args:
-        repo_path: Path to repository
-        alias: Repository alias/name
-        meta_dir: Path to cidx-meta directory
-
-    Returns:
-        Path to created fallback file if README found, None otherwise
-
-    Note:
-        - Creates file named <alias>_README.md
-        - Preserves original README content exactly
-        - Called from on_repo_added() which triggers cidx-meta reindex
-    """
-    readme_path = _find_readme(repo_path)
-    if readme_path is None:
-        logger.warning(f"No README found in {repo_path} for fallback")
-        return None
-
-    # Create fallback file with <alias>_README.md naming
-    fallback_path = meta_dir / f"{alias}_README.md"
-
-    try:
-        # Copy README content exactly
-        content = readme_path.read_text(encoding="utf-8")
-        fallback_path.write_text(content, encoding="utf-8")
-        logger.info(f"Created README fallback: {fallback_path}")
-
-        return fallback_path
-
-    except Exception as e:
-        logger.error(
-            f"Failed to create README fallback for {alias}: {e}", exc_info=True
-        )
-        return None
-
-
 def _generate_repo_description(
     repo_name: str,
     repo_url: str,
     clone_path: str,
+    cli_manager: ClaudeCliManager,
 ) -> str:
     """
     Generate .md file content for a repository using Phase 1 analysis only.
 
     Phase 1: RepoAnalyzer extracts technologies, purpose, summary, features,
-             and use cases.  Builds a frontmatter dict and markdown body.
+             and use cases via Claude CLI.  Builds a frontmatter dict and
+             markdown body.
 
     Lifecycle detection is handled separately by LifecycleBatchRunner
     (Story #876 unified pipeline).
@@ -597,14 +568,33 @@ def _generate_repo_description(
         repo_name: Repository name/alias
         repo_url: Repository URL
         clone_path: Path to cloned repository
+        cli_manager: ClaudeCliManager instance (REQUIRED — v10.4.13).
+            Passed to RepoAnalyzer so the rich Claude CLI extraction path
+            runs instead of falling back to terse static regex extraction.
+            Caller verified availability before calling.
+
+    Raises:
+        TypeError: if cli_manager is None or not a ClaudeCliManager instance.
+            Anti-fallback contract: refuse to silently produce terse output.
 
     Returns:
         Content string (YAML frontmatter + markdown body).
     """
+    if not isinstance(cli_manager, ClaudeCliManager):
+        raise TypeError(
+            f"_generate_repo_description requires a ClaudeCliManager instance "
+            f"(v10.4.13 anti-fallback contract). Got {type(cli_manager).__name__!r}. "
+            f"Caller must verify ClaudeCliManager is initialized AND CLI is "
+            f"available before calling — see on_repo_added's guard at line 348."
+        )
+
     now = datetime.now(timezone.utc).isoformat()
 
     # --- Phase 1: extract repo info ---
-    analyzer = RepoAnalyzer(clone_path)
+    # v10.4.13: pass cli_manager so RepoAnalyzer invokes Claude CLI for rich
+    # output. Without this, RepoAnalyzer falls back to static regex extraction
+    # capped at 10 features + 5 use cases — produces terse descriptions.
+    analyzer = RepoAnalyzer(clone_path, claude_cli_manager=cli_manager)
     info = analyzer.extract_info()
 
     frontmatter_dict: dict = {

@@ -15,6 +15,8 @@ Tests:
 
 from unittest.mock import MagicMock, patch
 
+from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
+
 
 class TestReindexRemovedFromMetaDescriptionHook:
     """C6: reindex_cidx_meta and _cidx_meta_index_lock must be removed."""
@@ -62,8 +64,19 @@ class TestReindexRemovedFromMetaDescriptionHook:
         clone_path.mkdir()
         (clone_path / "README.md").write_text("# Test Repo")
 
-        mock_cli_manager = MagicMock()
+        mock_cli_manager = MagicMock(spec=ClaudeCliManager)
         mock_cli_manager.check_cli_available.return_value = True
+
+        # v10.4.13 anti-fallback: bypass real Claude CLI invocation by mocking
+        # RepoAnalyzer at the import path used inside _generate_repo_description.
+        # The SUT here is the no-cidx-subprocess assertion below; the description
+        # generation path is incidental and has its own dedicated tests.
+        mock_info = MagicMock()
+        mock_info.technologies = ["Python"]
+        mock_info.purpose = "library"
+        mock_info.summary = "Test repo"
+        mock_info.features = ["feature1"]
+        mock_info.use_cases = ["use case 1"]
 
         cidx_calls = []
 
@@ -79,16 +92,21 @@ class TestReindexRemovedFromMetaDescriptionHook:
                 "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
                 return_value=mock_cli_manager,
             ):
-                from code_indexer.global_repos.meta_description_hook import (
-                    on_repo_added,
-                )
+                with patch(
+                    "code_indexer.global_repos.meta_description_hook.RepoAnalyzer"
+                ) as MockAnalyzer:
+                    MockAnalyzer.return_value.extract_info.return_value = mock_info
 
-                on_repo_added(
-                    repo_name=repo_name,
-                    repo_url=repo_url,
-                    clone_path=str(clone_path),
-                    golden_repos_dir=str(tmp_path),
-                )
+                    from code_indexer.global_repos.meta_description_hook import (
+                        on_repo_added,
+                    )
+
+                    on_repo_added(
+                        repo_name=repo_name,
+                        repo_url=repo_url,
+                        clone_path=str(clone_path),
+                        golden_repos_dir=str(tmp_path),
+                    )
 
         assert cidx_calls == [], (
             "on_repo_added() must NOT call cidx after C6 removal. "
@@ -129,44 +147,5 @@ class TestReindexRemovedFromMetaDescriptionHook:
 
         assert cidx_calls == [], (
             "on_repo_removed() must NOT call cidx after C6 removal. "
-            f"Got cidx calls: {cidx_calls}"
-        )
-
-    def test_create_readme_fallback_does_not_call_cidx(self, tmp_path):
-        """
-        _create_readme_fallback() must NOT invoke cidx index after C6 removal.
-
-        Previously _create_readme_fallback() called reindex_cidx_meta() after
-        creating the README copy. After C6 that call is removed.
-        """
-        meta_dir = tmp_path / "cidx-meta"
-        meta_dir.mkdir()
-
-        repo_path = tmp_path / "test-repo"
-        repo_path.mkdir()
-        (repo_path / "README.md").write_text("# Test README content")
-
-        cidx_calls = []
-
-        def mock_subprocess_run(cmd, **kwargs):
-            if isinstance(cmd, list) and "cidx" in cmd:
-                cidx_calls.append(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        with patch("subprocess.run", side_effect=mock_subprocess_run):
-            from code_indexer.global_repos.meta_description_hook import (
-                _create_readme_fallback,
-            )
-
-            _create_readme_fallback(
-                repo_path=repo_path,
-                alias="test-repo",
-                meta_dir=meta_dir,
-            )
-
-        assert cidx_calls == [], (
-            "_create_readme_fallback() must NOT call cidx after C6 removal. "
             f"Got cidx calls: {cidx_calls}"
         )

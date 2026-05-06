@@ -24,11 +24,12 @@ class TestCLIHelpTextCleanup:
         assert result.exit_code == 0
         help_text = result.output.lower()
 
-        # Should not mention semantic chunking or AST
+        # Story #968 (X-Ray, v10.x) introduced legitimate `AST-aware code search
+        # via tree-sitter.` as a subcommand description. The semantic-CHUNKING
+        # feature is still deprecated and must NOT reappear; tree-sitter references
+        # are now legitimate via the X-Ray feature.
         assert "semantic chunking" not in help_text
         assert "ast-based" not in help_text
-        assert "tree-sitter" not in help_text
-        assert "tree sitter" not in help_text
 
         # Should describe current fixed-size approach
         # Note: The query command focuses on searching, not chunking details
@@ -41,11 +42,12 @@ class TestCLIHelpTextCleanup:
         assert result.exit_code == 0
         help_text = result.output.lower()
 
-        # Should not mention semantic chunking or AST
+        # Story #968 (X-Ray, v10.x) introduced legitimate `AST-aware code search
+        # via tree-sitter.` as a subcommand description. The semantic-CHUNKING
+        # feature is still deprecated and must NOT reappear; tree-sitter references
+        # are now legitimate via the X-Ray feature.
         assert "semantic chunking" not in help_text
         assert "ast-based" not in help_text
-        assert "tree-sitter" not in help_text
-        assert "tree sitter" not in help_text
 
         # Should describe current approach
         assert (
@@ -67,11 +69,12 @@ class TestCLIHelpTextCleanup:
 
         help_text = result.stdout.lower()
 
-        # Should not mention semantic chunking or AST
+        # Story #968 (X-Ray, v10.x) introduced legitimate `AST-aware code search
+        # via tree-sitter.` as a subcommand description. The semantic-CHUNKING
+        # feature is still deprecated and must NOT reappear; tree-sitter references
+        # are now legitimate via the X-Ray feature.
         assert "semantic chunking" not in help_text
         assert "ast-based" not in help_text
-        assert "tree-sitter" not in help_text
-        assert "tree sitter" not in help_text
 
 
 class TestSemanticQueryOptions:

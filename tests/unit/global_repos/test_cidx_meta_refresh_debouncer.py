@@ -16,7 +16,24 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
+
 import pytest
+
+from code_indexer.global_repos.repo_analyzer import RepoInfo
+
+
+def _make_mock_repo_analyzer():
+    """Return a MagicMock RepoAnalyzer whose extract_info() gives a minimal RepoInfo."""
+    mock_analyzer = MagicMock()
+    mock_analyzer.extract_info.return_value = RepoInfo(
+        summary="Test summary.",
+        technologies=["python"],
+        features=["feature-a"],
+        use_cases=["use-case-a"],
+        purpose="Testing.",
+    )
+    return mock_analyzer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -516,9 +533,9 @@ def temp_golden_repos_dir(tmp_path):
 
 @pytest.fixture
 def mock_cli_manager():
-    """Create a mock Claude CLI manager that is unavailable (uses README fallback)."""
-    manager = MagicMock()
-    manager.check_cli_available.return_value = False
+    """Create a mock Claude CLI manager that reports CLI as available."""
+    manager = MagicMock(spec=ClaudeCliManager)
+    manager.check_cli_available.return_value = True
     return manager
 
 
@@ -553,9 +570,15 @@ class TestOnRepoAddedWithDebouncer:
         clone_path.mkdir(parents=True)
         (clone_path / "README.md").write_text("# Test Repo")
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-            return_value=mock_cli_manager,
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=mock_cli_manager,
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                return_value=_make_mock_repo_analyzer(),
+            ),
         ):
             on_repo_added(
                 repo_name=repo_name,
@@ -601,9 +624,15 @@ class TestOnRepoAddedWithDebouncer:
         clone_path.mkdir(parents=True)
         (clone_path / "README.md").write_text("# Test Repo")
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-            return_value=mock_cli_manager,
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                return_value=mock_cli_manager,
+            ),
+            patch(
+                "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                return_value=_make_mock_repo_analyzer(),
+            ),
         ):
             on_repo_added(
                 repo_name=repo_name,
@@ -649,9 +678,15 @@ class TestOnRepoAddedWithDebouncer:
         (clone_path / "README.md").write_text("# Test Repo")
 
         with caplog.at_level(logging.WARNING):
-            with patch(
-                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-                return_value=mock_cli_manager,
+            with (
+                patch(
+                    "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                    return_value=mock_cli_manager,
+                ),
+                patch(
+                    "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                    return_value=_make_mock_repo_analyzer(),
+                ),
             ):
                 on_repo_added(
                     repo_name=repo_name,
@@ -706,9 +741,15 @@ class TestOnRepoAddedWithDebouncer:
             clone_path.mkdir(parents=True)
             (clone_path / "README.md").write_text(f"# {repo_name}")
 
-            with patch(
-                "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
-                return_value=mock_cli_manager,
+            with (
+                patch(
+                    "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
+                    return_value=mock_cli_manager,
+                ),
+                patch(
+                    "code_indexer.global_repos.meta_description_hook.RepoAnalyzer",
+                    return_value=_make_mock_repo_analyzer(),
+                ),
             ):
                 on_repo_added(
                     repo_name=repo_name,
@@ -718,9 +759,10 @@ class TestOnRepoAddedWithDebouncer:
                 )
 
         # All 5 .md files should exist
+        # v10.4.9: alias form {repo_name}-global.md (MetaDirectoryUpdater convention)
         cidx_meta_path = Path(temp_golden_repos_dir) / "cidx-meta"
         for repo_name in repo_names:
-            md_file = cidx_meta_path / f"{repo_name}_README.md"
+            md_file = cidx_meta_path / f"{repo_name}-global.md"
             assert md_file.exists(), f"Expected .md file for {repo_name} at {md_file}"
 
         # Debouncer should have been signaled 4 times (for the 4 DuplicateJobErrors)

@@ -279,7 +279,7 @@ def test_xray_explore_json_output(tmp_path: Path):
             "--regex",
             "password",
             "--eval",
-            "return True",
+            "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
             "--json",
         ],
     )
@@ -339,7 +339,7 @@ def test_xray_explore_max_files_cap_shows_partial(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
             "--max-files",
             "1",
             "--json",
@@ -374,7 +374,7 @@ def test_xray_explore_ast_renderer_hierarchical(tmp_path: Path):
             "--regex",
             "foo",
             "--eval",
-            "return True",
+            "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
         ],
     )
     assert result.exit_code == 0, f"Output: {result.output}"
@@ -401,7 +401,7 @@ def test_xray_explore_ast_renderer_shows_truncated_sentinel(tmp_path: Path):
             "--regex",
             "x",
             "--eval",
-            "return True",
+            "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
             "--max-debug-nodes",
             "1",
         ],

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.13 (2026-05-05) — Anti-fallback: descriptions require Claude CLI (no static regex, no README copy)
+
+Production user reported "descriptions look very terse and relatively short" vs the richer historical state. Root cause: two silent fallback paths in the description-generation pipeline produced degraded output whenever Claude CLI was unavailable or returned no result, yet still wrote a description file (so operators saw "success" with terse content):
+
+1. `meta_description_hook.on_repo_added` had a README-copy fallback (`_create_readme_fallback`) when `cli_manager` was `None` or CLI was off PATH.
+2. `RepoAnalyzer.extract_info` fell back to static regex extraction (capped at 10 features + 5 use cases) when Claude returned `None`.
+
+Both violated Messi Rule #2 (anti-fallback): graceful failure over forced success. Per the user's explicit mandate, v10.4.13 enforces hard-fail on missing Claude CLI:
+
+- `meta_description_hook.on_repo_added`: raises `RuntimeError` when `cli_manager` is `None` or `check_cli_available()` returns `False`. Caller (golden repo registration job) logs ERROR; description file is NOT written; admin retries when CLI is restored.
+- `meta_description_hook._generate_repo_description`: now REQUIRES a `cli_manager: ClaudeCliManager` positional parameter. Runtime `isinstance` guard raises `TypeError` on `None` or wrong type (negative test verifies bare `MagicMock` is rejected).
+- `repo_analyzer.RepoAnalyzer.extract_info`: raises `RuntimeError` when `_extract_info_with_claude()` returns `None`. The static regex fallback is deleted entirely. `CIDX_USE_CLAUDE_FOR_META` env-var feature flag also removed (Claude is now mandatory, not optional).
+- `_create_readme_fallback` function deleted from `meta_description_hook.py` (anti-orphan-code per Messi Rule #12).
+
+Anti-regression test suite: `tests/unit/global_repos/test_description_no_fallback_v10_4_13.py` (8 tests across 4 ACs):
+- AC1: `_generate_repo_description` raises `TypeError` on `None` / wrong-type cli_manager AND forwards valid manager to RepoAnalyzer (observable via `check_cli_available` call).
+- AC2: `RepoAnalyzer.extract_info` raises `RuntimeError` when subprocess (mocked at the boundary) reports no result.
+- AC3: `_create_readme_fallback` is absent from module namespace (`hasattr` check, not just `FunctionDef`).
+- AC4: `on_repo_added` raises `RuntimeError` with specific reason (`ClaudeCliManager not initialized` / `Claude CLI not available on PATH`) when cli_manager unavailable.
+
+Test fixture cleanup: 9 existing tests were relying on the now-removed fallback (bare `MagicMock()` for `cli_manager`, calls to `_generate_repo_description` without the new positional, expectations on README-copy outputs). All updated to use `MagicMock(spec=ClaudeCliManager)` with `check_cli_available=True` and patch `RepoAnalyzer` at the meta_description_hook import path.
+
+Operator behavior change: when Claude CLI is unavailable, golden repo registration logs ERROR with code path `meta_description_hook.on_repo_added` and the repo registration completes WITHOUT a description file in cidx-meta. Refresh scheduler then picks the repo up for retry on subsequent passes once CLI is restored. No silent terse-output state any more.
+
 ## v10.4.12 (2026-05-05) — CRITICAL: DescriptionRefreshScheduler unwired in production (silent no-op)
 
 Production user reported the description refresh job had NEVER been seen running in dashboard or logs (beyond "Description refresh scheduler started"). Root cause: `global_lifecycle_manager` is initialized inside a try/except at `lifespan.py:509`. If `GlobalReposLifecycleManager(...)` or `.start()` raises, the exception is caught at line 579, logged at `APP-GENERAL-015`, but `global_lifecycle_manager` stays `None`. The description scheduler block at lines 887-935 then computed `refresh_scheduler = None` and the ENTIRE D3 wiring block (lines 896-935) was guarded by `if refresh_scheduler is not None:` — meaning ALL four collaborator assignments (`_lifecycle_invoker`, `_golden_repos_dir`, `_lifecycle_debouncer`, `_refresh_scheduler`) were skipped. The scheduler's `_check_lifecycle_backfill_wiring()` then returned `False` on every 60s loop pass, silently bailed out. Bug invisible in production logs.

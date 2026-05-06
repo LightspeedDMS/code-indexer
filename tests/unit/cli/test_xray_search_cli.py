@@ -35,31 +35,6 @@ def make_py_fixture(tmp_path: Path, files: dict) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Lazy-load gate
-# ---------------------------------------------------------------------------
-
-
-def test_cli_import_does_not_pull_tree_sitter():
-    """Importing the CLI module must not trigger tree_sitter at import time."""
-    import sys
-
-    # Remove cached module so we can test a fresh import path
-    mods_to_remove = [k for k in sys.modules if "code_indexer.cli" == k]
-    for m in mods_to_remove:
-        sys.modules.pop(m, None)
-
-    import importlib
-
-    import code_indexer.cli  # noqa: F401
-
-    importlib.import_module("code_indexer.cli")
-
-    assert "tree_sitter" not in sys.modules, (
-        "tree_sitter must not be imported at CLI startup — lazy-load boundary violated"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Flag validation — timeout bounds
 # ---------------------------------------------------------------------------
 

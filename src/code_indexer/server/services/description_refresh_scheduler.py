@@ -43,6 +43,12 @@ _CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 120  # Python subprocess.run cap
 # stops rescheduling (quarantines) and logs one ERROR.  Reset to 0 on success.
 PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3
 
+# v10.4.14 stub-healing: descriptions with body shorter than this threshold or
+# missing `last_analyzed` are treated as stubs (artifact of v10.4.9 wipe bug or
+# pre-v10.4.13 README/static-regex fallback) and trigger full re-analysis via
+# the same path on_repo_added uses, instead of incremental refresh.
+_STUB_BODY_CHAR_THRESHOLD: int = 800
+
 
 def _build_claude_env() -> dict:
     """
@@ -205,6 +211,13 @@ class DescriptionRefreshScheduler:
         # Subsequent passes for the same repo downgrade the log to DEBUG so the
         # warning fires at most once per repo (re-armed after a successful refresh).
         self._warned_missing_desc: set = set()
+        # v10.4.14 stub-heal regression guard: aliases placed here by
+        # _get_refresh_prompt when it returns None from the stub-heal branch
+        # (either heal succeeded or preconditions failed).  _run_loop_single_pass
+        # checks this set before incrementing the prompt-failure quarantine counter
+        # so stub-heal None returns never count toward the quarantine threshold and
+        # never block lifecycle backfill.  Entries are consumed (discarded) on read.
+        self._stub_heal_no_quarantine_aliases: set = set()
 
         # Story #728 AC5: Bounded thread pool sized by max_concurrent_claude_cli config.
         # Prevents mass backfill from spawning N unbounded concurrent Claude CLI processes.
@@ -779,38 +792,47 @@ class DescriptionRefreshScheduler:
                 # Get refresh prompt using RepoAnalyzer
                 prompt = self._get_refresh_prompt(alias, clone_path)
                 if prompt is None:
-                    # Bug #953: circuit-breaker — count consecutive prompt failures.
-                    self._prompt_failure_counts[alias] += 1
-                    failure_count = self._prompt_failure_counts[alias]
-                    if failure_count >= PROMPT_FAILURE_QUARANTINE_THRESHOLD:
-                        # Log exactly once at the quarantine boundary; subsequent
-                        # passes are silently skipped to avoid log spam.
-                        if failure_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD:
-                            logger.error(
-                                "Repo %s entered quarantine after %d consecutive "
-                                "prompt-generation failures — will not reschedule until "
-                                "a successful refresh resets the counter.",
-                                alias,
-                                failure_count,
-                            )
-                        # Do NOT call upsert_tracking — leave next_run stale so the
-                        # repo stays quarantined until the counter is reset externally.
+                    # v10.4.14: stub-heal returns None opportunistically (heal attempted
+                    # or preconditions not met).  Do NOT count toward quarantine and do
+                    # NOT reschedule/continue — fall through so the lifecycle runner fires
+                    # normally.  Heal is opportunistic; a missing precondition (e.g. no
+                    # cli_manager in tests) simply defers to the next cycle.
+                    if alias in self._stub_heal_no_quarantine_aliases:
+                        self._stub_heal_no_quarantine_aliases.discard(alias)
+                        # Fall through to lifecycle runner — no quarantine, no reschedule.
+                    else:
+                        # Bug #953: circuit-breaker — count consecutive prompt failures.
+                        self._prompt_failure_counts[alias] += 1
+                        failure_count = self._prompt_failure_counts[alias]
+                        if failure_count >= PROMPT_FAILURE_QUARANTINE_THRESHOLD:
+                            # Log exactly once at the quarantine boundary; subsequent
+                            # passes are silently skipped to avoid log spam.
+                            if failure_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD:
+                                logger.error(
+                                    "Repo %s entered quarantine after %d consecutive "
+                                    "prompt-generation failures — will not reschedule until "
+                                    "a successful refresh resets the counter.",
+                                    alias,
+                                    failure_count,
+                                )
+                            # Do NOT call upsert_tracking — leave next_run stale so the
+                            # repo stays quarantined until the counter is reset externally.
+                            continue
+                        logger.warning(
+                            "Cannot refresh %s: failed to generate prompt, rescheduling"
+                            " (failure %d/%d)",
+                            alias,
+                            failure_count,
+                            PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                        )
+                        # Reschedule to next cycle to avoid infinite retry loop (Finding N3)
+                        now = datetime.now(timezone.utc).isoformat()
+                        self._tracking_backend.upsert_tracking(
+                            repo_alias=alias,
+                            next_run=self.calculate_next_run(alias),
+                            updated_at=now,
+                        )
                         continue
-                    logger.warning(
-                        "Cannot refresh %s: failed to generate prompt, rescheduling"
-                        " (failure %d/%d)",
-                        alias,
-                        failure_count,
-                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
-                    )
-                    # Reschedule to next cycle to avoid infinite retry loop (Finding N3)
-                    now = datetime.now(timezone.utc).isoformat()
-                    self._tracking_backend.upsert_tracking(
-                        repo_alias=alias,
-                        next_run=self.calculate_next_run(alias),
-                        updated_at=now,
-                    )
-                    continue
 
                 # Mark as queued before submitting
                 now = datetime.now(timezone.utc).isoformat()
@@ -1044,21 +1066,208 @@ class DescriptionRefreshScheduler:
             logger.error("_stage_and_build_prompt failed: %s", e, exc_info=True)
             return None
 
+    def _extract_body_from_description(self, full_content: str) -> str:
+        """
+        Extract the markdown body (content after YAML frontmatter) from a .md file string.
+
+        Falls back to full content when frontmatter is absent, matching
+        _read_existing_description's no-frontmatter fallback behaviour.
+        """
+        fm_match = re.match(r"^---\n.*?\n---\n(.*)$", full_content, re.DOTALL)
+        if fm_match:
+            return fm_match.group(1)
+        return full_content
+
+    def _is_stub_description(self, desc_data: Dict[str, Optional[str]]) -> bool:
+        """
+        Return True when desc_data meets v10.4.14 stub-detection criteria (logical OR):
+          (a) last_analyzed is None or empty string
+          (b) body length (chars after YAML frontmatter) < _STUB_BODY_CHAR_THRESHOLD
+        """
+        if not desc_data.get("last_analyzed"):
+            return True
+        body = self._extract_body_from_description(desc_data.get("description") or "")
+        return len(body) < _STUB_BODY_CHAR_THRESHOLD
+
+    def _lookup_repo_url_for_heal(self, repo_alias: str) -> Optional[str]:
+        """
+        Look up repo_url from golden_backend for stub-heal dispatch (v10.4.14).
+
+        Returns URL or None; logs ERROR 006 on exception, 007 when empty.
+        """
+        try:
+            golden = self._golden_backend.get_repo(repo_alias)
+            repo_url: Optional[str] = golden.get("repo_url") if golden else None
+        except Exception as exc:
+            logger.error(
+                "DESC-REFRESH-STUB-HEAL-006 repo_url lookup failed for %s: %s",
+                repo_alias,
+                exc,
+                exc_info=True,
+            )
+            return None
+        if not repo_url:
+            logger.error("DESC-REFRESH-STUB-HEAL-007 repo_url empty for %s", repo_alias)
+            return None
+        return repo_url
+
+    def _validate_heal_preconditions(
+        self, repo_alias: str, repo_path_obj: Path
+    ) -> bool:
+        """
+        Validate preconditions for stub-heal dispatch (v10.4.14).
+
+        Checks alias format (no separators/traversal), meta_dir presence, and
+        repo_path_obj is an existing directory. Logs ERROR 008/009 on failure.
+        """
+        import re as _re
+
+        if not repo_alias or _re.search(r"[/\\]|\.\.", repo_alias):
+            logger.error("DESC-REFRESH-STUB-HEAL-009 invalid repo_alias %r", repo_alias)
+            return False
+        if self._meta_dir is None:
+            logger.error(
+                "DESC-REFRESH-STUB-HEAL-008 meta_dir not set for %s", repo_alias
+            )
+            return False
+        try:
+            valid_path = isinstance(repo_path_obj, Path) and repo_path_obj.is_dir()
+        except Exception as exc:
+            logger.error(
+                "DESC-REFRESH-STUB-HEAL-009 repo_path_obj check failed for %s: %s",
+                repo_alias,
+                exc,
+            )
+            return False
+        if not valid_path:
+            logger.error(
+                "DESC-REFRESH-STUB-HEAL-009 repo_path_obj not a directory for %s",
+                repo_alias,
+            )
+            return False
+        return True
+
+    def _get_available_cli_manager_for_heal(self, repo_alias: str):
+        """
+        Acquire ClaudeCliManager for stub-heal dispatch (v10.4.14).
+
+        Lazy-imports get_claude_cli_manager. Returns the manager when available,
+        or None after logging ERROR 004 when unavailable or CLI not on PATH.
+        """
+        from code_indexer.server.services.claude_cli_manager import (
+            get_claude_cli_manager,
+        )
+
+        cli_manager = get_claude_cli_manager()
+        if cli_manager is None or not cli_manager.check_cli_available():
+            reason = (
+                "ClaudeCliManager not initialized"
+                if cli_manager is None
+                else "Claude CLI not available on PATH"
+            )
+            # WARNING (not ERROR): missing precondition is transient — heal defers to
+            # next cycle.  ERROR is reserved for unexpected failures after preconditions
+            # are satisfied (see HEAL-005, HEAL-010).
+            logger.warning(
+                "DESC-REFRESH-STUB-HEAL-004 cannot heal %s: %s", repo_alias, reason
+            )
+            return None
+        return cli_manager
+
+    def _heal_stub_description(
+        self, repo_alias: str, repo_path_obj: Path
+    ) -> Optional[bool]:
+        """
+        Dispatch full re-analysis for a stub description (v10.4.14).
+
+        Orchestrates _validate_heal_preconditions, _lookup_repo_url_for_heal,
+        _get_available_cli_manager_for_heal, then calls _generate_repo_description
+        and atomic_write_description. Lazy imports preserve CLI startup discipline.
+        Log codes: INFO 001/002/003; ERROR 004/005/006/007/008/009/010.
+
+        Return values:
+          True  — heal completed successfully (full regen written).
+          False — preconditions not met (cli_manager absent, repo_url missing, etc.);
+                  caller may fall through to incremental refresh if last_analyzed present.
+          None  — preconditions met but heal failed at runtime (HEAL-005/010 logged);
+                  caller should NOT fall through (avoid masking the error silently).
+        """
+        from code_indexer.global_repos.meta_description_hook import (
+            _generate_repo_description,
+            atomic_write_description,
+        )
+
+        logger.info("DESC-REFRESH-STUB-HEAL-001 stub detected for %s", repo_alias)
+        if not self._validate_heal_preconditions(repo_alias, repo_path_obj):
+            return False
+        repo_url = self._lookup_repo_url_for_heal(repo_alias)
+        if not repo_url:
+            return False
+        cli_manager = self._get_available_cli_manager_for_heal(repo_alias)
+        if not cli_manager:
+            return False
+
+        logger.info(
+            "DESC-REFRESH-STUB-HEAL-002 dispatching full regen for %s", repo_alias
+        )
+        try:
+            md_content = _generate_repo_description(
+                repo_alias, repo_url, str(repo_path_obj), cli_manager
+            )
+        except Exception as exc:
+            logger.error(
+                "DESC-REFRESH-STUB-HEAL-005 generation failed for %s: %s",
+                repo_alias,
+                exc,
+                exc_info=True,
+            )
+            return None  # attempted but failed at runtime
+
+        assert self._meta_dir is not None  # guarded by _validate_heal_preconditions
+        try:
+            atomic_write_description(
+                self._meta_dir / f"{repo_alias}-global.md", md_content
+            )
+        except Exception as exc:
+            logger.error(
+                "DESC-REFRESH-STUB-HEAL-010 atomic write failed for %s: %s",
+                repo_alias,
+                exc,
+                exc_info=True,
+            )
+            return None  # attempted but failed at runtime
+        logger.info(
+            "DESC-REFRESH-STUB-HEAL-003 stub healing complete for %s", repo_alias
+        )
+        return True
+
     def _get_refresh_prompt(self, repo_alias: str, repo_path: str) -> Optional[str]:
         """
         Get refresh prompt staging the existing description to a temp file (Bug #840 Site #5).
 
         Returns a prompt string with the temp file path embedded, or None on failure.
         The temp dir persists until the calling thread completes the CLI invocation.
+
+        v10.4.14: when no .md file exists, falls through to existing warn-and-bail path.
+        When desc_data is present but is_stub, attempts full re-analysis via
+        _heal_stub_description (optimistic enhancement):
+          - True  (heal succeeded): regen complete, no incremental needed — return None
+            and mark alias as no-quarantine.
+          - False (preconditions unmet, e.g. cli_manager absent) AND last_analyzed
+            present: fall through to incremental refresh — better than nothing.
+          - False AND last_analyzed absent: nothing to refresh — return None,
+            mark as no-quarantine.
+          - None  (heal attempted but failed at runtime): return None and mark as
+            no-quarantine; do NOT fall through so the runtime error is not masked.
         """
         repo_path_obj = self._validate_refresh_inputs(repo_alias, repo_path)
         if repo_path_obj is None:
             return None
         desc_data = self._read_existing_description(repo_alias)
-        if not desc_data or not desc_data.get("last_analyzed"):
+        if not desc_data:
             # Bug #984: warn at WARNING level only on the first occurrence per repo
             # per scheduler instance lifetime; downgrade to DEBUG on repeats so
-            # stub-description repos do not flood the log on every scheduler pass.
+            # missing-file repos do not flood the log on every scheduler pass.
             if repo_alias not in self._warned_missing_desc:
                 logger.warning(
                     "Cannot generate refresh prompt for %s: missing description or last_analyzed",
@@ -1070,6 +1279,26 @@ class DescriptionRefreshScheduler:
                     "Cannot generate refresh prompt for %s: missing description or last_analyzed (suppressed repeat)",
                     repo_alias,
                 )
+            return None
+        # v10.4.14: detect and heal stub descriptions before incremental refresh.
+        # Heal is optimistic: precondition failures fall through to incremental refresh
+        # when last_analyzed is present; runtime failures do not fall through.
+        if self._is_stub_description(desc_data):
+            heal_result = self._heal_stub_description(repo_alias, repo_path_obj)
+            if heal_result is True:
+                # Full regen complete — no incremental refresh needed.
+                self._stub_heal_no_quarantine_aliases.add(repo_alias)
+                return None
+            if heal_result is False and desc_data.get("last_analyzed"):
+                # Preconditions unmet but last_analyzed present: do incremental refresh.
+                return self._stage_and_build_prompt(
+                    desc_data.get("description") or "",
+                    desc_data["last_analyzed"] or "",
+                    repo_path_obj,
+                )
+            # heal_result is None (runtime failure) or False with no last_analyzed:
+            # mark no-quarantine and skip refresh this cycle.
+            self._stub_heal_no_quarantine_aliases.add(repo_alias)
             return None
         return self._stage_and_build_prompt(
             desc_data.get("description") or "",
