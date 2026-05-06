@@ -23,11 +23,10 @@ from fastapi import status
 
 from code_indexer.server.app import create_app
 from code_indexer.server.auth.jwt_manager import JWTManager
-from code_indexer.server.auth.user_manager import UserManager, UserRole
+from code_indexer.server.auth.user_manager import UserRole
 from code_indexer.server.auth.refresh_token_manager import RefreshTokenManager
 from code_indexer.server.auth.rate_limiter import RefreshTokenRateLimiter
 from code_indexer.server.auth.audit_logger import PasswordChangeAuditLogger
-from code_indexer.server.utils.config_manager import PasswordSecurityConfig
 from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
 
 
@@ -60,22 +59,15 @@ class TestTokenRefreshRealComponents:
             token_expiration_minutes=15,
         )
 
-        # Create REAL user manager with test database and weak password config for testing
-        self.users_file_path = self.temp_path / "users.json"
-        weak_password_config = PasswordSecurityConfig(
-            min_length=1,  # Very short passwords allowed
-            max_length=128,
-            required_char_classes=0,  # No character class requirements
-            min_entropy_bits=0,  # No entropy requirements
-            check_common_passwords=False,  # Allow common passwords
-            check_personal_info=False,  # Allow personal info
-            check_keyboard_patterns=False,  # Allow keyboard patterns
-            check_sequential_chars=False,  # Allow sequential chars like "123"
-        )
-        self.user_manager = UserManager(
-            users_file_path=str(self.users_file_path),
-            password_security_config=weak_password_config,
-        )
+        # Create app first — this sets up dependencies.user_manager (the one login closure uses)
+        self.app = create_app()
+        self.client = TestClient(self.app)
+
+        # Derive user_manager from the app's own dependencies so test users
+        # are created in the same instance the login route closure captured.
+        from code_indexer.server.auth import dependencies
+
+        self.user_manager = dependencies.user_manager
 
         # Create REAL refresh token manager with test database
         self.refresh_db_path = self.temp_path / "refresh_tokens.db"
@@ -94,18 +86,12 @@ class TestTokenRefreshRealComponents:
             log_file_path=str(self.audit_log_path)
         )
 
-        # Create test users in REAL database
+        # Create test users in the app's real user_manager (login closure uses this)
         self._create_test_users()
 
-        # Create app and inject REAL components
-        self.app = create_app()
-        self.client = TestClient(self.app)
-
-        # Override app components with our test instances (still REAL, just test-scoped)
+        # Override app module components with our test-scoped instances
         import code_indexer.server.app as app_module
 
-        app_module.jwt_manager = self.jwt_manager
-        app_module.user_manager = self.user_manager
         app_module.refresh_token_manager = self.refresh_token_manager
         app_module.refresh_token_rate_limiter = self.rate_limiter
         app_module.password_audit_logger = self.audit_logger
@@ -115,21 +101,23 @@ class TestTokenRefreshRealComponents:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _create_test_users(self):
-        """Create real test users in the actual database."""
-        # Create normal user
-        self.user_manager.create_user(
-            username="testuser", password="TestPass123!", role=UserRole.NORMAL_USER
-        )
+        """Create real test users in the actual database, skipping pre-existing ones.
 
-        # Create admin user
-        self.user_manager.create_user(
-            username="admin", password="AdminPass456!", role=UserRole.ADMIN
-        )
+        Uses a helper to catch 'already exists' errors so that repeated setup_method
+        calls (one per test method) don't fail when dependencies.user_manager persists
+        across the test class lifetime.
+        """
 
-        # Create power user
-        self.user_manager.create_user(
-            username="poweruser", password="PowerPass789!", role=UserRole.POWER_USER
-        )
+        def _try_create(username, password, role):
+            try:
+                self.user_manager.create_user(username, password, role)
+            except ValueError as exc:
+                if "already exists" not in str(exc):
+                    raise
+
+        _try_create("testuser", "TestPass123!", UserRole.NORMAL_USER)
+        _try_create("admin", "AdminPass456!", UserRole.ADMIN)
+        _try_create("poweruser", "PowerPass789!", UserRole.POWER_USER)
 
     def _login_and_get_tokens(self, username: str, password: str) -> dict:
         """

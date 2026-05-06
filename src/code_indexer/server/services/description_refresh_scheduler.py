@@ -132,6 +132,7 @@ class DescriptionRefreshScheduler:
         lifecycle_debouncer=None,
         refresh_scheduler=None,
         cli_dispatcher=None,
+        background_job_manager=None,
     ) -> None:
         """
         Initialize the scheduler.
@@ -188,6 +189,11 @@ class DescriptionRefreshScheduler:
         self._refresh_scheduler = refresh_scheduler
         # Story #847: injectable CliDispatcher for testing; None means build from config.
         self._cli_dispatcher = cli_dispatcher
+        # v10.4.14 stub-heal: BackgroundJobManager wired by lifespan startup so the
+        # stub-heal dispatch goes through the standard background-job pipeline
+        # (dashboard visibility, JobTracker registration, DuplicateJobError dedup,
+        # operation_type="description_stub_heal").  Optional for unit tests.
+        self._background_job_manager = background_job_manager
         if tracking_backend is not None:
             self._tracking_backend = tracking_backend
         else:
@@ -799,7 +805,7 @@ class DescriptionRefreshScheduler:
                     # cli_manager in tests) simply defers to the next cycle.
                     if alias in self._stub_heal_no_quarantine_aliases:
                         self._stub_heal_no_quarantine_aliases.discard(alias)
-                        # Fall through to lifecycle runner — no quarantine, no reschedule.
+                        continue
                     else:
                         # Bug #953: circuit-breaker — count consecutive prompt failures.
                         self._prompt_failure_counts[alias] += 1
@@ -1224,10 +1230,14 @@ class DescriptionRefreshScheduler:
             return None  # attempted but failed at runtime
 
         assert self._meta_dir is not None  # guarded by _validate_heal_preconditions
+        # CRITICAL: heal must write to the SAME file _read_existing_description
+        # reads from (line 989: f"{repo_alias}.md"). The tracking table stores
+        # repo_alias = repo_name (bare), set by meta_description_hook.upsert_tracking
+        # at line 311-312. If heal writes a different filename (e.g. with -global
+        # suffix), the scheduler's next tick reads the OLD file, still detects
+        # the stub, and re-dispatches the heal job — infinite loop.
         try:
-            atomic_write_description(
-                self._meta_dir / f"{repo_alias}-global.md", md_content
-            )
+            atomic_write_description(self._meta_dir / f"{repo_alias}.md", md_content)
         except Exception as exc:
             logger.error(
                 "DESC-REFRESH-STUB-HEAL-010 atomic write failed for %s: %s",
@@ -1238,6 +1248,98 @@ class DescriptionRefreshScheduler:
             return None  # attempted but failed at runtime
         logger.info(
             "DESC-REFRESH-STUB-HEAL-003 stub healing complete for %s", repo_alias
+        )
+        return True
+
+    def _heal_stub_description_worker(
+        self, repo_alias: str, repo_path_str: str
+    ) -> Dict[str, Any]:
+        """BackgroundJobManager-compliant worker wrapping _heal_stub_description (v10.4.14).
+
+        Invoked from `_dispatch_heal_via_background_job` via
+        `BackgroundJobManager.submit_job`.  Adapts the tri-valued
+        _heal_stub_description return (True/False/None) into the dict shape
+        BJM expects (status string for dashboard visibility).  Raises on
+        runtime-failure so BJM marks the job FAILED, not SUCCESS.
+        """
+        result = self._heal_stub_description(repo_alias, Path(repo_path_str))
+        if result is True:
+            return {
+                "status": "success",
+                "operation_type": "description_stub_heal",
+                "repo_alias": repo_alias,
+            }
+        if result is False:
+            return {
+                "status": "preconditions_unmet",
+                "operation_type": "description_stub_heal",
+                "repo_alias": repo_alias,
+            }
+        # result is None — runtime failure already logged via HEAL-005 or HEAL-010.
+        # Raise so BJM marks the job FAILED for dashboard visibility.
+        raise RuntimeError(
+            f"description_stub_heal runtime failure for {repo_alias} "
+            f"(see DESC-REFRESH-STUB-HEAL-005 or HEAL-010 in logs)"
+        )
+
+    def _dispatch_heal_via_background_job(
+        self, repo_alias: str, repo_path_obj: Path
+    ) -> bool:
+        """Submit stub-heal as a tracked BackgroundJobManager job (v10.4.14).
+
+        Called from `_get_refresh_prompt` when `_is_stub_description` returns
+        True.  Returns True when the heal was queued (new job) or already in
+        flight (DuplicateJobError); False when BJM unavailable or submit
+        raised an unexpected exception (caller falls through if last_analyzed
+        is present).
+
+        Log codes:
+          INFO  HEAL-014 — job submitted (job_id + repo_alias)
+          INFO  HEAL-011 — heal already in flight (DuplicateJobError)
+          ERROR HEAL-012 — submit_job raised unexpected exception
+          WARNING HEAL-013 — BackgroundJobManager not wired (lifespan misconfig)
+        """
+        if self._background_job_manager is None:
+            logger.warning(
+                "DESC-REFRESH-STUB-HEAL-013 BackgroundJobManager not wired; "
+                "cannot dispatch heal for %s",
+                repo_alias,
+            )
+            return False
+        try:
+            from code_indexer.server.repositories.background_jobs import (
+                DuplicateJobError,
+            )
+
+            job_id = self._background_job_manager.submit_job(
+                "description_stub_heal",
+                self._heal_stub_description_worker,
+                repo_alias,
+                str(repo_path_obj),
+                submitter_username="system",
+                repo_alias=repo_alias,
+            )
+        except DuplicateJobError as dup:
+            logger.info(
+                "DESC-REFRESH-STUB-HEAL-011 heal already in flight for %s "
+                "(existing job %s); skipping dispatch",
+                repo_alias,
+                dup.existing_job_id,
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "DESC-REFRESH-STUB-HEAL-012 submit_job failed for %s: %s",
+                repo_alias,
+                exc,
+                exc_info=True,
+            )
+            return False
+        logger.info(
+            "DESC-REFRESH-STUB-HEAL-014 stub-heal background job submitted "
+            "for %s (job_id=%s)",
+            repo_alias,
+            job_id,
         )
         return True
 
@@ -1280,24 +1382,42 @@ class DescriptionRefreshScheduler:
                     repo_alias,
                 )
             return None
-        # v10.4.14: detect and heal stub descriptions before incremental refresh.
-        # Heal is optimistic: precondition failures fall through to incremental refresh
-        # when last_analyzed is present; runtime failures do not fall through.
+        # v10.4.14: detect stubs and dispatch full re-analysis as a proper
+        # background job via BackgroundJobManager (operation_type="description_stub_heal").
+        # The dispatch is NON-BLOCKING — scheduler tick continues in milliseconds
+        # while the heal runs concurrently in BJM's worker pool with dashboard
+        # visibility, JobTracker registration, and DuplicateJobError dedup.
         if self._is_stub_description(desc_data):
-            heal_result = self._heal_stub_description(repo_alias, repo_path_obj)
-            if heal_result is True:
-                # Full regen complete — no incremental refresh needed.
+            dispatched = self._dispatch_heal_via_background_job(
+                repo_alias, repo_path_obj
+            )
+            has_last_analyzed = bool(desc_data.get("last_analyzed"))
+            # Four explicit cases over (dispatched, has_last_analyzed):
+            if dispatched and has_last_analyzed:
+                # Heal in flight will replace the stub; skip incremental refresh
+                # to avoid race where the regular refresh overwrites the healed
+                # description.  Mark no-quarantine: heal is the real fix.
                 self._stub_heal_no_quarantine_aliases.add(repo_alias)
                 return None
-            if heal_result is False and desc_data.get("last_analyzed"):
-                # Preconditions unmet but last_analyzed present: do incremental refresh.
+            if not dispatched and has_last_analyzed:
+                # BJM unavailable / submit error (HEAL-013/012 logged); no heal
+                # in flight.  Try incremental refresh.  Do NOT mark no-quarantine
+                # — if incremental also fails, normal quarantine semantics should
+                # apply so operators see the misconfiguration.
                 return self._stage_and_build_prompt(
                     desc_data.get("description") or "",
                     desc_data["last_analyzed"] or "",
                     repo_path_obj,
                 )
-            # heal_result is None (runtime failure) or False with no last_analyzed:
-            # mark no-quarantine and skip refresh this cycle.
+            if dispatched and not has_last_analyzed:
+                # Heal in flight; nothing to incrementally refresh.  Mark
+                # no-quarantine: heal will replace the stub on completion.
+                self._stub_heal_no_quarantine_aliases.add(repo_alias)
+                return None
+            # not dispatched and not has_last_analyzed:
+            # Stub with no last_analyzed AND no heal in flight.  Nothing
+            # actionable this cycle.  Mark no-quarantine because the underlying
+            # issue is the stub itself, not a prompt-generation failure.
             self._stub_heal_no_quarantine_aliases.add(repo_alias)
             return None
         return self._stage_and_build_prompt(

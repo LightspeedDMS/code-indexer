@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.14 (2026-05-06) — HOTFIX: stub-heal must dispatch via BackgroundJobManager, not block the scheduler thread
+
+Production-down hotfix for v10.4.13's stub-heal pivot. The v10.4.13 implementation invoked `_heal_stub_description` SYNCHRONOUSLY inside the scheduler thread when `_get_refresh_prompt` detected a stub. With many stubs (production has ~893), every heal serializes through the single scheduler daemon thread, blocking incremental refresh and lifecycle backfill for the duration of all heals (10s of minutes per cycle). This is untenable in production and violates the CIDX background-jobs contract (CLAUDE.md "Background Jobs (MANDATORY Checklist)").
+
+Fix: heal dispatch now goes through `BackgroundJobManager.submit_job(operation_type="description_stub_heal", ...)` so it runs in BJM's worker pool with:
+
+- Dashboard visibility via JobTracker registration (operation_type appears in Recent Jobs widget).
+- Per-alias dedup via `DuplicateJobError` (BJM's existing `(operation_type, repo_alias)` gate).
+- Standardized status transitions (PENDING → RUNNING → SUCCESS / FAILED) and error reporting.
+- Survives restart (persisted to SQLite/Postgres backend).
+
+`DescriptionRefreshScheduler` gains an injectable `background_job_manager` constructor parameter, wired in `lifespan.py:865` from the lifespan-scoped `background_job_manager` argument that already feeds golden-repo / dep-map / lifecycle paths.
+
+`_get_refresh_prompt` rewritten with 4 explicit branches over `(dispatched, has_last_analyzed)`:
+- `(True, True)` → mark no-quarantine, return None (heal in flight will replace stub; skip incremental to avoid race).
+- `(False, True)` → return incremental refresh prompt only, do NOT mark no-quarantine (BJM unavailable; if incremental fails, normal quarantine SHOULD apply so operators see misconfig).
+- `(True, False)` → mark no-quarantine, return None (heal in flight; nothing to incrementally refresh).
+- `(False, False)` → mark no-quarantine, return None.
+
+Race condition fix (E2E-discovered): when `_get_refresh_prompt` returned None from a stub-heal dispatch, `_run_loop_single_pass` fell through to the regular description refresh instead of `continue`-ing. This caused two concurrent Claude CLI invocations for the same repo — the heal produced a rich description, but the regular refresh finished second and overwrote it with a terse one-liner. Fixed: (1) `(True, True)` branch returns None instead of an incremental prompt; (2) `_run_loop_single_pass` adds `continue` when alias was in `_stub_heal_no_quarantine_aliases`.
+
+New scheduler methods: `_heal_stub_description_worker(repo_alias, repo_path_str)` (BJM-compliant `Callable[..., Dict[str, Any]]` wrapping `_heal_stub_description`; raises `RuntimeError` on `None` return so BJM marks the job FAILED for dashboard visibility); `_dispatch_heal_via_background_job(repo_alias, repo_path_obj)` (submit wrapper handling `DuplicateJobError` + missing-BJM gracefully).
+
+New log codes: `DESC-REFRESH-STUB-HEAL-011` (DuplicateJobError → heal already in flight, skip), `DESC-REFRESH-STUB-HEAL-012` (submit_job unexpected exception, ERROR), `DESC-REFRESH-STUB-HEAL-013` (BackgroundJobManager not wired, WARNING — lifespan misconfig), `DESC-REFRESH-STUB-HEAL-014` (job submitted, INFO with job_id).
+
+Test suite: `tests/unit/server/services/test_description_refresh_stub_heal_v10_4_14.py` rewritten — 13 prior synchronous-heal assertions replaced with BJM dispatch assertions; new test classes `TestBackgroundJobDispatchContract`, `TestDuplicateJobErrorHandling`, `TestNoBackgroundJobManagerWired`, `TestNonBlockingDispatch`, `TestStubHealWorker` cover the BJM contract end-to-end.
+
+**Breaking change for callers**: NONE. All scheduler instantiation flows through `lifespan.py` which now passes the BJM. Standalone test instantiation must inject a mock BJM (or set `_background_job_manager = None` to exercise the not-wired branch).
+
 ## v10.4.13 (2026-05-05) — Anti-fallback: descriptions require Claude CLI (no static regex, no README copy)
 
 Production user reported "descriptions look very terse and relatively short" vs the richer historical state. Root cause: two silent fallback paths in the description-generation pipeline produced degraded output whenever Claude CLI was unavailable or returned no result, yet still wrote a description file (so operators saw "success" with terse content):

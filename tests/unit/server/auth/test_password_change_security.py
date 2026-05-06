@@ -389,13 +389,13 @@ class TestPasswordChangeConcurrencyProtection:
             ) as mock_dep_user_mgr:
                 with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
                     with patch(
-                        "code_indexer.server.app.password_change_rate_limiter"
+                        "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
                         with patch(
-                            "code_indexer.server.app.password_audit_logger"
+                            "code_indexer.server.routers.inline_admin_users.password_audit_logger"
                         ) as _mock_audit_logger:
                             with patch(
-                                "code_indexer.server.app.password_change_concurrency_protection"
+                                "code_indexer.server.routers.inline_admin_users.password_change_concurrency_protection"
                             ) as mock_concurrency:
                                 # Mock concurrency protection to simulate realistic behavior:
                                 # First request succeeds, subsequent requests fail with ConcurrencyConflictError
@@ -536,10 +536,10 @@ class TestPasswordChangeAuditLogging:
             ) as mock_dep_user_mgr:
                 with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
                     with patch(
-                        "code_indexer.server.app.password_change_rate_limiter"
+                        "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
                         with patch(
-                            "code_indexer.server.app.password_audit_logger"
+                            "code_indexer.server.routers.inline_admin_users.password_audit_logger"
                         ) as mock_audit:
                             # Mock JWT authentication
                             mock_jwt.validate_token.return_value = {
@@ -601,10 +601,10 @@ class TestPasswordChangeAuditLogging:
             ) as mock_dep_user_mgr:
                 with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
                     with patch(
-                        "code_indexer.server.app.password_change_rate_limiter"
+                        "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
                         with patch(
-                            "code_indexer.server.app.password_audit_logger"
+                            "code_indexer.server.routers.inline_admin_users.password_audit_logger"
                         ) as mock_audit:
                             # Mock JWT authentication
                             mock_jwt.validate_token.return_value = {
@@ -701,13 +701,13 @@ class TestPasswordChangeSessionInvalidation:
             ) as mock_dep_user_mgr:
                 with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
                     with patch(
-                        "code_indexer.server.app.password_change_rate_limiter"
+                        "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
                         with patch(
-                            "code_indexer.server.app.password_audit_logger"
+                            "code_indexer.server.routers.inline_admin_users.password_audit_logger"
                         ) as _mock_audit_logger:
                             with patch(
-                                "code_indexer.server.app.session_manager"
+                                "code_indexer.server.routers.inline_admin_users.session_manager"
                             ) as mock_session_mgr:
                                 # Mock JWT authentication
                                 mock_jwt.validate_token.return_value = {
@@ -768,12 +768,14 @@ class TestPasswordChangeSessionInvalidation:
             ) as mock_dep_user_mgr:
                 with patch("code_indexer.server.app.user_manager") as mock_user_mgr:
                     with patch(
-                        "code_indexer.server.app.password_change_rate_limiter"
+                        "code_indexer.server.routers.inline_admin_users.password_change_rate_limiter"
                     ) as mock_rate_limiter:
                         with patch(
-                            "code_indexer.server.app.password_audit_logger"
+                            "code_indexer.server.routers.inline_admin_users.password_audit_logger"
                         ) as _mock_audit_logger:
-                            with patch("code_indexer.server.app.session_manager"):
+                            with patch(
+                                "code_indexer.server.routers.inline_admin_users.session_manager"
+                            ):
                                 # Mock JWT authentication
                                 mock_jwt.validate_token.return_value = {
                                     "username": "testuser",
