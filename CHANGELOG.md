@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.15 (2026-05-06) — HOTFIX: MetaDirectoryUpdater creates `-global.md` filenames instead of bare-name `.md`
+
+Root cause of 895 misnamed stub files in production. `MetaDirectoryUpdater._get_active_aliases()` used `repo["alias_name"]` (which includes the `-global` suffix, e.g. `JSqlParser-global`) instead of `repo["repo_name"]` (bare name, e.g. `JSqlParser`). The scheduler and API expect bare-name `.md` files — so every file the updater created was invisible to refresh, heal, and query pipelines.
+
+One-line fix: `meta_directory_updater.py` line 116 changed from `alias = repo["alias_name"]` to `alias = repo["repo_name"]`.
+
 ## v10.4.14 (2026-05-06) — HOTFIX: stub-heal must dispatch via BackgroundJobManager, not block the scheduler thread
 
 Production-down hotfix for v10.4.13's stub-heal pivot. The v10.4.13 implementation invoked `_heal_stub_description` SYNCHRONOUSLY inside the scheduler thread when `_get_refresh_prompt` detected a stub. With many stubs (production has ~893), every heal serializes through the single scheduler daemon thread, blocking incremental refresh and lifecycle backfill for the duration of all heals (10s of minutes per cycle). This is untenable in production and violates the CIDX background-jobs contract (CLAUDE.md "Background Jobs (MANDATORY Checklist)").
