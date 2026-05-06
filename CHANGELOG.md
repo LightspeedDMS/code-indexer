@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.11 (2026-05-05) — Bug #984 logging dedup + xray dashboard verification
+
+- **Bug #984 logging fix (#70)**: even after v10.4.9 cratered the warning rate 94% (3,010/24h → 4 in 30 min by stopping the wipe upstream cause), residual stub descriptions still re-emitted "Cannot generate refresh prompt for &lt;repo&gt;: missing description or last_analyzed" on every scheduler pass because the warning fires BEFORE the quarantine branch can suppress it. Fix in `description_refresh_scheduler.py`: per-repo "warned-already" flag set on first WARNING emission, downgrades subsequent emissions to DEBUG level. Flag re-armed after a successful refresh so legit failures still warn. Quarantine state is also checked before `_get_refresh_prompt()` to short-circuit the call entirely on already-quarantined repos.
+- **#67 dashboard xray-visibility verification**: investigation confirmed `xray_search` and `xray_explore` jobs already appear correctly in the dashboard recent-jobs widget. Neither `BackgroundJobManager.get_recent_jobs_with_filter` nor `JobTracker.get_recent_jobs` filter by operation_type, and `dashboard_recent_jobs.html` has no exclusion list. No production change needed; 3 anti-regression tests added at `tests/unit/server/web/test_dashboard_xray_visibility_v10_4_11.py` to lock the contract.
+
 ## v10.4.10 (2026-05-05) — Health badge data-volume fix + auth test cleanup (partial)
 
 - **Bug #71**: dashboard health badge (HEALTHY / DEGRADED / UNHEALTHY) and the system_metrics alert cache used `psutil.disk_usage("/")` (root volume only). If `/mnt/codeindexer-data` filled up while `/` stayed fine, the health indicator stayed green and no alert fired. Fix: both `health_service.py:298` (`_check_storage_health`) and `system_metrics_collector.py:97,151` (`_get_system_info`) now resolve `data_path` from `ServerConfig.server_dir`, validated via `os.path.isdir()`, with `/` fallback when config is unavailable. Per-volume progressbars (line 753) were already correct via `psutil.disk_usage(partition.mountpoint)` and remain unchanged.
