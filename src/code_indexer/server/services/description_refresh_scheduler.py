@@ -200,6 +200,11 @@ class DescriptionRefreshScheduler:
         # When the count reaches PROMPT_FAILURE_QUARANTINE_THRESHOLD the repo is
         # quarantined (not rescheduled) and one ERROR log is emitted.
         self._prompt_failure_counts: Dict[str, int] = defaultdict(int)
+        # Bug #984: track which repos have already had "missing description or
+        # last_analyzed" WARNING emitted in the current scheduler instance lifetime.
+        # Subsequent passes for the same repo downgrade the log to DEBUG so the
+        # warning fires at most once per repo (re-armed after a successful refresh).
+        self._warned_missing_desc: set = set()
 
         # Story #728 AC5: Bounded thread pool sized by max_concurrent_claude_cli config.
         # Prevents mass backfill from spawning N unbounded concurrent Claude CLI processes.
@@ -672,6 +677,8 @@ class DescriptionRefreshScheduler:
         if success:
             # Bug #953: reset circuit-breaker counter on any successful refresh.
             self._prompt_failure_counts[repo_alias] = 0
+            # Bug #984: re-arm warning so future legitimate failures warn again.
+            self._warned_missing_desc.discard(repo_alias)
             self._tracking_backend.upsert_tracking(
                 repo_alias=repo_alias,
                 status="completed",
@@ -754,6 +761,20 @@ class DescriptionRefreshScheduler:
             # Submit refresh job (if ClaudeCliManager available)
             if self._claude_cli_manager:
                 logger.info(f"Submitting description refresh for {alias}")
+
+                # Bug #984: check quarantine state BEFORE calling _get_refresh_prompt()
+                # so that already-quarantined repos never trigger the warning inside it.
+                if (
+                    self._prompt_failure_counts[alias]
+                    >= PROMPT_FAILURE_QUARANTINE_THRESHOLD
+                ):
+                    logger.debug(
+                        "Repo %s is quarantined (failure count %d >= %d), skipping",
+                        alias,
+                        self._prompt_failure_counts[alias],
+                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                    )
+                    continue
 
                 # Get refresh prompt using RepoAnalyzer
                 prompt = self._get_refresh_prompt(alias, clone_path)
@@ -1035,9 +1056,20 @@ class DescriptionRefreshScheduler:
             return None
         desc_data = self._read_existing_description(repo_alias)
         if not desc_data or not desc_data.get("last_analyzed"):
-            logger.warning(
-                f"Cannot generate refresh prompt for {repo_alias}: missing description or last_analyzed"
-            )
+            # Bug #984: warn at WARNING level only on the first occurrence per repo
+            # per scheduler instance lifetime; downgrade to DEBUG on repeats so
+            # stub-description repos do not flood the log on every scheduler pass.
+            if repo_alias not in self._warned_missing_desc:
+                logger.warning(
+                    "Cannot generate refresh prompt for %s: missing description or last_analyzed",
+                    repo_alias,
+                )
+                self._warned_missing_desc.add(repo_alias)
+            else:
+                logger.debug(
+                    "Cannot generate refresh prompt for %s: missing description or last_analyzed (suppressed repeat)",
+                    repo_alias,
+                )
             return None
         return self._stage_and_build_prompt(
             desc_data.get("description") or "",
