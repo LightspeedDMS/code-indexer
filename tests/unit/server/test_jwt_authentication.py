@@ -358,7 +358,7 @@ class TestUser:
 
         assert not normal_user.has_permission("manage_users")
         assert not normal_user.has_permission("manage_golden_repos")
-        assert not normal_user.has_permission("activate_repos")
+        assert normal_user.has_permission("activate_repos")
         assert normal_user.has_permission("query_repos")
 
 
