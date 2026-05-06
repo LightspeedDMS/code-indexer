@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.4.10 (2026-05-05) — Health badge data-volume fix + auth test cleanup (partial)
+
+- **Bug #71**: dashboard health badge (HEALTHY / DEGRADED / UNHEALTHY) and the system_metrics alert cache used `psutil.disk_usage("/")` (root volume only). If `/mnt/codeindexer-data` filled up while `/` stayed fine, the health indicator stayed green and no alert fired. Fix: both `health_service.py:298` (`_check_storage_health`) and `system_metrics_collector.py:97,151` (`_get_system_info`) now resolve `data_path` from `ServerConfig.server_dir`, validated via `os.path.isdir()`, with `/` fallback when config is unavailable. Per-volume progressbars (line 753) were already correct via `psutil.disk_usage(partition.mountpoint)` and remain unchanged.
+- **Test cleanup #68 (partial — 5 of 47)**: `test_mcp_session_state.py` had a stale assertion that `NORMAL_USER` lacked `activate_repos` permission — Story #981 (commit `860db6dc`) granted it; assertion updated. `test_totp_service.py` 4 errors fixed via `@pytest.mark.timeout(65)` on classes whose fixtures sleep 31s to advance the TOTP window (default 30s pytest timeout). The remaining 42 failures categorized as Class B (test infrastructure: account-lockout state contamination, SQLite fixture setup, real-login fixture failures — 22 items) and Class C (test-side stale paths: `app.password_change_rate_limiter` should be `code_indexer.server.auth.rate_limiter.password_change_rate_limiter` after rate-limiter modularization; some tests use stale endpoint URLs — production code is INTACT — 18 items). Cleanup tracked as v10.4.11 (#72).
+
 ## v10.4.9 (2026-05-05) — CRITICAL HOTFIX: cidx-meta description filename mismatch (production data loss)
 
 `MetaDirectoryUpdater` and `on_repo_added()` used different naming conventions for cidx-meta description files. Every cidx-meta refresh cycle treated all hook-created files as orphaned and deleted them, replacing with 3-line stubs. Production evidence: cidx-meta commit `971850c` deleted 892 files and added 893 stubs in one run (`git diff e0be4bd 971850c --stat`: 1787 files changed, 2682 insertions, 27622 deletions).

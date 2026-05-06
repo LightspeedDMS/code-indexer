@@ -13,6 +13,7 @@ clean kwargs to the handler.
 """
 
 import contextlib
+import json
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -167,9 +168,17 @@ def test_gate1_enabled_no_session_key_returns_elevation_required(
     with _patch_all(manager, totp_enabled, enforcement=True):
         result = decorated({}, admin_user)  # no session_key at all
 
-    assert result.get("error") == "elevation_required", (
-        f"Expected elevation_required when no session key supplied, got: {result}"
+    # v10.4.6: the elevation decorator now wraps error responses via _mcp_response
+    # (closing Open 8 root cause where raw dicts were stringified at the MCP
+    # transport layer as "Error occurred during tool execution"). Parse the MCP
+    # envelope to access the underlying structured error.
+    assert "content" in result, (
+        f"Expected MCP envelope with 'content' key, got: {result}"
     )
-    assert result.get("called") is None, (
+    payload = json.loads(result["content"][0]["text"])
+    assert payload.get("error") == "elevation_required", (
+        f"Expected elevation_required when no session key supplied, got: {payload}"
+    )
+    assert payload.get("called") is None, (
         "Handler must NOT be invoked when elevation window is missing"
     )

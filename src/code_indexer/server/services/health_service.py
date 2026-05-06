@@ -295,7 +295,39 @@ class HealthCheckService:
             # Note: memory/RAM is NOT checked here — it is reported separately by
             # _collect_resource_failures() to avoid duplicate "Storage: High memory usage"
             # entries in failure_reasons (Bug #737).
-            disk_usage = psutil.disk_usage("/")
+            # v10.4.10 (#71): use the data directory volume, not root, so the
+            # health badge reflects the actual data volume filling up.
+            data_path = "/"
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                config = get_config_service().get_config()
+                candidate = getattr(config, "server_dir", None) or "/"
+                if os.path.isdir(candidate):
+                    data_path = candidate
+                else:
+                    logger.debug(
+                        "Storage health: server_dir '%s' is not a directory, "
+                        "falling back to '/'",
+                        candidate,
+                    )
+            except RuntimeError as exc:
+                # Config service not yet initialized (common at early startup);
+                # fall back to root volume.
+                logger.debug(
+                    "Storage health: config not available, falling back to '/': %s", exc
+                )
+            except Exception as exc:
+                # Unexpected error resolving config; log at warning so operators
+                # can investigate misconfiguration while the check still proceeds.
+                logger.warning(
+                    "Storage health: unexpected error resolving data_path, "
+                    "falling back to '/': %s",
+                    exc,
+                )
+            disk_usage = psutil.disk_usage(data_path)
             free_space_gb = disk_usage.free / (1024**3)
             disk_used_percent = disk_usage.percent
 

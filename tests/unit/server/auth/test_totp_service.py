@@ -555,6 +555,9 @@ def _activated_service_with_pool(totp_service_with_pool):
 
 
 @pytest.mark.slow
+@pytest.mark.timeout(
+    65
+)  # fixture sleeps 31s to advance TOTP window; needs >30s timeout
 class TestVerifyEnabledCodeWithPool:
     """verify_enabled_code() via PostgreSQL pool path (_cas_otp_counter_pg)."""
 
@@ -572,6 +575,9 @@ class TestVerifyEnabledCodeWithPool:
 
 
 @pytest.mark.slow
+@pytest.mark.timeout(
+    65
+)  # fixture sleeps 31s to advance TOTP window; needs >30s timeout
 class TestVerifyEnabledCode:
     """verify_enabled_code() requires MFA enabled; blocks replay via timestamp CAS."""
 
