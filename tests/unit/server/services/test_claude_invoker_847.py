@@ -245,6 +245,13 @@ class TestClaudeInvokerCommandLine:
             cmd_str = " ".join(mock_run.call_args[0][0])
             assert "45" in cmd_str
 
+    def test_command_includes_e_flag(self):
+        """Command list includes '-e' flag so inner command exit codes propagate through script."""
+        from code_indexer.server.services.claude_invoker import _build_claude_command
+
+        cmd = _build_claude_command("test prompt", "opus", 90)
+        assert "-e" in cmd
+
 
 # ---------------------------------------------------------------------------
 # Success path

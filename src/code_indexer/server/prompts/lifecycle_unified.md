@@ -13,7 +13,7 @@ MCP tools (registered globally, always available):
 
 **What to produce:**
 
-1. **description** (1-500 chars): A concise, factual summary of what this repository does — its purpose, domain, and primary capabilities. Avoid marketing language.
+1. **description** (500-2000 chars): A comprehensive, factual summary of what this repository does — its purpose, domain, primary capabilities, key features, and typical use cases. Be thorough but avoid marketing language. Include the main technologies used and what problems the project solves.
 
 2. **lifecycle** — six required fields describing the CI/CD and build ecosystem:
    - `ci_system`: the CI system in use (e.g., "github-actions", "gitlab-ci", "jenkins", "circleci", "none")
@@ -89,7 +89,7 @@ The JSON object MUST match this schema. The six lifecycle fields are REQUIRED. A
 
 ```
 {
-  "description": "<1-500 char string, non-empty>",
+  "description": "<500-2000 char string, comprehensive and non-empty>",
   "lifecycle": {
     "ci_system": "<non-empty string>",
     "deployment_target": "<non-empty string>",
@@ -125,7 +125,7 @@ The JSON object MUST match this schema. The six lifecycle fields are REQUIRED. A
 
 Example of a valid v3 response (copy the structure, not the values):
 
-{"description": "A Python service for semantic code search using VoyageAI embeddings and HNSW vector indexing.", "lifecycle": {"ci_system": "github-actions", "deployment_target": "pypi", "language_ecosystem": "python/poetry", "build_system": "poetry", "testing_framework": "pytest", "confidence": "high", "branching": {"default_branch": "main", "model": "github-flow", "release_branch_pattern": null, "protected_branches": ["main"]}, "ci": {"trigger_events": ["push", "pull_request"], "required_checks": ["lint", "test"], "deploy_on": "tag", "environments": null}, "release": {"versioning": "semver", "version_source": "pyproject.toml", "changelog": "CHANGELOG.md", "auto_publish": true, "artifact_types": ["wheel", "sdist"]}}}
+{"description": "A Python service for semantic code search using VoyageAI embeddings and HNSW vector indexing. Provides a FastAPI server with MCP protocol support, JWT authentication, and multi-repository management. Key features include full-text search via Tantivy, SCIP-based code intelligence for call graphs and symbol navigation, git-aware incremental indexing, multimodal search for documentation with embedded images, and inter-repository dependency mapping. Supports both standalone CLI mode with filesystem-based vector storage and server mode with PostgreSQL-backed cluster deployment. Built for development teams that need to search codebases by meaning rather than keywords.", "lifecycle": {"ci_system": "github-actions", "deployment_target": "pypi", "language_ecosystem": "python/poetry", "build_system": "poetry", "testing_framework": "pytest", "confidence": "high", "branching": {"default_branch": "main", "model": "github-flow", "release_branch_pattern": null, "protected_branches": ["main"]}, "ci": {"trigger_events": ["push", "pull_request"], "required_checks": ["lint", "test"], "deploy_on": "tag", "environments": null}, "release": {"versioning": "semver", "version_source": "pyproject.toml", "changelog": "CHANGELOG.md", "auto_publish": true, "artifact_types": ["wheel", "sdist"]}}}
 
 ---
 

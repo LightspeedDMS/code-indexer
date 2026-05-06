@@ -862,7 +862,6 @@ def make_lifespan(
                 ),
                 job_tracker=job_tracker,
                 mcp_registration_service=mcp_registration_service,
-                background_job_manager=background_job_manager,
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove

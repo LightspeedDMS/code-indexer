@@ -7,7 +7,7 @@ Extracts the PTY-via-``script`` invocation pattern from
 description_refresh_scheduler.py into the IntelligenceCliInvoker protocol.
 
 Command structure:
-    script -q -c "timeout <soft> claude --model <model> -p <prompt>
+    script -q -e -c "timeout <soft> claude --model <model> -p <prompt>
                   --print --dangerously-skip-permissions" /dev/null
 
 Environment sanitization (preserved from description_refresh_scheduler.py):
@@ -79,7 +79,7 @@ def _build_claude_command(
         f"{max_turns_flag}"
         f" --print --dangerously-skip-permissions"
     )
-    return ["script", "-q", "-c", claude_cmd, os.devnull]
+    return ["script", "-q", "-e", "-c", claude_cmd, os.devnull]
 
 
 def _build_claude_env(source_env: Mapping[str, str]) -> dict:
