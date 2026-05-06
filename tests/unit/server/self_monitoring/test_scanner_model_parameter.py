@@ -35,7 +35,7 @@ class TestLogScannerModelParameter:
             # Command is wrapped: ['script', '-q', '-c', "timeout N claude --model M ...", '/dev/null']
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]  # Get the command list
-            shell_cmd = call_args[4]  # inner shell command string (index 4: script -q -e -c <cmd> /dev/null)
+            shell_cmd = call_args[4]  # inner shell command string
             assert "claude" in shell_cmd
             assert "--model opus" in shell_cmd
 
@@ -60,7 +60,7 @@ class TestLogScannerModelParameter:
             # Command is wrapped: ['script', '-q', '-c', "timeout N claude --model M ...", '/dev/null']
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]  # Get the command list
-            shell_cmd = call_args[4]  # inner shell command string (index 4: script -q -e -c <cmd> /dev/null)
+            shell_cmd = call_args[4]  # inner shell command string
             assert "claude" in shell_cmd
             assert "--model sonnet" in shell_cmd
 
@@ -86,7 +86,7 @@ class TestLogScannerModelParameter:
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]
             assert call_args[0] == "script"  # outer wrapper
-            shell_cmd = call_args[4]  # inner shell command string (index 4: script -q -e -c <cmd> /dev/null)
+            shell_cmd = call_args[4]  # inner shell command string
             # Model should appear before the prompt (-p flag)
             model_pos = shell_cmd.index("--model")
             prompt_pos = shell_cmd.index(" -p ")
@@ -144,5 +144,5 @@ class TestLogScannerModelParameter:
             # Command is wrapped: ['script', '-q', '-c', "timeout N claude ... --dangerously-skip-permissions", '/dev/null']
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]  # Get the command list
-            shell_cmd = call_args[4]  # inner shell command string (index 4: script -q -e -c <cmd> /dev/null)
+            shell_cmd = call_args[4]  # inner shell command string
             assert "--dangerously-skip-permissions" in shell_cmd

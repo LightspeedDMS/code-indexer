@@ -113,7 +113,7 @@ class MetaDirectoryUpdater(UpdateStrategy):
         repos = self.registry.list_global_repos()
         safe = set()
         for repo in repos:
-            alias = repo["repo_name"]
+            alias = repo["alias_name"]
             if _SAFE_ALIAS_PATTERN.match(alias):
                 safe.add(alias)
             else:
