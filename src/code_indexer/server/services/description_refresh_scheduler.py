@@ -637,6 +637,7 @@ class DescriptionRefreshScheduler:
                 job_id=job_id,
                 operation_type="description_backfill",
                 username="system",
+                repo_alias="server",
                 metadata={
                     "total": len(aliases),
                     "source": "startup_description_backfill",
@@ -765,6 +766,7 @@ class DescriptionRefreshScheduler:
                 job_id=job_id,
                 operation_type="lifecycle_backfill",
                 username="system",
+                repo_alias="server",
                 metadata={"total": len(aliases), "source": "startup_backfill"},
             )
 
