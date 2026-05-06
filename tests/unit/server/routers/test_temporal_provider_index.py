@@ -482,6 +482,10 @@ class TestBug648EnableTemporalFlag:
                 return_value=(10, 5),
             ),
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.GlobalRegistry"),
+            patch(
+                "code_indexer.server.services.sqlite_log_handler.SQLiteLogHandler.emit"
+            ),
         ):
             mock_cfg_svc.return_value.get_config.return_value = _mock_server_config()
             mock_app_module.golden_repo_manager = mock_grm
@@ -601,6 +605,9 @@ class TestBug648GlobalRegistryUpdate:
             patch(
                 "code_indexer.server.mcp.handlers.GlobalRegistry",
                 return_value=mock_global_registry_instance,
+            ),
+            patch(
+                "code_indexer.server.services.sqlite_log_handler.SQLiteLogHandler.emit"
             ),
             caplog.at_level(
                 stdlib_logging.INFO, logger="code_indexer.server.mcp.handlers"

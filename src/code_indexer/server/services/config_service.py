@@ -73,6 +73,7 @@ BOOTSTRAP_KEYS = frozenset(
         "graph_repair_bidirectional_mismatch",  # Story #920
         "fault_injection_enabled",  # Story #746
         "fault_injection_nonprod_ack",  # Story #746
+        "server_threadpool_size",  # startup threadpool config
     }
 )
 CONFIG_KEY_RUNTIME = "runtime"
