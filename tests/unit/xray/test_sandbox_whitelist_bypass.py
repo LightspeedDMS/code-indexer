@@ -92,20 +92,26 @@ class TestWhitelistBypassAttempts:
         _assert_no_subprocess_spawned("import subprocess")
 
     def test_from_os_import_system_rejected(self):
-        _assert_rejected("from os import system", "ImportFrom")
+        # Story #993: import-specific message says "Import of 'os' is not allowed..."
+        # which contains "Import" but no longer includes the AST node type "ImportFrom".
+        _assert_rejected("from os import system", "Import")
         _assert_no_subprocess_spawned("from os import system")
 
-    # --- FunctionDef ---
+    # --- FunctionDef (now allowed, Story #993 Group G) ---
 
     def test_function_def_rejected(self):
-        _assert_rejected("def helper(): return 1\nreturn helper()", "FunctionDef")
-        _assert_no_subprocess_spawned("def helper(): return 1\nreturn helper()")
+        # FunctionDef was previously rejected; now allowed in Group G (Story #993).
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate("def helper(): return 1\nreturn helper()")
+        assert result.ok is True
 
-    # --- Lambda ---
+    # --- Lambda (now allowed, Story #993 Group G) ---
 
     def test_lambda_rejected(self):
-        _assert_rejected("return (lambda x: x > 0)(5)", "Lambda")
-        _assert_no_subprocess_spawned("return (lambda x: x > 0)(5)")
+        # Lambda was previously rejected; now allowed in Group G (Story #993).
+        sb = PythonEvaluatorSandbox()
+        result = sb.validate("return (lambda x: x > 0)(5)")
+        assert result.ok is True
 
     # --- ClassDef ---
 

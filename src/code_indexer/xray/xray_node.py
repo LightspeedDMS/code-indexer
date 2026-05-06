@@ -156,6 +156,60 @@ class XRayNode:
             current = current.parent
         return None
 
+    def is_in_try_resources(self) -> bool:
+        """Return True if this node is inside a Java try-with-resources declaration."""
+        current = self._node.parent
+        while current is not None:
+            if current.type == "resource_specification":
+                if (
+                    current.parent
+                    and current.parent.type == "try_with_resources_statement"
+                ):
+                    return True
+            if current.type == "resource":
+                if current.parent and current.parent.type == "resource_specification":
+                    return True
+            current = current.parent
+        return False
+
+    def enclosing_method_body(self) -> Optional["XRayNode"]:
+        """Return the body block of the enclosing method/function, or None."""
+        _METHOD_TYPES = {
+            "method_declaration",
+            "function_declaration",
+            "function_definition",
+            "fun_declaration",
+            "method_definition",
+            "function_item",
+        }
+        current = self._node.parent
+        while current is not None:
+            if current.type in _METHOD_TYPES:
+                body = current.child_by_field_name("body")
+                if body is None:
+                    body = current.child_by_field_name("block")
+                if body is not None:
+                    return XRayNode(body)
+                return None
+            current = current.parent
+        return None
+
+    def node_at_byte_offset(self, offset: int) -> Optional["XRayNode"]:
+        """Find the smallest named AST node containing *offset*."""
+        if offset < self._node.start_byte or offset >= self._node.end_byte:
+            return None
+        best = self._node
+        stack = [self._node]
+        while stack:
+            current = stack.pop()
+            for child in current.children:
+                if child.start_byte <= offset < child.end_byte:
+                    if child.is_named:
+                        best = child
+                    stack.append(child)
+                    break
+        return XRayNode(best) if best != self._node or self._node.is_named else None
+
     # ------------------------------------------------------------------
     # Position
     # ------------------------------------------------------------------

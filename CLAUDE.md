@@ -147,9 +147,10 @@ Two-phase pipeline: Phase 1 regex walk -> Phase 2 sandboxed evaluator over `XRay
 
 **Key invariants**:
 - v10.4.0 evaluator contract: 6 globals (`node`, `root`, `source`, `lang`, `file_path`, `match_positions`). Must return `{"matches": [...], "value": <any>}` -- bool REJECTED. Legacy `match_byte_offset`/`match_line_number`/`match_line_content` always `None`.
-- v10.4.0 allowed nodes: Groups C (If/For/While/Break/Continue/Pass), D (Try/ExceptHandler/Raise), E (BinOp/operator). Still banned: `def`/`class`/`lambda`/`import`/`with`/`global`/`nonlocal`/`async`/`await`/`yield`.
+- v10.4.0 allowed nodes: Groups C (If/For/While/Break/Continue/Pass), D (Try/ExceptHandler/Raise), E (BinOp/operator), F (Import/ImportFrom with STDLIB_WHITELIST: re, collections, itertools, functools), G (FunctionDef/Lambda/arguments/arg). Still banned: `class`/`with`/`global`/`nonlocal`/`async`/`await`/`yield`. SAFE_BUILTIN_NAMES: 34 entries (25 value + 9 exception types). Structured `ValidationResult` fields: `error_code`, `offending_construct`, `offending_line`.
 - Omni multi-repo: `repository_alias` accepts string, list-of-strings, or JSON array. Multi-repo returns `{job_ids, errors}`.
-- Async job pattern: returns `job_id`, clients poll `GET /api/jobs/{job_id}`. Pre-flight `sandbox.validate()` before job submission. `await_seconds` in [0.0, 10.0].
+- Async job pattern: returns `job_id`, clients poll `GET /api/jobs/{job_id}`. Pre-flight `sandbox.validate()` before job submission. `await_seconds` in [0.0, 120.0] (warning logged at >30.0).
+- v10.5.0 evaluator extensions: `match_positions[i]["ast_node"]` (XRayNode at byte offset), `{"skip": True}` early bail-out, `{"file_role": str}` in return dict surfaced in `file_metadata[]`. XRayNode helpers: `is_in_try_resources()`, `enclosing_method_body()`, `node_at_byte_offset()`.
 
 -> Full reference: `docs/xray-architecture.md`
 

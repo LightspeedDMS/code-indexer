@@ -60,16 +60,16 @@ class TestValidation:
         assert "Import" in result.reason
 
     def test_rejects_function_definition(self):
+        # FunctionDef is now ALLOWED (Story #993 Group G) — was previously rejected.
         sb = PythonEvaluatorSandbox()
         result = sb.validate("def f(): pass")
-        assert result.ok is False
-        assert "FunctionDef" in result.reason
+        assert result.ok is True
 
     def test_rejects_lambda(self):
+        # Lambda is now ALLOWED (Story #993 Group G) — was previously rejected.
         sb = PythonEvaluatorSandbox()
         result = sb.validate("lambda x: x")
-        assert result.ok is False
-        assert "Lambda" in result.reason
+        assert result.ok is True
 
     def test_now_accepts_try_except_v10_4_0(self):
         # try/except was added to ALLOWED_NODES in v10.4.0 (loops/control-flow lift).
