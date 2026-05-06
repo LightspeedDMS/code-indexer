@@ -11,6 +11,7 @@ patch at module-level import seams (not internal helpers).
 """
 
 import contextlib
+import json
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -137,9 +138,17 @@ def test_decorator_when_enabled_no_session_returns_elevation_required(
     with _patch_all(manager, totp_enabled, enforcement=True):
         result = decorated({}, admin_user, session_key=_SESSION_KEY)
 
-    assert result["error"] == "elevation_required", (
-        f"Expected elevation_required error, got: {result}"
+    # v10.4.6: the elevation decorator now wraps error responses via _mcp_response
+    # (closing Open 8 root cause where raw dicts were stringified at the MCP
+    # transport layer as "Error occurred during tool execution"). Parse the MCP
+    # envelope to access the underlying structured error.
+    assert "content" in result, (
+        f"Expected MCP envelope with 'content' key, got: {result}"
     )
-    assert result.get("called") is None, (
+    payload = json.loads(result["content"][0]["text"])
+    assert payload.get("error") == "elevation_required", (
+        f"Expected elevation_required error, got: {payload}"
+    )
+    assert payload.get("called") is None, (
         "Handler must NOT be invoked when elevation window is missing"
     )
