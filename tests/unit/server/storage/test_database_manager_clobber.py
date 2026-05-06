@@ -33,12 +33,15 @@ def tmp_db(tmp_path):
 @pytest.fixture(autouse=True)
 def isolated_manager_registry():
     """Clear the singleton registry and global cleanup state before each test."""
+    DatabaseConnectionManager.stop_cleanup_daemon(timeout=5.0)
     DatabaseConnectionManager._instances.clear()
     DatabaseConnectionManager._last_global_cleanup = 0.0
     yield
+    DatabaseConnectionManager.stop_cleanup_daemon(timeout=5.0)
     DatabaseConnectionManager._instances.clear()
 
 
+@pytest.mark.timeout(30)
 class TestCloseOnClobber:
     """Tests for close-on-clobber fix (Bug #878 Fix A.1)."""
 

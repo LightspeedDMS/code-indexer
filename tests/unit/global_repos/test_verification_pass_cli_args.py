@@ -68,7 +68,7 @@ def capture(analyzer, cfg, tmp_path):
     """Factory fixture: call capture(cfg_override=None) -> (cmds, prompts, temp_file, call_kwargs).
 
     Patches subprocess.run inside ClaudeInvoker to record every cmd, the embedded
-    prompt (from cmd[3]), and the kwargs; both attempts exhaust via TimeoutExpired
+    prompt (from cmd[4]), and the kwargs; both attempts exhaust via TimeoutExpired
     causing VerificationFailed, which is expected here — the fixture is a
     capture-only helper, not a success-path test harness.
     """
@@ -83,9 +83,9 @@ def capture(analyzer, cfg, tmp_path):
 
         def fake_run(cmd, input=None, **kwargs):
             cmds.append(list(cmd))
-            # ClaudeInvoker embeds the prompt inside cmd[3] (the shell command
-            # string passed to `script -q -c <cmd> /dev/null`), not via stdin.
-            prompts.append(cmd[3] if len(cmd) > 3 else "")
+            # ClaudeInvoker embeds the prompt inside cmd[4] (the shell command
+            # string passed to `script -q -e -c <cmd> /dev/null`), not via stdin.
+            prompts.append(cmd[4] if len(cmd) > 4 else "")
             call_kwargs.append(dict(kwargs))
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=_DEFAULT_TIMEOUT_SECONDS)
 

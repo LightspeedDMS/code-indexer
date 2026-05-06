@@ -25,6 +25,7 @@ Duplication reduction strategy:
 """
 
 import contextlib
+import json
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -32,6 +33,13 @@ from unittest.mock import MagicMock, patch
 from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.mcp.auth.elevation_decorator import require_mcp_elevation
+
+
+def _parse_mcp_response(response: dict) -> dict:
+    """Unwrap MCP-formatted response to the inner data dict."""
+    content = response.get("content", [])
+    return json.loads(content[0]["text"])
+
 
 # ---------------------------------------------------------------------------
 # Named constants
@@ -157,7 +165,8 @@ def test_kill_switch_off_passes_through_to_handler(
 def test_manager_none_returns_disabled_error(decorated, admin_user, totp_enabled):
     with _patch_all(None, totp_enabled, enforcement=True):
         result = decorated({}, admin_user, session_key=_SESSION_KEY)
-    assert result["error"] == "elevation_enforcement_disabled"
+    data = _parse_mcp_response(result)
+    assert data["error"] == "elevation_enforcement_disabled"
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +177,8 @@ def test_manager_none_returns_disabled_error(decorated, admin_user, totp_enabled
 def test_totp_service_none_returns_disabled(decorated, admin_user, manager):
     with _patch_all(manager, None, enforcement=True):
         result = decorated({}, admin_user, session_key=_SESSION_KEY)
-    assert result["error"] == "elevation_enforcement_disabled"
+    data = _parse_mcp_response(result)
+    assert data["error"] == "elevation_enforcement_disabled"
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +191,9 @@ def test_totp_not_setup_returns_setup_required(
 ):
     with _patch_all(manager, totp_disabled):
         result = decorated({}, admin_user, session_key=_SESSION_KEY)
-    assert result["error"] == "totp_setup_required"
-    assert result.get("setup_url") == "/admin/mfa/setup"
+    data = _parse_mcp_response(result)
+    assert data["error"] == "totp_setup_required"
+    assert data.get("setup_url") == "/admin/mfa/setup"
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +206,8 @@ def test_no_session_key_returns_elevation_required(
 ):
     with _patch_all(manager, totp_enabled):
         result = decorated({}, admin_user)  # neither kwarg nor positional
-    assert result["error"] == "elevation_required"
+    data = _parse_mcp_response(result)
+    assert data["error"] == "elevation_required"
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +220,8 @@ def test_no_window_returns_elevation_required(
 ):
     with _patch_all(manager, totp_enabled):
         result = decorated({}, admin_user, session_key=_SESSION_KEY)
-    assert result["error"] == "elevation_required"
+    data = _parse_mcp_response(result)
+    assert data["error"] == "elevation_required"
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +236,9 @@ def test_recovery_scope_insufficient_for_full_required(
     handler = require_mcp_elevation(required_scope="full")(_noop_handler)
     with _patch_all(active_repair_session, totp_enabled):
         result = handler({}, admin_user, session_key=_SESSION_KEY)
-    assert result["error"] == "elevation_required"
-    assert "full" in result["message"].lower()
+    data = _parse_mcp_response(result)
+    assert data["error"] == "elevation_required"
+    assert "full" in data["message"].lower()
 
 
 # ---------------------------------------------------------------------------

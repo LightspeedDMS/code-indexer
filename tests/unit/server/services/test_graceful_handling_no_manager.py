@@ -1,16 +1,18 @@
 """
-Tests for graceful handling when ClaudeCliManager is not initialized (Story #23, AC5).
+Tests for handling when ClaudeCliManager is not initialized (Story #23, AC5).
 
 This module tests:
-- All components that use get_claude_cli_manager() handle None gracefully
-- No exceptions are raised when manager is not initialized
+- All components that use get_claude_cli_manager() handle None appropriately
+- on_repo_added raises RuntimeError (anti-fallback contract) when manager is not initialized
+- trigger_catchup returns False gracefully when manager is not available
 - Appropriate logging occurs when manager is not available
-- Operations fall back to alternatives when manager is unavailable
 """
 
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 
 class TestGracefulHandlingWhenManagerNotInitialized:
@@ -53,8 +55,8 @@ class TestGracefulHandlingWhenManagerNotInitialized:
             "not initialized" in record.message.lower() for record in caplog.records
         )
 
-    def test_on_repo_added_graceful_when_no_manager(self, tmp_path: Path, caplog):
-        """on_repo_added should use fallback gracefully when manager not initialized."""
+    def test_on_repo_added_raises_when_no_manager(self, tmp_path: Path):
+        """on_repo_added raises RuntimeError when manager not initialized (anti-fallback contract)."""
         from code_indexer.global_repos.meta_description_hook import on_repo_added
 
         # Setup directory structure
@@ -69,8 +71,8 @@ class TestGracefulHandlingWhenManagerNotInitialized:
         readme = test_repo_dir / "README.md"
         readme.write_text("# Test Repo\n\nA test repository.")
 
-        # Should not raise, should use fallback
-        with caplog.at_level(logging.INFO):
+        # v10.4.13 anti-fallback contract: must raise RuntimeError when manager is None
+        with pytest.raises(RuntimeError, match="anti-fallback"):
             on_repo_added(
                 repo_name="test-repo",
                 repo_url="https://github.com/test/test-repo",
@@ -78,43 +80,27 @@ class TestGracefulHandlingWhenManagerNotInitialized:
                 golden_repos_dir=str(golden_repos_dir),
             )
 
-        # Fallback should be created
-        fallback_file = cidx_meta_dir / "test-repo_README.md"
-        assert fallback_file.exists()
-
-        # Should log about manager not being initialized
-        assert any(
-            "not initialized" in record.message.lower() for record in caplog.records
-        )
-
-    def test_on_repo_added_no_crash_when_no_readme_and_no_manager(
-        self, tmp_path: Path, caplog
-    ):
-        """on_repo_added should not crash when no README and no manager."""
+    def test_on_repo_added_raises_when_no_readme_and_no_manager(self, tmp_path: Path):
+        """on_repo_added raises RuntimeError when no manager, regardless of README presence."""
         from code_indexer.global_repos.meta_description_hook import on_repo_added
 
         # Setup directory structure
         golden_repos_dir = tmp_path / "golden-repos"
         golden_repos_dir.mkdir()
-        cidx_meta_dir = golden_repos_dir / "cidx-meta"
-        cidx_meta_dir.mkdir()
+        (golden_repos_dir / "cidx-meta").mkdir()
 
         # Create test repo WITHOUT README
         test_repo_dir = tmp_path / "test-repo"
         test_repo_dir.mkdir()
 
-        # Should not raise even with no README
-        with caplog.at_level(logging.WARNING):
+        # v10.4.13 anti-fallback contract: RuntimeError raised before README check
+        with pytest.raises(RuntimeError, match="anti-fallback"):
             on_repo_added(
                 repo_name="test-repo",
                 repo_url="https://github.com/test/test-repo",
                 clone_path=str(test_repo_dir),
                 golden_repos_dir=str(golden_repos_dir),
             )
-
-        # No fallback file (no README to copy)
-        fallback_file = cidx_meta_dir / "test-repo_README.md"
-        assert not fallback_file.exists()
 
     def test_server_startup_graceful_when_initialization_fails(
         self, tmp_path: Path, caplog
@@ -172,31 +158,23 @@ class TestGracefulHandlingLogging:
             for r in warning_records
         )
 
-    def test_on_repo_added_logs_info_when_using_fallback(self, tmp_path: Path, caplog):
-        """on_repo_added should log INFO when using fallback."""
+    def test_on_repo_added_raises_when_no_manager(self, tmp_path: Path):
+        """on_repo_added raises RuntimeError (anti-fallback contract) when manager not initialized."""
         from code_indexer.global_repos.meta_description_hook import on_repo_added
 
         # Setup
         golden_repos_dir = tmp_path / "golden-repos"
         golden_repos_dir.mkdir()
-        cidx_meta_dir = golden_repos_dir / "cidx-meta"
-        cidx_meta_dir.mkdir()
+        (golden_repos_dir / "cidx-meta").mkdir()
         test_repo_dir = tmp_path / "test-repo"
         test_repo_dir.mkdir()
-        readme = test_repo_dir / "README.md"
-        readme.write_text("# Test")
+        (test_repo_dir / "README.md").write_text("# Test")
 
-        with caplog.at_level(logging.INFO):
+        # v10.4.13 anti-fallback contract: no fallback logging — RuntimeError raised instead
+        with pytest.raises(RuntimeError, match="anti-fallback"):
             on_repo_added(
                 repo_name="test-repo",
                 repo_url="https://github.com/test/repo",
                 clone_path=str(test_repo_dir),
                 golden_repos_dir=str(golden_repos_dir),
             )
-
-        # Should have INFO level log about not initialized
-        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
-        assert any(
-            "not initialized" in r.message.lower() or "fallback" in r.message.lower()
-            for r in info_records
-        )

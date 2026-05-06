@@ -16,9 +16,9 @@ import pytest
 
 from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
 
-# The subprocess command has the shape: ['script', '-q', '-c', <shell_str>, '/dev/null']
-# Index 3 is the embedded shell command string containing the actual claude invocation.
-_SCRIPT_SHELL_CMD_IDX = 3
+# The subprocess command has the shape: ['script', '-q', '-e', '-c', <shell_str>, '/dev/null']
+# Index 4 is the embedded shell command string containing the actual claude invocation.
+_SCRIPT_SHELL_CMD_IDX = 4
 
 
 class TestClaudeMdGeneration:
@@ -127,18 +127,18 @@ class TestPass1Synthesis:
 
         # Check command structure.
         # Pass 1 routes through CliDispatcher -> ClaudeInvoker which builds:
-        #   ['script', '-q', '-c', 'timeout <N> claude --model <m> -p <prompt> ...', '/dev/null']
-        # so 'claude' and the prompt appear inside cmd[3] (the shell command string).
+        #   ['script', '-q', '-e', '-c', 'timeout <N> claude --model <m> -p <prompt> ...', '/dev/null']
+        # so 'claude' and the prompt appear inside cmd[4] (the shell command string).
         cmd = call_args[0][0]
         assert any("claude" in arg for arg in cmd), (
             f"Expected 'claude' somewhere in cmd: {cmd}"
         )
         assert any("--print" in arg for arg in cmd)
         assert any("--model" in arg for arg in cmd)
-        # Prompt is embedded in cmd[3] (the -c argument to script) via -p flag.
+        # Prompt is embedded in cmd[4] (the -c argument to script) via -p flag.
         # ClaudeInvoker does not add --max-turns; it uses a soft inner timeout instead.
         assert any("-p" in arg for arg in cmd)
-        assert "Identify domain clusters" in cmd[3]
+        assert "Identify domain clusters" in cmd[4]
         assert call_args[1]["cwd"] == str(tmp_path)
         assert (
             call_args[1]["timeout"] == 600
@@ -821,7 +821,7 @@ class TestPass1JsonParseFailure:
         second_shell_cmd = second_cmd[_SCRIPT_SHELL_CMD_IDX]
         assert "--max-turns" in second_shell_cmd
 
-        # Verify retry prompt contains file-write reminder — embedded in cmd[3]
+        # Verify retry prompt contains file-write reminder — embedded in cmd[4]
         assert "CRITICAL: You MUST write your output to the file" in second_shell_cmd
 
         # Verify result is from successful retry
@@ -3091,7 +3091,7 @@ class TestIteration15InsideOutAndConciseness:
         )
 
         # Extract the shell string from the subprocess command list.
-        # Since Bug #936 the prompt is embedded in cmd[3] (the shell string),
+        # Since Bug #936 the prompt is embedded in cmd[4] (the shell string),
         # not passed via input= kwarg.
         mock_subprocess.assert_called_once()
         cmd = mock_subprocess.call_args[0][0]

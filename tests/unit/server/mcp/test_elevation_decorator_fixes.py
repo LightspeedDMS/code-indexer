@@ -9,6 +9,7 @@ AC8: Same session_key + correct owner -> handler is called successfully
 """
 
 import contextlib
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +33,12 @@ _ENFORCEMENT_PATH = (
 )
 _TOTP_PATH = "code_indexer.server.mcp.auth.elevation_decorator.get_totp_service"
 _ESM_PATH = "code_indexer.server.mcp.auth.elevation_decorator.elevated_session_manager"
+
+
+def _parse_mcp_response(response: dict) -> dict:
+    """Unwrap MCP-formatted response to the inner data dict."""
+    content = response.get("content", [])
+    return json.loads(content[0]["text"])
 
 
 def _make_user(username: str) -> User:
@@ -112,11 +119,12 @@ def test_ac7_cross_user_bypass_is_denied(tmp_path):
     with _patch_all(manager, _make_totp_enabled(), enforcement=True):
         result = decorated({}, user_b, session_key=_SESSION_KEY)
 
-    assert result.get("error") == "elevation_required", (
+    data = _parse_mcp_response(result)
+    assert data.get("error") == "elevation_required", (
         "Admin B must not be able to use Admin A's session window. "
         f"Got result: {result!r}. Cross-user bypass is still open."
     )
-    assert result.get("success") is not True, (
+    assert data.get("success") is not True, (
         "Handler must NOT be called when cross-user bypass is attempted"
     )
 
