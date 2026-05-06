@@ -13,6 +13,7 @@ _patch_all contextmanager applies enforcement=True + real manager (no window)
 """
 
 import contextlib
+import json
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -20,6 +21,18 @@ from unittest.mock import MagicMock, patch
 from code_indexer.server.auth.elevated_session_manager import ElevatedSessionManager
 from code_indexer.server.auth.user_manager import User
 import code_indexer.server.mcp.handlers.admin as admin_handlers
+
+
+# ---------------------------------------------------------------------------
+# MCP response helper
+# ---------------------------------------------------------------------------
+
+
+def _parse_mcp_response(response: dict) -> dict:
+    """Unwrap a MCP-formatted response: {"content": [{"type": "text", "text": "..."}]}."""
+    content = response.get("content", [])
+    return json.loads(content[0]["text"])
+
 
 # ---------------------------------------------------------------------------
 # Named constants
@@ -145,7 +158,8 @@ def test_gated_tool_returns_elevation_required(
     """Each canonical gated tool returns exactly elevation_required when no window."""
     with _patch_all(manager, totp_enabled):
         result = invoke(admin_user)
-    assert result.get("error") == "elevation_required", (
+    parsed = _parse_mcp_response(result)
+    assert parsed.get("error") == "elevation_required", (
         f"Expected elevation_required, got: {result}"
     )
 
@@ -159,7 +173,8 @@ def test_list_users_is_gated(admin_user, manager, totp_enabled):
     """list_users is elevation-gated and must return elevation_required when no window."""
     with _patch_all(manager, totp_enabled):
         result = admin_handlers.list_users({}, admin_user)
-    assert result.get("error") == "elevation_required", (
+    parsed = _parse_mcp_response(result)
+    assert parsed.get("error") == "elevation_required", (
         f"list_users should be elevation-gated: {result}"
     )
 
