@@ -321,11 +321,17 @@ class DescriptionRefreshScheduler:
         Returns:
             True if repository has changes (or no metadata), False if unchanged
         """
-        metadata_path = Path(repo_path) / ".code-indexer" / "metadata.json"
+        metadata_dir = Path(repo_path) / ".code-indexer"
+        metadata_path = metadata_dir / "metadata.json"
 
         if not metadata_path.exists():
-            logger.debug(f"No metadata.json in {repo_path}, assuming changes")
-            return True
+            # Golden repos use provider-specific filenames: metadata-{provider}.json
+            provider_files = sorted(metadata_dir.glob("metadata-*.json"))
+            if provider_files:
+                metadata_path = provider_files[0]
+            else:
+                logger.debug(f"No metadata in {repo_path}, assuming changes")
+                return True
 
         try:
             with open(metadata_path) as f:
