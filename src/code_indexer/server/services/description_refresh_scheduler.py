@@ -250,6 +250,7 @@ class DescriptionRefreshScheduler:
             f"Description refresh scheduler started (interval: {interval_hours}h, {buckets} buckets)"
         )
 
+        self._migrate_global_suffix_filenames()
         self.reconcile_orphan_tracking()
         self.reconcile_broken_lifecycle_metadata()
         self.reconcile_terse_descriptions()
@@ -553,6 +554,45 @@ class DescriptionRefreshScheduler:
             )
             return 0
         return len(terse)
+
+    def _migrate_global_suffix_filenames(self) -> int:
+        """One-time migration: rename {alias}-global.md -> {alias}.md in cidx-meta.
+
+        v10.4.9 introduced -global suffix in WRITE paths. v10.8.0 reversed this.
+        Must run BEFORE any description scan to preserve existing frontmatter.
+        Skips rename when target {alias}.md already exists.
+
+        # INVARIANT: cidx-meta descriptions use the SHORT repo alias as filename:
+        #   {short_alias}.md  (e.g., JSqlParser.md)
+        # The "-global" suffix belongs to the registry alias_name, NOT the filename.
+        """
+        if self._meta_dir is None or not self._meta_dir.exists():
+            return 0
+        try:
+            aliases = self._list_golden_aliases()
+            if not aliases:
+                return 0
+            count = 0
+            for alias in aliases:
+                old_file = self._meta_dir / f"{alias}-global.md"
+                new_file = self._meta_dir / f"{alias}.md"
+                if old_file.exists() and not new_file.exists():
+                    old_file.rename(new_file)
+                    logger.info(
+                        "Filename migration: renamed %s -> %s",
+                        old_file.name,
+                        new_file.name,
+                    )
+                    count += 1
+            if count:
+                logger.info("Filename migration: renamed %d files", count)
+            return count
+        except Exception:
+            logger.error(
+                "Filename migration: failed — skipping (non-fatal)",
+                exc_info=True,
+            )
+            return 0
 
     def _find_terse_description_aliases(
         self, aliases: List[str]
