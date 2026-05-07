@@ -2337,11 +2337,12 @@ class RefreshScheduler:
         """
         Queue description generation when cidx-meta description file is missing.
 
-        Checks for golden-repos/cidx-meta/{alias_name}.md and submits work to
+        Checks for golden-repos/cidx-meta/{short_alias}.md and submits work to
         ClaudeCliManager if the file does not exist.
 
         Args:
-            alias_name: Global alias name (e.g., "my-repo-global")
+            alias_name: Global alias name (e.g., "my-repo-global"). The "-global"
+                suffix is stripped to form the filename (e.g., "my-repo.md").
             master_path: Master golden repo path (used as repo_path for generation)
             claude_cli_manager: ClaudeCliManager instance to submit work to
 
@@ -2349,10 +2350,13 @@ class RefreshScheduler:
             True if description was queued, False if already exists or error
         """
         cidx_meta_dir = self.golden_repos_dir / "cidx-meta"
-        # v10.4.9: align to {alias_name}.md convention used by MetaDirectoryUpdater
-        # and the cidx-meta hook. Previously stripped "-global" then looked for
-        # {repo_name}.md — never matched what the hook actually wrote.
-        description_file = cidx_meta_dir / f"{alias_name}.md"
+        short_alias = alias_name.removesuffix("-global")
+        # INVARIANT: cidx-meta descriptions use the SHORT repo alias as filename:
+        #   {short_alias}.md  (e.g., JSqlParser.md)
+        # The "-global" suffix belongs to the registry alias_name, NOT the filename.
+        # DO NOT change this to use "-global" in the filename -- v10.4.9 did this
+        # and broke 10 read paths, the UI, and access filtering. Fixed in v10.7.x.
+        description_file = cidx_meta_dir / f"{short_alias}.md"
 
         if description_file.exists():
             return False

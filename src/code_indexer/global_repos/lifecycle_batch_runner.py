@@ -210,6 +210,7 @@ def write_meta_md(
         )
 
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
+    # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT {alias}-global.md
     meta_md_path = cidx_meta_path / f"{alias}.md"
 
     # -- Cooperative lock ---------------------------------------------------
@@ -313,6 +314,7 @@ class LifecycleFleetScanner:
                 broken.append(alias)
                 continue
 
+            # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT {alias}-global.md
             meta_path = self._cidx_meta_dir / f"{alias}.md"
 
             if not meta_path.exists():

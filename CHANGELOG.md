@@ -5,13 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.8.0 (2026-05-07) — Remove `-global` from cidx-meta description filenames
+
+Production bug fix: v10.4.9 changed cidx-meta description filenames from `{alias}.md` to `{alias}-global.md`, but only in WRITE paths. 10 READ paths still used `{alias}.md`, causing: UI showing no descriptions, terse-backfill storms on every startup, all repos quarantined by refresh scheduler, and a security bypass in access filtering (all descriptions visible to all users). The `-global` suffix was a registry naming convention leak into the filesystem -- this release removes it entirely and adds protective INVARIANT comments at all 10 filename-construction sites.
+
+### Fixed
+- **Description filename convention**: removed `-global` suffix from all WRITE/DELETE paths in `meta_description_hook.py`, `meta_directory_updater.py`, and `refresh_scheduler.py`. Filenames standardized on `{short_alias}.md`.
+- **Managed-file filter**: `MetaDirectoryUpdater._get_existing_description_aliases()` now matches `.md` stems against known registered aliases instead of relying on `*-global.md` glob pattern. Non-managed files (README.md, runbooks) excluded by alias whitelist.
+- **Migration**: `MetaDirectoryUpdater.update()` auto-renames existing `{alias}-global.md` to `{alias}.md` on first run (skips if target already exists).
+- **Registry alias stripping**: `_get_safe_registered_aliases()` strips `-global` suffix from registry `alias_name` values before use.
+- **Refresh scheduler**: `_queue_missing_description()` strips `-global` suffix before constructing filename.
+- **10 READ paths auto-fixed**: all paths that construct `{alias}.md` from short aliases now find the correct files without any code changes.
+- **Access filtering security bypass**: `access_filtering_service.py` stem comparison works again because file stems match short aliases.
+
+### Added
+- INVARIANT protective comments at all 10 filename-construction sites warning against reintroducing `-global` in filenames.
+- Migration tests in `test_meta_directory_updater_hardening.py`: rename and skip-when-both-exist scenarios.
+
+### Removed
+- `test_cidx_meta_filename_alignment_v10_4_9.py` (405 lines) -- enforced the incorrect `-global.md` convention.
+
 ## v10.7.0 (2026-05-07) — cidx-meta MetaDirectoryUpdater hardening (defense-in-depth)
 
 Production data loss prevention: MetaDirectoryUpdater twice wiped $500+ worth of Claude-generated description files due to blind destructive reconciliation with no safety gates. This release adds defense-in-depth at three layers (filesystem, git commit, git push) to prevent mass-deletion of cidx-meta content.
 
 ### Fixed
 - **Mass-delete safety threshold**: `MetaDirectoryUpdater.update()` now raises `MetaDirectoryMassDeleteBlocked` when deletion ratio exceeds 50% and at least 3 managed files exist, preventing empty-registry or transient-glitch wipeouts.
-- **Managed-file filter**: changed `glob("*.md")` to `glob("*-global.md")` so non-managed files (README.md, runbooks, etc.) are never treated as managed or counted in deletion ratios.
+- **Managed-file filter**: changed `glob("*.md")` to registry-aware alias matching so non-managed files (README.md, runbooks, etc.) are never treated as managed or counted in deletion ratios (further refined in v10.8.0).
 - **Stub overwrite guard**: creation loop now checks `if not desc_file.exists()` before writing, preventing rich descriptions from being overwritten by 3-line stubs.
 - **Lock discipline for MetaDirectoryUpdater**: `update()` acquires cidx-meta write lock before filesystem changes and releases in finally block. Skips update when lock not acquired.
 - **Lock discipline for on_repo_removed**: `meta_description_hook.py` acquires cidx-meta write lock before deleting description files on repo removal.
@@ -21,7 +41,6 @@ Production data loss prevention: MetaDirectoryUpdater twice wiped $500+ worth of
 
 ### Added
 - `tests/unit/global_repos/test_meta_directory_updater_hardening.py` (29 tests) -- comprehensive safety threshold, stub guard, lock discipline, sync gate, bootstrap, and porcelain parsing tests.
-- Extended `test_cidx_meta_filename_alignment_v10_4_9.py` with non-global .md file survival test.
 - Path model documentation comments in `meta_directory_updater.py` module docstring.
 
 ## v10.6.0 (2026-05-06) — Fix Claude CLI timeouts, concurrency bug, and UI cosmetic issues

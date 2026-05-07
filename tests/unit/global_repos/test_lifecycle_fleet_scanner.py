@@ -144,20 +144,20 @@ def test_find_broken_or_missing_skips_cidx_meta_self_alias(
 ) -> None:
     """'cidx-meta' self-alias is never flagged, even with no .md file present."""
     cidx_meta_dir = golden_repos_dir / "cidx-meta"
-    # Write a valid file for real-global to confirm regular aliases ARE processed
+    # Write a valid file for real to confirm regular aliases ARE processed
     fm_yaml = yaml.dump(
         _VALID_FRONTMATTER, default_flow_style=False, allow_unicode=True
     )
-    (cidx_meta_dir / "real-global.md").write_text(
+    (cidx_meta_dir / "real.md").write_text(
         f"---\n{fm_yaml}---\n\nSome description.\n", encoding="utf-8"
     )
     scanner = LifecycleFleetScanner(
         golden_repos_dir=golden_repos_dir,
-        repo_aliases=["cidx-meta", "real-global"],
+        repo_aliases=["cidx-meta", "real"],
     )
     broken = scanner.find_broken_or_missing()
     assert "cidx-meta" not in broken
-    assert "real-global" not in broken
+    assert "real" not in broken
 
 
 # ---------------------------------------------------------------------------

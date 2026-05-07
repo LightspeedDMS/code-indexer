@@ -106,7 +106,7 @@ def test_write_meta_md_lock_failure_raises_and_does_not_write(
     golden_repos_dir: Path, mock_scheduler_locked: MagicMock
 ) -> None:
     """acquire_write_lock returns False -> LifecycleLockUnavailableError, no file, no release."""
-    meta_path = golden_repos_dir / "cidx-meta" / "foo-global.md"
+    meta_path = golden_repos_dir / "cidx-meta" / "foo.md"
 
     with pytest.raises(LifecycleLockUnavailableError):
         write_meta_md(
@@ -160,7 +160,7 @@ def test_write_meta_md_uses_atomic_rename(
       - os.rename must be called with the final destination = cidx-meta/<alias>.md
     """
     cidx_meta_dir = golden_repos_dir / "cidx-meta"
-    final_path = str(cidx_meta_dir / "foo-global.md")
+    final_path = str(cidx_meta_dir / "foo.md")
 
     mkstemp_calls: list = []
     rename_calls: list = []
@@ -187,7 +187,7 @@ def test_write_meta_md_uses_atomic_rename(
         ),
     ):
         write_meta_md(
-            alias="foo-global",
+            alias="foo",
             description_body=DESCRIPTION,
             lifecycle_frontmatter=LIFECYCLE_FM,
             already_locked=False,
@@ -218,7 +218,7 @@ def test_write_meta_md_frontmatter_contains_lifecycle_fields(
 ) -> None:
     """Written file has YAML frontmatter with lifecycle and lifecycle_schema_version."""
     write_meta_md(
-        alias="repo-beta-global",
+        alias="repo-beta",
         description_body=DESCRIPTION,
         lifecycle_frontmatter=LIFECYCLE_FM,
         already_locked=False,
@@ -226,7 +226,7 @@ def test_write_meta_md_frontmatter_contains_lifecycle_fields(
         golden_repos_dir=golden_repos_dir,
     )
 
-    content = (golden_repos_dir / "cidx-meta" / "repo-beta-global.md").read_text()
+    content = (golden_repos_dir / "cidx-meta" / "repo-beta.md").read_text()
     assert content.startswith("---\n"), (
         "File must start with YAML frontmatter delimiter"
     )

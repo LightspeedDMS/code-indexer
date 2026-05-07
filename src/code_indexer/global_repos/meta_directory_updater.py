@@ -20,7 +20,7 @@ PATH MODEL (four path types in code-indexer golden repos):
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from .update_strategy import UpdateStrategy
 
@@ -68,7 +68,7 @@ class MetaDirectoryUpdater(UpdateStrategy):
     Unsafe aliases are logged and excluded, so both has_changes() and update()
     operate on the same validated alias set and always converge.
 
-    Managed files are identified by the *-global.md glob pattern only.
+    Managed files are identified by matching stems against known repo aliases.
     Non-managed files (README.md, CHANGELOG.md, etc.) are never touched.
     """
 
@@ -104,11 +104,11 @@ class MetaDirectoryUpdater(UpdateStrategy):
             True if changes detected, False if in sync
         """
         registered = self._get_safe_registered_aliases()
-        existing_files = self._get_existing_description_aliases()
+        all_existing = self._get_existing_description_aliases(known_aliases=None)
 
-        if registered - existing_files:
+        if registered - all_existing:
             return True
-        if existing_files - registered:
+        if all_existing - registered:
             return True
         return False
 
@@ -152,32 +152,55 @@ class MetaDirectoryUpdater(UpdateStrategy):
 
         try:
             registered = self._get_safe_registered_aliases()
-            existing_files = self._get_existing_description_aliases()
+
+            # One-time migration: rename {alias}-global.md -> {alias}.md
+            for short_alias in registered:
+                old_file = self.meta_dir / f"{short_alias}-global.md"
+                new_file = self.meta_dir / f"{short_alias}.md"
+                if old_file.exists() and not new_file.exists():
+                    old_file.rename(new_file)
+                    logger.info(
+                        "MetaDirectoryUpdater: migrated %s -> %s",
+                        old_file.name,
+                        new_file.name,
+                    )
+
+            # Find all plausible managed .md files on disk for orphan/mass-delete detection.
+            # Uses known_aliases=None so we find files that were previously managed but
+            # whose aliases may no longer be in the registry (orphaned files).
+            # The None fallback excludes _-prefixed and uppercase-initial files (README etc.).
+            all_existing = self._get_existing_description_aliases(known_aliases=None)
+
+            # For stub creation, only check files that match current registered aliases.
+            existing_registered = self._get_existing_description_aliases(
+                known_aliases=registered
+            )
 
             # Create missing description files (stub only -- never overwrite existing)
-            for alias in registered - existing_files:
+            for alias in registered - existing_registered:
                 desc_file = self.meta_dir / f"{alias}.md"
                 if not desc_file.exists():
+                    # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT {alias}-global.md
                     desc_file.write_text(f"# {alias}\n\nGolden repository: {alias}\n")
                     logger.info(
                         "MetaDirectoryUpdater: created description file %s", desc_file
                     )
 
             # Safety threshold: block mass-deletion
-            to_delete = existing_files - registered
-            if to_delete and len(existing_files) >= MIN_FILES_FOR_THRESHOLD:
-                ratio = len(to_delete) / len(existing_files)
+            to_delete = all_existing - registered
+            if to_delete and len(all_existing) >= MIN_FILES_FOR_THRESHOLD:
+                ratio = len(to_delete) / len(all_existing)
                 if ratio > MAX_DELETE_RATIO:
                     logger.error(
                         "MetaDirectoryUpdater: BLOCKED mass-delete of %d/%d files (%.0f%%). "
                         "Aliases: %s",
                         len(to_delete),
-                        len(existing_files),
+                        len(all_existing),
                         ratio * 100,
                         sorted(to_delete)[:10],
                     )
                     raise MetaDirectoryMassDeleteBlocked(
-                        len(to_delete), len(existing_files), to_delete
+                        len(to_delete), len(all_existing), to_delete
                     )
 
             for alias in to_delete:
@@ -211,21 +234,32 @@ class MetaDirectoryUpdater(UpdateStrategy):
         safe = set()
         for repo in repos:
             alias = repo["alias_name"]
-            if _SAFE_ALIAS_PATTERN.match(alias):
-                safe.add(alias)
+            short = alias.removesuffix("-global")
+            if _SAFE_ALIAS_PATTERN.match(short):
+                safe.add(short)
             else:
                 logger.warning(
                     "MetaDirectoryUpdater: excluded unsafe alias from sync: %r", alias
                 )
         return safe
 
-    def _get_existing_description_aliases(self) -> set:
-        """Return set of alias names inferred from existing *-global.md files in meta_dir.
+    def _get_existing_description_aliases(
+        self, known_aliases: Optional[set] = None
+    ) -> set:
+        """Return set of short aliases that have description .md files in meta_dir.
 
-        Only files matching the *-global.md pattern are considered managed.
-        Non-managed files (README.md, CHANGELOG.md, notes.md, etc.) are ignored
-        and never modified by this updater.
+        When known_aliases is provided (recommended), only .md files whose stem
+        matches a known alias are considered managed. This prevents non-managed
+        files (README.md, CHANGELOG.md, etc.) from being treated as repo
+        description files.
         """
         if not self.meta_dir.exists():
             return set()
-        return {f.stem for f in self.meta_dir.glob("*-global.md")}
+        existing = set()
+        for f in self.meta_dir.glob("*.md"):
+            if known_aliases is not None:
+                if f.stem in known_aliases:
+                    existing.add(f.stem)
+            elif not f.name.startswith("_") and not f.name[0].isupper():
+                existing.add(f.stem)
+        return existing

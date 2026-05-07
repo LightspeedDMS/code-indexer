@@ -213,7 +213,7 @@ def test_run_acquires_and_releases_lock_per_sub_batch(golden_repos_dir: Path) ->
     per alias (N times total), not once per sub-batch.  Each lock key is
     "lifecycle:<alias>" rather than the global "cidx-meta".
     """
-    aliases = ["a-global", "b-global", "c-global"]  # 3 repos → 3 per-alias acquires
+    aliases = ["a", "b", "c"]  # 3 repos → 3 per-alias acquires
     for alias in aliases:
         (golden_repos_dir / alias).mkdir(exist_ok=True)
     log = _EventLog()
@@ -242,7 +242,7 @@ def test_run_calls_complete_job_after_all_sub_batches(golden_repos_dir: Path) ->
     Ordering: every release event precedes complete_job in the shared event log.
     Proves complete_job fires only after all sub-batches have finished.
     """
-    aliases = ["p-global", "q-global", "r-global"]
+    aliases = ["p", "q", "r"]
     log = _EventLog()
     runner, _, job_tracker, _ = _make_runner(
         golden_repos_dir, log, sub_batch_size_override=FORCED_SUB_BATCH_SIZE
@@ -268,7 +268,7 @@ def test_run_signals_debouncer_after_all_sub_batches(golden_repos_dir: Path) -> 
     Ordering: signal_dirty appears after every release event in the event log.
     Proves the debouncer fires exactly once per run after all sub-batches join.
     """
-    aliases = ["s-global", "t-global", "u-global", "v-global"]
+    aliases = ["s", "t", "u", "v"]
     log = _EventLog()
     runner, _, _, debouncer = _make_runner(
         golden_repos_dir, log, sub_batch_size_override=FORCED_SUB_BATCH_SIZE
@@ -295,16 +295,16 @@ def test_run_completes_despite_per_alias_lock_failure(golden_repos_dir: Path) ->
     _process_one_repo is treated as a per-repo exception — logged at ERROR
     level and swallowed — so the batch completes and complete_job IS called.
 
-    acquire_sequence: x-global→True, y-global→False (lock fails), z-global→True.
-    Sub-batch size 2: first batch [x-global, y-global], second batch [z-global].
+    acquire_sequence: x→True, y→False (lock fails), z→True.
+    Sub-batch size 2: first batch [x, y], second batch [z].
 
     Verifications:
     - complete_job IS called (batch did not abort)
     - debouncer.signal_dirty IS called
-    - y-global (lock failed) has NO .md file in cidx-meta (fail-closed)
-    - x-global and z-global (locks succeeded) DO have .md files in cidx-meta
+    - y (lock failed) has NO .md file in cidx-meta (fail-closed)
+    - x and z (locks succeeded) DO have .md files in cidx-meta
     """
-    aliases = ["x-global", "y-global", "z-global"]
+    aliases = ["x", "y", "z"]
     for alias in aliases:
         (golden_repos_dir / alias).mkdir(exist_ok=True)
     log = _EventLog()
@@ -326,14 +326,14 @@ def test_run_completes_despite_per_alias_lock_failure(golden_repos_dir: Path) ->
     )
 
     cidx_meta = golden_repos_dir / "cidx-meta"
-    assert not (cidx_meta / "y-global.md").exists(), (
-        "y-global.md must NOT exist: lock failed for this alias"
+    assert not (cidx_meta / "y.md").exists(), (
+        "y.md must NOT exist: lock failed for this alias"
     )
-    assert (cidx_meta / "x-global.md").exists(), (
-        "x-global.md must exist: lock succeeded for this alias"
+    assert (cidx_meta / "x.md").exists(), (
+        "x.md must exist: lock succeeded for this alias"
     )
-    assert (cidx_meta / "z-global.md").exists(), (
-        "z-global.md must exist: lock succeeded for this alias"
+    assert (cidx_meta / "z.md").exists(), (
+        "z.md must exist: lock succeeded for this alias"
     )
 
 
@@ -354,7 +354,7 @@ def test_process_one_repo_emits_current_schema_version(golden_repos_dir: Path) -
     """
     import yaml
 
-    alias = "writer-test-global"
+    alias = "writer-test"
     (golden_repos_dir / alias).mkdir(exist_ok=True)
 
     log = _EventLog()
