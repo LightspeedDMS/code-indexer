@@ -18,7 +18,7 @@ inputSchema:
       description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files. Backed by RegexSearchService (ripgrep) for content. Renamed from driver_regex in v10.3.x.'
     evaluator_code:
       type: string
-      description: 'Optional. Python code snippet evaluated ONCE per candidate file in a sandboxed subprocess. Receives globals: node (file root XRayNode), root (alias), source (file UTF-8 text), lang (language name), file_path (absolute path), match_positions (list of dicts: one per Phase 1 hit, each with line_number/column/line_content/byte_offset/context_before/context_after; empty list in filename mode). MUST return a dict with shape {"matches": [...], "value": <any>}. Defaults to a snippet that emits one match per Phase 1 hit (or a single file-level match in filename mode), accepting all candidate files for AST exploration without requiring the caller to write their own evaluator. Each match in the list is a dict requiring at minimum line_number; may carry any open keys.'
+      description: 'Optional. Python code snippet evaluated ONCE per candidate file in a sandboxed subprocess. Receives globals: node (file root XRayNode), root (alias), source (file UTF-8 text), lang (language name), file_path (absolute path), match_positions (list of dicts: one per Phase 1 hit, each with line_number/column/line_content/byte_offset/ast_node/context_before/context_after; ast_node is the XRayNode at the hit location; empty list in filename mode). Can use import re/collections/itertools/functools and define helper functions with def/lambda. MUST return a dict with shape {"matches": [...], "value": <any>} or {"skip": True} to bail out. Optional "file_role" key tags the file in file_metadata. Defaults to a snippet that emits one match per Phase 1 hit (or a single file-level match in filename mode), accepting all candidate files for AST exploration without requiring the caller to write their own evaluator. Each match in the list is a dict requiring at minimum line_number; may carry any open keys.'
     search_target:
       type: string
       enum:
@@ -76,9 +76,9 @@ inputSchema:
       minimum: 1
     await_seconds:
       type: number
-      description: 'Optional server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0 (default), returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range 0.0..10.0 (lowered from 30 in v10.3.2 to keep server-side polling within threadpool capacity). Error code await_seconds_invalid if out of range or wrong type.'
+      description: 'Optional server-side polling window in seconds. Accepts floats (e.g. 2.5). When 0 (default), returns {job_id} immediately. When > 0, the server polls the background job for up to await_seconds and returns the inline result if the job completes; otherwise falls back to {job_id}. Range 0.0..120.0 (raised from 10.0 in v10.5.0). Values > 30.0 emit a server-side warning. Error code await_seconds_invalid if out of range or wrong type.'
       minimum: 0
-      maximum: 10.0
+      maximum: 120.0
       default: 0
   required:
     - repository_alias
@@ -131,7 +131,7 @@ PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_t
 
 PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs ONCE in a sandboxed subprocess with the file root AST node and the full list of Phase 1 hits for that file. The evaluator returns a dict `{"matches": [...], "value": ...}`. The server enriches each match with `file_path`, `language`, `line_content` (when omitted), `matched_node`, and `ast_debug`.
 
-Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 10 seconds.
+Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 120 seconds (v10.5.0).
 
 ## Parameters
 
@@ -151,7 +151,7 @@ Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap (10..600). |
 | max_debug_nodes | int | no | 50 | Maximum AST nodes in the `ast_debug` payload per match (1..500). When the cap is hit a `{"type": "...truncated"}` sentinel appears in the children list. |
 | max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. Renamed from `max_files` in v10.3.x. |
-| await_seconds | float | no | 0 | Server-side inline-wait window (0.0..10.0). |
+| await_seconds | float | no | 0 | Server-side inline-wait window (0.0..120.0, v10.5.0). |
 
 ## Evaluator API
 
@@ -166,7 +166,7 @@ The evaluator API for `xray_explore` is identical to `xray_search`. The evaluato
 | `source` | `str` | Full file content as a UTF-8 string. Equivalent to `node.text`. |
 | `lang` | `str` | tree-sitter language name. One of: `java`, `kotlin`, `go`, `python`, `typescript`, `javascript`, `bash`, `csharp`, `html`, `css` (and `terraform` when `tree_sitter_hcl` is installed). |
 | `file_path` | `str` | Absolute path of the file being evaluated. |
-| `match_positions` | `list[dict]` | List of every Phase 1 regex hit in this file. Each entry: `{"line_number": int, "column": int, "line_content": str, "byte_offset": int, "context_before": list[str], "context_after": list[str]}`. EMPTY LIST in `search_target='filename'` mode. |
+| `match_positions` | `list[dict]` | List of every Phase 1 regex hit in this file. Each entry: `{"line_number": int, "column": int, "line_content": str, "byte_offset": int, "ast_node": XRayNode, "context_before": list[str], "context_after": list[str]}`. The `ast_node` field (v10.5.0) is the smallest named AST node at the hit's byte offset. EMPTY LIST in `search_target='filename'` mode. |
 
 The legacy per-position globals `match_byte_offset`, `match_line_number`, `match_line_content` are still passed (always `None` under the file-as-unit contract) and SHOULD NOT be referenced by new evaluators.
 
@@ -208,13 +208,17 @@ The sandbox accepts the following Python AST node types in evaluator code (every
 
 > **Termination guarantee**: infinite loops and unbounded iteration in your evaluator do NOT cause validation rejection — they hit the subprocess hard timeout (HARD_TIMEOUT_SECONDS = 5.0 s, SIGTERM; SIGKILL_GRACE_SECONDS = 1.0 s grace) and surface as `EvaluatorTimeout` in `evaluation_errors[]`.
 
-**Still banned**: `class`, `def`, `async def`, `lambda`, `import`, `from ... import`, `global`, `nonlocal`, `with`, `async with`, `async`, `await`, `yield`, `yield from`.
+**Now allowed (v10.5.0)**:
+- `def`, `lambda` — define helper functions to structure multi-pass evaluator logic
+- `import`, `from ... import` — ONLY for whitelisted stdlib modules: `re`, `collections`, `itertools`, `functools`. Non-whitelisted imports raise `ImportError` at runtime.
 
-**Safe builtins** (available in the exec environment):
-`len, str, int, bool, list, tuple, dict, min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr` plus exception types for `except` clauses: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`.
+**Still banned**: `class`, `async def`, `global`, `nonlocal`, `with`, `async with`, `async`, `await`, `yield`, `yield from`.
+
+**Safe builtins** (34 total, available in the exec environment):
+`len, str, int, bool, list, tuple, dict, min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr, isinstance, type, set, frozenset, float, repr, print` plus exception types for `except` clauses: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`.
 
 **Stripped builtins** (removed from the exec environment — referencing them raises NameError):
-`getattr, setattr, delattr, __import__, eval, exec, open, compile`.
+`getattr, setattr, delattr, eval, exec, open, compile`. Note: `__import__` is replaced by a restricted import function that enforces the stdlib whitelist.
 
 **Dunder attribute blocklist** (Attribute and Subscript access to these names is rejected at AST validation time as sandbox escape vectors):
 
