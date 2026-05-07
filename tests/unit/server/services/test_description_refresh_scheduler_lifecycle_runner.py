@@ -277,6 +277,10 @@ class TestLifecycleRunnerInvocation:
         _seed_golden_repo(atomic_db_path, alias, str(clone_path))
         _seed_tracking_row(atomic_db_path, alias, lifecycle_version=1)
         _seed_clone_metadata(clone_path)
+        # Simulate code changes: tracking has _KNOWN_COMMIT, metadata now has a new commit
+        (clone_path / ".code-indexer" / "metadata.json").write_text(
+            json.dumps({"current_commit": "new_commit_after_push"})
+        )
         meta_dir = tmp_path / "cidx-meta"
         _seed_meta_md(meta_dir, alias)
 
@@ -312,19 +316,22 @@ class TestLifecycleRunnerInvocation:
         assert run_kwargs["parent_job_id"].startswith(f"desc-refresh-{alias}-")
 
 
-class TestUnconditionalFiring:
-    """The has_changes and lifecycle_backfill gates must no longer suppress refresh."""
+class TestChangeGate:
+    """The has_changes gate must prevent wasted LLM calls for unchanged repos."""
 
     @patch(_PATCH_RUNNER)
-    def test_refresh_fires_unconditionally_when_no_changes_detected(
+    def test_refresh_skipped_when_no_changes_detected(
         self, runner_cls, tmp_path, atomic_db_path, real_job_tracker
     ):
         """
         Repo metadata.json has matching current_commit (no code changes) AND
-        lifecycle_schema_version is current. Old code path would skip —
-        post-D3, runner MUST fire.
+        lifecycle_schema_version is current. The has_changes gate must skip
+        the repo and reschedule it without invoking LifecycleBatchRunner.
         """
         from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
+        from code_indexer.server.storage.sqlite_backends import (
+            DescriptionRefreshTrackingBackend,
+        )
 
         _full_schema_init(atomic_db_path)
         alias = "no-changes-repo"
@@ -351,8 +358,17 @@ class TestUnconditionalFiring:
 
         _run_single_pass_synchronously(scheduler)
 
-        runner_cls.assert_called_once()
-        runner_cls.return_value.run.assert_called_once()
+        runner_cls.assert_not_called()
+        record = DescriptionRefreshTrackingBackend(atomic_db_path).get_tracking_record(
+            alias
+        )
+        assert record is not None
+        assert record["status"] == "pending", (
+            f"Unchanged repo must stay 'pending', got '{record['status']}'"
+        )
+        assert record["next_run"] > _STALE_NEXT_RUN, (
+            "Unchanged repo must be rescheduled to a future next_run"
+        )
 
     @patch(_PATCH_RUNNER)
     def test_refresh_fires_unconditionally_when_lifecycle_schema_current(

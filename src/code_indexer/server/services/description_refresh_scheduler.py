@@ -210,6 +210,7 @@ class DescriptionRefreshScheduler:
         # Subsequent passes for the same repo downgrade the log to DEBUG so the
         # warning fires at most once per repo (re-armed after a successful refresh).
         self._warned_missing_desc: set = set()
+        self._backfill_in_progress = threading.Event()
         # Story #728 AC5: Bounded thread pool sized by max_concurrent_claude_cli config.
         # Prevents mass backfill from spawning N unbounded concurrent Claude CLI processes.
         # Canonical default comes from ClaudeIntegrationConfig to avoid duplication.
@@ -663,6 +664,7 @@ class DescriptionRefreshScheduler:
         All exceptions are logged and swallowed — a sweep failure must not crash
         the daemon thread or leak back into scheduler startup.
         """
+        self._backfill_in_progress.set()
         try:
             if self._job_tracker is None:
                 logger.error(
@@ -704,6 +706,8 @@ class DescriptionRefreshScheduler:
                 "Description backfill async: regeneration thread failed",
                 exc_info=True,
             )
+        finally:
+            self._backfill_in_progress.clear()
 
     def _check_lifecycle_backfill_wiring(self) -> bool:
         """Return True if all five lifecycle collaborators are wired; log WARNING and
@@ -793,6 +797,7 @@ class DescriptionRefreshScheduler:
         All exceptions are logged and swallowed — a sweep failure must not crash
         the daemon thread or leak back into scheduler startup.
         """
+        self._backfill_in_progress.set()
         try:
             if self._job_tracker is None:
                 logger.error(
@@ -831,6 +836,8 @@ class DescriptionRefreshScheduler:
                 "Lifecycle backfill async: repair thread failed",
                 exc_info=True,
             )
+        finally:
+            self._backfill_in_progress.clear()
 
     def on_refresh_complete(
         self,
@@ -958,6 +965,10 @@ class DescriptionRefreshScheduler:
         For each stale repo with changes, registers a description_refresh job in the
         job_tracker (if configured) and spawns a background thread (AC2, Story #313).
         """
+        if self._backfill_in_progress.is_set():
+            logger.debug("Description refresh pass skipped: backfill in progress")
+            return
+
         import uuid
 
         stale_repos = self.get_stale_repos()
@@ -981,6 +992,15 @@ class DescriptionRefreshScheduler:
                         alias,
                         self._prompt_failure_counts[alias],
                         PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                    )
+                    continue
+
+                if not self.has_changes_since_last_run(clone_path, repo):
+                    now = datetime.now(timezone.utc).isoformat()
+                    self._tracking_backend.upsert_tracking(
+                        repo_alias=alias,
+                        next_run=self.calculate_next_run(alias),
+                        updated_at=now,
                     )
                     continue
 

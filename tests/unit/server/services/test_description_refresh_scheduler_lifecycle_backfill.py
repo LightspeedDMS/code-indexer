@@ -49,6 +49,8 @@ def _make_scheduler_bare() -> Any:
     All lifecycle collaborators are initially None (mirrors production
     state before lifespan wires them).
     """
+    import threading
+
     from code_indexer.server.services.description_refresh_scheduler import (
         DescriptionRefreshScheduler,
     )
@@ -61,9 +63,10 @@ def _make_scheduler_bare() -> Any:
     sched._lifecycle_debouncer = None
     sched._refresh_scheduler = None
 
-    # Required by _run_lifecycle_backfill_async()
+    # Required by _run_lifecycle_backfill_async() / _run_description_backfill_async()
     sched._job_tracker = None
     sched._tracking_backend = MagicMock()
+    sched._backfill_in_progress = threading.Event()
 
     # Required by reconcile_broken_lifecycle_metadata() scan phase
     sched._golden_backend = MagicMock()
