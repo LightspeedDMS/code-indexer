@@ -153,18 +153,6 @@ class MetaDirectoryUpdater(UpdateStrategy):
         try:
             registered = self._get_safe_registered_aliases()
 
-            # One-time migration: rename {alias}-global.md -> {alias}.md
-            for short_alias in registered:
-                old_file = self.meta_dir / f"{short_alias}-global.md"
-                new_file = self.meta_dir / f"{short_alias}.md"
-                if old_file.exists() and not new_file.exists():
-                    old_file.rename(new_file)
-                    logger.info(
-                        "MetaDirectoryUpdater: migrated %s -> %s",
-                        old_file.name,
-                        new_file.name,
-                    )
-
             # Find all plausible managed .md files on disk for orphan/mass-delete detection.
             # Uses known_aliases=None so we find files that were previously managed but
             # whose aliases may no longer be in the registry (orphaned files).
