@@ -22,10 +22,19 @@ This module verifies:
 5. match dict has correct line_number and line_content from evaluator/enrichment.
 6. Evaluator can walk DOWN from root via descendants_of_type.
 7. Multi-hit files: evaluator receives match_positions with multiple entries.
+
+NOTE: Tests that previously patched sandbox.run() to capture kwargs have been
+converted to result-based tests.  With the spawn-driver architecture (Bug #994),
+sandbox.run() executes inside a child process where parent-side patches are not
+visible.  The converted tests instead write evaluator code that introspects the
+globals it received and returns diagnostic data, then verify the returned result.
+Error-field tests patch sandbox.run_batch() (called in the parent process) to
+inject pre-constructed failure tuples directly.
 """
 
 from __future__ import annotations
 
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -47,6 +56,54 @@ def ast_engine():
     from code_indexer.xray.ast_engine import AstSearchEngine
 
     return AstSearchEngine()
+
+
+# ---------------------------------------------------------------------------
+# Shared helper for error-injection tests
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_run_batch(
+    error_type: str,
+    error_message: str,
+) -> Callable[..., List[Tuple[List[Any], List[Any], Optional[Any]]]]:
+    """Return a fake run_batch side-effect that injects a single error tuple.
+
+    The returned callable reads file_specs[0]["file_path"] so that the
+    error dict carries the real path of the candidate file.
+
+    Args:
+        error_type: e.g. "EvaluatorTimeout" or "EvaluatorCrash".
+        error_message: Human-readable error description.
+
+    Returns:
+        A callable compatible with sandbox.run_batch's signature.
+    """
+
+    def fake_run_batch(
+        *,
+        evaluator_code: str,
+        file_specs: List[Dict[str, Any]],
+        worker_threads: int = 2,
+        timeout_seconds: int = 120,
+        ast_engine: Any = None,
+    ) -> List[Tuple[List[Any], List[Any], Optional[Any]]]:
+        return [
+            (
+                [],
+                [
+                    {
+                        "file_path": str(file_specs[0]["file_path"]),
+                        "line_number": 0,
+                        "error_type": error_type,
+                        "error_message": error_message,
+                    }
+                ],
+                None,
+            )
+        ]
+
+    return fake_run_batch
 
 
 # ---------------------------------------------------------------------------
@@ -171,85 +228,75 @@ class TestLineToBytOffset:
 
 
 class TestSandboxReceivesRootNodeInContentMode:
-    """In content mode, sandbox.run must receive node=root (file root)."""
+    """In content mode, the evaluator receives node=root (file root).
+
+    Converted from sandbox.run-patching to result-based approach (Bug #994):
+    the evaluator code itself inspects the globals it received and returns
+    diagnostic data, which the test then checks in the result dict.
+    """
 
     def test_node_kwarg_is_root_in_content_mode(self, search_engine, tmp_path):
-        """In content mode, the node kwarg passed to sandbox.run is the file root."""
+        """In content mode, the node passed to the evaluator is the file root."""
         py_file = tmp_path / "test.py"
         py_file.write_text("def foo():\n    bar()\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator returns node.type so we can verify it is the module root.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"bar",
+            evaluator_code=(
+                'return {"matches": [{"line_number": 1}], "value": node.type}'
+            ),
+            search_target="content",
+        )
 
-        captured_nodes = []
-
-        def capturing_run(*args, **kwargs):
-            captured_nodes.append(kwargs.get("node"))
-            return EvalResult(value={"matches": [{"line_number": 1}], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=capturing_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"bar",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
-            )
-
-        # Must have been called exactly once (one file)
-        assert len(captured_nodes) == 1
-        # node must be the root (type == "module" for Python)
-        assert captured_nodes[0] is not None
-        assert captured_nodes[0].type == "module"
+        # The file produced at least one match; the value carries node.type.
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 1
+        assert file_meta[0]["value"] == "module"
 
     def test_node_kwarg_equals_root_kwarg_in_content_mode(
         self, search_engine, tmp_path
     ):
-        """node kwarg and root kwarg must be the same object in content mode."""
+        """node and root must be the same object in content mode."""
         py_file = tmp_path / "test.py"
         py_file.write_text("foo()\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator checks node is root by comparing their type and byte spans.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"foo",
+            evaluator_code=(
+                "same = (node.type == root.type "
+                "and node.start_byte == root.start_byte "
+                "and node.end_byte == root.end_byte)\n"
+                'return {"matches": [{"line_number": 1}], "value": same}'
+            ),
+            search_target="content",
+        )
 
-        captured_calls = []
-
-        def capturing_run(*args, **kwargs):
-            captured_calls.append(kwargs)
-            return EvalResult(value={"matches": [], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=capturing_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"foo",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
-            )
-
-        assert len(captured_calls) == 1
-        assert captured_calls[0]["node"] is captured_calls[0]["root"]
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 1
+        assert file_meta[0]["value"] is True
 
     def test_node_kwarg_is_root_in_filename_mode(self, search_engine, tmp_path):
-        """In filename mode, node kwarg must also be the file root."""
+        """In filename mode, node passed to the evaluator is also the file root."""
         py_file = tmp_path / "foo_module.py"
         py_file.write_text("x = 1\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator returns node.type to verify it is the module root.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"foo",
+            evaluator_code=(
+                'return {"matches": [{"line_number": 1}], "value": node.type}'
+            ),
+            search_target="filename",
+        )
 
-        captured_nodes = []
-
-        def capturing_run(*args, **kwargs):
-            captured_nodes.append(kwargs.get("node"))
-            return EvalResult(value={"matches": [{"line_number": 1}], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=capturing_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"foo",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="filename",
-            )
-
-        assert len(captured_nodes) == 1
-        assert captured_nodes[0] is not None
-        assert captured_nodes[0].type == "module"
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 1
+        assert file_meta[0]["value"] == "module"
 
 
 # ---------------------------------------------------------------------------
@@ -258,34 +305,32 @@ class TestSandboxReceivesRootNodeInContentMode:
 
 
 class TestMatchPositionsKwargInContentMode:
-    """In content mode, sandbox receives match_positions as a list of dicts."""
+    """In content mode, the evaluator receives match_positions as a list of dicts.
+
+    Converted from sandbox.run-patching to result-based approach (Bug #994).
+    """
 
     def test_match_positions_kwarg_is_list_in_content_mode(
         self, search_engine, tmp_path
     ):
-        """match_positions kwarg must be a list in content mode."""
+        """match_positions received by evaluator must be a list in content mode."""
         (tmp_path / "f.py").write_text("foo()\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator checks isinstance and returns the result.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"foo",
+            evaluator_code=(
+                "is_list = isinstance(match_positions, list)\n"
+                "has_items = len(match_positions) >= 1\n"
+                'return {"matches": [{"line_number": 1}], "value": is_list and has_items}'
+            ),
+            search_target="content",
+        )
 
-        captured = []
-
-        def capturing_run(*args, **kwargs):
-            captured.append(kwargs)
-            return EvalResult(value={"matches": [], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=capturing_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"foo",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
-            )
-
-        assert len(captured) == 1
-        mp = captured[0].get("match_positions")
-        assert isinstance(mp, list)
-        assert len(mp) >= 1
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 1
+        assert file_meta[0]["value"] is True
 
     def test_match_positions_entries_are_dicts_with_line_number(
         self, search_engine, tmp_path
@@ -293,162 +338,152 @@ class TestMatchPositionsKwargInContentMode:
         """Each match_positions entry has line_number key."""
         (tmp_path / "f.py").write_text("a = 1\nfoo()\nb = 3\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator checks first entry is a dict with line_number and returns it.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"foo",
+            evaluator_code=(
+                "entry = match_positions[0]\n"
+                "is_dict = isinstance(entry, dict)\n"
+                "has_ln = 'line_number' in entry\n"
+                "ln_val = entry.get('line_number', -1)\n"
+                'return {"matches": [{"line_number": ln_val}], "value": is_dict and has_ln}'
+            ),
+            search_target="content",
+        )
 
-        captured = []
-
-        def capturing_run(*args, **kwargs):
-            captured.append(kwargs)
-            return EvalResult(value={"matches": [], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=capturing_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"foo",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
-            )
-
-        assert len(captured) == 1
-        mp = captured[0]["match_positions"]
-        assert len(mp) == 1
-        assert mp[0]["line_number"] == 2  # 'foo()' is on line 2
+        assert len(result["matches"]) == 1
+        assert result["matches"][0]["line_number"] == 2  # 'foo()' is on line 2
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 1
+        assert file_meta[0]["value"] is True
 
     def test_match_positions_contains_all_hits_for_file(self, search_engine, tmp_path):
-        """File with 3 hits passes all 3 in match_positions (one sandbox call)."""
+        """File with 3 hits passes all 3 in match_positions (one evaluator call)."""
         (tmp_path / "f.py").write_text("foo()\nbar = 1\nfoo()\nbaz = 2\nfoo()\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator returns line numbers from all match_positions entries.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"foo",
+            evaluator_code=(
+                "lns = [p['line_number'] for p in match_positions]\n"
+                'return {"matches": [{"line_number": 1}], "value": lns}'
+            ),
+            search_target="content",
+        )
 
-        captured = []
-
-        def capturing_run(*args, **kwargs):
-            captured.append(kwargs)
-            return EvalResult(value={"matches": [], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=capturing_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"foo",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
-            )
-
-        # File-as-unit: exactly 1 sandbox call, with all 3 hits in match_positions
-        assert len(captured) == 1
-        mp = captured[0]["match_positions"]
-        assert len(mp) == 3
-        line_numbers = [p["line_number"] for p in mp]
-        assert line_numbers == [1, 3, 5]
+        # File-as-unit: evaluator is called once; value carries all line numbers.
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 1
+        assert file_meta[0]["value"] == [1, 3, 5]
 
     def test_match_positions_is_empty_in_filename_mode(self, search_engine, tmp_path):
         """In filename mode, match_positions must be an empty list."""
         (tmp_path / "foo_module.py").write_text("x = 1\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator returns len(match_positions); should be 0 in filename mode.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"foo",
+            evaluator_code=(
+                "count = len(match_positions)\n"
+                'return {"matches": [{"line_number": 1}], "value": count}'
+            ),
+            search_target="filename",
+        )
 
-        captured = []
-
-        def capturing_run(*args, **kwargs):
-            captured.append(kwargs)
-            return EvalResult(value={"matches": [{"line_number": 1}], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=capturing_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"foo",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="filename",
-            )
-
-        assert len(captured) == 1
-        mp = captured[0].get("match_positions")
-        assert isinstance(mp, list)
-        assert len(mp) == 0
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 1
+        assert file_meta[0]["value"] == 0
 
 
 # ---------------------------------------------------------------------------
-# File-as-unit: sandbox called ONCE per file
+# File-as-unit: evaluator called ONCE per file
 # ---------------------------------------------------------------------------
 
 
 class TestEvaluatorCalledOncePerFile:
-    """sandbox.run must be called exactly once per candidate file."""
+    """The evaluator must be called exactly once per candidate file.
+
+    Converted from sandbox.run-patching to result-based approach (Bug #994):
+    we verify call-count invariants via the structure of the returned results.
+    """
 
     def test_sandbox_called_once_for_file_with_multiple_hits(
         self, search_engine, tmp_path
     ):
-        """File with 3 driver hits -> sandbox.run called exactly once (not 3 times)."""
+        """File with 3 driver hits -> evaluator called exactly once (not 3 times).
+
+        Evidence: file_metadata has exactly 1 entry for the one candidate file,
+        and the value carries the count of match_positions (which is 3, not 1),
+        proving the evaluator received all hits in a single call.
+        """
         py_file = tmp_path / "multi.py"
         py_file.write_text("foo()\nfoo()\nfoo()\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator returns number of positions it received.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"foo",
+            evaluator_code=(
+                "count = len(match_positions)\n"
+                'return {"matches": [{"line_number": 1}], "value": count}'
+            ),
+            search_target="content",
+        )
 
-        call_count = []
-
-        def counting_run(*args, **kwargs):
-            call_count.append(1)
-            return EvalResult(value={"matches": [], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=counting_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"foo",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
-            )
-
-        # File-as-unit: one file → exactly one sandbox call
-        assert len(call_count) == 1
+        # Exactly 1 file_metadata entry (evaluator ran once for the one file).
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 1
+        # The evaluator received all 3 hits in that single call.
+        assert file_meta[0]["value"] == 3
 
     def test_sandbox_called_zero_times_for_file_with_no_phase1_matches(
         self, search_engine, tmp_path
     ):
-        """Files that Phase 1 does not select result in zero sandbox calls."""
+        """Files that Phase 1 does not select result in zero evaluator calls.
+
+        Evidence: when Phase 1 finds nothing, the result has no matches, no
+        evaluation_errors, and no file_metadata entries — the evaluator never ran.
+        """
         (tmp_path / "no_match.py").write_text("def bar(): pass\n")
 
-        call_count = []
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"XYZZY_NEVER_MATCHES",
+            evaluator_code='return {"matches": [{"line_number": 1}], "value": "ran"}',
+            search_target="content",
+        )
 
-        def counting_run(*args, **kwargs):
-            call_count.append(1)
-            from code_indexer.xray.sandbox import EvalResult
-
-            return EvalResult(value={"matches": [], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=counting_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"XYZZY_NEVER_MATCHES",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
-            )
-
-        assert len(call_count) == 0
+        # No Phase 1 candidates -> evaluator never called -> no results of any kind.
+        assert result["matches"] == []
+        assert result["evaluation_errors"] == []
+        assert result.get("file_metadata", []) == []
 
     def test_sandbox_called_n_times_for_n_candidate_files(
         self, search_engine, tmp_path
     ):
-        """With 3 candidate files, sandbox.run is called exactly 3 times."""
+        """With 3 candidate files, evaluator is called exactly 3 times.
+
+        Evidence: file_metadata has exactly 3 entries, one per candidate file.
+        """
         for i in range(3):
             (tmp_path / f"file{i}.py").write_text("foo()\n")
 
-        from code_indexer.xray.sandbox import EvalResult
+        # Evaluator returns the file_path so we can count distinct invocations.
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"foo",
+            evaluator_code=(
+                'return {"matches": [{"line_number": 1}], "value": file_path}'
+            ),
+            search_target="content",
+        )
 
-        call_count = []
-
-        def counting_run(*args, **kwargs):
-            call_count.append(1)
-            return EvalResult(value={"matches": [], "value": None})
-
-        with patch.object(search_engine.sandbox, "run", side_effect=counting_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"foo",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
-            )
-
-        assert len(call_count) == 3
+        # Three files -> three file_metadata entries (one per evaluator call).
+        file_meta = result.get("file_metadata", [])
+        assert len(file_meta) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -543,17 +578,25 @@ class TestMatchDictFields:
 
 
 class TestEvaluationErrorFields:
-    """Error entries from file-level evaluation carry file_path."""
+    """Error entries from file-level evaluation carry file_path.
+
+    Converted from sandbox.run-patching to sandbox.run_batch-patching (Bug #994):
+    run_batch() is called in the parent process, so patches on it ARE visible.
+    The shared _make_fake_run_batch helper builds the side-effect callable to
+    avoid duplicating the injection logic across tests.
+    """
 
     def test_timeout_error_carries_file_path(self, search_engine, tmp_path):
         """EvaluatorTimeout error has the file_path of the failing file."""
         (tmp_path / "f.py").write_text("a = 1\nfoo()\nb = 3\n")
 
-        from code_indexer.xray.sandbox import EvalResult
-
-        timeout_result = EvalResult(failure="evaluator_timeout")
-
-        with patch.object(search_engine.sandbox, "run", return_value=timeout_result):
+        with patch.object(
+            search_engine.sandbox,
+            "run_batch",
+            side_effect=_make_fake_run_batch(
+                "EvaluatorTimeout", "evaluator exceeded 5s sandbox limit"
+            ),
+        ):
             result = search_engine.run(
                 repo_path=tmp_path,
                 driver_regex=r"foo",
@@ -570,13 +613,11 @@ class TestEvaluationErrorFields:
         """EvaluatorCrash error has the file_path of the crashing file."""
         (tmp_path / "f.py").write_text("x = 1\nfoo()\n")
 
-        from code_indexer.xray.sandbox import EvalResult
-
-        crash_result = EvalResult(
-            failure="evaluator_subprocess_died", detail="Subprocess died"
-        )
-
-        with patch.object(search_engine.sandbox, "run", return_value=crash_result):
+        with patch.object(
+            search_engine.sandbox,
+            "run_batch",
+            side_effect=_make_fake_run_batch("EvaluatorCrash", "Subprocess died"),
+        ):
             result = search_engine.run(
                 repo_path=tmp_path,
                 driver_regex=r"foo",

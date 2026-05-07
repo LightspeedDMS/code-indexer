@@ -154,6 +154,17 @@ Two-phase pipeline: Phase 1 regex walk -> Phase 2 sandboxed evaluator over `XRay
 
 -> Full reference: `docs/xray-architecture.md`
 
+### X-Ray Spawn-Driver Architecture (Bug #994)
+
+`XRaySearchEngine.run()` delegates Phase 2 evaluator execution to `PythonEvaluatorSandbox.run_batch()`, which spawns a clean driver process via `multiprocessing.get_context("spawn")`. The driver imports tree-sitter once, then forks per-file evaluators via `sandbox.run()` (inheriting the driver's clean ~50MB state, not the parent's potentially 2GB+ state).
+
+**Key invariants**:
+- Parent (main process): validates evaluator code, reads files, detects languages, builds file_specs -- NO tree-sitter in this path (just extension mapping).
+- Driver (spawn'd): imports tree-sitter + AstSearchEngine, creates PythonEvaluatorSandbox, processes files via ThreadPoolExecutor, each file fork-evaluated from driver state.
+- Results pipe back as `List[Tuple[matches, errors, meta]]`.
+- `_evaluate_file()` kept as lower-level test API -- existing unit tests call it directly.
+- `_run_inline_batch()` path still exists (activated by passing `ast_engine` to `run_batch`) -- reserved for in-process testing.
+
 ### TOTP Step-Up Elevation (Epic #922 / Story #923)
 
 **Essential invariants** -- NEVER refactor these:

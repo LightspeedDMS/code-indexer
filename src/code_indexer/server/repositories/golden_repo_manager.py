@@ -2564,6 +2564,25 @@ class GoldenRepoManager:
         current_target = alias_manager.read_alias(global_alias)
         alias_manager.create_alias(global_alias, new_snapshot_path, repo_name=alias)
 
+        # Evict stale HNSW cache entries for the old versioned path (Bug #994 AC11)
+        try:
+            from code_indexer.server.cache import get_global_cache
+
+            _cache = get_global_cache()
+            if _cache is not None and current_target:
+                _evicted = _cache.invalidate_prefix(current_target)
+                logger.info(
+                    "[change_branch] Evicted %d HNSW cache entries for old snapshot %s",
+                    _evicted,
+                    current_target,
+                )
+        except Exception as _cache_evict_err:
+            logger.warning(
+                "[change_branch] Failed to evict HNSW cache for old snapshot %s: %s",
+                current_target,
+                _cache_evict_err,
+            )
+
         if current_target and ".versioned" in current_target:
             try:
                 # Import here to avoid circular dependency (app imports from repos)

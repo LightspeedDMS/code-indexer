@@ -44,8 +44,10 @@ import builtins
 import difflib
 import multiprocessing
 import textwrap
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from code_indexer.xray.xray_node import XRayNode
@@ -832,3 +834,483 @@ class PythonEvaluatorSandbox:
             return multiprocessing.get_context("fork")
         except ValueError:
             return multiprocessing.get_context("spawn")
+
+    def run_batch(
+        self,
+        *,
+        evaluator_code: str,
+        file_specs: List[Dict[str, Any]],
+        worker_threads: int = 2,
+        timeout_seconds: int = 120,
+        ast_engine: Optional[Any] = None,
+    ) -> List[
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
+    ]:
+        """Run evaluator_code against a batch of files.
+
+        When ``ast_engine`` is provided, runs inline in the parent process:
+        parses each file with ``ast_engine.parse()``, then calls ``self.run()``
+        per file using a ThreadPoolExecutor.  This mode allows test patches on
+        ``sandbox.run`` and ``ast_engine.parse`` to be intercepted.
+        ``timeout_seconds`` is enforced as a wall-clock cap in both modes.
+
+        When ``ast_engine`` is ``None`` (default), spawns a single driver
+        subprocess that handles all files; the driver starts clean (no HNSW
+        cache) via the spawn multiprocessing context.
+
+        Validates code once in the parent.  On validation failure returns
+        per-file error tuples without spawning or processing.
+
+        Args:
+            evaluator_code: Python evaluator source (same contract as run()).
+            file_specs: Dicts with keys: file_path, source, lang, match_positions
+                (WITHOUT ast_node — populated from byte_offset during processing).
+            worker_threads: Concurrency; must be >= 1.
+            timeout_seconds: Wall-clock cap for the entire batch; must be > 0.
+                Enforced in both inline and driver-subprocess modes.
+            ast_engine: Optional AstSearchEngine instance.  When provided,
+                processing runs inline in the caller's process (no subprocess
+                driver is spawned), allowing patches on ``sandbox.run`` and
+                ``ast_engine.parse`` to be intercepted by callers.
+
+        Returns:
+            List of (matches, errors, meta) tuples, one per file spec, in order.
+        """
+        if worker_threads < 1:
+            raise ValueError(f"worker_threads must be >= 1, got {worker_threads}")
+        if timeout_seconds <= 0:
+            raise ValueError(f"timeout_seconds must be > 0, got {timeout_seconds}")
+        if not file_specs:
+            return []
+
+        validation = self.validate(evaluator_code)
+        if not validation.ok:
+            reason = validation.reason or "Evaluator validation failed"
+            return [
+                _batch_error(spec.get("file_path", ""), "ValidationFailed", reason)
+                for spec in file_specs
+            ]
+
+        if ast_engine is not None:
+            return _run_inline_batch(
+                self,
+                file_specs,
+                evaluator_code,
+                worker_threads,
+                timeout_seconds,
+                ast_engine,
+            )
+
+        return _run_driver_batch(
+            self, file_specs, evaluator_code, worker_threads, timeout_seconds
+        )
+
+
+# ---------------------------------------------------------------------------
+# Spawn-driver architecture (module-level for picklability)
+# ---------------------------------------------------------------------------
+
+
+def _batch_error(
+    file_path: str,
+    error_type: str,
+    message: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Return a single ([], [error_dict], None) batch result tuple."""
+    return (
+        [],
+        [
+            {
+                "file_path": file_path,
+                "line_number": 0,
+                "error_type": error_type,
+                "error_message": message,
+            }
+        ],
+        None,
+    )
+
+
+def _line_to_byte_offset_bytes(source_str: str, line_number: int) -> int:
+    """Convert 1-indexed line_number to UTF-8 byte offset of that line's start.
+
+    Uses encoded byte lengths so the result is correct for non-ASCII sources.
+    """
+    if line_number <= 1:
+        return 0
+    lines = source_str.split("\n")
+    if line_number > len(lines):
+        return len(source_str.encode("utf-8"))
+    return sum(len(line.encode("utf-8")) + 1 for line in lines[: line_number - 1])
+
+
+def _build_matches_from_evaluator(
+    raw_matches: List[Any],
+    file_path: str,
+    lang: str,
+    source_lines: List[str],
+) -> Tuple[
+    List[Dict[str, Any]],
+    Optional[
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
+    ],
+]:
+    """Build enriched match dicts from raw evaluator match list.
+
+    Returns (matches, error_tuple_or_none).  On first malformed entry returns
+    ([], error_tuple) so the caller can short-circuit.
+    """
+    matches: List[Dict[str, Any]] = []
+    for em in raw_matches:
+        if not isinstance(em, dict):
+            continue
+        if "line_number" not in em:
+            return [], _batch_error(
+                file_path,
+                "InvalidEvaluatorReturn",
+                "each match must contain 'line_number'",
+            )
+        try:
+            ln = int(em["line_number"])
+        except (TypeError, ValueError):
+            return [], _batch_error(
+                file_path,
+                "InvalidEvaluatorReturn",
+                f"line_number must be an int, got {em['line_number']!r}",
+            )
+        entry = dict(em)
+        entry["line_number"] = ln
+        entry["file_path"] = file_path
+        entry["language"] = lang
+        if "line_content" not in entry:
+            idx = ln - 1
+            entry["line_content"] = (
+                source_lines[idx] if 0 <= idx < len(source_lines) else ""
+            )
+        matches.append(entry)
+    return matches, None
+
+
+def _normalize_eval_result(
+    eval_result: "EvalResult",
+    file_path: str,
+    source: str,
+    lang: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Apply full result contract to an EvalResult; return (matches, errors, meta)."""
+    if eval_result.failure == "evaluator_timeout":
+        return _batch_error(
+            file_path, "EvaluatorTimeout", "evaluator exceeded 5s sandbox limit"
+        )
+    if eval_result.failure is not None:
+        return _batch_error(
+            file_path, "EvaluatorCrash", eval_result.detail or eval_result.failure
+        )
+
+    raw_value = eval_result.value
+    if not isinstance(raw_value, dict):
+        return _batch_error(
+            file_path,
+            "InvalidEvaluatorReturn",
+            f"Evaluator must return a dict, got {type(raw_value).__name__!r}",
+        )
+    if raw_value.get("skip") is True:
+        return ([], [], None)
+    if "matches" not in raw_value:
+        return _batch_error(
+            file_path,
+            "InvalidEvaluatorReturn",
+            "Evaluator dict missing required 'matches' key.",
+        )
+    evaluator_matches = raw_value["matches"]
+    if not isinstance(evaluator_matches, list):
+        return _batch_error(
+            file_path,
+            "InvalidEvaluatorReturn",
+            f"'matches' must be a list, got {type(evaluator_matches).__name__!r}",
+        )
+
+    matches, err = _build_matches_from_evaluator(
+        evaluator_matches, file_path, lang, source.splitlines()
+    )
+    if err is not None:
+        return err
+
+    per_file_value = raw_value.get("value", None)
+    per_file_role = raw_value.get("file_role", None)
+    file_meta: Optional[Dict[str, Any]] = None
+    if per_file_value is not None or per_file_role is not None:
+        file_meta = {"file_path": file_path}
+        if per_file_value is not None:
+            file_meta["value"] = per_file_value
+        if per_file_role is not None:
+            file_meta["file_role"] = per_file_role
+    return matches, [], file_meta
+
+
+def _process_one_file_in_driver(
+    evaluator_code: str,
+    spec: Dict[str, Any],
+    ast_engine: Any,
+    sandbox: "PythonEvaluatorSandbox",
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Process a single file inside the driver process.
+
+    Re-parses source with tree-sitter (XRayNode objects are not picklable),
+    enriches match_positions with ast_node from byte offset, runs evaluator.
+    """
+    file_path = spec.get("file_path", "")
+    source = spec.get("source", "")
+    lang = spec.get("lang", "")
+    raw_positions: List[Dict[str, Any]] = list(spec.get("match_positions") or [])
+
+    try:
+        source_bytes = source.encode("utf-8") if isinstance(source, str) else source
+        root = ast_engine.parse(source_bytes, lang)
+
+        positions: List[Dict[str, Any]] = []
+        for pos in raw_positions:
+            entry = dict(pos)
+            ln = entry.get("line_number", 1) or 1
+            entry["byte_offset"] = _line_to_byte_offset_bytes(source, ln)
+            positions.append(entry)
+
+        for pos in positions:
+            byte_off = pos.get("byte_offset")
+            pos["ast_node"] = (
+                root.node_at_byte_offset(byte_off) if byte_off is not None else None
+            )
+
+        eval_result = sandbox.run(
+            evaluator_code,
+            node=root,
+            root=root,
+            source=source,
+            lang=lang,
+            file_path=file_path,
+            match_positions=positions,
+        )
+        return _normalize_eval_result(eval_result, file_path, source, lang)
+    except Exception as exc:  # noqa: BLE001
+        return _batch_error(file_path, type(exc).__name__, str(exc))
+
+
+def _driver_process(
+    conn: Any,
+    file_specs: List[Dict[str, Any]],
+    evaluator_code: str,
+    worker_threads: int,
+) -> None:
+    """Entry point for the spawned driver process.
+
+    Module-level for picklability in the spawn multiprocessing context.
+    Imports AstSearchEngine here (deferred import — tree-sitter not loaded at startup).
+    """
+    try:
+        from code_indexer.xray.ast_engine import AstSearchEngine
+
+        ast_engine = AstSearchEngine()
+        sandbox = PythonEvaluatorSandbox()
+        results: List[Any] = [None] * len(file_specs)
+
+        def _process(idx_spec: Tuple[int, Dict[str, Any]]) -> Tuple[int, Any]:
+            idx, spec = idx_spec
+            return idx, _process_one_file_in_driver(
+                evaluator_code, spec, ast_engine, sandbox
+            )
+
+        with ThreadPoolExecutor(max_workers=worker_threads) as pool:
+            for idx, result in pool.map(_process, enumerate(file_specs)):
+                results[idx] = result
+
+        conn.send(results)
+    except Exception as exc:  # noqa: BLE001
+        conn.send(f"__driver_exception__:{type(exc).__name__}:{exc}")
+    finally:
+        conn.close()
+
+
+def _collect_driver_result(
+    parent_conn: Any,
+    proc: Any,
+    file_specs: List[Dict[str, Any]],
+) -> Optional[List[Any]]:
+    """Read batch results from driver pipe; return list or None on failure.
+
+    Closes parent_conn exactly once in a finally block, reaps the process.
+    Returns None if pipe has no data, EOF, or driver sent an exception string
+    — caller converts None to per-file errors.
+
+    NOTE: poll(timeout=5.0) not 0.0 — after proc.join() the kernel pipe buffer
+    may not be readable with zero latency even though the child has already sent
+    data and exited.  5 s is conservative; the process is already dead at this
+    point so the only wait is for OS pipe-buffer propagation (sub-millisecond in
+    practice).
+    """
+    try:
+        has_data = parent_conn.poll(timeout=5.0)
+        if not has_data:
+            return None
+        try:
+            raw = parent_conn.recv()
+        except EOFError:
+            return None
+        if isinstance(raw, str) and raw.startswith("__driver_exception__:"):
+            return None
+        # multiprocessing pipe recv() returns Any; actual payload is a list
+        # serialized by the driver — the static type system cannot express this.
+        return raw  # type: ignore[no-any-return]
+    finally:
+        parent_conn.close()
+        if proc.is_alive():
+            proc.join(timeout=0.0)
+
+
+def _cancel_remaining(
+    futures: Dict[Future, int],
+    file_specs: List[Dict[str, Any]],
+    results: List[
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
+    ],
+    pool: ThreadPoolExecutor,
+) -> None:
+    """Cancel all outstanding futures and shut down the pool without blocking.
+
+    Checks ``fut.cancel()`` return value: returns True for futures that were
+    not yet started (safely cancelled), False for futures already running
+    (cannot be cancelled — they will run to completion in the background but
+    their results are ignored).  Pre-filled timeout error entries in ``results``
+    remain for any future whose result is not yet collected.
+    """
+    for fut, idx in futures.items():
+        cancelled = fut.cancel()
+        if not cancelled and not fut.done():
+            # Already running — mark explicitly as timeout; result will be ignored.
+            fp = file_specs[idx].get("file_path", "")
+            results[idx] = _batch_error(
+                fp, "EvaluatorTimeout", "batch inline exceeded timeout"
+            )
+    pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _run_inline_batch(
+    sandbox: "PythonEvaluatorSandbox",
+    file_specs: List[Dict[str, Any]],
+    evaluator_code: str,
+    worker_threads: int,
+    timeout_seconds: int,
+    ast_engine: Any,
+) -> List[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]]:
+    """Process files inline in the caller's process using a ThreadPoolExecutor.
+
+    Calls ``ast_engine.parse()`` and ``sandbox.run()`` per file in the parent
+    process, so patches on either (e.g. in tests) are properly intercepted.
+
+    Input validation (worker_threads >= 1, timeout_seconds > 0) is performed
+    by the calling ``run_batch()`` method before this function is invoked.
+
+    Enforces ``timeout_seconds`` as a wall-clock cap: each future's result is
+    collected with a per-item remaining-time budget.  On deadline, outstanding
+    futures are cancelled via ``_cancel_remaining`` (which checks the cancel()
+    return value to distinguish not-yet-started from already-running futures)
+    and the pool is shut down immediately without blocking.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    # Pre-fill with timeout errors; overwritten as results arrive.
+    results: List[
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
+    ] = [
+        _batch_error(
+            spec.get("file_path", ""),
+            "EvaluatorTimeout",
+            "batch inline exceeded timeout",
+        )
+        for spec in file_specs
+    ]
+
+    def _process_one(
+        idx: int,
+        spec: Dict[str, Any],
+    ) -> Tuple[
+        int, Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
+    ]:
+        return idx, _process_one_file_in_driver(
+            evaluator_code, spec, ast_engine, sandbox
+        )
+
+    pool = ThreadPoolExecutor(max_workers=worker_threads)
+    futures: Dict[Future, int] = {
+        pool.submit(_process_one, idx, spec): idx for idx, spec in enumerate(file_specs)
+    }
+
+    for fut, idx in futures.items():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _cancel_remaining(futures, file_specs, results, pool)
+            return results
+        try:
+            _, file_result = fut.result(timeout=remaining)
+            results[idx] = file_result
+        except TimeoutError:
+            _cancel_remaining(futures, file_specs, results, pool)
+            return results
+        except Exception as exc:  # noqa: BLE001
+            # Broad catch is required: any error from parse(), ast_engine, or
+            # sandbox.run() must produce a per-file error entry rather than
+            # crashing the entire batch. The _process_one_file_in_driver helper
+            # already catches its own exceptions, so this guard catches only
+            # unexpected failures in the Future machinery itself.
+            fp = file_specs[idx].get("file_path", "")
+            results[idx] = _batch_error(fp, type(exc).__name__, str(exc))
+
+    pool.shutdown(wait=False, cancel_futures=True)
+    return results
+
+
+def _run_driver_batch(
+    sandbox: "PythonEvaluatorSandbox",
+    file_specs: List[Dict[str, Any]],
+    evaluator_code: str,
+    worker_threads: int,
+    timeout_seconds: int,
+) -> List[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]]:
+    """Spawn ONE driver and collect batch results; convert all failures to per-file errors."""
+    ctx = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+
+    proc = ctx.Process(
+        target=_driver_process,
+        args=(child_conn, file_specs, evaluator_code, worker_threads),
+        daemon=False,
+    )
+    proc.start()
+    child_conn.close()
+    proc.join(timeout=timeout_seconds)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=sandbox.SIGKILL_GRACE_SECONDS)
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
+        parent_conn.close()
+        return [
+            _batch_error(
+                s.get("file_path", ""),
+                "EvaluatorTimeout",
+                "batch driver exceeded timeout",
+            )
+            for s in file_specs
+        ]
+
+    results = _collect_driver_result(parent_conn, proc, file_specs)
+    if results is None:
+        return [
+            _batch_error(
+                s.get("file_path", ""),
+                "EvaluatorCrash",
+                f"driver exitcode={proc.exitcode}",
+            )
+            for s in file_specs
+        ]
+    return results
