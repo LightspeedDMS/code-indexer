@@ -166,6 +166,7 @@ async def get_repository_description(
             detail=f"No cidx-meta description found for repository '{repo_alias}'",
         )
 
+    # INVARIANT: cidx-meta filenames use SHORT alias ({repo_alias}.md), NOT -global.md
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta" / f"{repo_alias}.md"
     # Prevent path traversal: reject any alias that escapes the cidx-meta dir (Story #218)
     expected_parent = (Path(golden_repos_dir) / "cidx-meta").resolve()

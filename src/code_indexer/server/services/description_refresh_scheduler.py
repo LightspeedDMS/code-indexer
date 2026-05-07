@@ -578,6 +578,7 @@ class DescriptionRefreshScheduler:
                     continue
                 if self._meta_dir is None:
                     continue
+                # INVARIANT: cidx-meta filenames use SHORT alias ({alias}.md), NOT -global.md
                 md_file = self._meta_dir / f"{alias}.md"
                 if not md_file.exists():
                     continue
@@ -1136,6 +1137,7 @@ class DescriptionRefreshScheduler:
             logger.warning("Meta directory not set, cannot read existing description")
             return None
 
+        # INVARIANT: cidx-meta filenames use SHORT alias ({repo_alias}.md), NOT -global.md
         md_file = self._meta_dir / f"{repo_alias}.md"
         if not md_file.exists():
             logger.debug(f"No .md file found for {repo_alias}, cannot refresh")

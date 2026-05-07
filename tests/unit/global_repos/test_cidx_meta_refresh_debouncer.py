@@ -759,10 +759,10 @@ class TestOnRepoAddedWithDebouncer:
                 )
 
         # All 5 .md files should exist
-        # v10.4.9: alias form {repo_name}-global.md (MetaDirectoryUpdater convention)
+        # INVARIANT: cidx-meta uses short alias {repo_name}.md
         cidx_meta_path = Path(temp_golden_repos_dir) / "cidx-meta"
         for repo_name in repo_names:
-            md_file = cidx_meta_path / f"{repo_name}-global.md"
+            md_file = cidx_meta_path / f"{repo_name}.md"
             assert md_file.exists(), f"Expected .md file for {repo_name} at {md_file}"
 
         # Debouncer should have been signaled 4 times (for the 4 DuplicateJobErrors)
@@ -799,8 +799,8 @@ class TestOnRepoRemovedWithDebouncer:
 
         repo_name = "repo-to-remove"
         cidx_meta_path = Path(temp_golden_repos_dir) / "cidx-meta"
-        # v10.4.9: alias form {repo_name}-global.md
-        md_file = cidx_meta_path / f"{repo_name}-global.md"
+        # INVARIANT: cidx-meta uses short alias {repo_name}.md
+        md_file = cidx_meta_path / f"{repo_name}.md"
         md_file.write_text("# Repo to Remove")
 
         on_repo_removed(
@@ -842,8 +842,8 @@ class TestOnRepoRemovedWithDebouncer:
 
         repo_name = "repo-to-remove"
         cidx_meta_path = Path(temp_golden_repos_dir) / "cidx-meta"
-        # v10.4.9: alias form {repo_name}-global.md
-        md_file = cidx_meta_path / f"{repo_name}-global.md"
+        # INVARIANT: cidx-meta uses short alias {repo_name}.md
+        md_file = cidx_meta_path / f"{repo_name}.md"
         md_file.write_text("# Repo to Remove")
 
         with caplog.at_level(logging.WARNING):

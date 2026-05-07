@@ -3,7 +3,7 @@ Tests for MetaDirectoryUpdater hardening changes.
 
 Covers:
 - CHANGE 1+2: Safety threshold (MetaDirectoryMassDeleteBlocked), stub guard, lock discipline
-- CHANGE 2: Managed-file filter (*-global.md only)
+- CHANGE 2: Managed-file filter (registry-aware)
 - CHANGE 3: Lock discipline in on_repo_removed
 - CHANGE 4: Dead raw writer gate (_update_description_file raises NotImplementedError)
 - CHANGE 5: Commit-level safety gate in CidxMetaBackupSync.sync()
@@ -140,15 +140,21 @@ class TestSafetyThreshold:
         self, cidx_meta_path, registry_with_repos
     ):
         """
-        Scenario: 4 managed files exist, registry has 0 repos.
-        Deletion ratio = 4/4 = 100% > 50% -> must raise MetaDirectoryMassDeleteBlocked.
+        Scenario: 4 managed files exist (matched by 4 registry aliases), registry shrinks to 1.
+        Deletion ratio = 3/4 = 75% > 50% -> must raise MetaDirectoryMassDeleteBlocked.
+
+        With registry-based file detection, managed files are only those whose stems
+        match a known alias. To detect orphaned files the registry must contain aliases
+        (even if reduced). A registry that goes from 4->1 with 3 orphaned files = 75%.
         """
         from code_indexer.global_repos.meta_directory_updater import (
             MetaDirectoryMassDeleteBlocked,
             MetaDirectoryUpdater,
         )
 
-        for name in ["a-global", "b-global", "c-global", "d-global"]:
+        # Files use short alias form (no -global suffix); known_aliases=None fallback
+        # in update() detects all plausible managed .md files on disk.
+        for name in ["a", "b", "c", "d"]:
             (cidx_meta_path / f"{name}.md").write_text(f"# {name}\n")
 
         registry = registry_with_repos([])
@@ -170,8 +176,8 @@ class TestSafetyThreshold:
             MetaDirectoryUpdater,
         )
 
-        aliases = ["x-global", "y-global", "z-global"]
-        for name in aliases:
+        # Files use short alias form; known_aliases=None fallback finds all plausible files
+        for name in ["x", "y", "z"]:
             (cidx_meta_path / f"{name}.md").write_text(f"# {name}\n")
 
         # Only keep one in registry — 2 of 3 deleted = 66% > 50%
@@ -184,7 +190,7 @@ class TestSafetyThreshold:
         e = exc_info.value
         assert e.to_delete_count == 2
         assert e.existing_count == 3
-        assert "y-global" in e.aliases or "z-global" in e.aliases
+        assert "y" in e.aliases or "z" in e.aliases
 
     def test_no_raise_when_below_threshold(self, cidx_meta_path, registry_with_repos):
         """
@@ -194,16 +200,17 @@ class TestSafetyThreshold:
             MetaDirectoryUpdater,
         )
 
-        for name in ["a-global", "b-global", "c-global", "d-global"]:
+        # Files use short alias form; known_aliases=None fallback finds all plausible files
+        for name in ["a", "b", "c", "d"]:
             (cidx_meta_path / f"{name}.md").write_text(f"# {name}\n")
 
-        # Remove only one (25%)
+        # Remove only one (25%); registry strips -global suffix to get short aliases
         registry = registry_with_repos(["a-global", "b-global", "c-global"])
         updater = MetaDirectoryUpdater(str(cidx_meta_path), registry)
         updater.update()  # Must not raise
 
-        assert not (cidx_meta_path / "d-global.md").exists()
-        assert (cidx_meta_path / "a-global.md").exists()
+        assert not (cidx_meta_path / "d.md").exists()
+        assert (cidx_meta_path / "a.md").exists()
 
     def test_no_raise_when_below_min_files_threshold(
         self, cidx_meta_path, registry_with_repos
@@ -216,15 +223,15 @@ class TestSafetyThreshold:
             MetaDirectoryUpdater,
         )
 
-        for name in ["a-global", "b-global"]:
+        for name in ["a", "b"]:
             (cidx_meta_path / f"{name}.md").write_text(f"# {name}\n")
 
         registry = registry_with_repos([])
         updater = MetaDirectoryUpdater(str(cidx_meta_path), registry)
         updater.update()  # Must not raise — below MIN_FILES_FOR_THRESHOLD
 
-        assert not (cidx_meta_path / "a-global.md").exists()
-        assert not (cidx_meta_path / "b-global.md").exists()
+        assert not (cidx_meta_path / "a.md").exists()
+        assert not (cidx_meta_path / "b.md").exists()
 
     def test_files_preserved_after_mass_delete_blocked(
         self, cidx_meta_path, registry_with_repos
@@ -235,7 +242,7 @@ class TestSafetyThreshold:
             MetaDirectoryUpdater,
         )
 
-        for name in ["a-global", "b-global", "c-global", "d-global"]:
+        for name in ["a", "b", "c", "d"]:
             (cidx_meta_path / f"{name}.md").write_text(f"# {name}\n")
 
         registry = registry_with_repos([])
@@ -245,7 +252,7 @@ class TestSafetyThreshold:
             updater.update()
 
         # All files must still exist — raise must happen BEFORE any unlink
-        for name in ["a-global", "b-global", "c-global", "d-global"]:
+        for name in ["a", "b", "c", "d"]:
             assert (cidx_meta_path / f"{name}.md").exists(), (
                 f"File {name}.md was deleted despite mass-delete block"
             )
@@ -267,14 +274,15 @@ class TestStubGuard:
             MetaDirectoryUpdater,
         )
 
-        rich_content = "# MyRepo-global\n\nRich description from Claude CLI.\n"
-        (cidx_meta_path / "MyRepo-global.md").write_text(rich_content)
+        rich_content = "# MyRepo\n\nRich description from Claude CLI.\n"
+        # INVARIANT: cidx-meta filenames use SHORT alias (MyRepo.md), NOT MyRepo-global.md
+        (cidx_meta_path / "MyRepo.md").write_text(rich_content)
 
         registry = registry_with_repos(["MyRepo-global"])
         updater = MetaDirectoryUpdater(str(cidx_meta_path), registry)
         updater.update()
 
-        assert (cidx_meta_path / "MyRepo-global.md").read_text() == rich_content, (
+        assert (cidx_meta_path / "MyRepo.md").read_text() == rich_content, (
             "update() overwrote existing file with stub — stub guard failed"
         )
 
@@ -288,9 +296,10 @@ class TestStubGuard:
         updater = MetaDirectoryUpdater(str(cidx_meta_path), registry)
         updater.update()
 
-        expected = cidx_meta_path / "NewRepo-global.md"
+        # INVARIANT: cidx-meta filenames use SHORT alias (NewRepo.md), NOT NewRepo-global.md
+        expected = cidx_meta_path / "NewRepo.md"
         assert expected.exists()
-        assert "NewRepo-global" in expected.read_text()
+        assert "NewRepo" in expected.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +340,7 @@ class TestUpdateLockDiscipline:
             MetaDirectoryUpdater,
         )
 
-        for name in ["a-global", "b-global", "c-global", "d-global"]:
+        for name in ["a", "b", "c", "d"]:
             (cidx_meta_path / f"{name}.md").write_text(f"# {name}\n")
 
         registry = registry_with_repos([])
@@ -356,44 +365,52 @@ class TestUpdateLockDiscipline:
         updater = MetaDirectoryUpdater(str(cidx_meta_path), registry)
         updater.update()
 
-        expected = cidx_meta_path / "repo1-global.md"
+        # INVARIANT: cidx-meta filenames use SHORT alias (repo1.md), NOT repo1-global.md
+        expected = cidx_meta_path / "repo1.md"
         assert expected.exists()
 
 
 # ---------------------------------------------------------------------------
-# CLASS 4: Managed-file filter (*-global.md only)
+# CLASS 4: Managed-file filter (registry-aware)
 # ---------------------------------------------------------------------------
 
 
 class TestManagedFileFilter:
-    """CHANGE 2: _get_existing_description_aliases uses *-global.md glob only."""
+    """CHANGE 2: _get_existing_description_aliases uses registry-aware filtering."""
 
-    def test_non_global_md_not_treated_as_managed(
+    def test_readme_and_underscore_files_not_treated_as_managed(
         self, cidx_meta_path, registry_with_repos
     ):
-        """README.md and notes.md must not be touched or counted as managed files."""
+        """README.md (uppercase initial) and _internal.md (underscore prefix) must not be
+        touched or counted as managed files. Plain lowercase files like notes.md ARE
+        treated as managed and may be deleted if not in the registry."""
         from code_indexer.global_repos.meta_directory_updater import (
             MetaDirectoryUpdater,
         )
 
         (cidx_meta_path / "README.md").write_text("# Readme\n")
-        (cidx_meta_path / "notes.md").write_text("# Notes\n")
-        (cidx_meta_path / "MyRepo-global.md").write_text("# MyRepo-global\nRich.\n")
+        (cidx_meta_path / "_internal.md").write_text("# Internal\n")
+        # INVARIANT: cidx-meta filenames use SHORT alias (MyRepo.md), NOT MyRepo-global.md
+        (cidx_meta_path / "MyRepo.md").write_text("# MyRepo\nRich.\n")
 
         registry = registry_with_repos(["MyRepo-global"])
         updater = MetaDirectoryUpdater(str(cidx_meta_path), registry)
         updater.update()
 
         assert (cidx_meta_path / "README.md").exists()
-        assert (cidx_meta_path / "notes.md").exists()
-        assert (cidx_meta_path / "MyRepo-global.md").exists()
+        assert (cidx_meta_path / "_internal.md").exists()
+        assert (cidx_meta_path / "MyRepo.md").exists()
         assert (cidx_meta_path / "README.md").read_text() == "# Readme\n"
-        assert (cidx_meta_path / "notes.md").read_text() == "# Notes\n"
+        assert (cidx_meta_path / "_internal.md").read_text() == "# Internal\n"
 
     def test_non_global_md_not_counted_in_existing_set(
         self, cidx_meta_path, registry_with_repos
     ):
-        """Non-*-global.md files must not appear in _get_existing_description_aliases()."""
+        """Non-repo .md files must not appear in _get_existing_description_aliases().
+
+        The registry-based filter requires known_aliases to be passed so that
+        README.md, CHANGELOG.md etc. are excluded from the managed set.
+        """
         from code_indexer.global_repos.meta_directory_updater import (
             MetaDirectoryUpdater,
         )
@@ -403,7 +420,8 @@ class TestManagedFileFilter:
 
         registry = registry_with_repos([])
         updater = MetaDirectoryUpdater(str(cidx_meta_path), registry)
-        existing = updater._get_existing_description_aliases()
+        # Pass known_aliases=set() to use registry-based filter (no known repos)
+        existing = updater._get_existing_description_aliases(known_aliases=set())
 
         assert "README" not in existing
         assert "CHANGELOG" not in existing
@@ -425,7 +443,7 @@ class TestOnRepoRemovedLockDiscipline:
         golden_repos_dir = tmp_path / "golden-repos"
         cidx_meta = golden_repos_dir / "cidx-meta"
         cidx_meta.mkdir(parents=True)
-        md_file = cidx_meta / "MyRepo-global.md"
+        md_file = cidx_meta / "MyRepo.md"
         md_file.write_text("# MyRepo\n")
 
         mock_scheduler = MagicMock()
@@ -455,7 +473,7 @@ class TestOnRepoRemovedLockDiscipline:
         golden_repos_dir = tmp_path / "golden-repos"
         cidx_meta = golden_repos_dir / "cidx-meta"
         cidx_meta.mkdir(parents=True)
-        md_file = cidx_meta / "MyRepo-global.md"
+        md_file = cidx_meta / "MyRepo.md"
         md_file.write_text("# MyRepo\n")
 
         mock_scheduler = MagicMock()
@@ -484,7 +502,7 @@ class TestOnRepoRemovedLockDiscipline:
         golden_repos_dir = tmp_path / "golden-repos"
         cidx_meta = golden_repos_dir / "cidx-meta"
         cidx_meta.mkdir(parents=True)
-        md_file = cidx_meta / "MyRepo-global.md"
+        md_file = cidx_meta / "MyRepo.md"
         md_file.write_text("# MyRepo\n")
 
         mock_scheduler = MagicMock()
@@ -869,8 +887,8 @@ class TestUpdateSkipsWhenLockNotAcquired:
         )
         updater.update()
 
-        # File must NOT have been created (update was skipped)
-        assert not (cidx_meta_path / "new-repo-global.md").exists(), (
+        # File must NOT have been created (update was skipped); short alias = new-repo.md
+        assert not (cidx_meta_path / "new-repo.md").exists(), (
             "update() created files despite lock not being acquired — "
             "it must skip filesystem changes when lock returns False"
         )
@@ -900,8 +918,76 @@ class TestUpdateSkipsWhenLockNotAcquired:
         updater.update()
 
         # File must NOT have been created (update was skipped due to lock failure)
-        assert not (cidx_meta_path / "new-repo-global.md").exists(), (
+        assert not (cidx_meta_path / "new-repo.md").exists(), (
             "update() created files despite lock acquisition raising an exception"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CLASS 12: Migration -- rename {alias}-global.md -> {alias}.md in update()
+# ---------------------------------------------------------------------------
+
+
+def _make_updater(cidx_meta_path, registry_with_repos, alias_names, scheduler=None):
+    """Helper: build MetaDirectoryUpdater with given alias list."""
+    from code_indexer.global_repos.meta_directory_updater import MetaDirectoryUpdater
+
+    registry = registry_with_repos(alias_names)
+    return MetaDirectoryUpdater(
+        str(cidx_meta_path), registry, refresh_scheduler=scheduler
+    )
+
+
+class TestMigrationRenamesGlobalMdFiles:
+    """update() renames existing {alias}-global.md -> {alias}.md before reconciliation."""
+
+    def test_migration_renames_global_md_files(
+        self, cidx_meta_path, registry_with_repos
+    ):
+        """
+        Two {alias}-global.md files exist; registry has JSqlParser-global / SpringBoot-global.
+        update() must rename both to short-alias .md files and remove the -global.md originals.
+        """
+        (cidx_meta_path / "JSqlParser-global.md").write_text("# JSqlParser\n")
+        (cidx_meta_path / "SpringBoot-global.md").write_text("# SpringBoot\n")
+
+        _make_updater(
+            cidx_meta_path,
+            registry_with_repos,
+            ["JSqlParser-global", "SpringBoot-global"],
+        ).update()
+
+        assert (cidx_meta_path / "JSqlParser.md").exists(), (
+            "JSqlParser.md must exist after migration of JSqlParser-global.md"
+        )
+        assert (cidx_meta_path / "SpringBoot.md").exists(), (
+            "SpringBoot.md must exist after migration of SpringBoot-global.md"
+        )
+        assert not (cidx_meta_path / "JSqlParser-global.md").exists(), (
+            "JSqlParser-global.md must have been renamed to JSqlParser.md"
+        )
+        assert not (cidx_meta_path / "SpringBoot-global.md").exists(), (
+            "SpringBoot-global.md must have been renamed to SpringBoot.md"
+        )
+
+    def test_migration_skips_when_both_exist(self, cidx_meta_path, registry_with_repos):
+        """
+        Both JSqlParser-global.md AND JSqlParser.md already exist.
+        update() must NOT overwrite JSqlParser.md; skip migration for that alias.
+        """
+        old_content = "# JSqlParser (old -global version)\n"
+        new_content = "# JSqlParser (existing .md version)\n"
+        (cidx_meta_path / "JSqlParser-global.md").write_text(old_content)
+        (cidx_meta_path / "JSqlParser.md").write_text(new_content)
+
+        _make_updater(
+            cidx_meta_path, registry_with_repos, ["JSqlParser-global"]
+        ).update()
+
+        assert (cidx_meta_path / "JSqlParser.md").exists()
+        assert (cidx_meta_path / "JSqlParser-global.md").exists()
+        assert (cidx_meta_path / "JSqlParser.md").read_text() == new_content, (
+            "update() must not overwrite JSqlParser.md when both files exist"
         )
 
 

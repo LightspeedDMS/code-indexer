@@ -371,10 +371,12 @@ def on_repo_added(
         cli_manager,
     )
 
-    # v10.4.9: align with MetaDirectoryUpdater's {alias_name}.md convention
-    # (alias_name = repo_name + "-global"). Filename mismatch caused every
-    # refresh cycle to treat all hook-created files as orphaned and delete them.
-    md_file = cidx_meta_path / f"{repo_name}-global.md"
+    # INVARIANT: cidx-meta descriptions use the SHORT repo alias as filename:
+    #   {short_alias}.md  (e.g., JSqlParser.md)
+    # The "-global" suffix belongs to the registry alias_name, NOT the filename.
+    # DO NOT change this to use "-global" in the filename -- v10.4.9 did this
+    # and broke 10 read paths, the UI, and access filtering. Fixed in v10.7.x.
+    md_file = cidx_meta_path / f"{repo_name}.md"
 
     # Story #724 v2: optional post-generation verification pass BEFORE atomic write
     from code_indexer.server.services.config_service import (
@@ -466,10 +468,12 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
         - Deletes tracking record (if tracking backend available)
     """
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
-    # v10.4.9: align with MetaDirectoryUpdater's {alias_name}.md convention
-    # (alias_name = repo_name + "-global"). Filename mismatch caused every
-    # refresh cycle to treat all hook-created files as orphaned and delete them.
-    md_file = cidx_meta_path / f"{repo_name}-global.md"
+    # INVARIANT: cidx-meta descriptions use the SHORT repo alias as filename:
+    #   {short_alias}.md  (e.g., JSqlParser.md)
+    # The "-global" suffix belongs to the registry alias_name, NOT the filename.
+    # DO NOT change this to use "-global" in the filename -- v10.4.9 did this
+    # and broke 10 read paths, the UI, and access filtering. Fixed in v10.7.x.
+    md_file = cidx_meta_path / f"{repo_name}.md"
 
     # Delete .md file if it exists
     if md_file.exists():
