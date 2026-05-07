@@ -135,7 +135,7 @@ class TestLifecycleGateBypass:
         [
             pytest.param(
                 "stale-lifecycle-repo",
-                id="lifecycle_stale_bypasses_change_gate",
+                id="lifecycle_stale_with_changes_gets_queued",
             ),
             pytest.param(
                 "backfill-pending-repo",
@@ -145,16 +145,12 @@ class TestLifecycleGateBypass:
     )
     def test_lifecycle_stale_repo_transitions_to_queued(self, tmp_path, alias):
         """
-        A repo with lifecycle_schema_version < LIFECYCLE_SCHEMA_VERSION and no code
-        changes (matching commit in real metadata.json) must transition to 'queued'
-        in a single pass.
+        A repo with lifecycle_schema_version < LIFECYCLE_SCHEMA_VERSION and code
+        changes (no metadata.json on disk) must transition to 'queued' in a
+        single pass.
 
-        Case 'lifecycle_stale_bypasses_change_gate': verifies the bypass logic.
-        Case 'pending_lifecycle_row_transitions_after_one_pass': regression for the
-        production symptom — row stuck in 'pending' forever before the fix.
-
-        has_changes_since_last_run() runs against the real metadata.json and returns
-        False naturally; no scheduler decision logic is patched.
+        has_changes_since_last_run() returns True because metadata.json is absent,
+        so the change gate passes and the repo gets queued for refresh.
         """
         from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
         from code_indexer.server.storage.database_manager import DatabaseSchema
@@ -169,6 +165,10 @@ class TestLifecycleGateBypass:
         _seed_golden_repo(db_file, alias)
         _seed_tracking_row(db_file, alias, lifecycle_version=stale_version)
         _seed_clone_metadata(tmp_path)
+        # Overwrite with a different commit so has_changes_since_last_run() returns True
+        (tmp_path / "clone" / ".code-indexer" / "metadata.json").write_text(
+            json.dumps({"current_commit": "new_commit_after_push"})
+        )
         meta_dir = _seed_meta_md(tmp_path, alias)
         scheduler = _make_scheduler(db_file, meta_dir)
 
@@ -178,18 +178,15 @@ class TestLifecycleGateBypass:
         record = DescriptionRefreshTrackingBackend(db_file).get_tracking_record(alias)
         assert record is not None
         assert record["status"] == "queued", (
-            f"Bug #835: lifecycle-stale repo must transition to 'queued' in one pass, "
+            f"Repo with code changes must transition to 'queued' in one pass, "
             f"got status='{record['status']}'"
         )
 
-    def test_lifecycle_fresh_repo_with_no_changes_is_still_queued(self, tmp_path):
+    def test_fresh_repo_with_no_changes_is_rescheduled_not_queued(self, tmp_path):
         """
-        Post Story #876 D3 the has_changes and needs_lifecycle_backfill gates
-        are both removed — every stale repo transitions to 'queued' regardless
-        of lifecycle schema version or code-change state.  The prior contract
-        ('stays pending when fresh and unchanged') is the exact behavior D3
-        eliminates.  External collaborators are patched with the same shape
-        used by the sibling test above so this unit test does not shell out.
+        A repo with current lifecycle schema and no code changes (matching commit
+        in metadata.json) must NOT be queued for refresh — the has_changes gate
+        reschedules it to the next cycle instead, avoiding wasted LLM calls.
         """
         from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
         from code_indexer.server.storage.database_manager import DatabaseSchema
@@ -212,7 +209,10 @@ class TestLifecycleGateBypass:
 
         record = DescriptionRefreshTrackingBackend(db_file).get_tracking_record(alias)
         assert record is not None
-        assert record["status"] == "queued", (
-            f"D3: lifecycle-fresh repo with no changes must still transition to "
-            f"'queued', got status='{record['status']}'"
+        assert record["status"] == "pending", (
+            f"Repo with no code changes must stay 'pending' (not queued), "
+            f"got status='{record['status']}'"
+        )
+        assert record["next_run"] > _STALE_NEXT_RUN, (
+            "Repo with no changes must be rescheduled to a future next_run"
         )
