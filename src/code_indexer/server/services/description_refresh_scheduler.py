@@ -987,6 +987,18 @@ class DescriptionRefreshScheduler:
                 # Get refresh prompt using RepoAnalyzer
                 prompt = self._get_refresh_prompt(alias, clone_path)
                 if prompt is None:
+                    # If the .md file doesn't exist, this is NOT a prompt-generation
+                    # failure — the repo simply hasn't been analyzed yet.  Skip it
+                    # without incrementing the failure counter so it doesn't get
+                    # quarantined for a missing file.
+                    if self._meta_dir and not (self._meta_dir / f"{alias}.md").exists():
+                        now = datetime.now(timezone.utc).isoformat()
+                        self._tracking_backend.upsert_tracking(
+                            repo_alias=alias,
+                            next_run=self.calculate_next_run(alias),
+                            updated_at=now,
+                        )
+                        continue
                     # Bug #953: circuit-breaker — count consecutive prompt failures.
                     self._prompt_failure_counts[alias] += 1
                     failure_count = self._prompt_failure_counts[alias]
