@@ -610,40 +610,19 @@ Output ONLY a JSON object (no markdown, no explanation) with these exact fields:
   "purpose": "one of: api, service, library, cli-tool, web-application, data-structure, utility, framework, general-purpose"
 }"""
 
-            # Use script to provide pseudo-TTY (required for Claude CLI in non-interactive environments)
-            # The command: script -q -c 'timeout 90 claude -p "..." --print --dangerously-skip-permissions' /dev/null
-            claude_cmd = f"timeout 90 claude -p {shlex.quote(prompt)} --print --dangerously-skip-permissions"
-            full_cmd = ["script", "-q", "-c", claude_cmd, "/dev/null"]
-
-            result = subprocess.run(
-                full_cmd,
-                cwd=str(self.repo_path),
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env={
-                    k: v
-                    for k, v in os.environ.items()
-                    if k
-                    not in (
-                        ("CLAUDECODE", "ANTHROPIC_API_KEY")
-                        if "CLAUDECODE" in os.environ
-                        else ("CLAUDECODE",)
-                    )
-                },
+            # Delegate to the shared invoke_claude_cli wrapper which handles
+            # pseudo-TTY, environment filtering, output cleaning, and timeouts.
+            from code_indexer.server.utils.config_manager import LifecycleAnalysisConfig
+            _defaults = LifecycleAnalysisConfig()
+            success, output = invoke_claude_cli(
+                str(self.repo_path),
+                prompt,
+                _defaults.shell_timeout_seconds,
+                _defaults.outer_timeout_seconds,
             )
-
-            if result.returncode != 0:
-                logger.debug("Claude CLI returned non-zero: %d", result.returncode)
+            if not success:
+                logger.debug("Claude CLI failed: %s", output)
                 return None
-
-            # Clean output (remove ANSI escape codes and carriage returns)
-            output = result.stdout
-            output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", output)  # Remove ANSI escapes
-            output = output.replace("\r\n", "\n").replace(
-                "\r", ""
-            )  # Normalize line endings
-            output = output.strip()
 
             # Extract JSON from response (may be wrapped in markdown code blocks)
             if "```json" in output:
@@ -685,12 +664,6 @@ Output ONLY a JSON object (no markdown, no explanation) with these exact fields:
                 purpose=data.get("purpose", "general-purpose"),
             )
 
-        except FileNotFoundError:
-            logger.debug("script command not found")
-            return None
-        except subprocess.TimeoutExpired:
-            logger.debug("Claude CLI timed out after 120 seconds")
-            return None
         except json.JSONDecodeError as e:
             logger.debug("Failed to parse Claude CLI JSON response: %s", e)
             return None

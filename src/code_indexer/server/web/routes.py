@@ -3272,7 +3272,6 @@ def get_golden_repo_branches(
 @web_router.post(
     "/golden-repos/activate",
     response_class=HTMLResponse,
-    dependencies=[Depends(dependencies.require_elevation())],
 )
 def activate_golden_repo(
     request: Request,
@@ -3948,7 +3947,6 @@ def repo_details(
 @web_router.post(
     "/repos/{username}/{user_alias}/deactivate",
     response_class=HTMLResponse,
-    dependencies=[Depends(dependencies.require_elevation())],
 )
 def deactivate_repo(
     request: Request,

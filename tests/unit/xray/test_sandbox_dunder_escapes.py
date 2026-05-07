@@ -250,12 +250,12 @@ class TestDunderSandboxEscapes:
     # type() is still blocked by stripped builtins (NameError in subprocess)
     # -----------------------------------------------------------------------
 
-    def test_type_builtin_absent_from_safe_builtins(self):
-        """Verify 'type' is NOT in safe builtins — type(x) raises NameError.
+    def test_type_builtin_in_safe_builtins(self):
+        """Verify 'type' IS in safe builtins — type(x) succeeds in the evaluator.
 
-        This is a LAYER 2 check (stripped builtins), not a LAYER 1 check.
-        type(node) uses only Call+Name — both whitelisted, so validation passes.
-        The subprocess dies with NameError.
+        Story #993 added 'type' to SAFE_BUILTIN_NAMES. type(node) uses only
+        Call+Name — both whitelisted at AST validation (Layer 1), and now
+        'type' is present in the exec env (Layer 2), so the evaluator succeeds.
         """
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
@@ -269,5 +269,11 @@ class TestDunderSandboxEscapes:
             lang="python",
             file_path="/src/main.py",
         )
-        # type() is not in safe builtins — NameError => evaluator_subprocess_died
-        assert result.failure == "evaluator_subprocess_died"
+        # type() is now in safe builtins — evaluator succeeds
+        assert result.failure is None, (
+            f"type() must succeed after Story #993, got failure={result.failure!r}, "
+            f"detail={result.detail!r}"
+        )
+        assert result.value is True, (
+            f"type(node) is not None must return True, got {result.value!r}"
+        )

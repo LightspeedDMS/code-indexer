@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.6.0 (2026-05-06) — Fix Claude CLI timeouts, concurrency bug, and UI cosmetic issues
+
+Production bug fix: Claude CLI invocations were being killed with exit code 124 on large repos due to hardcoded timeouts (90-360s) scattered across 5 code paths. Also fixes LifecycleBatchRunner ignoring config-driven concurrency, and 3 Web UI bugs.
+
+### Fixed
+- **Claude CLI timeout raised to 30 minutes**: all 5 hardcoded timeout sites unified under `LifecycleAnalysisConfig` defaults (1800s shell / 1860s outer). Configurable from Web UI at `/admin/config/lifecycle_analysis`.
+- **LifecycleBatchRunner concurrency bug**: was hardcoded to 2 at all 3 call sites, now reads `max_concurrent_claude_cli` from config via `_get_lifecycle_concurrency()`.
+- **repo_analyzer duplicate subprocess**: `_extract_info_with_claude` replaced copy-pasted subprocess block with call to shared `invoke_claude_cli()`.
+- **FTS tag missing on activated repo cards**: path detection checked wrong location (`index/tantivy` instead of `tantivy_index`).
+- **Description text not word-wrapping in golden repo details**: added CSS `word-wrap: break-word` and `white-space: pre-wrap` to `.repo-description-box`.
+- **TOTP elevation required for repo activation/deactivation**: removed `require_elevation()` dependency from web routes `/golden-repos/activate` and `/repos/{username}/{user_alias}/deactivate`.
+
+### Added
+- `tests/unit/server/services/test_claude_timeout_defaults.py` (10 tests) -- regression guard for all timeout sites.
+- `tests/unit/server/services/test_lifecycle_batch_concurrency.py` (5 tests) -- regression guard for concurrency propagation.
+
 ## v10.5.0 (2026-05-06) — Unify description refresh to single code path, fix terse descriptions, bootstrap backfill
 
 Production crisis fix: 895 golden repos had broken/terse descriptions caused by competing code paths and mismatched thresholds.

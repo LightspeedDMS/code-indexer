@@ -24,8 +24,8 @@ from code_indexer.server.web.routes import _validate_config_section
 # Named constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_SHELL_TIMEOUT = 360
-DEFAULT_OUTER_TIMEOUT = 420
+DEFAULT_SHELL_TIMEOUT = 1800
+DEFAULT_OUTER_TIMEOUT = 1860
 MINIMUM_MARGIN = 30  # outer must be >= shell + MINIMUM_MARGIN
 
 SHELL_600 = 600

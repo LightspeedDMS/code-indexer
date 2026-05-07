@@ -45,7 +45,7 @@ import difflib
 import multiprocessing
 import textwrap
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 if TYPE_CHECKING:
     from code_indexer.xray.xray_node import XRayNode
@@ -62,6 +62,9 @@ class ValidationResult:
 
     ok: bool
     reason: Optional[str] = field(default=None)
+    error_code: Optional[str] = field(default=None)
+    offending_construct: Optional[str] = field(default=None)
+    offending_line: Optional[int] = field(default=None)
 
 
 @dataclass
@@ -129,6 +132,15 @@ SAFE_BUILTIN_NAMES: frozenset[str] = frozenset(
         # and has no escalation power beyond the dunder blocklist already enforced
         # at AST validation time (M1 Codex review finding).
         "hasattr",
+        # Story #993 additions — common introspection / type helpers that have no
+        # escalation power beyond what the dunder blocklist already prevents.
+        "isinstance",  # type checking in evaluator logic
+        "type",  # inspect node type objects
+        "set",  # mutable set literals
+        "frozenset",  # immutable set for membership tests
+        "float",  # numeric coercion
+        "repr",  # debugging output inside evaluators
+        "print",  # debugging output; subprocess stdout is not visible to callers
     }
 )
 
@@ -140,14 +152,6 @@ SAFE_BUILTIN_NAMES: frozenset[str] = frozenset(
 # Maps the *first* forbidden AST node type name encountered during validation
 # to a human-readable workaround hint.  Keys are exact type.__name__ strings.
 _VALIDATION_HINTS: dict[str, str] = {
-    "Lambda": (
-        "Lambdas are not allowed. Inline the boolean expression directly, "
-        "or assign with `=` to a local variable."
-    ),
-    "FunctionDef": (
-        "Function and class definitions are not allowed. Evaluator code must be "
-        "a single expression or sequence of statements that produces a return value."
-    ),
     "AsyncFunctionDef": (
         "Function and class definitions are not allowed. Evaluator code must be "
         "a single expression or sequence of statements that produces a return value."
@@ -155,20 +159,6 @@ _VALIDATION_HINTS: dict[str, str] = {
     "ClassDef": (
         "Function and class definitions are not allowed. Evaluator code must be "
         "a single expression or sequence of statements that produces a return value."
-    ),
-    "Import": (
-        "Imports are not allowed. "
-        "Available builtins: len, str, int, bool, list, tuple, dict, "
-        "min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr. "
-        "Plus exception types for except clauses: Exception, ValueError, TypeError, "
-        "RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration."
-    ),
-    "ImportFrom": (
-        "Imports are not allowed. "
-        "Available builtins: len, str, int, bool, list, tuple, dict, "
-        "min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr. "
-        "Plus exception types for except clauses: Exception, ValueError, TypeError, "
-        "RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration."
     ),
     "Global": (
         "Global/nonlocal declarations are not allowed. Use local `=` assignments only."
@@ -203,6 +193,10 @@ _XRAY_NODE_PUBLIC_ATTRS: frozenset[str] = frozenset(
         "enclosing",
         "child_by_field_name",
         "children_by_field_name",
+        # Story #993 Improvement 2 additions
+        "is_in_try_resources",
+        "enclosing_method_body",
+        "node_at_byte_offset",
     }
 )
 
@@ -249,6 +243,29 @@ def _run_evaluator(
             for k, v in all_builtins.items()
             if k in SAFE_BUILTIN_NAMES and k not in stripped
         }
+
+        # Restricted __import__ that only permits whitelisted stdlib modules.
+        # The real __import__ is captured here (in the parent before exec) and
+        # called only when the top-level name is in STDLIB_WHITELIST.
+        _real_import = builtins.__import__
+        _whitelist = PythonEvaluatorSandbox.STDLIB_WHITELIST
+
+        def _restricted_import(
+            name: str,
+            globals: Any = None,
+            locals: Any = None,
+            fromlist: Any = (),
+            level: int = 0,
+        ) -> Any:
+            top = name.split(".")[0]
+            if top not in _whitelist:
+                raise ImportError(
+                    f"Import of '{top}' is blocked by the evaluator sandbox. "
+                    f"Allowed: {', '.join(sorted(_whitelist))}."
+                )
+            return _real_import(name, globals, locals, fromlist, level)
+
+        safe["__import__"] = _restricted_import
 
         globals_dict: dict[str, Any] = {
             "__builtins__": safe,
@@ -392,9 +409,17 @@ class PythonEvaluatorSandbox:
         # Group E — arithmetic binary operations
         # BinOp allows x + n, x - n, x * n etc. in evaluator code.
         # ast.operator covers concrete subclasses Add, Sub, Mult, Div etc.
-        # via isinstance() — same pattern as ast.boolop, ast.cmpop.
+        # via isinstance() — already included in Group A above.
         ast.BinOp,  # binary arithmetic: x + y, x * y, etc.
-        ast.operator,  # abstract base for Add, Sub, Mult, Div, Mod, etc.
+        # Group F — import statements (Story #993)
+        ast.Import,
+        ast.ImportFrom,
+        ast.alias,  # name alias node inside Import/ImportFrom
+        # Group G — function definitions and lambdas (Story #993)
+        ast.FunctionDef,
+        ast.Lambda,
+        ast.arguments,
+        ast.arg,
     )
 
     # Dunder attribute names that are blocked at AST validation time.
@@ -462,9 +487,36 @@ class PythonEvaluatorSandbox:
         }
     )
 
+    # Stdlib modules allowed in evaluator import statements (Story #993 Group F).
+    # Only the top-level module name is checked (e.g. "os.path" → "os").
+    # Non-whitelisted imports are rejected in validate() with a descriptive error.
+    STDLIB_WHITELIST: frozenset[str] = frozenset(
+        {"re", "collections", "itertools", "functools"}
+    )
+
     # ---------------------------------------------------------------------------
     # Internal class helpers
     # ---------------------------------------------------------------------------
+
+    @classmethod
+    def _import_top_level_modules(
+        cls, node: "Union[ast.Import, ast.ImportFrom]"
+    ) -> list[str]:
+        """Return the top-level module name(s) from an import statement node.
+
+        For ``ast.Import`` (``import re, os``): one entry per alias name.
+        For ``ast.ImportFrom`` (``from re import search``): one entry for the module.
+        Raises TypeError for any other node type (caller must gate with isinstance).
+        """
+        if isinstance(node, ast.Import):
+            return [alias.name.split(".")[0] for alias in node.names]
+        if isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            return [top] if top else []
+        raise TypeError(
+            f"_import_top_level_modules expects ast.Import or ast.ImportFrom, "
+            f"got {type(node).__name__}"
+        )
 
     @classmethod
     def _allowed_node_names(cls) -> list[str]:
@@ -519,18 +571,47 @@ class PythonEvaluatorSandbox:
         try:
             tree = ast.parse(code, mode="exec")
         except SyntaxError as exc:
-            return ValidationResult(ok=False, reason=f"syntax_error: {exc}")
+            return ValidationResult(
+                ok=False,
+                reason=f"syntax_error: {exc}",
+                error_code="syntax_error",
+                offending_line=getattr(exc, "lineno", None),
+            )
         except ValueError as exc:
             # ast.parse raises ValueError for inputs such as null bytes that
             # are structurally invalid before parsing even begins.
-            return ValidationResult(ok=False, reason=f"value_error: {exc}")
+            return ValidationResult(
+                ok=False,
+                reason=f"value_error: {exc}",
+                error_code="value_error",
+            )
 
         for node in ast.walk(tree):
             if not isinstance(node, self.ALLOWED_NODES):
                 return ValidationResult(
                     ok=False,
                     reason=self._build_rejection_reason(type(node).__name__),
+                    error_code="forbidden_node",
+                    offending_construct=type(node).__name__,
+                    offending_line=getattr(node, "lineno", None),
                 )
+
+            # Secondary whitelist check for import statements (Group F).
+            # Runs only for nodes that already passed the ALLOWED_NODES isinstance check.
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for top in self._import_top_level_modules(node):
+                    if top not in self.STDLIB_WHITELIST:
+                        return ValidationResult(
+                            ok=False,
+                            reason=(
+                                f"Import of '{top}' is not allowed. "
+                                f"Only whitelisted stdlib modules may be imported: "
+                                f"{', '.join(sorted(self.STDLIB_WHITELIST))}."
+                            ),
+                            error_code="import_not_whitelisted",
+                            offending_construct=top,
+                            offending_line=getattr(node, "lineno", None),
+                        )
 
             # Block Attribute access to dunder names (Python sandbox escape vector).
             # e.g. node.__class__, ''.join.__globals__, dict.__base__
@@ -544,6 +625,9 @@ class PythonEvaluatorSandbox:
                         f"Attribute access to {node.attr!r} blocked "
                         f"(sandbox escape vector)"
                     ),
+                    error_code="dunder_blocked",
+                    offending_construct=node.attr,
+                    offending_line=getattr(node, "lineno", None),
                 )
 
             # Block Subscript access using a string Constant slice that is a dunder
@@ -567,6 +651,9 @@ class PythonEvaluatorSandbox:
                                 f"Subscript access to {sl.value!r} blocked "
                                 f"(sandbox escape vector)"
                             ),
+                            error_code="dunder_blocked",
+                            offending_construct=sl.value,
+                            offending_line=getattr(node, "lineno", None),
                         )
 
             # v10.4.3: Slice expressions (e.g. obj['__class__':10]) can hide dunder
@@ -595,6 +682,9 @@ class PythonEvaluatorSandbox:
                                 f"Slice {component_name} access to {component.value!r} "
                                 f"blocked (sandbox escape vector)"
                             ),
+                            error_code="dunder_blocked",
+                            offending_construct=component.value,
+                            offending_line=getattr(node, "lineno", None),
                         )
 
         return ValidationResult(ok=True)

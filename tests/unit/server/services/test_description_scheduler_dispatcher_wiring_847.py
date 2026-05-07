@@ -11,7 +11,7 @@ Test inventory (6 tests):
               from config when codex is enabled.
     Test 3 — scheduler-execution drives dispatcher.dispatch(...) with the
               exact flow="description_refresh", cwd=repo_path, prompt=prompt,
-              timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS (120).
+              timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS (1860).
     Test 4a — success: result.output flows back as (True, output_str).
     Test 4b — failure: result.error flows back as (False, error_str).
     Test 5 — failover logging: when result.was_failover=True an INFO log
@@ -27,7 +27,7 @@ from code_indexer.server.services.intelligence_cli_invoker import InvocationResu
 
 # The scheduler hard-timeout constant — the dispatcher must receive this exact value.
 _EXPECTED_TIMEOUT = (
-    120  # _CLAUDE_CLI_HARD_TIMEOUT_SECONDS in description_refresh_scheduler.py
+    1860  # _CLAUDE_CLI_HARD_TIMEOUT_SECONDS in description_refresh_scheduler.py
 )
 _EXPECTED_FLOW = "description_refresh"
 
@@ -203,7 +203,7 @@ class TestSchedulerDispatchCallArgs:
           flow  = "description_refresh"
           cwd   = repo_path
           prompt = prompt
-          timeout = 120  (_CLAUDE_CLI_HARD_TIMEOUT_SECONDS)
+          timeout = 1860  (_CLAUDE_CLI_HARD_TIMEOUT_SECONDS)
         """
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = _make_success_result()

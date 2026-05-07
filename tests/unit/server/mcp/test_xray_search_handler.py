@@ -573,10 +573,10 @@ class TestXraySearchHandlerAwaitSeconds:
         data = _parse_response(result)
         assert data.get("error") == "await_seconds_invalid"
 
-    def test_await_seconds_31_rejected(self):
-        """await_seconds=31 exceeds cap of 30, returns await_seconds_invalid."""
+    def test_await_seconds_121_rejected(self):
+        """await_seconds=121 exceeds cap of 120, returns await_seconds_invalid."""
         user = _make_user(UserRole.NORMAL_USER)
-        params = {**VALID_PARAMS, "await_seconds": 31}
+        params = {**VALID_PARAMS, "await_seconds": 121}
 
         with patch(
             "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
@@ -588,10 +588,10 @@ class TestXraySearchHandlerAwaitSeconds:
         data = _parse_response(result)
         assert data.get("error") == "await_seconds_invalid"
 
-    def test_await_seconds_30_rejected_v2_cap(self):
-        """await_seconds=30 is now rejected — cap was lowered from 30 to 10 in v10.3.2."""
+    def test_await_seconds_121_rejected_v2_cap(self):
+        """await_seconds=30 is now valid (below the 120 cap raised in story/993); 121 is rejected."""
         user = _make_user(UserRole.NORMAL_USER)
-        params = {**VALID_PARAMS, "await_seconds": 30}
+        params = {**VALID_PARAMS, "await_seconds": 121}
 
         with patch(
             "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
@@ -601,7 +601,7 @@ class TestXraySearchHandlerAwaitSeconds:
             result = handler(params, user)
 
         data = _parse_response(result)
-        # 30 exceeds the new cap of 10 — must be rejected
+        # 121 exceeds the new cap of 120 — must be rejected
         assert data.get("error") == "await_seconds_invalid"
 
 
@@ -703,9 +703,9 @@ class TestXraySearchHandlerAwaitSecondsV2:
     # --- Float rejection ---
 
     def test_await_seconds_float_just_above_cap_rejected(self):
-        """await_seconds=10.001 (just above new cap) is rejected with await_seconds_invalid."""
+        """await_seconds=120.01 (just above new cap of 120) is rejected with await_seconds_invalid."""
         user = _make_user(UserRole.NORMAL_USER)
-        params = {**VALID_PARAMS, "await_seconds": 10.001}
+        params = {**VALID_PARAMS, "await_seconds": 120.01}
 
         with patch(
             "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
@@ -716,7 +716,7 @@ class TestXraySearchHandlerAwaitSecondsV2:
 
         data = _parse_response(result)
         assert data.get("error") == "await_seconds_invalid", (
-            "await_seconds=10.001 must be rejected"
+            "await_seconds=120.01 (just above cap of 120) must be rejected"
         )
 
     def test_await_seconds_float_negative_rejected(self):
@@ -823,10 +823,10 @@ class TestXraySearchHandlerAwaitSecondsV2:
 
     # --- New cap enforcement ---
 
-    def test_await_seconds_11_rejected_new_cap(self):
-        """await_seconds=11 exceeds new cap of 10 — rejected (cap lowered from 30 in v10.3.2)."""
+    def test_await_seconds_121_rejected_new_cap(self):
+        """await_seconds=121 exceeds new cap of 120 — rejected (cap raised from 10 to 120 in story/993)."""
         user = _make_user(UserRole.NORMAL_USER)
-        params = {**VALID_PARAMS, "await_seconds": 11}
+        params = {**VALID_PARAMS, "await_seconds": 121}
 
         with patch(
             "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
@@ -837,17 +837,17 @@ class TestXraySearchHandlerAwaitSecondsV2:
 
         data = _parse_response(result)
         assert data.get("error") == "await_seconds_invalid", (
-            "await_seconds=11 must be rejected by the new 10s cap"
+            "await_seconds=121 must be rejected by the new 120s cap"
         )
         message = data.get("message", "")
-        assert "10" in message, (
-            f"Error message must mention the new cap (10), got: {message!r}"
+        assert "120" in message, (
+            f"Error message must mention the new cap (120), got: {message!r}"
         )
 
-    def test_await_seconds_30_now_rejected(self):
-        """await_seconds=30 was valid in v10.3.0 but rejected now (cap lowered to 10 in v10.3.2)."""
+    def test_await_seconds_121_now_rejected(self):
+        """await_seconds=30 is now valid (below 120 cap); 121 is rejected (cap raised in story/993)."""
         user = _make_user(UserRole.NORMAL_USER)
-        params = {**VALID_PARAMS, "await_seconds": 30}
+        params = {**VALID_PARAMS, "await_seconds": 121}
 
         with patch(
             "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
@@ -858,7 +858,7 @@ class TestXraySearchHandlerAwaitSecondsV2:
 
         data = _parse_response(result)
         assert data.get("error") == "await_seconds_invalid", (
-            "await_seconds=30 must now be rejected (cap lowered from 30 to 10 in v10.3.2)"
+            "await_seconds=121 must be rejected (cap is 120 since story/993)"
         )
 
 

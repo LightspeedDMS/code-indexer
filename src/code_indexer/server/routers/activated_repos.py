@@ -301,8 +301,8 @@ async def get_indexes_status(
         semantic_path = resolve_semantic_index_path(index_dir)
         indexes.append(_check_index_status(semantic_path, "semantic"))
 
-        # FTS index (tantivy)
-        fts_path = index_dir / "tantivy"
+        # FTS index (tantivy) lives at .code-indexer/tantivy_index, not inside index/
+        fts_path = index_dir.parent / "tantivy_index"
         indexes.append(_check_index_status(fts_path, "fts"))
 
         # Temporal index (any provider-aware or legacy temporal collection)

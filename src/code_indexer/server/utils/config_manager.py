@@ -287,14 +287,14 @@ class LifecycleAnalysisConfig:
     Controls the shell-level kill budget and the outer Python-level grace window
     for Claude CLI invocations triggered by LifecycleClaudeCliInvoker.
 
-    Defaults bumped from the v3 module-level frozen constants (240s/300s) to
-    360s/420s per workshop decision #7 (Story #885).
+    Defaults bumped to 1800s/1860s (30-min shell budget) to support large-repo
+    Claude analysis.  Previous values: 360s/420s (Story #885), 240s/300s (v3).
     """
 
-    # A7a: Shell kill budget in seconds (default 360s, was 240s in v3 module constants)
-    shell_timeout_seconds: int = 360
-    # A7a: Outer Python grace window in seconds (default 420s, was 300s in v3 module constants)
-    outer_timeout_seconds: int = 420
+    # A7a: Shell kill budget in seconds (default 1800s = 30 min, was 360s pre-v10.5)
+    shell_timeout_seconds: int = 1800
+    # A7a: Outer Python grace window in seconds (default 1860s = shell + 60s grace, was 420s pre-v10.5)
+    outer_timeout_seconds: int = 1860
 
 
 @dataclass

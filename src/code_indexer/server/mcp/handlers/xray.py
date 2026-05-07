@@ -54,7 +54,8 @@ _DEFAULT_TIMEOUT_SECONDS = 120
 # use the async {job_id} polling path for waits beyond this ceiling.
 # Task #35 (v10.3.2): await_seconds accepts int OR float — typed as float.
 _AWAIT_SECONDS_MIN: float = 0.0
-_AWAIT_SECONDS_MAX: float = 10.0
+_AWAIT_SECONDS_MAX: float = 120.0
+_AWAIT_SECONDS_WARN_THRESHOLD: float = 30.0
 _AWAIT_POLL_INTERVAL = 0.05
 
 
@@ -193,6 +194,11 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 ),
             }
         )
+    if await_seconds > _AWAIT_SECONDS_WARN_THRESHOLD:
+        logger.warning(
+            "xray_search: await_seconds=%s may saturate threadpool under load",
+            await_seconds,
+        )
 
     if search_target not in ("content", "filename"):
         return _mcp_response(
@@ -294,6 +300,9 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response(
                 {
                     "error": "xray_evaluator_validation_failed",
+                    "error_code": validation_multi.error_code,
+                    "offending_construct": validation_multi.offending_construct,
+                    "offending_line": validation_multi.offending_line,
                     "message": validation_multi.reason,
                 }
             )
@@ -393,6 +402,9 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {
                 "error": "xray_evaluator_validation_failed",
+                "error_code": validation.error_code,
+                "offending_construct": validation.offending_construct,
+                "offending_line": validation.offending_line,
                 "message": validation.reason,
             }
         )
@@ -635,6 +647,11 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 ),
             }
         )
+    if await_seconds > _AWAIT_SECONDS_WARN_THRESHOLD:
+        logger.warning(
+            "xray_explore: await_seconds=%s may saturate threadpool under load",
+            await_seconds,
+        )
 
     # 'pattern' is required — reject if missing or empty (catches old 'driver_regex' callers)
     if not driver_regex:
@@ -745,6 +762,9 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {
                 "error": "xray_evaluator_validation_failed",
+                "error_code": validation.error_code,
+                "offending_construct": validation.offending_construct,
+                "offending_line": validation.offending_line,
                 "message": validation.reason,
             }
         )
