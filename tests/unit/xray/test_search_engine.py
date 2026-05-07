@@ -123,8 +123,18 @@ class TestXRaySearchEngineFileAsUnit:
             return real_run(code, **kwargs)
 
         match_positions = [
-            {"line_number": 1, "line_content": "prepareStatement(sql1)", "column": 0, "byte_offset": 0},
-            {"line_number": 2, "line_content": "prepareStatement(sql2)", "column": 0, "byte_offset": 0},
+            {
+                "line_number": 1,
+                "line_content": "prepareStatement(sql1)",
+                "column": 0,
+                "byte_offset": 0,
+            },
+            {
+                "line_number": 2,
+                "line_content": "prepareStatement(sql2)",
+                "column": 0,
+                "byte_offset": 0,
+            },
         ]
 
         with patch.object(search_engine.sandbox, "run", side_effect=counting_run):
@@ -551,7 +561,14 @@ class TestXRaySearchEngineCoverageEdgeCases:
                 'return {"matches": [], "value": None}',
                 include_ast_debug=False,
                 max_debug_nodes=50,
-                match_positions=[{"line_number": 1, "line_content": "prepareStatement()", "column": 0, "byte_offset": 0}],
+                match_positions=[
+                    {
+                        "line_number": 1,
+                        "line_content": "prepareStatement()",
+                        "column": 0,
+                        "byte_offset": 0,
+                    }
+                ],
                 lang="python",
                 source=source_text,
                 context_lines=0,
@@ -580,7 +597,14 @@ class TestXRaySearchEngineCoverageEdgeCases:
                 'return {"matches": [], "value": None}',
                 include_ast_debug=False,
                 max_debug_nodes=50,
-                match_positions=[{"line_number": 1, "line_content": "prepareStatement()", "column": 0, "byte_offset": 0}],
+                match_positions=[
+                    {
+                        "line_number": 1,
+                        "line_content": "prepareStatement()",
+                        "column": 0,
+                        "byte_offset": 0,
+                    }
+                ],
                 lang="python",
                 source=source_text,
                 context_lines=0,
@@ -613,7 +637,14 @@ class TestXRaySearchEngineCoverageEdgeCases:
                 'return {"matches": [], "value": None}',
                 include_ast_debug=False,
                 max_debug_nodes=50,
-                match_positions=[{"line_number": 1, "line_content": "prepareStatement()", "column": 0, "byte_offset": 0}],
+                match_positions=[
+                    {
+                        "line_number": 1,
+                        "line_content": "prepareStatement()",
+                        "column": 0,
+                        "byte_offset": 0,
+                    }
+                ],
                 lang="python",
                 source=source_text,
                 context_lines=0,

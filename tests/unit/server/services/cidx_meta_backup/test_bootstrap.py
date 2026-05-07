@@ -185,8 +185,10 @@ def _seed_remote_with_commit(remote_uri: str, work_dir: Path) -> None:
     )
 
 
-def test_push_with_fallback_force_succeeds_when_plain_rejected(tmp_path):
-    """_push_with_fallback falls back to --force when plain push is non-fast-forward rejected."""
+def test_push_raises_on_divergent_remote(tmp_path):
+    """_push raises RuntimeError when push is non-fast-forward rejected (no force fallback)."""
+    import pytest
+
     from code_indexer.server.services.cidx_meta_backup.bootstrap import (
         CidxMetaBackupBootstrap,
     )
@@ -194,26 +196,16 @@ def test_push_with_fallback_force_succeeds_when_plain_rejected(tmp_path):
     remote_path = _init_bare_remote(tmp_path)
     _seed_remote_with_commit(remote_path.as_uri(), tmp_path / "seed")
 
-    # Bootstrap from a new local path — creates its own commit, diverging from remote.
     repo_path = tmp_path / "cidx-meta"
     repo_path.mkdir()
     _write_seed_files(repo_path)
 
-    result = CidxMetaBackupBootstrap().bootstrap(str(repo_path), remote_path.as_uri())
-    assert result == "bootstrapped"
-
-    # Verify bootstrap's content is on the remote (force push won).
-    verify = tmp_path / "verify"
-    subprocess.run(
-        ["git", "clone", remote_path.as_uri(), str(verify)],
-        check=True,
-        capture_output=True,
-    )
-    assert (verify / "README.md").read_text() == "seed\n"
+    with pytest.raises(RuntimeError, match="push rejected by remote"):
+        CidxMetaBackupBootstrap().bootstrap(str(repo_path), remote_path.as_uri())
 
 
-def test_push_with_fallback_raises_when_both_fail(tmp_path):
-    """bootstrap raises RuntimeError when both plain and --force pushes fail."""
+def test_push_raises_on_bad_remote(tmp_path):
+    """bootstrap raises RuntimeError when push to unreachable remote fails."""
     import pytest
 
     from code_indexer.server.services.cidx_meta_backup.bootstrap import (
@@ -225,5 +217,5 @@ def test_push_with_fallback_raises_when_both_fail(tmp_path):
     _write_seed_files(repo_path)
 
     bad_remote = str(tmp_path / "nonexistent" / "repo.git")
-    with pytest.raises(RuntimeError, match="push failed"):
+    with pytest.raises(RuntimeError, match="push rejected by remote"):
         CidxMetaBackupBootstrap().bootstrap(str(repo_path), bad_remote)

@@ -36,20 +36,14 @@ class CidxMetaBackupBootstrap:
         if not gitignore_path.exists() or gitignore_path.read_text() != content:
             gitignore_path.write_text(content)
 
-    def _push_with_fallback(self, cidx_meta_path: str, branch: str) -> None:
-        """Try plain push first; fall back to --force if rejected; raise if both fail."""
-        plain = self._git(
+    def _push(self, cidx_meta_path: str, branch: str) -> None:
+        """Push to remote. Raises RuntimeError on rejection -- never force-pushes."""
+        result = self._git(
             cidx_meta_path, "push", "origin", f"HEAD:{branch}", check=False
         )
-        if plain.returncode == 0:
-            return
-        force = self._git(
-            cidx_meta_path, "push", "--force", "origin", f"HEAD:{branch}", check=False
-        )
-        if force.returncode == 0:
-            return
-        stderr = (force.stderr or force.stdout or "").strip()
-        raise RuntimeError(f"push failed (plain and --force both rejected): {stderr}")
+        if result.returncode != 0:
+            stderr = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(f"push rejected by remote: {stderr}")
 
     def bootstrap(self, cidx_meta_path: str, remote_url: str) -> str:
         """Initialize or re-point git backup state for cidx-meta."""
@@ -63,7 +57,7 @@ class CidxMetaBackupBootstrap:
             self._git(cidx_meta_path, "add", "-A")
             self._git(cidx_meta_path, "commit", "-m", "auto: initial cidx-meta state")
             self._git(cidx_meta_path, "remote", "add", "origin", remote_url)
-            self._push_with_fallback(cidx_meta_path, branch)
+            self._push(cidx_meta_path, branch)
             return "bootstrapped"
 
         current_remote_result = self._git(
@@ -81,6 +75,6 @@ class CidxMetaBackupBootstrap:
                 self._git(cidx_meta_path, "remote", "add", "origin", remote_url)
             else:
                 self._git(cidx_meta_path, "remote", "set-url", "origin", remote_url)
-            self._push_with_fallback(cidx_meta_path, branch)
+            self._push(cidx_meta_path, branch)
 
         return "already_initialized"

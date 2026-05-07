@@ -1180,7 +1180,9 @@ class RefreshScheduler:
                                 # in place before CidxMetaBackupSync runs `git add -A`.
                                 try:
                                     MetaDirectoryUpdater(
-                                        master_path, self.registry
+                                        master_path,
+                                        self.registry,
+                                        refresh_scheduler=self,
                                     ).update()
                                 except Exception as _meta_err:
                                     logger.warning(
@@ -1286,7 +1288,7 @@ class RefreshScheduler:
                             # used for backup_cfg fetch and bootstrap errors in this block).
                             try:
                                 MetaDirectoryUpdater(
-                                    master_path, self.registry
+                                    master_path, self.registry, refresh_scheduler=self
                                 ).update()
                             except Exception as meta_err:
                                 logger.warning(
@@ -1335,7 +1337,7 @@ class RefreshScheduler:
                             updater: UpdateStrategy
                             if is_meta_repo:
                                 updater = MetaDirectoryUpdater(
-                                    master_path, self.registry
+                                    master_path, self.registry, refresh_scheduler=self
                                 )
                             else:
                                 # Story #236 Fix 2: Always git pull into the master golden repo, never into
