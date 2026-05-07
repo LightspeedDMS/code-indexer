@@ -372,3 +372,34 @@ class TestFilenameConventionConsistencyAcrossModules:
             "REGRESSION: MetaDirectoryUpdater replaced the hook-written file "
             "with a stub — the two modules do not agree on the filename."
         )
+
+
+class TestMetaDirectoryUpdaterIgnoresNonGlobalMdFiles:
+    """Verify MetaDirectoryUpdater only manages *-global.md files."""
+
+    def test_non_global_md_files_not_treated_as_managed(
+        self, golden_repos_dir, cidx_meta_path
+    ):
+        # Create non-managed .md files
+        (cidx_meta_path / "README.md").write_text("# Readme\n")
+        (cidx_meta_path / "notes.md").write_text("# Notes\n")
+        # Create managed file
+        (cidx_meta_path / "MyRepo-global.md").write_text("# MyRepo\nRich content\n")
+
+        registry = MagicMock()
+        registry.list_global_repos.return_value = [
+            {"alias_name": "MyRepo-global", "repo_name": "MyRepo", "repo_url": "..."},
+        ]
+
+        from code_indexer.global_repos.meta_directory_updater import (
+            MetaDirectoryUpdater,
+        )
+
+        updater = MetaDirectoryUpdater(str(cidx_meta_path), registry)
+        updater.update()
+
+        assert (cidx_meta_path / "README.md").exists()
+        assert (cidx_meta_path / "notes.md").exists()
+        assert (cidx_meta_path / "MyRepo-global.md").exists()
+        assert (cidx_meta_path / "README.md").read_text() == "# Readme\n"
+        assert (cidx_meta_path / "notes.md").read_text() == "# Notes\n"

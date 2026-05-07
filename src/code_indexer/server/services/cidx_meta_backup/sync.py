@@ -11,6 +11,11 @@ from code_indexer.server.git.git_subprocess_env import build_non_interactive_git
 
 from .conflict_resolver import ClaudeConflictResolver
 
+import logging as _logging
+
+_MAX_MD_DELETE_RATIO = 0.5
+_MIN_MD_DELETES_FOR_GATE = 3
+
 
 @dataclass
 class SyncResult:
@@ -54,6 +59,57 @@ class CidxMetaBackupSync:
         status = self._git("status", "--porcelain")
         local_committed = False
         if status.stdout.strip():
+            # Safety gate: block commit if mass-deleting .md files.
+            # Git porcelain v1 format is 'XY <path>' where X=index, Y=working-tree.
+            # Check both status columns for 'D' to catch all deletion variants
+            # (e.g. ' D' = unstaged delete, 'D ' = staged delete, 'DD' = both).
+            status_lines = [ln for ln in status.stdout.splitlines() if ln.strip()]
+            deleted_md_count = sum(
+                1
+                for line in status_lines
+                if len(line) >= 4
+                and "D" in line[:2]
+                and line[3:].strip().endswith(".md")
+            )
+            if deleted_md_count >= _MIN_MD_DELETES_FOR_GATE:
+                tracked_result = self._git("ls-files", "*.md", check=False)
+                # Runs BEFORE `git add -A`, so deletions are unstaged.
+                # `git ls-files` includes deleted-but-tracked files in the count,
+                # giving us the correct pre-deletion total.
+                total_md = (
+                    len(tracked_result.stdout.strip().splitlines())
+                    if tracked_result.stdout.strip()
+                    else 0
+                )
+                if total_md > 0 and deleted_md_count / total_md > _MAX_MD_DELETE_RATIO:
+                    _logging.getLogger(__name__).error(
+                        "CidxMetaBackupSync: BLOCKED commit — mass-delete of %d/%d .md files "
+                        "(%.0f%% exceeds %.0f%% threshold)",
+                        deleted_md_count,
+                        total_md,
+                        deleted_md_count / total_md * 100,
+                        _MAX_MD_DELETE_RATIO * 100,
+                    )
+                    # Restore only the deleted .md files, not all unstaged changes.
+                    # Using 'git checkout -- .' would revert ALL working-tree modifications
+                    # (including legitimate changes to .gitignore, config files, etc.).
+                    deleted_md_files = [
+                        line[3:].strip()
+                        for line in status_lines
+                        if len(line) >= 4
+                        and "D" in line[:2]
+                        and line[3:].strip().endswith(".md")
+                    ]
+                    for md_file in deleted_md_files:
+                        self._git("checkout", "--", md_file, check=False)
+                    return SyncResult(
+                        skipped=False,
+                        sync_failure=(
+                            f"mass-delete safety gate blocked commit: "
+                            f"{deleted_md_count}/{total_md} .md files would be deleted"
+                        ),
+                    )
+
             self._git("add", "-A")
             timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             self._git("commit", "-m", f"auto: cidx-meta refresh @ {timestamp}")

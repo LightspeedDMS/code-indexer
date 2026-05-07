@@ -106,10 +106,15 @@ class TestXRaySearchEngineFileAsUnit:
     """Evaluator is called ONCE per candidate file with match_positions list."""
 
     def test_evaluator_called_once_per_file(self, search_engine, tmp_path):
-        """With 2 regex hits in one file, evaluator is called once (not twice)."""
-        (tmp_path / "file.py").write_text(
-            "prepareStatement(sql1)\nprepareStatement(sql2)\n"
-        )
+        """With 2 regex hits in one file, _evaluate_file calls sandbox.run once.
+
+        Uses _evaluate_file directly (lower-level test API) because the production
+        run() path now uses the spawn-driver which runs in a separate process where
+        parent-process patches on sandbox.run cannot be intercepted.
+        """
+        source_text = "prepareStatement(sql1)\nprepareStatement(sql2)\n"
+        fp = tmp_path / "file.py"
+        fp.write_text(source_text)
         call_count = [0]
         real_run = search_engine.sandbox.run
 
@@ -117,12 +122,31 @@ class TestXRaySearchEngineFileAsUnit:
             call_count[0] += 1
             return real_run(code, **kwargs)
 
+        match_positions = [
+            {
+                "line_number": 1,
+                "line_content": "prepareStatement(sql1)",
+                "column": 0,
+                "byte_offset": 0,
+            },
+            {
+                "line_number": 2,
+                "line_content": "prepareStatement(sql2)",
+                "column": 0,
+                "byte_offset": 0,
+            },
+        ]
+
         with patch.object(search_engine.sandbox, "run", side_effect=counting_run):
-            search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"prepareStatement",
-                evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-                search_target="content",
+            search_engine._evaluate_file(
+                fp,
+                'return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
+                include_ast_debug=False,
+                max_debug_nodes=50,
+                match_positions=match_positions,
+                lang="python",
+                source=source_text,
+                context_lines=0,
             )
 
         # One file → one evaluator call regardless of hit count
@@ -518,67 +542,115 @@ class TestXRaySearchEngineCoverageEdgeCases:
     def test_evaluator_timeout_populates_evaluation_errors(
         self, search_engine, tmp_path
     ):
-        """evaluator_timeout sandbox result produces EvaluatorTimeout error entry."""
+        """evaluator_timeout sandbox result produces EvaluatorTimeout error entry.
+
+        Uses _evaluate_file directly (lower-level test API) because the production
+        run() path now uses the spawn-driver which runs in a separate process where
+        parent-process patches on sandbox.run cannot be intercepted.
+        """
         from code_indexer.xray.sandbox import EvalResult
 
-        (tmp_path / "file.py").write_text("prepareStatement()")
+        source_text = "prepareStatement()"
+        fp = tmp_path / "file.py"
+        fp.write_text(source_text)
         timeout_result = EvalResult(failure="evaluator_timeout")
 
         with patch.object(search_engine.sandbox, "run", return_value=timeout_result):
-            result = search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"prepareStatement",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
+            _matches, errors, _meta = search_engine._evaluate_file(
+                fp,
+                'return {"matches": [], "value": None}',
+                include_ast_debug=False,
+                max_debug_nodes=50,
+                match_positions=[
+                    {
+                        "line_number": 1,
+                        "line_content": "prepareStatement()",
+                        "column": 0,
+                        "byte_offset": 0,
+                    }
+                ],
+                lang="python",
+                source=source_text,
+                context_lines=0,
             )
 
-        assert any(
-            e["error_type"] == "EvaluatorTimeout" for e in result["evaluation_errors"]
-        )
+        assert any(e["error_type"] == "EvaluatorTimeout" for e in errors)
 
     def test_parse_exception_populates_evaluation_errors(self, search_engine, tmp_path):
-        """Unexpected exception during parse is caught and added to evaluation_errors."""
-        (tmp_path / "file.py").write_text("prepareStatement()")
+        """Unexpected exception during parse is caught and added to evaluation_errors.
+
+        Uses _evaluate_file directly (lower-level test API) because the production
+        run() path now uses the spawn-driver which runs in a separate process where
+        parent-process patches on ast_engine.parse cannot be intercepted.
+        """
+        source_text = "prepareStatement()"
+        fp = tmp_path / "file.py"
+        fp.write_text(source_text)
 
         with patch.object(
             search_engine.ast_engine,
             "parse",
             side_effect=RuntimeError("parse failure"),
         ):
-            result = search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"prepareStatement",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
+            _matches, errors, _meta = search_engine._evaluate_file(
+                fp,
+                'return {"matches": [], "value": None}',
+                include_ast_debug=False,
+                max_debug_nodes=50,
+                match_positions=[
+                    {
+                        "line_number": 1,
+                        "line_content": "prepareStatement()",
+                        "column": 0,
+                        "byte_offset": 0,
+                    }
+                ],
+                lang="python",
+                source=source_text,
+                context_lines=0,
             )
 
-        assert len(result["evaluation_errors"]) >= 1
-        assert result["evaluation_errors"][0]["error_type"] == "RuntimeError"
+        assert len(errors) >= 1
+        assert errors[0]["error_type"] == "RuntimeError"
 
     def test_evaluator_returned_non_dict_populates_error(self, search_engine, tmp_path):
         """Non-dict return from sandbox produces InvalidEvaluatorReturn error entry.
 
         The sandbox subprocess sends back whatever the evaluator returns.
         A dict is required; bool/int/str produces an error.
+
+        Uses _evaluate_file directly (lower-level test API) because the production
+        run() path now uses the spawn-driver which runs in a separate process where
+        parent-process patches on sandbox.run cannot be intercepted.
         """
         from code_indexer.xray.sandbox import EvalResult
 
-        (tmp_path / "file.py").write_text("prepareStatement()")
+        source_text = "prepareStatement()"
+        fp = tmp_path / "file.py"
+        fp.write_text(source_text)
         # Simulate sandbox returning success with a bool (old contract)
         bool_result = EvalResult(value=True)
 
         with patch.object(search_engine.sandbox, "run", return_value=bool_result):
-            result = search_engine.run(
-                repo_path=tmp_path,
-                driver_regex=r"prepareStatement",
-                evaluator_code='return {"matches": [], "value": None}',
-                search_target="content",
+            _matches, errors, _meta = search_engine._evaluate_file(
+                fp,
+                'return {"matches": [], "value": None}',
+                include_ast_debug=False,
+                max_debug_nodes=50,
+                match_positions=[
+                    {
+                        "line_number": 1,
+                        "line_content": "prepareStatement()",
+                        "column": 0,
+                        "byte_offset": 0,
+                    }
+                ],
+                lang="python",
+                source=source_text,
+                context_lines=0,
             )
 
-        assert any(
-            e["error_type"] == "InvalidEvaluatorReturn"
-            for e in result["evaluation_errors"]
-        )
+        assert any(e["error_type"] == "InvalidEvaluatorReturn" for e in errors)
 
 
 class TestXRaySearchEngineProgressCallback:

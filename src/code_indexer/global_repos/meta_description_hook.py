@@ -473,6 +473,22 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
 
     # Delete .md file if it exists
     if md_file.exists():
+        _lock_acquired = False
+        if _refresh_scheduler is not None:
+            try:
+                _lock_acquired = _refresh_scheduler.acquire_write_lock(
+                    "cidx-meta", owner_name="lifecycle_writer"
+                )
+            except Exception as _lock_err:
+                logger.warning(
+                    "on_repo_removed: could not acquire write lock: %s", _lock_err
+                )
+            if not _lock_acquired:
+                logger.warning(
+                    "on_repo_removed: write lock not acquired, skipping deletion of %s",
+                    md_file,
+                )
+                return
         try:
             md_file.unlink()
             logger.info(f"Deleted meta description file: {md_file}")
@@ -509,6 +525,14 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                 f"Failed to delete meta description for {repo_name}: {e}", exc_info=True
             )
             # Don't crash the golden repo remove operation - log and continue
+        finally:
+            if _lock_acquired and _refresh_scheduler is not None:
+                try:
+                    _refresh_scheduler.release_write_lock(
+                        "cidx-meta", owner_name="lifecycle_writer"
+                    )
+                except Exception:
+                    pass
     else:
         logger.debug(f"No meta description file to delete for {repo_name}")
 

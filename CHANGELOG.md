@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.7.0 (2026-05-07) — cidx-meta MetaDirectoryUpdater hardening (defense-in-depth)
+
+Production data loss prevention: MetaDirectoryUpdater twice wiped $500+ worth of Claude-generated description files due to blind destructive reconciliation with no safety gates. This release adds defense-in-depth at three layers (filesystem, git commit, git push) to prevent mass-deletion of cidx-meta content.
+
+### Fixed
+- **Mass-delete safety threshold**: `MetaDirectoryUpdater.update()` now raises `MetaDirectoryMassDeleteBlocked` when deletion ratio exceeds 50% and at least 3 managed files exist, preventing empty-registry or transient-glitch wipeouts.
+- **Managed-file filter**: changed `glob("*.md")` to `glob("*-global.md")` so non-managed files (README.md, runbooks, etc.) are never treated as managed or counted in deletion ratios.
+- **Stub overwrite guard**: creation loop now checks `if not desc_file.exists()` before writing, preventing rich descriptions from being overwritten by 3-line stubs.
+- **Lock discipline for MetaDirectoryUpdater**: `update()` acquires cidx-meta write lock before filesystem changes and releases in finally block. Skips update when lock not acquired.
+- **Lock discipline for on_repo_removed**: `meta_description_hook.py` acquires cidx-meta write lock before deleting description files on repo removal.
+- **Backup sync commit-level safety gate**: `CidxMetaBackupSync.sync()` inspects `git status --porcelain` before committing; blocks and restores deleted .md files when mass-deletion detected.
+- **Bootstrap force-push removed**: `CidxMetaBackupBootstrap._push()` raises `RuntimeError` on push rejection instead of falling back to `--force`, preventing silent history destruction.
+- **Dead raw writer gated**: `DescriptionRefreshScheduler._update_description_file()` now raises `NotImplementedError` directing callers to `atomic_write_description()` or `write_meta_md()`.
+
+### Added
+- `tests/unit/global_repos/test_meta_directory_updater_hardening.py` (29 tests) -- comprehensive safety threshold, stub guard, lock discipline, sync gate, bootstrap, and porcelain parsing tests.
+- Extended `test_cidx_meta_filename_alignment_v10_4_9.py` with non-global .md file survival test.
+- Path model documentation comments in `meta_directory_updater.py` module docstring.
+
 ## v10.6.0 (2026-05-06) — Fix Claude CLI timeouts, concurrency bug, and UI cosmetic issues
 
 Production bug fix: Claude CLI invocations were being killed with exit code 124 on large repos due to hardcoded timeouts (90-360s) scattered across 5 code paths. Also fixes LifecycleBatchRunner ignoring config-driven concurrency, and 3 Web UI bugs.

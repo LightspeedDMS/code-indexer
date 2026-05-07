@@ -15,7 +15,6 @@ import logging
 import re
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -23,27 +22,9 @@ from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RipgrepExecutionError,
 )
+from code_indexer.xray.sandbox import _line_to_byte_offset_bytes as _line_to_byte_offset
 
 logger = logging.getLogger(__name__)
-
-
-def _line_to_byte_offset(source: str, line_number: int) -> int:
-    """Convert a 1-indexed line number to the byte offset of that line's start.
-
-    Args:
-        source: The full source code string (UTF-8 assumed).
-        line_number: 1-indexed line number.
-
-    Returns:
-        Byte offset of the start of the given line.  Returns 0 for line_number
-        <= 1.  Returns len(source) for line_number beyond the last line.
-    """
-    if line_number <= 1:
-        return 0
-    lines = source.split("\n")
-    if line_number > len(lines):
-        return len(source)
-    return sum(len(line) + 1 for line in lines[: line_number - 1])
 
 
 def _run_async_in_sync(coro: Any) -> Any:
@@ -296,57 +277,105 @@ class XRaySearchEngine:
         def _timed_out() -> bool:
             return _elapsed() > timeout_seconds
 
-        with ThreadPoolExecutor(max_workers=worker_threads) as pool:
-            pending: Dict[Future, Path] = {
-                pool.submit(
-                    self._evaluate_file,
-                    fp,
-                    evaluator_code,
-                    include_ast_debug,
-                    max_debug_nodes,
-                    self._last_phase1_positions.get(fp),
-                ): fp
-                for fp in candidate_files
-            }
-
-            while pending:
-                if _timed_out():
-                    timeout_hit = True
-                    for fut in list(pending):
-                        fut.cancel()
-                    break
-
-                # Poll for the next completion with a short timeout so we can
-                # re-check wall-clock between polls without blocking forever.
-                done, _ = wait(
-                    list(pending.keys()), timeout=0.5, return_when=FIRST_COMPLETED
+        # Build serializable file specs for spawn-driver batch (Bug #994).
+        # Language detection stays in parent (no tree-sitter needed — just extension map).
+        # Parsing + evaluation moves to the spawned driver process.
+        file_specs: List[Dict[str, Any]] = []
+        for fp in candidate_files:
+            fp_lang = self.ast_engine.detect_language(fp)
+            if fp_lang is None:
+                evaluation_errors.append(
+                    {
+                        "file_path": str(fp),
+                        "line_number": 0,
+                        "error_type": "UnsupportedLanguage",
+                        "error_message": f"No grammar for extension {fp.suffix!r}",
+                    }
                 )
+                files_processed += 1
+                continue
+            try:
+                fp_source = fp.read_bytes().decode("utf-8", errors="replace")
+            except Exception as exc:  # noqa: BLE001
+                evaluation_errors.append(
+                    {
+                        "file_path": str(fp),
+                        "line_number": 0,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+                files_processed += 1
+                continue
+            positions = self._last_phase1_positions.get(fp, [])
+            clean_positions = [
+                {k: v for k, v in p.items() if k != "ast_node"} for p in positions
+            ]
+            file_specs.append(
+                {
+                    "file_path": str(fp),
+                    "source": fp_source,
+                    "lang": fp_lang,
+                    "match_positions": clean_positions,
+                }
+            )
 
-                for fut in done:
-                    fp = pending.pop(fut)
-                    try:
-                        file_matches, file_errors, file_meta = fut.result()
-                        matches.extend(file_matches)
-                        evaluation_errors.extend(file_errors)
-                        if file_meta is not None:
-                            file_metadata.append(file_meta)
-                    except Exception as exc:  # noqa: BLE001
-                        evaluation_errors.append(
-                            {
-                                "file_path": str(fp),
-                                "line_number": 0,
-                                "error_type": type(exc).__name__,
-                                "error_message": str(exc),
-                            }
-                        )
-                    files_processed += 1
-
-                # Re-check timeout immediately after processing completions.
+        if file_specs:
+            remaining = max(1, timeout_seconds - int(_elapsed()))
+            batch_results = self.sandbox.run_batch(
+                evaluator_code=evaluator_code,
+                file_specs=file_specs,
+                worker_threads=worker_threads,
+                timeout_seconds=remaining,
+            )
+            for file_matches, file_errors, file_meta in batch_results:
                 if _timed_out():
                     timeout_hit = True
-                    for fut in list(pending):
-                        fut.cancel()
                     break
+                matches.extend(file_matches)
+                evaluation_errors.extend(file_errors)
+                if file_meta is not None:
+                    file_metadata.append(file_meta)
+                files_processed += 1
+
+        # Enrich matches with ast_debug and matched_node when requested.
+        # Re-parses each matched file once; safe since include_ast_debug is a
+        # debug/development flag (not a production hot path).
+        # matched_node uses the file-level root node (same contract as the
+        # original _evaluate_file implementation at lines 694-705).
+        if include_ast_debug and matches:
+            spec_by_path = {s["file_path"]: s for s in file_specs}
+            parsed_roots: Dict[str, Any] = {}
+            for match in matches:
+                fp_str = match.get("file_path", "")
+                if fp_str not in parsed_roots:
+                    spec = spec_by_path.get(fp_str)
+                    if spec is not None:
+                        try:
+                            root = self.ast_engine.parse(
+                                spec["source"].encode("utf-8"), spec["lang"]
+                            )
+                            parsed_roots[fp_str] = root
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "ast_debug: failed to parse %s for enrichment: %s",
+                                fp_str,
+                                exc,
+                            )
+                            parsed_roots[fp_str] = None
+                    else:
+                        parsed_roots[fp_str] = None
+                root = parsed_roots.get(fp_str)
+                if root is not None:
+                    raw_root = getattr(root, "_node", root)
+                    match["matched_node"] = {
+                        "type": raw_root.type,
+                        "start_byte": raw_root.start_byte,
+                        "end_byte": raw_root.end_byte,
+                        "start_point": list(raw_root.start_point),
+                        "end_point": list(raw_root.end_point),
+                    }
+                    match["ast_debug"] = self._serialize_ast(root, max_debug_nodes)
 
         elapsed = time.monotonic() - start
 
@@ -394,6 +423,7 @@ class XRaySearchEngine:
 
         return result
 
+    # Lower-level single-file evaluation API used directly by unit tests (not dead code).
     def _evaluate_file(
         self,
         file_path: Path,

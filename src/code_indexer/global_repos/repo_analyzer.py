@@ -613,6 +613,7 @@ Output ONLY a JSON object (no markdown, no explanation) with these exact fields:
             # Delegate to the shared invoke_claude_cli wrapper which handles
             # pseudo-TTY, environment filtering, output cleaning, and timeouts.
             from code_indexer.server.utils.config_manager import LifecycleAnalysisConfig
+
             _defaults = LifecycleAnalysisConfig()
             success, output = invoke_claude_cli(
                 str(self.repo_path),

@@ -146,9 +146,10 @@ class TestThreadPoolExecutorParallelism:
         for i in range(4):
             (tmp_path / f"f{i}.py").write_text(f"x_{i} = {i}\n")
 
-        # Evaluator that runs for ~50ms per file (tight loop, not sleep)
-        # sum(range(600_000)) takes ~25ms on modern CPUs, safe under 5s sandbox limit
-        slow_evaluator = "sum(range(600_000)); return True"
+        # Evaluator that runs for ~200ms per file (tight loop, not sleep).
+        # Must be large enough that 4x serial cost dominates the fixed ~200ms
+        # spawn-driver overhead (Bug #994 architecture).
+        slow_evaluator = 'sum(range(10_000_000)); return {"matches": [{"line_number": 1}], "value": None}'
 
         # Serial run: 1 worker (sequential)
         t_serial_start = time.monotonic()

@@ -9,7 +9,7 @@ Tests:
   call cidx after updating a description file.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 class TestReindexRemovedFromDescriptionRefreshScheduler:
@@ -77,28 +77,7 @@ class TestReindexRemovedFromDescriptionRefreshScheduler:
         )
         scheduler._meta_dir = meta_dir
 
-        cidx_calls = []
+        import pytest
 
-        def capture_subprocess(cmd, **kwargs):
-            if isinstance(cmd, list) and "cidx" in cmd:
-                cidx_calls.append(cmd)
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        content = "# Test Repo\nDescription content."
-        with patch("subprocess.run", side_effect=capture_subprocess):
-            scheduler._update_description_file("test-repo", content)
-
-        # Verify the .md file was written (core functionality preserved)
-        md_file = meta_dir / "test-repo.md"
-        assert md_file.exists(), (
-            "_update_description_file must still write the .md file"
-        )
-        assert md_file.read_text() == content
-
-        # Verify NO cidx calls were made
-        assert cidx_calls == [], (
-            "_update_description_file() must NOT call cidx after C9 removal. "
-            f"Got cidx calls: {cidx_calls}"
-        )
+        with pytest.raises(NotImplementedError, match="deprecated"):
+            scheduler._update_description_file("test-repo", "content")

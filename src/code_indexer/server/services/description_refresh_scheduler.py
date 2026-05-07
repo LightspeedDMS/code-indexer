@@ -1373,30 +1373,12 @@ class DescriptionRefreshScheduler:
         return True
 
     def _update_description_file(self, repo_alias: str, content: str) -> None:
-        """
-        Update the .md description file for a repository.
-
-        Args:
-            repo_alias: Repository alias
-            content: New content for the .md file (YAML frontmatter + markdown)
-        """
-        if not self._meta_dir:
-            logger.warning(
-                f"Meta directory not set, cannot update description for {repo_alias}"
-            )
-            return
-
-        md_file = self._meta_dir / f"{repo_alias}.md"
-
-        try:
-            md_file.write_text(content)
-            logger.info(f"Updated description file: {md_file}")
-
-        except Exception as e:
-            logger.error(
-                f"Failed to update description file for {repo_alias}: {e}",
-                exc_info=True,
-            )
+        """DEPRECATED: Use atomic_write_description() or write_meta_md() instead."""
+        raise NotImplementedError(
+            "_update_description_file is deprecated. "
+            "Use atomic_write_description() from meta_description_hook or "
+            "write_meta_md() from lifecycle_batch_runner instead."
+        )
 
     def close(self) -> None:
         """Clean up resources."""
