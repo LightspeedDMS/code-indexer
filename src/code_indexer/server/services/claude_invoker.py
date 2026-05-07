@@ -43,7 +43,7 @@ from code_indexer.server.services.intelligence_cli_invoker import (
 logger = logging.getLogger(__name__)
 
 _CLI_USED = "claude"
-_DEFAULT_SOFT_TIMEOUT_SECONDS = 90
+_DEFAULT_SOFT_TIMEOUT_SECONDS = 1800
 _STDERR_SNIPPET_LEN = 200
 
 

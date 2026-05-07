@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 # NOTE: This module assumes a Unix-like host with ``script``, ``timeout``, and
 # ``claude`` available in PATH.  The ``script`` utility provides a pseudo-TTY
 # required for Claude CLI in non-interactive environments.
-_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS = 90  # inner shell ``timeout`` budget
-_CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 120  # Python subprocess.run cap
+_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS = 1800  # inner shell ``timeout`` budget (30 min)
+_CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 1860  # Python subprocess.run cap (shell + 60s grace)
 
 # Bug #953: circuit-breaker threshold for consecutive prompt-generation failures.
 # After this many consecutive None-prompt results for the same repo, the scheduler
@@ -651,6 +651,7 @@ class DescriptionRefreshScheduler:
                 debouncer=self._lifecycle_debouncer,
                 claude_cli_invoker=self._lifecycle_invoker,
                 tracking_backend=self._tracking_backend,
+                concurrency=self._get_lifecycle_concurrency(),
             )
             runner.run(aliases, parent_job_id=job_id)
             logger.info(
@@ -777,6 +778,7 @@ class DescriptionRefreshScheduler:
                 debouncer=self._lifecycle_debouncer,
                 claude_cli_invoker=self._lifecycle_invoker,
                 tracking_backend=self._tracking_backend,
+                concurrency=self._get_lifecycle_concurrency(),
             )
             runner.run(aliases, parent_job_id=job_id)
             logger.info(
@@ -1096,6 +1098,7 @@ class DescriptionRefreshScheduler:
             refresh_scheduler=self._refresh_scheduler,
             debouncer=self._lifecycle_debouncer,
             claude_cli_invoker=self._lifecycle_invoker,
+            concurrency=self._get_lifecycle_concurrency(),
         )
         runner.run([alias], parent_job_id=job_id)
 
@@ -1106,6 +1109,16 @@ class DescriptionRefreshScheduler:
             return 24  # Default
 
         return int(config.claude_integration_config.description_refresh_interval_hours)
+
+    def _get_lifecycle_concurrency(self) -> int:
+        """Read max_concurrent_claude_cli from config for LifecycleBatchRunner."""
+        config_manager = getattr(self, "_config_manager", None)
+        config = config_manager.load_config() if config_manager else None
+        if config and config.claude_integration_config:
+            return max(1, config.claude_integration_config.max_concurrent_claude_cli)
+        from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+
+        return ClaudeIntegrationConfig().max_concurrent_claude_cli
 
     def _read_existing_description(
         self, repo_alias: str

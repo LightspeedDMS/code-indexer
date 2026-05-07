@@ -695,11 +695,15 @@ class ClaudeCliManager:
 
             # Story #847: route through CliDispatcher when one is wired.
             if self._cli_dispatcher is not None:
+                from code_indexer.server.utils.config_manager import (
+                    LifecycleAnalysisConfig,
+                )
+
                 result = self._cli_dispatcher.dispatch(
                     flow="description_gen",
                     cwd=str(repo_path),
                     prompt=str(repo_path),
-                    timeout=120,
+                    timeout=LifecycleAnalysisConfig().outer_timeout_seconds,
                 )
                 callback(result.success, result.output)
                 if result.success:

@@ -277,6 +277,7 @@
 }
 .repo-description-box {
     overflow-y: auto;
+    overflow-x: hidden;
     resize: vertical;
     min-height: 80px;
     max-height: 400px;
@@ -287,6 +288,8 @@
     background-color: var(--pico-card-background-color);
     font-size: 0.9rem;
     line-height: 1.6;
+    word-wrap: break-word;
+    white-space: pre-wrap;
 }
 .repo-description-box h1,
 .repo-description-box h2,
