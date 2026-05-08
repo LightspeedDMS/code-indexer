@@ -2,7 +2,7 @@
 Unit tests for DependencyMapAnalyzer (Story #192).
 
 Tests the multi-pass Claude CLI pipeline for generating dependency maps:
-- CLAUDE.md orientation file generation
+- Orientation files generation (CLAUDE.md pointer + dep_map_repo_catalogue.md)
 - Pass 1: Domain synthesis (JSON output)
 - Pass 2: Per-domain analysis
 - Pass 3: Index generation
@@ -21,11 +21,11 @@ from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnaly
 _SCRIPT_SHELL_CMD_IDX = 4
 
 
-class TestClaudeMdGeneration:
-    """Test CLAUDE.md orientation file generation (AC2)."""
+class TestOrientationFilesGeneration:
+    """Test orientation files generation (AC2)."""
 
-    def test_generate_claude_md_creates_file(self, tmp_path):
-        """Test that generate_claude_md creates CLAUDE.md in golden-repos root."""
+    def test_generate_orientation_files_creates_both_files(self, tmp_path):
+        """Test that generate_orientation_files creates CLAUDE.md and dep_map_repo_catalogue.md."""
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
@@ -37,20 +37,26 @@ class TestClaudeMdGeneration:
             {"alias": "repo2", "description_summary": "Second repository"},
         ]
 
-        analyzer.generate_claude_md(repo_list)
+        analyzer.generate_orientation_files(repo_list)
 
         claude_md = tmp_path / "CLAUDE.md"
+        catalogue = tmp_path / "dep_map_repo_catalogue.md"
         assert claude_md.exists()
+        assert catalogue.exists()
 
-        content = claude_md.read_text()
-        assert "CIDX Dependency Map Analysis" in content
-        assert "Available Repositories" in content
-        assert "**repo1**: First repository" in content
-        assert "**repo2**: Second repository" in content
-        assert "dependency" in content.lower()
+        claude_content = claude_md.read_text()
+        assert "dep_map_repo_catalogue.md" in claude_content
+        assert "cidx-local" in claude_content
 
-    def test_generate_claude_md_overwrites_existing(self, tmp_path):
-        """Test that generate_claude_md overwrites existing CLAUDE.md."""
+        cat_content = catalogue.read_text()
+        assert "CIDX Dependency Map Analysis" in cat_content
+        assert "Available Repositories" in cat_content
+        assert "**repo1**: First repository" in cat_content
+        assert "**repo2**: Second repository" in cat_content
+        assert "dependency" in cat_content.lower()
+
+    def test_generate_orientation_files_overwrites_both_existing(self, tmp_path):
+        """Test that generate_orientation_files overwrites both existing files."""
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
@@ -58,14 +64,20 @@ class TestClaudeMdGeneration:
         )
 
         claude_md = tmp_path / "CLAUDE.md"
-        claude_md.write_text("Old content")
+        catalogue = tmp_path / "dep_map_repo_catalogue.md"
+        claude_md.write_text("Old CLAUDE.md content")
+        catalogue.write_text("Old catalogue content")
 
         repo_list = [{"alias": "repo1", "description_summary": "New repo"}]
-        analyzer.generate_claude_md(repo_list)
+        analyzer.generate_orientation_files(repo_list)
 
-        content = claude_md.read_text()
-        assert "Old content" not in content
-        assert "**repo1**: New repo" in content
+        claude_content = claude_md.read_text()
+        assert "Old CLAUDE.md content" not in claude_content
+        assert "dep_map_repo_catalogue.md" in claude_content
+
+        cat_content = catalogue.read_text()
+        assert "Old catalogue content" not in cat_content
+        assert "**repo1**: New repo" in cat_content
 
 
 class TestPass1Synthesis:

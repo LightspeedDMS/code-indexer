@@ -190,7 +190,7 @@ def full_svc_and_tracking(tmp_path):
     analyzer.run_pass_2_per_domain.return_value = None
     analyzer._reconcile_domains_json.side_effect = lambda _s, dl: dl
     analyzer._generate_index_md.return_value = None
-    analyzer.generate_claude_md.return_value = None
+    analyzer.generate_orientation_files.return_value = None
     cfg = Mock()
     cfg.dependency_map_enabled = True
     cfg.dependency_map_interval_hours = 24
@@ -215,7 +215,7 @@ def delta_svc_and_tracking(tmp_path):
     analyzer = Mock()
     analyzer.build_delta_merge_prompt.return_value = "prompt"
     analyzer.invoke_delta_merge_file.return_value = "updated auth content"
-    analyzer.generate_claude_md.return_value = None
+    analyzer.generate_orientation_files.return_value = None
     cfg = Mock()
     cfg.dependency_map_enabled = True
     cfg.dependency_map_interval_hours = 24

@@ -1269,6 +1269,33 @@ def make_lifespan(
             # Late-bind the closure into the service
             dependency_map_service.set_repair_invoker_fn(_dep_map_repair_invoker_fn)
 
+            # Startup migration: rename oversized CLAUDE.md → dep_map_repo_catalogue.md.
+            # Pre-v10.7 code wrote the entire repo catalogue (~350K tokens at scale)
+            # into CLAUDE.md, which Claude CLI auto-loads from cwd — overflowing the
+            # 200K context window. The catalogue content is still useful for on-demand
+            # reads, so rename rather than delete.
+            _gr_root = Path(golden_repos_manager.golden_repos_dir)
+            _old_claude_md = _gr_root / "CLAUDE.md"
+            _catalogue_file = _gr_root / "dep_map_repo_catalogue.md"
+            _CLAUDE_MD_MAX_SAFE_SIZE = 10_000  # 10KB; new CLAUDE.md is ~500 bytes
+            try:
+                if (
+                    _old_claude_md.exists()
+                    and _old_claude_md.stat().st_size > _CLAUDE_MD_MAX_SAFE_SIZE
+                ):
+                    logger.info(
+                        "Startup migration: renaming oversized CLAUDE.md (%d bytes) "
+                        "to dep_map_repo_catalogue.md at %s",
+                        _old_claude_md.stat().st_size,
+                        _gr_root,
+                    )
+                    _old_claude_md.rename(_catalogue_file)
+            except Exception as _mig_err:
+                logger.warning(
+                    "Startup migration: failed to rename oversized CLAUDE.md (non-fatal): %s",
+                    _mig_err,
+                )
+
             # Start scheduler — invoker is bound, safe to start
             dependency_map_service.start_scheduler()
             app.state.dependency_map_service = dependency_map_service

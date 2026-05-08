@@ -279,52 +279,65 @@ class DependencyMapAnalyzer:
         self._cached_refinement_dispatcher = None
         self._cached_verification_dispatcher = None
 
-    def generate_claude_md(self, repo_list: List[Dict[str, Any]]) -> None:
+    def generate_orientation_files(self, repo_list: List[Dict[str, Any]]) -> None:
         """
-        Generate CLAUDE.md orientation file in golden-repos root (AC2).
+        Generate orientation files in golden-repos root (AC2).
 
-        Creates orientation context for Claude CLI listing all repositories
-        and the dependency analysis task.
+        Creates two files:
+        - dep_map_repo_catalogue.md: full repo listing with descriptions and tools/task sections
+        - CLAUDE.md: minimal pointer (~50 tokens) to the catalogue, avoiding context overflow
 
         Args:
             repo_list: List of repository metadata dicts with 'alias' and 'description_summary'
         """
-        content = "# CIDX Dependency Map Analysis\n\n"
-        content += "## Available Repositories\n\n"
+        catalogue_content = "# CIDX Dependency Map Analysis\n\n"
+        catalogue_content += "## Available Repositories\n\n"
 
         for repo in repo_list:
             alias = repo.get("alias", "unknown")
             summary = repo.get("description_summary", "No description")
             clone_path = repo.get("clone_path", "unknown")
-            content += f"- **{alias}**: {summary}\n"
-            content += f"  - Path: `{clone_path}`\n"
+            catalogue_content += f"- **{alias}**: {summary}\n"
+            catalogue_content += f"  - Path: `{clone_path}`\n"
 
-        content += "\n## Tools Available\n\n"
-        content += "You MUST use the `cidx-local` MCP server's `search_code` tool for semantic code search.\n"
-        content += "Search for repo names, class names, and API endpoints across all repositories to discover integration patterns.\n\n"
+        catalogue_content += "\n## Tools Available\n\n"
+        catalogue_content += "You MUST use the `cidx-local` MCP server's `search_code` tool for semantic code search.\n"
+        catalogue_content += "Search for repo names, class names, and API endpoints across all repositories to discover integration patterns.\n\n"
 
-        content += "## Task\n\n"
-        content += (
+        catalogue_content += "## Task\n\n"
+        catalogue_content += (
             "Analyze cross-repository dependencies at the domain and subdomain level.\n"
         )
-        content += "Focus on identifying:\n"
-        content += "- Domain clusters that span multiple repositories\n"
-        content += "- Code-level dependencies (imports, shared libraries, type reuse)\n"
-        content += "- Data contract dependencies (shared database tables/views/schemas, file formats)\n"
-        content += "- Service integration dependencies (REST/HTTP/MCP/gRPC API calls)\n"
-        content += (
+        catalogue_content += "Focus on identifying:\n"
+        catalogue_content += "- Domain clusters that span multiple repositories\n"
+        catalogue_content += "- Code-level dependencies (imports, shared libraries, type reuse)\n"
+        catalogue_content += "- Data contract dependencies (shared database tables/views/schemas, file formats)\n"
+        catalogue_content += "- Service integration dependencies (REST/HTTP/MCP/gRPC API calls)\n"
+        catalogue_content += (
             "- External tool invocation dependencies (CLI tools, subprocess calls)\n"
         )
-        content += (
+        catalogue_content += (
             "- Configuration coupling (shared env vars, config keys, feature flags)\n"
         )
-        content += "- Message/event contract dependencies (queues, webhooks, pub/sub)\n"
-        content += "- Deployment dependencies (runtime availability requirements)\n"
-        content += "- Semantic coupling (behavioral contracts without code imports)\n"
+        catalogue_content += "- Message/event contract dependencies (queues, webhooks, pub/sub)\n"
+        catalogue_content += "- Deployment dependencies (runtime availability requirements)\n"
+        catalogue_content += "- Semantic coupling (behavioral contracts without code imports)\n"
+
+        catalogue_path = self.golden_repos_root / "dep_map_repo_catalogue.md"
+        catalogue_path.write_text(catalogue_content)
+        logger.info(f"Generated repo catalogue at {catalogue_path}")
+
+        claude_md_content = (
+            "# CIDX Dependency Map Analysis\n\n"
+            "Repository catalogue is in `dep_map_repo_catalogue.md` in this directory.\n"
+            "Read it to see all available repositories and their descriptions.\n\n"
+            "Use the `cidx-local` MCP server's `search_code` tool for semantic code search.\n"
+            "Your specific task instructions are provided in the prompt.\n"
+        )
 
         claude_md_path = self.golden_repos_root / "CLAUDE.md"
-        claude_md_path.write_text(content)
-        logger.info(f"Generated CLAUDE.md orientation file at {claude_md_path}")
+        claude_md_path.write_text(claude_md_content)
+        logger.info(f"Generated minimal CLAUDE.md orientation file at {claude_md_path}")
 
     def run_pass_1_synthesis(
         self,

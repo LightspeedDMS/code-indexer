@@ -85,6 +85,9 @@ def versioned_dep_map_dirs(tmp_path):
     )
     dep_map_write_dir = tmp_path / "dep-map-live"
     dep_map_write_dir.mkdir()
+    (dep_map_write_dir / "auth.md").write_text(
+        "---\ndomain: auth\n---\n\n# Auth\n\nContent."
+    )
     return dep_map_read_dir, dep_map_write_dir
 
 

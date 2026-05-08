@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.9.0 (2026-05-08) — Fix dep-map CLAUDE.md context overflow ($3K token burn)
+
+Production bug fix: `generate_claude_md()` wrote a full repo catalogue (~350K tokens) directly into `CLAUDE.md` at the golden-repos root. Claude CLI auto-loads `CLAUDE.md` from its cwd, so every dep-map invocation overflowed the 200K context window before the task prompt loaded -- causing $3K/night in wasted tokens with zero useful output.
+
+### Fixed
+- **CLAUDE.md context overflow**: Split `generate_claude_md()` into `generate_orientation_files()` which writes a minimal `CLAUDE.md` pointer (~50 tokens) + `dep_map_repo_catalogue.md` (full catalogue). Claude CLI loads the tiny pointer; the catalogue is read on demand.
+- **Startup migration**: On server startup, oversized `CLAUDE.md` (>10KB) is renamed to `dep_map_repo_catalogue.md`, preserving catalogue content while immediately unblocking dep-map runs.
+- **Delta analysis retry loop**: Fixed exception handling in retry loop that could swallow errors silently.
+- **Delta analysis live-path reads**: Fixed file reads to use correct live path instead of stale versioned path.
+- **Delta analysis next_run advancement**: Fixed `next_run` timestamp not advancing after completed delta runs.
+- **Elevation gating**: Added missing `require_elevation()` dependency on `POST /golden-repos/activate` and `POST /repos/{username}/{user_alias}/deactivate` admin mutation routes.
+
+### Removed
+- 5 dead sync-gate tests in `test_meta_directory_updater_hardening.py` (tested a safety gate removed in d8922eb6).
+
 ## v10.8.0 (2026-05-07) — Remove `-global` from cidx-meta description filenames
 
 Production bug fix: v10.4.9 changed cidx-meta description filenames from `{alias}.md` to `{alias}-global.md`, but only in WRITE paths. 10 READ paths still used `{alias}.md`, causing: UI showing no descriptions, terse-backfill storms on every startup, all repos quarantined by refresh scheduler, and a security bypass in access filtering (all descriptions visible to all users). The `-global` suffix was a registry naming convention leak into the filesystem -- this release removes it entirely and adds protective INVARIANT comments at all 10 filename-construction sites.

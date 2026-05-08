@@ -119,7 +119,7 @@ def mock_golden_repos_manager(tmp_path):
 def mock_analyzer():
     """Mock DependencyMapAnalyzer that completes quickly."""
     analyzer = MagicMock()
-    analyzer.generate_claude_md.return_value = None
+    analyzer.generate_orientation_files.return_value = None
     analyzer.run_pass_1_synthesis.return_value = [{"name": "domain-alpha"}]
     analyzer.run_pass_2_per_domain.return_value = None
     analyzer._reconcile_domains_json.side_effect = (
