@@ -137,6 +137,7 @@
                             path: evt.detail.requestConfig && evt.detail.requestConfig.path,
                             target: evt.detail.target,
                             parameters: evt.detail.requestConfig && evt.detail.requestConfig.parameters,
+                            sourceElt: evt.detail.requestConfig && evt.detail.requestConfig.elt,
                         };
                         _cidxOpenElevationModal();
                         return;
@@ -213,6 +214,9 @@
                         var pending = window._cidxElevationPending;
                         _cidxCloseElevationModal(false);
                         if (pending && pending.verb && pending.path) {
+                            if (pending.sourceElt) {
+                                pending.sourceElt.querySelectorAll('textarea').forEach(function(el) { el.value = ''; });
+                            }
                             htmx.ajax(pending.verb.toUpperCase(), pending.path, {
                                 target: pending.target,
                                 values: pending.parameters || {},
