@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
 MAX_DOMAIN_RETRIES = 3  # Bug #849: module-level constant for retry loop
+_DEFAULT_DELTA_INTERVAL_HOURS = (
+    168  # Fallback when config unavailable (matches ClaudeIntegrationConfig default)
+)
 _AUTO_REPAIR_JOB_ID_SUFFIX_LEN = (
     8  # Story #927: hex suffix length for auto-repair job IDs
 )
@@ -506,18 +509,21 @@ class DependencyMapService:
                     )
             raise
         finally:
-            # Cleanup CLAUDE.md (paths may not be defined if exception occurred early)
+            # Cleanup orientation files (CLAUDE.md + dep_map_repo_catalogue.md)
             try:
-                claude_md = (
-                    paths.get("golden_repos_root", Path()) / "CLAUDE.md"
+                _gr_root = (
+                    paths.get("golden_repos_root", Path())
                     if "paths" in locals()
-                    else Path(self._golden_repos_manager.golden_repos_dir) / "CLAUDE.md"
+                    else Path(self._golden_repos_manager.golden_repos_dir)
                 )
-                if claude_md.exists():
-                    claude_md.unlink()
+                for _fname in ("CLAUDE.md", "dep_map_repo_catalogue.md"):
+                    _fpath = _gr_root / _fname
+                    if _fpath.exists():
+                        _fpath.unlink()
             except Exception as cleanup_error:
-                # Log but don't re-raise - cleanup failure should not prevent lock release or mask original error
-                logger.debug(f"CLAUDE.md cleanup failed (non-fatal): {cleanup_error}")
+                logger.debug(
+                    f"Orientation file cleanup failed (non-fatal): {cleanup_error}"
+                )
 
             # Bug #383: Clean up stale staging directory on failure.
             # On success, _stage_then_swap() already consumed the staging dir.
@@ -680,8 +686,8 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error (resume): {e}")
 
-        # Generate CLAUDE.md (AC2: CLAUDE.md Orientation File)
-        self._analyzer.generate_claude_md(repo_list)
+        # Generate orientation files (CLAUDE.md + dep_map_repo_catalogue.md)
+        self._analyzer.generate_orientation_files(repo_list)
 
         # Pass 1: Synthesis (skip if already completed)
         pass1_duration_s = 0.0
@@ -2265,29 +2271,23 @@ class DependencyMapService:
         new_aliases = [r["alias"] for r in new_repos]
 
         # Build full domain list from ALL domain files (Code Review H2: cross-domain awareness)
-        # Claude needs the complete domain landscape, not just affected domains
-        # READ from versioned path: live path is empty after Story #224
-        dependency_map_read_dir = self._get_cidx_meta_read_path() / "dependency-map"
         domain_list = (
             [
                 f.stem
-                for f in dependency_map_read_dir.glob("*.md")
+                for f in dependency_map_dir.glob("*.md")
                 if not f.name.startswith("_")
             ]
-            if dependency_map_read_dir.exists()
+            if dependency_map_dir.exists()
             else []
         )
 
         # Code Review M4: Sort for deterministic processing order
         total_affected = len(affected_domains)
         for domain_idx, domain_name in enumerate(sorted(affected_domains)):
-            # READ existence check and content from versioned path (live path is empty after Story #224)
-            read_domain_file = dependency_map_read_dir / f"{domain_name}.md"
-            # WRITE updated file to live path (so RefreshScheduler detects changes)
             domain_file = dependency_map_dir / f"{domain_name}.md"
 
-            if not read_domain_file.exists():
-                logger.warning(f"Domain file not found: {read_domain_file}, skipping")
+            if not domain_file.exists():
+                logger.warning(f"Domain file not found: {domain_file}, skipping")
                 continue
 
             try:
@@ -2298,16 +2298,31 @@ class DependencyMapService:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
             for attempt in range(1, MAX_DOMAIN_RETRIES + 1):
-                update_result = self._update_domain_file(
-                    domain_name=domain_name,
-                    domain_file=domain_file,
-                    changed_repos=changed_aliases,
-                    new_repos=new_aliases,
-                    removed_repos=removed_repos,
-                    domain_list=domain_list,
-                    config=config,
-                    read_file=read_domain_file,
-                )
+                try:
+                    update_result = self._update_domain_file(
+                        domain_name=domain_name,
+                        domain_file=domain_file,
+                        changed_repos=changed_aliases,
+                        new_repos=new_aliases,
+                        removed_repos=removed_repos,
+                        domain_list=domain_list,
+                        config=config,
+                    )
+                except Exception as exc:
+                    if attempt >= MAX_DOMAIN_RETRIES:
+                        logger.error(
+                            f"Delta domain '{domain_name}' raised exception on attempt "
+                            f"{attempt}/{MAX_DOMAIN_RETRIES}: {exc}",
+                            exc_info=True,
+                        )
+                        errors.append(f"{domain_name}: {exc}")
+                        break
+                    else:
+                        logger.warning(
+                            f"Delta domain '{domain_name}' raised exception on attempt "
+                            f"{attempt}/{MAX_DOMAIN_RETRIES}: {exc}, retrying",
+                        )
+                    continue
 
                 if update_result == _DomainUpdateResult.WRITTEN:
                     try:
@@ -2848,12 +2863,10 @@ class DependencyMapService:
             )
 
             # Get paths
-            # WRITE path: live golden-repos/cidx-meta/ so RefreshScheduler detects changes
+            # WRITE/READ path: live golden-repos/cidx-meta/ so RefreshScheduler detects changes
             golden_repos_root = Path(self._golden_repos_manager.golden_repos_dir)
             cidx_meta_path = golden_repos_root / "cidx-meta"
             dependency_map_dir = cidx_meta_path / "dependency-map"
-            # READ path: versioned cidx-meta (Story #224 made cidx-meta a versioned repo)
-            dependency_map_read_dir = self._get_cidx_meta_read_path() / "dependency-map"
 
             # Identify affected domains (AC3/4)
             affected_domains = self.identify_affected_domains(
@@ -2888,9 +2901,9 @@ class DependencyMapService:
                     "affected_domains": 0,
                 }
 
-            # Generate CLAUDE.md
+            # Generate orientation files (CLAUDE.md + dep_map_repo_catalogue.md)
             all_repos = self._get_activated_repos()
-            self._analyzer.generate_claude_md(all_repos)
+            self._analyzer.generate_orientation_files(all_repos)
 
             # Handle new repo domain discovery (AC6, Story #216)
             discovery_write_success = True
@@ -2899,10 +2912,10 @@ class DependencyMapService:
                 existing_domains = (
                     [
                         f.stem
-                        for f in dependency_map_read_dir.glob("*.md")
+                        for f in dependency_map_dir.glob("*.md")
                         if not f.name.startswith("_")
                     ]
-                    if dependency_map_read_dir.exists()
+                    if dependency_map_dir.exists()
                     else []
                 )
                 discovered, discovery_write_success = (
@@ -2927,10 +2940,10 @@ class DependencyMapService:
                         existing_domains_list = (
                             [
                                 f.stem
-                                for f in dependency_map_read_dir.glob("*.md")
+                                for f in dependency_map_dir.glob("*.md")
                                 if not f.name.startswith("_")
                             ]
-                            if dependency_map_read_dir.exists()
+                            if dependency_map_dir.exists()
                             else []
                         )
                         uncov_discovered, _ = self._discover_and_assign_new_repos(
@@ -3052,8 +3065,26 @@ class DependencyMapService:
 
         except Exception as e:
             logger.error(f"Delta analysis failed: {e}", exc_info=True)
+            try:
+                _fail_config = self._config_manager.get_claude_integration_config()
+                _fail_interval = (
+                    _fail_config.dependency_map_interval_hours
+                    if _fail_config
+                    else _DEFAULT_DELTA_INTERVAL_HOURS
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to read dependency_map_interval_hours from config on failure path; "
+                    f"defaulting to {_DEFAULT_DELTA_INTERVAL_HOURS}h",
+                    exc_info=True,
+                )
+                _fail_interval = _DEFAULT_DELTA_INTERVAL_HOURS
             self._tracking_backend.update_tracking(
-                status="failed", error_message=str(e)
+                status="failed",
+                error_message=str(e),
+                next_run=(
+                    datetime.now(timezone.utc) + timedelta(hours=_fail_interval)
+                ).isoformat(),
             )
             # Story #312: Report failure to JobTracker (AC8). Defensive - never re-raises.
             if _tracked_job_id is not None and self._job_tracker is not None:
@@ -3067,15 +3098,17 @@ class DependencyMapService:
             raise
 
         finally:
-            # Cleanup CLAUDE.md
+            # Cleanup orientation files (CLAUDE.md + dep_map_repo_catalogue.md)
             try:
-                claude_md = (
-                    Path(self._golden_repos_manager.golden_repos_dir) / "CLAUDE.md"
-                )
-                if claude_md.exists():
-                    claude_md.unlink()
+                _gr_root = Path(self._golden_repos_manager.golden_repos_dir)
+                for _fname in ("CLAUDE.md", "dep_map_repo_catalogue.md"):
+                    _fpath = _gr_root / _fname
+                    if _fpath.exists():
+                        _fpath.unlink()
             except Exception as cleanup_error:
-                logger.debug(f"CLAUDE.md cleanup failed (non-fatal): {cleanup_error}")
+                logger.debug(
+                    f"Orientation file cleanup failed (non-fatal): {cleanup_error}"
+                )
 
             self._lock.release()
 

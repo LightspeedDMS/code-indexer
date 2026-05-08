@@ -154,7 +154,7 @@ def _delta_fixture(tmp_path):
         analyzer = Mock()
         analyzer.build_delta_merge_prompt.return_value = "prompt"
         analyzer.invoke_delta_merge_file.return_value = "updated auth content"
-        analyzer.generate_claude_md.return_value = None
+        analyzer.generate_orientation_files.return_value = None
 
         claude_config = Mock()
         claude_config.dependency_map_enabled = True

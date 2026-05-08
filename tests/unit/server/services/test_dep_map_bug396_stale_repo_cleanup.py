@@ -278,7 +278,7 @@ class TestRunDeltaAnalysisStaleRepoCleanup:
                 svc, "_remove_stale_repos_from_domains_json", return_value=True
             ) as mock_cleanup,
         ):
-            svc._analyzer.generate_claude_md.return_value = None
+            svc._analyzer.generate_orientation_files.return_value = None
             svc.run_delta_analysis()
 
         mock_cleanup.assert_called_once()
@@ -391,7 +391,7 @@ class TestRunDeltaAnalysisStaleRepoCleanup:
                 svc, "_remove_stale_repos_from_domains_json", return_value=True
             ) as mock_cleanup,
         ):
-            svc._analyzer.generate_claude_md.return_value = None
+            svc._analyzer.generate_orientation_files.return_value = None
             svc.run_delta_analysis()
 
         mock_cleanup.assert_not_called()
