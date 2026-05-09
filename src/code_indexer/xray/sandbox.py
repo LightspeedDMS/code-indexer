@@ -719,7 +719,7 @@ class PythonEvaluatorSandbox:
             root: Alias for *node* (same object); kept for backward compatibility.
             source: Full source text of the file being evaluated.
             lang: Language identifier string (e.g. ``"java"``, ``"python"``).
-            file_path: Absolute path of the file being evaluated.
+            file_path: Path of the file being evaluated (relative to repo root in production).
             match_byte_offset: Byte offset of the Phase 1 regex match within the
                 file source.  ``None`` in filename-target mode.
             match_line_number: 1-based line number of the Phase 1 regex match.

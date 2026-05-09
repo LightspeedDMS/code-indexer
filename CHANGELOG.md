@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.10.0 (2026-05-08) — Fix X-Ray path disclosure (security)
+
+Security fix: X-Ray search/explore results leaked absolute host filesystem paths (e.g. `/opt/code-indexer/.cidx-server/data/golden-repos/.versioned/alias/v_TIMESTAMP/code/src/...`) in `file_path` fields of matches, evaluation_errors, and file_metadata. This exposed internal server directory structure, versioned snapshot naming conventions, and deployment paths to API consumers and evaluator scripts.
+
+### Fixed
+- **X-Ray path disclosure**: `file_path` values in all X-Ray result output channels (matches, evaluation_errors, file_metadata) are now relative to the repository root instead of absolute host paths. The fix converts paths at the source in `XRaySearchEngine.run()` before they enter `file_specs`, so all downstream consumers (sandbox, evaluator globals, normalized results) automatically produce relative paths.
+- **Stale docstrings**: Updated `_evaluate_file()` and `PythonEvaluatorSandbox.run()` docstrings to reflect that `file_path` is relative in production.
+
+### Added
+- 4 new tests in `TestXRaySearchEngineRelativePaths` verifying that `file_path` values are always relative across matches, errors, and file_metadata.
+
 ## v10.9.0 (2026-05-08) — Fix dep-map CLAUDE.md context overflow ($3K token burn)
 
 Production bug fix: `generate_claude_md()` wrote a full repo catalogue (~350K tokens) directly into `CLAUDE.md` at the golden-repos root. Claude CLI auto-loads `CLAUDE.md` from its cwd, so every dep-map invocation overflowed the 200K context window before the task prompt loaded -- causing $3K/night in wasted tokens with zero useful output.

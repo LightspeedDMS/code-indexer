@@ -313,7 +313,7 @@ class TestXRaySearchEngineServerEnrichment:
         assert len(result["matches"]) == 1
         m = result["matches"][0]
         assert "file_path" in m
-        assert str(tmp_path) in m["file_path"]
+        assert m["file_path"] == "file.py"
 
     def test_server_always_adds_language(self, search_engine, tmp_path):
         """language is always server-provided."""
@@ -897,3 +897,76 @@ class TestXRaySearchEngineMatchedNode:
         )
         assert len(result["matches"]) >= 1
         assert "matched_node" not in result["matches"][0]
+
+
+class TestXRaySearchEngineRelativePaths:
+    """file_path values in all output fields are relative to repo_path (security fix)."""
+
+    def test_match_file_path_is_relative(self, search_engine, tmp_path):
+        """file_path in matches must be relative to repo_path, not absolute."""
+        (tmp_path / "file.py").write_text("x = prepareStatement()\n")
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
+            search_target="content",
+        )
+        assert len(result["matches"]) >= 1
+        for match in result["matches"]:
+            fp = match["file_path"]
+            assert not fp.startswith("/"), (
+                f"file_path must be relative, got absolute: {fp!r}"
+            )
+
+    def test_match_file_path_is_relative_to_repo_root(self, search_engine, tmp_path):
+        """file_path in matches must be exactly the path relative to repo_path."""
+        subdir = tmp_path / "pkg"
+        subdir.mkdir()
+        (subdir / "module.py").write_text("prepareStatement()\n")
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
+            search_target="content",
+        )
+        assert len(result["matches"]) >= 1
+        fps = [m["file_path"] for m in result["matches"]]
+        assert any(fp == "pkg/module.py" for fp in fps), (
+            f"Expected 'pkg/module.py' in file_paths, got: {fps}"
+        )
+
+    def test_evaluation_error_file_path_is_relative(self, search_engine, tmp_path):
+        """file_path in evaluation_errors must be relative, not absolute."""
+        (tmp_path / "file.xyz").write_text("prepareStatement content")
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code='return {"matches": [], "value": None}',
+            search_target="content",
+        )
+        errors = [
+            e for e in result["evaluation_errors"]
+            if e["error_type"] == "UnsupportedLanguage"
+        ]
+        assert len(errors) >= 1
+        for err in errors:
+            fp = err["file_path"]
+            assert not fp.startswith("/"), (
+                f"evaluation_error file_path must be relative, got absolute: {fp!r}"
+            )
+
+    def test_file_metadata_file_path_is_relative(self, search_engine, tmp_path):
+        """file_path in file_metadata must be relative, not absolute."""
+        (tmp_path / "file.py").write_text("x = prepareStatement()\n")
+        result = search_engine.run(
+            repo_path=tmp_path,
+            driver_regex=r"prepareStatement",
+            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": "my_value"}',
+            search_target="content",
+        )
+        assert len(result.get("file_metadata", [])) >= 1
+        for fm in result["file_metadata"]:
+            fp = fm["file_path"]
+            assert not fp.startswith("/"), (
+                f"file_metadata file_path must be relative, got absolute: {fp!r}"
+            )

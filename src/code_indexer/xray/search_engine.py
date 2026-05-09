@@ -286,7 +286,7 @@ class XRaySearchEngine:
             if fp_lang is None:
                 evaluation_errors.append(
                     {
-                        "file_path": str(fp),
+                        "file_path": str(fp.relative_to(repo_path)),
                         "line_number": 0,
                         "error_type": "UnsupportedLanguage",
                         "error_message": f"No grammar for extension {fp.suffix!r}",
@@ -299,7 +299,7 @@ class XRaySearchEngine:
             except Exception as exc:  # noqa: BLE001
                 evaluation_errors.append(
                     {
-                        "file_path": str(fp),
+                        "file_path": str(fp.relative_to(repo_path)),
                         "line_number": 0,
                         "error_type": type(exc).__name__,
                         "error_message": str(exc),
@@ -313,7 +313,7 @@ class XRaySearchEngine:
             ]
             file_specs.append(
                 {
-                    "file_path": str(fp),
+                    "file_path": str(fp.relative_to(repo_path)),
                     "source": fp_source,
                     "lang": fp_lang,
                     "match_positions": clean_positions,
@@ -443,7 +443,7 @@ class XRaySearchEngine:
           - ``node`` / ``root``: file root AST node
           - ``source``: raw file text
           - ``lang``: language string
-          - ``file_path``: absolute file path
+          - ``file_path``: file path (relative to repo root via run(); absolute when called directly)
           - ``match_positions``: list of dicts, one per Phase 1 hit:
               {line_number, line_content, column, byte_offset,
                context_before, context_after}
