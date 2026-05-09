@@ -66,12 +66,6 @@ _JOURNAL_HOOK_PREVIEW_LEN: int = 120
 # How often (in tool calls) to emit a STATUS NUDGE prompting Claude to self-report.
 _JOURNAL_HOOK_NUDGE_INTERVAL: int = 10
 
-# Bug #840: threshold for pass-1 description staging.
-# When total description bytes across all repos exceed this value, descriptions
-# are written to a temp JSON file and Claude is instructed to Read it — rather
-# than embedding all content inline in the prompt.
-PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES = 8192
-
 # Bug #849: sentinel returned by invoke_delta_merge_file when Claude signals
 # FILE_UNCHANGED — meaning no edits were needed.  Distinct from None (invocation
 # failure) so callers can suppress retries for intentional no-ops.
@@ -108,9 +102,11 @@ Allowed dependency types (use exactly one per row):
 - Code-level
 - Data contracts
 - Service integration
-- External tool
+- External tool invocation
 - Configuration coupling
+- Message/event contracts
 - Deployment dependency
+- Semantic coupling
 """
 
 
@@ -279,70 +275,203 @@ class DependencyMapAnalyzer:
         self._cached_refinement_dispatcher = None
         self._cached_verification_dispatcher = None
 
-    def generate_orientation_files(self, repo_list: List[Dict[str, Any]]) -> None:
+    def generate_orientation_files(
+        self,
+        repo_list: List[Dict[str, Any]],
+        dep_map_dir: Optional[Path] = None,
+    ) -> None:
         """
         Generate orientation files in golden-repos root (AC2).
 
-        Creates two files:
-        - dep_map_repo_catalogue.md: full repo listing with descriptions and tools/task sections
-        - CLAUDE.md: minimal pointer (~50 tokens) to the catalogue, avoiding context overflow
+        Creates:
+        - CLAUDE.md: minimal pointer (~200 bytes) to cidx-meta structure and reference files.
+
+        When dep_map_dir is provided, also writes canonical reference files there:
+        - _dep_types.md: dependency type definitions
+        - _analysis_guidelines.md: analysis methodology and evidence rules
+
+        The old dep_map_repo_catalogue.md is no longer created. Claude CLI reads repo
+        descriptions directly from cidx-meta/*.md files, eliminating prompt bloat.
 
         Args:
-            repo_list: List of repository metadata dicts with 'alias' and 'description_summary'
+            repo_list: List of repository metadata dicts (unused now; kept for
+                       API compatibility — callers need not be updated).
+            dep_map_dir: Optional path to cidx-meta/dependency-map/ for writing
+                         reference files. Must already exist.
         """
-        catalogue_content = "# CIDX Dependency Map Analysis\n\n"
-        catalogue_content += "## Available Repositories\n\n"
-
-        for repo in repo_list:
-            alias = repo.get("alias", "unknown")
-            summary = repo.get("description_summary", "No description")
-            clone_path = repo.get("clone_path", "unknown")
-            catalogue_content += f"- **{alias}**: {summary}\n"
-            catalogue_content += f"  - Path: `{clone_path}`\n"
-
-        catalogue_content += "\n## Tools Available\n\n"
-        catalogue_content += "You MUST use the `cidx-local` MCP server's `search_code` tool for semantic code search.\n"
-        catalogue_content += "Search for repo names, class names, and API endpoints across all repositories to discover integration patterns.\n\n"
-
-        catalogue_content += "## Task\n\n"
-        catalogue_content += (
-            "Analyze cross-repository dependencies at the domain and subdomain level.\n"
-        )
-        catalogue_content += "Focus on identifying:\n"
-        catalogue_content += "- Domain clusters that span multiple repositories\n"
-        catalogue_content += "- Code-level dependencies (imports, shared libraries, type reuse)\n"
-        catalogue_content += "- Data contract dependencies (shared database tables/views/schemas, file formats)\n"
-        catalogue_content += "- Service integration dependencies (REST/HTTP/MCP/gRPC API calls)\n"
-        catalogue_content += (
-            "- External tool invocation dependencies (CLI tools, subprocess calls)\n"
-        )
-        catalogue_content += (
-            "- Configuration coupling (shared env vars, config keys, feature flags)\n"
-        )
-        catalogue_content += "- Message/event contract dependencies (queues, webhooks, pub/sub)\n"
-        catalogue_content += "- Deployment dependencies (runtime availability requirements)\n"
-        catalogue_content += "- Semantic coupling (behavioral contracts without code imports)\n"
-
-        catalogue_path = self.golden_repos_root / "dep_map_repo_catalogue.md"
-        catalogue_path.write_text(catalogue_content)
-        logger.info(f"Generated repo catalogue at {catalogue_path}")
-
         claude_md_content = (
-            "# CIDX Dependency Map Analysis\n\n"
-            "Repository catalogue is in `dep_map_repo_catalogue.md` in this directory.\n"
-            "Read it to see all available repositories and their descriptions.\n\n"
-            "Use the `cidx-local` MCP server's `search_code` tool for semantic code search.\n"
-            "Your specific task instructions are provided in the prompt.\n"
+            "# CIDX Dependency Map Workspace\n\n"
+            "## What This Workspace Is\n\n"
+            "You are running in the golden-repos root directory. Each subdirectory is a cloned\n"
+            "source code repository registered for dependency analysis. You have filesystem\n"
+            "access to read all source code.\n\n"
+            "## What Domains Are\n\n"
+            "A domain is a meaningful functional or technical area that groups related repositories\n"
+            "(e.g., 'authentication', 'data-pipeline', 'frontend-platform'). A domain is NOT a\n"
+            "repository -- it is a higher-level organizational concept. The purpose of domain\n"
+            "analysis is to group repositories so that cross-repository dependencies can be\n"
+            "understood at a higher abstraction level.\n\n"
+            "## Directory Structure\n\n"
+            "- `{alias}/` -- cloned source code repositories (one per registered repo)\n"
+            "- `cidx-meta/` -- system metadata registry (NOT a source code repository):\n"
+            "  - `cidx-meta/{alias}.md` -- description file for each repository (file stem = alias)\n"
+            "  - `cidx-meta/dependency-map/` -- analysis output and reference files:\n"
+            "    - `_index.md` -- domain catalog and repo-to-domain mapping\n"
+            "    - `{domain}.md` -- individual domain analysis documents\n"
+            "    - `_dep_types.md` -- dependency type definitions (8 types)\n"
+            "    - `_analysis_guidelines.md` -- analysis methodology, evidence rules, output constraints\n\n"
+            "## Available Tools\n\n"
+            "- Filesystem: Read/Edit/Write files, run shell commands\n"
+            "- `cidx-local` MCP server: `search_code` tool for semantic search across all indexed repos\n"
+            "- Task-specific instructions are in the prompt\n"
         )
-
         claude_md_path = self.golden_repos_root / "CLAUDE.md"
         claude_md_path.write_text(claude_md_content)
         logger.info(f"Generated minimal CLAUDE.md orientation file at {claude_md_path}")
 
+        if dep_map_dir is not None:
+            self._write_reference_files(dep_map_dir)
+
+    @staticmethod
+    def _build_dep_types_content() -> str:
+        """Return canonical dependency-type reference content for _dep_types.md."""
+        return """\
+# Dependency Types Reference
+
+Use EXACTLY one of these type names per dependency row in analysis output.
+
+| Type | Description | Example |
+|---|---|---|
+| Code-level | Direct imports, shared libraries, type/interface reuse | web-app imports shared-types package for User interface |
+| Data contracts | Shared database tables/views/schemas, shared file formats | lambda-processor reads customer_summary_view exposed by core-db |
+| Service integration | REST/HTTP/MCP/gRPC API calls between repos | frontend calls backend /api/auth endpoint for login |
+| External tool invocation | CLI tools, subprocess calls, shell commands invoking another repo | deployment-scripts invoke cidx CLI for indexing |
+| Configuration coupling | Shared env vars, config keys, feature flags, connection strings | worker-service and api-service both read REDIS_URL from env |
+| Message/event contracts | Queue messages, webhooks, pub/sub events, callback URLs | order-service publishes order.created event consumed by notification-service |
+| Deployment dependency | Runtime availability requirements (repo A must be running for repo B) | web-app requires auth-service to be running and reachable |
+| Semantic coupling | Behavioral contracts where changing logic in repo A breaks expectations in repo B | analytics-pipeline expects user-service to always include email field in user records |
+
+**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.
+The types above cover all non-import coupling patterns.
+"""
+
+    @staticmethod
+    def _build_analysis_guidelines_content() -> str:
+        """Return canonical analysis-guidelines content for _analysis_guidelines.md."""
+        return """\
+# Analysis Guidelines
+
+## Source Code Exploration Mandate
+
+DO NOT rely solely on README files or documentation. Actively explore:
+- Import statements and package dependencies (requirements.txt, package.json, setup.py, go.mod)
+- Entry points (main.py, app.py, index.ts, cmd/ directories)
+- Configuration files for references to other repos/services
+- API endpoint definitions and client code
+- Test files (often reveal integration dependencies)
+- Build and deployment scripts
+
+Assess each repo's documentation depth relative to its codebase size.
+A repo with 100+ source files and a 5-line README has unreliable documentation - explore its source code thoroughly.
+
+**NOTE**: The `cidx-meta` directory in the golden-repos root is the system metadata registry.
+It stores dependency map output and repo descriptions. Ignore it during analysis -- it is not a source code repository.
+
+## MANDATORY: Fact-Check Pass 1 Domain Assignments
+
+Before analyzing dependencies, verify that each repository listed in this domain actually belongs here.
+For each participating repo:
+1. Examine its source code, imports, and integration points
+2. Confirm it has actual code-level or integration relationships with other repos in this domain
+3. If a repo does NOT belong in this domain based on source code evidence, state this explicitly
+
+## MANDATORY: Technology Stack Verification
+
+When describing a repository's technology stack or primary language:
+1. Search for dependency manifests (requirements.txt, package.json, Cargo.toml, go.mod, *.csproj, pom.xml, pyproject.toml)
+2. Check actual source file extensions in the repository (.py, .ts, .js, .rs, .go, .cs, .java, .pas)
+3. Do NOT assume technology based on tool names, library names, or general knowledge
+4. If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X
+5. State only what the dependency manifest and source files confirm
+
+## MANDATORY: Evidence-Based Claims
+
+Every dependency you document MUST include:
+1. **Source reference**: The specific module, package, or subsystem where the dependency manifests
+2. **Evidence type**: What you observed (import statement, API endpoint definition, configuration key, subprocess invocation, etc.)
+3. **Reasoning**: Why this constitutes a dependency and what would break if the depended-on component changed
+
+DO NOT document dependencies based on:
+- Assumptions about what "should" exist
+- Naming similarity between repos
+- General knowledge about how similar systems typically work
+- Documentation claims you cannot verify in source code
+
+If you cannot find concrete evidence of a dependency in actual source files, DO NOT include it.
+
+### External Dependency Verification
+
+For external/third-party dependencies, you MUST read the actual manifest file:
+- Python: requirements.txt, setup.py, pyproject.toml
+- JavaScript/TypeScript: package.json
+- .NET/C#: *.csproj, *.sln, packages.config
+- Go: go.mod
+- Java: pom.xml, build.gradle
+- Rust: Cargo.toml
+
+DO NOT list external dependencies from memory or general knowledge of similar systems.
+If you cannot find the dependency manifest file, state 'dependency manifest not found' rather than guessing.
+
+## Granularity Guidelines
+
+Document at MODULE/SUBSYSTEM level, not files or functions.
+
+**CORRECT**: 'auth-service JWT subsystem provides token validation consumed by web-app middleware layer'
+
+**INCORRECT (too granular)**: 'auth-service/src/jwt/validator.py:validate_token() called by web-app/src/middleware/auth.py'
+
+**INCORRECT (too abstract)**: 'auth-service is used by web-app'
+
+## PROHIBITED Content
+
+Do NOT include any of the following in analysis output:
+- YAML frontmatter blocks (the system adds these automatically)
+- Speculative sections ('Recommendations', 'Potential Integration Opportunities',
+  'Future Considerations', 'Suggested Improvements')
+- Advisory content about what SHOULD be done or COULD be integrated
+- 'MCP Searches Performed' or search audit trail sections
+- Code snippets, source code blocks, or JSON schema definitions
+- Directory listings or file tree dumps
+- Any content not directly supported by source code evidence
+
+Document ONLY verified, factual dependencies and relationships found in source code.
+"""
+
+    def _write_reference_files(self, dep_map_dir: Path) -> None:
+        """Write _dep_types.md and _analysis_guidelines.md to dep_map_dir.
+
+        Silently skips if dep_map_dir does not exist, logging a WARNING.
+
+        Args:
+            dep_map_dir: Path to cidx-meta/dependency-map/ (must already exist).
+        """
+        if not dep_map_dir.exists():
+            logger.warning(
+                "dep_map_dir does not exist, skipping reference file writes: %s",
+                dep_map_dir,
+            )
+            return
+        dep_types_path = dep_map_dir / "_dep_types.md"
+        dep_types_path.write_text(self._build_dep_types_content())
+        logger.info("Wrote dependency type reference: %s", dep_types_path)
+
+        guidelines_path = dep_map_dir / "_analysis_guidelines.md"
+        guidelines_path.write_text(self._build_analysis_guidelines_content())
+        logger.info("Wrote analysis guidelines reference: %s", guidelines_path)
+
     def run_pass_1_synthesis(
         self,
         staging_dir: Path,
-        repo_descriptions: Dict[str, str],
         repo_list: List[Dict[str, Any]],
         max_turns: int,
     ) -> List[Dict[str, Any]]:
@@ -350,6 +479,9 @@ class DependencyMapAnalyzer:
         Run Pass 1: Domain synthesis from repository descriptions (AC1).
 
         Analyzes cidx-meta repository descriptions to identify domain clusters.
+        Claude CLI reads repository descriptions directly from cidx-meta/*.md files
+        (one file per repo, file stem = alias) rather than receiving them inline,
+        reducing prompt size.
 
         Uses file-based output: Claude writes the JSON to a staging file,
         validates it with python3 -m json.tool, and self-corrects errors.
@@ -358,7 +490,6 @@ class DependencyMapAnalyzer:
 
         Args:
             staging_dir: Staging directory for output files
-            repo_descriptions: Dict mapping repo alias to description content
             repo_list: List of repository metadata dicts with alias and clone_path
             max_turns: Maximum Claude CLI turns for this pass
 
@@ -415,26 +546,15 @@ class DependencyMapAnalyzer:
         prompt += "**STEP 3** — If validation fails, fix the JSON errors and re-validate until it passes.\n\n"
         prompt += "**FALLBACK**: If file writing worked in the canary test but fails later during the actual write, output ONLY the raw JSON array to stdout (no explanation, no commentary).\n\n"
 
-        # ── REPOSITORY DESCRIPTIONS (after file instructions) ──
-        prompt += "## Repository Descriptions\n\n"
-        for alias, content in repo_descriptions.items():
-            prompt += f"### {alias}\n\n"
-            prompt += f"{content}\n\n"
+        # ── REPOSITORY INFORMATION (file references — Claude reads files directly) ──
+        prompt += "## Repository Information\n\n"
+        prompt += "Each `.md` file in `cidx-meta/` describes one repository (file stem = repo alias).\n"
+        prompt += "Read ALL description files before starting analysis — they contain essential context\n"
+        prompt += "about each repository's purpose, technology stack, and integration patterns.\n\n"
 
-        prompt += "## Repository Filesystem Locations\n\n"
-        prompt += "Each repository is available on disk. Use these paths to explore source code:\n\n"
-        # Build alias-to-path mapping from repo_list
-        for repo in repo_list:
-            alias = repo.get("alias", "unknown")
-            clone_path = repo.get("clone_path", "unknown")
-            file_count = repo.get("file_count", "?")
-            total_mb = round(repo.get("total_bytes", 0) / (1024 * 1024), 1)
-            prompt += (
-                f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
-            )
-        prompt += "\n"
-
-        prompt += self._build_domain_definition_section()
+        prompt += "## Reference Material\n\n"
+        prompt += "Read dependency type definitions from `cidx-meta/dependency-map/_dep_types.md`.\n"
+        prompt += "Read analysis methodology and evidence requirements from `cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
 
         prompt += "## Instructions\n\n"
         prompt += (
@@ -445,32 +565,6 @@ class DependencyMapAnalyzer:
             "It must NOT be included as a participating repository in any domain. "
         )
         prompt += "If you see references to cidx-meta in other repos, that is a system-level integration, not a domain dependency.\n\n"
-
-        prompt += "### Source-Code-First Exploration (MANDATORY)\n\n"
-        prompt += "ALWAYS examine source code, not just descriptions. Documentation may be incomplete or misleading. Source code is the ground truth.\n\n"
-        prompt += "For each repository:\n"
-        prompt += "1. Assess documentation depth relative to codebase size (file count, directory depth)\n"
-        prompt += "2. If a repo description is short/generic but has many source files, the description is unreliable - explore source\n"
-        prompt += "3. Look at imports, entry points, and config/manifest files (e.g., package.json, requirements.txt, setup.py, pyproject.toml, go.mod, Cargo.toml, pom.xml, build.gradle, *.csproj, CMakeLists.txt, Makefile, Dockerfile)\n"
-        prompt += "4. Check build files, test patterns, directory structures to understand actual repo purpose\n"
-        prompt += "5. Examine interesting modules to infer purpose and integration patterns\n\n"
-
-        prompt += "### Evidence-Based Domain Clustering\n\n"
-        prompt += "Cluster repositories by integration-level relationships, not just functional similarity.\n"
-        prompt += "Consider: shared data sources, service-to-service calls, tool chains, deployment coupling.\n\n"
-        prompt += "For each domain clustering decision, briefly justify WHY repos belong together based on what you observed in source code (not just description similarity).\n\n"
-
-        prompt += "### Domain Clustering Standards\n\n"
-        prompt += "Cluster repositories that have integration relationships. Evidence can include:\n"
-        prompt += "- Direct: shared imports, API calls, configuration references, deployment scripts\n"
-        prompt += "- Transitive: A depends on B depends on C (all three belong in same domain)\n"
-        prompt += "- Semantic: A reads data that B produces, A calls services that B exposes\n"
-        prompt += "- Ecosystem: A and B are tools in the same workflow (e.g., one generates data, another visualizes it)\n\n"
-        prompt += "DO NOT cluster based solely on naming similarity without verifying in source code.\n"
-        prompt += (
-            "DO NOT cluster based on general knowledge without source code evidence.\n"
-        )
-        prompt += "But DO cluster when you find source-code-verified integration of ANY type listed above.\n\n"
         repo_count = len(repo_list)
         if repo_count <= 20:
             domain_guidance = "3-7"
@@ -508,7 +602,8 @@ class DependencyMapAnalyzer:
         prompt += "Every alias in your output MUST come from this exact list:\n\n"
         for repo in repo_list:
             alias = repo.get("alias", "unknown")
-            prompt += f"- `{alias}`\n"
+            clone_path = repo.get("clone_path", "unknown")
+            prompt += f"- `{alias}` -- `{clone_path}`\n"
         prompt += "\nAny domain containing repos not in this list will be rejected by validation.\n"
         prompt += f"\nCOMPLETENESS CHECK: Your output must contain exactly {len(repo_list)} repos total across all domains.\n\n"
 
@@ -817,22 +912,10 @@ class DependencyMapAnalyzer:
         prompt += _CROSS_DOMAIN_SCHEMA
         prompt += "```\n\n"
 
-        # Dependency types (condensed)
-        prompt += "## Dependency Types to Document\n\n"
-        prompt += "- Code-level (imports, shared libraries)\n"
-        prompt += "- Data contracts (shared schemas, file formats)\n"
-        prompt += "- Service integration (REST/HTTP/MCP/gRPC API calls)\n"
-        prompt += "- External tool invocation (CLI tools, subprocess calls)\n"
-        prompt += "- Configuration coupling (shared env vars, config keys)\n"
-        prompt += "- Deployment dependencies (runtime requirements)\n"
-        prompt += "- Semantic coupling (behavioral contracts)\n\n"
-
-        # Evidence requirements (condensed)
-        prompt += "## Evidence Requirements\n\n"
-        prompt += "Every dependency MUST include: source reference (module/subsystem), evidence type, reasoning.\n"
-        prompt += (
-            "If you cannot find concrete evidence, DO NOT include the dependency.\n\n"
-        )
+        prompt += "## Analysis Methodology\n\n"
+        prompt += "Read dependency type definitions from `cidx-meta/dependency-map/_dep_types.md`.\n"
+        prompt += "Read the full analysis methodology, evidence requirements, granularity guidelines,\n"
+        prompt += "and output constraints from `cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
 
         # OPTIONAL verification searches at the end
         prompt += "## OPTIONAL: MCP Verification Searches (max 5 calls)\n\n"
@@ -844,12 +927,10 @@ class DependencyMapAnalyzer:
             "These searches are for CONFIRMING what you wrote, not for discovery.\n\n"
         )
 
-        # Prohibited content
         prompt += "## PROHIBITED Content\n\n"
-        prompt += "- YAML frontmatter blocks (system adds automatically)\n"
-        prompt += "- Speculative sections (Recommendations, Future Considerations)\n"
-        prompt += "- Meta-commentary about your process or thinking\n"
-        prompt += "- Content not supported by evidence\n\n"
+        prompt += "See `cidx-meta/dependency-map/_analysis_guidelines.md` for the full list of\n"
+        prompt += "prohibited content types. Additionally: do NOT include meta-commentary\n"
+        prompt += "about your process or thinking.\n\n"
 
         prompt += "## Output Format\n\n"
         prompt += f"Your output MUST begin with: # Domain Analysis: {domain_name}\n"
@@ -985,96 +1066,28 @@ Rules:
         return prompt
 
     def _build_std_exploration_and_evidence(self) -> str:
-        """Build source code exploration mandate, dependency types, and evidence sections."""
-        prompt = "## Source Code Exploration Mandate\n\n"
-        prompt += (
-            "DO NOT rely solely on README files or documentation. Actively explore:\n"
-        )
-        prompt += "- Import statements and package dependencies (requirements.txt, package.json, setup.py, go.mod)\n"
-        prompt += "- Entry points (main.py, app.py, index.ts, cmd/ directories)\n"
-        prompt += "- Configuration files for references to other repos/services\n"
-        prompt += "- API endpoint definitions and client code\n"
-        prompt += "- Test files (often reveal integration dependencies)\n"
-        prompt += "- Build and deployment scripts\n\n"
-        prompt += (
-            "Assess each repo's documentation depth relative to its codebase size.\n"
-        )
-        prompt += "A repo with 100+ source files and a 5-line README has unreliable documentation - explore its source code thoroughly.\n\n"
-        prompt += "**NOTE**: The `cidx-meta` directory in the golden-repos root is the system metadata registry. "
-        prompt += "It stores dependency map output and repo descriptions. Ignore it during analysis — it is not a source code repository.\n\n"
-        prompt += "## Dependency Types to Identify\n\n"
-        prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
-        prompt += (
-            "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
-        )
-        prompt += (
-            "  Example: 'web-app imports shared-types package for User interface'\n\n"
-        )
-        prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
-        prompt += "  Example: 'lambda-processor reads customer_summary_view exposed by core-db'\n\n"
-        prompt += (
-            "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
-        )
-        prompt += "  Example: 'frontend calls backend /api/auth endpoint for login'\n\n"
-        prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
-        prompt += "  Example: 'deployment-scripts invoke cidx CLI for indexing'\n\n"
-        prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
-        prompt += "  Example: 'worker-service and api-service both read REDIS_URL from env'\n\n"
-        prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
-        prompt += "  Example: 'order-service publishes order.created event consumed by notification-service'\n\n"
-        prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
-        prompt += (
-            "  Example: 'web-app requires auth-service to be running and reachable'\n\n"
-        )
-        prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n"
-        prompt += "  Example: 'analytics-pipeline expects user-service to always include email field in user records'\n\n"
+        """Return file-reference instructions for exploration mandate and dependency types.
+
+        Content lives in cidx-meta/dependency-map/_analysis_guidelines.md and
+        _dep_types.md, written by _write_reference_files().  Claude reads them
+        directly rather than receiving them inline, reducing prompt size.
+        """
+        prompt = "## Analysis Guidelines\n\n"
+        prompt += "Read the full exploration mandate, dependency type definitions, and evidence requirements from:\n"
+        prompt += "- `cidx-meta/dependency-map/_dep_types.md` -- dependency type definitions\n"
+        prompt += "- `cidx-meta/dependency-map/_analysis_guidelines.md` -- exploration mandate and evidence methodology\n\n"
         return prompt
 
     def _build_std_verification_mandates(self) -> str:
-        """Build fact-check, tech stack verification, and evidence-based claims sections."""
-        prompt = "## MANDATORY: Fact-Check Pass 1 Domain Assignments\n\n"
-        prompt += "Before analyzing dependencies, verify that each repository listed in this domain actually belongs here.\n"
-        prompt += "For each participating repo:\n"
-        prompt += "1. Examine its source code, imports, and integration points\n"
-        prompt += "2. Confirm it has actual code-level or integration relationships with other repos in this domain\n"
-        prompt += "3. If a repo does NOT belong in this domain based on source code evidence, state this explicitly\n\n"
-        prompt += "## MANDATORY: Technology Stack Verification\n\n"
-        prompt += (
-            "When describing a repository's technology stack or primary language:\n"
-        )
-        prompt += "1. Search for dependency manifests (requirements.txt, package.json, Cargo.toml, go.mod, *.csproj, pom.xml, pyproject.toml)\n"
-        prompt += "2. Check actual source file extensions in the repository (.py, .ts, .js, .rs, .go, .cs, .java, .pas)\n"
-        prompt += "3. Do NOT assume technology based on tool names, library names, or general knowledge\n"
-        prompt += "4. If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X\n"
-        prompt += (
-            "5. State only what the dependency manifest and source files confirm\n\n"
-        )
-        prompt += "## MANDATORY: Evidence-Based Claims\n\n"
-        prompt += "Every dependency you document MUST include:\n"
-        prompt += '1. **Source reference**: The specific module, package, or subsystem where the dependency manifests (e.g., "code-indexer\'s server/mcp/handlers.py module")\n'
-        prompt += "2. **Evidence type**: What you observed (import statement, API endpoint definition, configuration key, subprocess invocation, etc.)\n"
-        prompt += "3. **Reasoning**: Why this constitutes a dependency and what would break if the depended-on component changed\n\n"
-        prompt += "DO NOT document dependencies based on:\n"
-        prompt += '- Assumptions about what "should" exist\n'
-        prompt += "- Naming similarity between repos\n"
-        prompt += "- General knowledge about how similar systems typically work\n"
-        prompt += "- Documentation claims you cannot verify in source code\n\n"
-        prompt += "If you cannot find concrete evidence of a dependency in actual source files, DO NOT include it.\n\n"
-        prompt += "### External Dependency Verification\n\n"
-        prompt += "For external/third-party dependencies, you MUST read the actual manifest file:\n"
-        prompt += "- Python: requirements.txt, setup.py, pyproject.toml\n"
-        prompt += "- JavaScript/TypeScript: package.json\n"
-        prompt += "- .NET/C#: *.csproj, *.sln, packages.config\n"
-        prompt += "- Go: go.mod\n"
-        prompt += "- Java: pom.xml, build.gradle\n"
-        prompt += "- Rust: Cargo.toml\n\n"
-        prompt += "DO NOT list external dependencies from memory or general knowledge of similar systems.\n"
-        prompt += "If you cannot find the dependency manifest file, state 'dependency manifest not found' rather than guessing.\n\n"
-        prompt += "## Granularity Guidelines\n\n"
-        prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
-        prompt += "**CORRECT**: 'auth-service JWT subsystem provides token validation consumed by web-app middleware layer'\n\n"
-        prompt += "**INCORRECT (too granular)**: 'auth-service/src/jwt/validator.py:validate_token() called by web-app/src/middleware/auth.py'\n\n"
-        prompt += "**INCORRECT (too abstract)**: 'auth-service is used by web-app'\n\n"
+        """Return file-reference instruction for verification mandates.
+
+        Content lives in cidx-meta/dependency-map/_analysis_guidelines.md,
+        written by _write_reference_files().  Claude reads it directly rather
+        than receiving it inline, reducing prompt size.
+        """
+        prompt = "## Verification Mandates\n\n"
+        prompt += "Fact-check, technology stack verification, evidence-based claims rules, and granularity guidelines\n"
+        prompt += "are in `cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
         return prompt
 
     def _build_std_output_section(self, domain_name: str) -> str:
@@ -1107,18 +1120,9 @@ Rules:
         prompt += _CROSS_DOMAIN_SCHEMA
         prompt += "\n"
         prompt += "## PROHIBITED Content\n\n"
-        prompt += "Do NOT include any of the following in your output:\n"
-        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
-        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
-        prompt += (
-            "- Advisory content about what SHOULD be done or COULD be integrated\n"
-        )
-        prompt += "- 'MCP Searches Performed' or search audit trail sections\n"
-        prompt += "- Code snippets or source code blocks\n"
-        prompt += "- JSON schema definitions or field-by-field breakdowns\n"
-        prompt += "- Directory listings or file tree dumps\n"
-        prompt += "- Any content not directly supported by source code evidence\n\n"
-        prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
+        prompt += "See `cidx-meta/dependency-map/_analysis_guidelines.md` for the full list of\n"
+        prompt += "prohibited content types. Additionally for this analysis: do NOT include\n"
+        prompt += "'MCP Searches Performed' sections, code snippets, JSON schemas, or directory listings.\n\n"
         prompt += "## Output Format\n\n"
         prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
         prompt += "Do NOT start with summary text, meta-commentary, or a description of what you found.\n"
@@ -1904,7 +1908,6 @@ Rules:
 
     def build_pass1_prompt(
         self,
-        repo_descriptions: Dict[str, str],
         repo_list: List[Dict[str, Any]],
         previous_domains_dir: Optional[Path] = None,
     ) -> str:
@@ -1915,9 +1918,11 @@ Rules:
         When previous_domains_dir is provided and _domains.json exists there,
         includes the previous domain structure as a stability anchor.
 
+        Repository descriptions are NOT inlined — Claude reads them directly
+        from cidx-meta/*.md files (one per repo, file stem = alias).
+
         Args:
-            repo_descriptions: Dict mapping repo alias to description text
-            repo_list: List of repo dicts with alias, clone_path, file_count, total_bytes
+            repo_list: List of repo dicts with alias and clone_path
             previous_domains_dir: Optional directory containing a previous _domains.json
 
         Returns:
@@ -1934,88 +1939,23 @@ Rules:
             )
         )
 
-        total_description_bytes = sum(
-            len(desc.encode("utf-8")) for desc in repo_descriptions.values()
-        )
-        use_staging = total_description_bytes > PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES
-
         prompt = "# Domain Synthesis Task\n\n"
-        prompt += self._build_domain_definition_section()
-        prompt += "Analyze the following repository descriptions and identify domain clusters.\n\n"
+        prompt += "Analyze repository descriptions and identify domain clusters.\n\n"
         prompt += self._build_previous_domains_section(previous_domains_dir)
-        prompt += "## Repository Descriptions\n\n"
 
-        if use_staging:
-            import tempfile as _tempfile
+        prompt += "## Repository Information\n\n"
+        prompt += "Each `.md` file in `cidx-meta/` describes one repository (file stem = repo alias).\n"
+        prompt += "Read ALL description files before starting analysis.\n\n"
 
-            staging_fd, staging_path_str = _tempfile.mkstemp(
-                suffix=".json", prefix="cidx_pass1_descriptions_"
-            )
-            with os.fdopen(staging_fd, "w") as fh:
-                json.dump(repo_descriptions, fh, indent=2)
-
-            staging_path = Path(staging_path_str)
-            prompt += (
-                f"Repository descriptions have been written to a staging file at:\n"
-                f"`{staging_path}`\n\n"
-                "Use the Read tool to load that file before performing your analysis. "
-                "The file is a JSON object mapping repo alias to description text.\n\n"
-            )
-
-            # Also stage the filesystem locations to avoid embedding 500-repo lists inline
-            loc_fd, loc_path_str = _tempfile.mkstemp(
-                suffix=".json", prefix="cidx_pass1_locations_"
-            )
-            repo_locations = [
-                {
-                    "alias": repo.get("alias", "unknown"),
-                    "clone_path": repo.get("clone_path", "unknown"),
-                    "file_count": repo.get("file_count", "?"),
-                    "total_mb": round(repo.get("total_bytes", 0) / (1024 * 1024), 1),
-                }
-                for repo in repo_list
-            ]
-            with os.fdopen(loc_fd, "w") as fh:
-                json.dump(repo_locations, fh, indent=2)
-
-            loc_path = Path(loc_path_str)
-            prompt += "## Repository Filesystem Locations\n\n"
-            prompt += (
-                f"Repository filesystem locations have been written to a staging file at:\n"
-                f"`{loc_path}`\n\n"
-                "Use the Read tool to load that file. "
-                "Each entry has alias, clone_path, file_count, and total_mb fields.\n\n"
-            )
-        else:
-            for alias, content in repo_descriptions.items():
-                prompt += f"### {alias}\n\n{content}\n\n"
-
-            prompt += "## Repository Filesystem Locations\n\n"
-            for repo in repo_list:
-                alias = repo.get("alias", "unknown")
-                clone_path = repo.get("clone_path", "unknown")
-                file_count = repo.get("file_count", "?")
-                total_mb = round(repo.get("total_bytes", 0) / (1024 * 1024), 1)
-                prompt += f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
-            prompt += "\n"
+        prompt += "## Reference Material\n\n"
+        prompt += "Read dependency type definitions from `cidx-meta/dependency-map/_dep_types.md`.\n"
+        prompt += "Read analysis methodology from `cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
 
         prompt += f"## Instructions\n\nAIM for {domain_guidance} domains for {repo_count} repositories.\n"
         prompt += f"Assign ALL {repo_count} repositories. Missing repos = failed analysis.\n\n"
         prompt += "## Output Format\n\nYour ENTIRE response must be ONLY a valid JSON array.\n"
         prompt += '[\n  {"name": "domain-name", "description": "scope", "participating_repos": ["alias1"]}\n]\n'
         return prompt
-
-    def _build_domain_definition_section(self) -> str:
-        """Return the 'What Is a Domain?' conceptual definition section for Pass 1 prompts."""
-        section = "## What Is a Domain?\n\n"
-        section += "A domain is a meaningful functional or technical area that groups multiple related repositories. "
-        section += "A domain is NOT a repository — it represents a higher-level organizational concept "
-        section += "(e.g., 'authentication', 'data-pipeline', 'frontend-platform') that encompasses the repositories "
-        section += "participating in that area. "
-        section += "The purpose of domain analysis is to group repositories into these meaningful areas so that "
-        section += "cross-repository dependencies can be understood at a higher abstraction level, and so that "
-        section += "changes to one repository can be traced to their impact across the broader domain.\n\n"
-        return section
 
     def _build_previous_domains_section(
         self, previous_domains_dir: Optional[Path]
@@ -3018,18 +2958,7 @@ Rules:
 
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
-        prompt += (
-            "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
-        )
-        prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
-        prompt += (
-            "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
-        )
-        prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
-        prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
-        prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
-        prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
-        prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n\n"
+        prompt += "Read dependency type definitions from `cidx-meta/dependency-map/_dep_types.md`.\n\n"
 
         prompt += "## CRITICAL SELF-CORRECTION RULES\n\n"
         prompt += "1. For every CHANGED repo: re-verify ALL dependencies listed for that repo against current source code\n"
@@ -3044,26 +2973,9 @@ Rules:
         )
         prompt += "7. Cross-Domain Connections MUST use the structured table format with Outgoing and Incoming subsections\n\n"
 
-        prompt += "## Evidence-Based Claims Requirement\n\n"
-        prompt += "Every dependency you document MUST include a source reference (module/subsystem name) and evidence type.\n"
-        prompt += "For CHANGED repos: Do NOT preserve or add dependencies you cannot verify from current source code.\n"
-        prompt += '"I assume this exists" is NOT evidence. "I found import X in module Y" IS evidence.\n\n'
-
-        prompt += "## Granularity Guidelines\n\n"
-        prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
-        prompt += "**CORRECT**: 'auth-service JWT subsystem provides token validation consumed by web-app middleware layer'\n\n"
-        prompt += "**INCORRECT (too granular)**: 'auth-service/src/jwt/validator.py:validate_token() called by web-app/src/middleware/auth.py'\n\n"
-        prompt += "**INCORRECT (too abstract)**: 'auth-service is used by web-app'\n\n"
-
-        prompt += "## PROHIBITED Content\n\n"
-        prompt += "Do NOT include any of the following in your output:\n"
-        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
-        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
-        prompt += (
-            "- Advisory content about what SHOULD be done or COULD be integrated\n"
-        )
-        prompt += "- Any content not directly supported by source code evidence\n\n"
-        prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
+        prompt += "## Analysis Methodology\n\n"
+        prompt += "Read the full analysis methodology, evidence requirements, granularity guidelines,\n"
+        prompt += "and output constraints from `cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
 
         prompt += "## Output Format\n\n"
         prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
@@ -3155,31 +3067,15 @@ Rules:
 
         prompt += "## Dependency Types to Identify\n\n"
         prompt += "**CRITICAL**: ABSENCE of code imports does NOT mean absence of dependency.\n\n"
-        prompt += (
-            "- **Code-level**: Direct imports, shared libraries, type/interface reuse\n"
-        )
-        prompt += "- **Data contracts**: Shared database tables/views/schemas, shared file formats\n"
-        prompt += (
-            "- **Service integration**: REST/HTTP/MCP/gRPC API calls between repos\n"
-        )
-        prompt += "- **External tool invocation**: CLI tools, subprocess calls, shell commands invoking another repo\n"
-        prompt += "- **Configuration coupling**: Shared env vars, config keys, feature flags, connection strings\n"
-        prompt += "- **Message/event contracts**: Queue messages, webhooks, pub/sub events, callback URLs\n"
-        prompt += "- **Deployment dependencies**: Runtime availability requirements (repo A must be running for repo B)\n"
-        prompt += "- **Semantic coupling**: Behavioral contracts where changing logic in repo A breaks expectations in repo B\n\n"
+        prompt += "Read dependency type definitions from `cidx-meta/dependency-map/_dep_types.md`.\n\n"
 
-        prompt += "## Granularity Guidelines\n\n"
-        prompt += "Document at MODULE/SUBSYSTEM level, not files or functions.\n\n"
+        prompt += "## Analysis Methodology\n\n"
+        prompt += "Read the full analysis methodology, evidence requirements, granularity guidelines,\n"
+        prompt += "and output constraints from `cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
 
-        prompt += "## PROHIBITED Content\n\n"
-        prompt += "Do NOT include any of the following in your output:\n"
-        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
-        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', 'Future Considerations', or 'Suggested Improvements'\n"
-        prompt += (
-            "- Advisory content about what SHOULD be done or COULD be integrated\n"
-        )
-        prompt += "- Any content not directly supported by source code evidence\n\n"
-        prompt += "Document ONLY verified, factual dependencies and relationships found in source code.\n\n"
+        prompt += "## Source Code Exploration\n\n"
+        prompt += "Use the `cidx-local` MCP server's `search_code` tool to discover cross-repository\n"
+        prompt += "references, integration patterns, and shared identifiers.\n\n"
 
         prompt += "## Output Format\n\n"
         prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
@@ -3440,15 +3336,14 @@ Rules:
         prompt += "4. **Retain** all accurate, evidence-supported content\n"
         prompt += "5. **Remove** only claims not supported by source code evidence\n\n"
 
-        prompt += "## PROHIBITED Content\n\n"
-        prompt += "Do NOT include any of the following in your output:\n"
-        prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
-        prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', or 'Future Considerations'\n"
-        prompt += (
-            "- Advisory content about what SHOULD be done or COULD be integrated\n"
-        )
-        prompt += "- Any content not directly supported by source code evidence\n\n"
-        prompt += "Document ONLY verified, factual dependencies and relationships.\n\n"
+        prompt += "## Reference Material\n\n"
+        prompt += "Read dependency type definitions from `cidx-meta/dependency-map/_dep_types.md`.\n"
+        prompt += "Read analysis methodology, evidence rules, and output constraints from\n"
+        prompt += "`cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
+
+        prompt += "## Source Code Exploration\n\n"
+        prompt += "Use the `cidx-local` MCP server's `search_code` tool to verify claims against\n"
+        prompt += "actual source code. Do not rely solely on the existing document's assertions.\n\n"
 
         prompt += "## Output Format\n\n"
         prompt += f"Return the full refined document body starting with '# Domain Analysis: {domain_name}'.\n"

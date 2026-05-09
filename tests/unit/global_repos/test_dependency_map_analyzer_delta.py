@@ -178,13 +178,9 @@ Existing analysis content.
             domain_list=domain_list,
         )
 
-        # Should include granularity examples
-        assert (
-            "MODULE" in prompt
-            or "SUBSYSTEM" in prompt
-            or "granularity" in prompt.lower()
-        )
-        assert "CORRECT" in prompt and "INCORRECT" in prompt
+        # Granularity guidance now lives in _analysis_guidelines.md (Bug #995 Phase 2)
+        assert "granularity" in prompt.lower()
+        assert "_analysis_guidelines.md" in prompt
 
 
 class TestDomainDiscoveryPrompt:

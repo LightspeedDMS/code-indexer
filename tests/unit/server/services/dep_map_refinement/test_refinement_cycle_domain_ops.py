@@ -293,9 +293,10 @@ class TestIndexMdRegenerationAfterBatch:
         """
         Given at least one domain was updated by refinement
         When run_refinement_cycle() completes
-        Then _generate_index_md is called on the analyzer.
+        Then IndexRegenerator.regenerate() is called (not _generate_index_md with []).
         """
         import json
+        from unittest.mock import patch
 
         dep_map = make_dependency_map_dir(tmp_path)
         (dep_map / "_domains.json").write_text(json.dumps(SAMPLE_DOMAINS_JSON[:1]))
@@ -313,17 +314,30 @@ class TestIndexMdRegenerationAfterBatch:
         config = make_config(refinement_domains_per_run=1)
         service = make_service(tmp_path, mock_analyzer, config)
 
-        service.run_refinement_cycle()
+        regenerate_calls = []
 
-        mock_analyzer._generate_index_md.assert_called_once()
+        def fake_regenerate(output_dir):
+            regenerate_calls.append(output_dir)
+
+        with patch(
+            "code_indexer.server.services.dep_map_index_regenerator.IndexRegenerator.regenerate",
+            side_effect=fake_regenerate,
+        ):
+            service.run_refinement_cycle()
+
+        assert len(regenerate_calls) == 1, (
+            "IndexRegenerator.regenerate() must be called exactly once when a domain changed"
+        )
+        mock_analyzer._generate_index_md.assert_not_called()
 
     def test_index_md_not_regenerated_when_no_changes(self, tmp_path: Path):
         """
         Given no domains were changed (all returned identical content)
         When run_refinement_cycle() completes
-        Then _generate_index_md is NOT called.
+        Then IndexRegenerator.regenerate() is NOT called.
         """
         import json
+        from unittest.mock import patch
 
         dep_map = make_dependency_map_dir(tmp_path)
         (dep_map / "_domains.json").write_text(json.dumps(SAMPLE_DOMAINS_JSON[:1]))
@@ -339,6 +353,18 @@ class TestIndexMdRegenerationAfterBatch:
         config = make_config(refinement_domains_per_run=1)
         service = make_service(tmp_path, mock_analyzer, config)
 
-        service.run_refinement_cycle()
+        regenerate_calls = []
 
+        def fake_regenerate(output_dir):
+            regenerate_calls.append(output_dir)
+
+        with patch(
+            "code_indexer.server.services.dep_map_index_regenerator.IndexRegenerator.regenerate",
+            side_effect=fake_regenerate,
+        ):
+            service.run_refinement_cycle()
+
+        assert len(regenerate_calls) == 0, (
+            "IndexRegenerator.regenerate() must NOT be called when no domain changed"
+        )
         mock_analyzer._generate_index_md.assert_not_called()

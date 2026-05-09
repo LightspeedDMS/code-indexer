@@ -22,62 +22,131 @@ _SCRIPT_SHELL_CMD_IDX = 4
 
 
 class TestOrientationFilesGeneration:
-    """Test orientation files generation (AC2)."""
+    """Test orientation files generation (AC2 / Bug #995)."""
 
-    def test_generate_orientation_files_creates_both_files(self, tmp_path):
-        """Test that generate_orientation_files creates CLAUDE.md and dep_map_repo_catalogue.md."""
+    def test_generate_orientation_files_creates_claude_md_with_cidx_meta_pointers(
+        self, tmp_path
+    ):
+        """CLAUDE.md must be created with cidx-meta structure pointers; no catalogue created."""
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
         )
-
         repo_list = [
             {"alias": "repo1", "description_summary": "First repository"},
             {"alias": "repo2", "description_summary": "Second repository"},
         ]
-
         analyzer.generate_orientation_files(repo_list)
 
         claude_md = tmp_path / "CLAUDE.md"
-        catalogue = tmp_path / "dep_map_repo_catalogue.md"
         assert claude_md.exists()
-        assert catalogue.exists()
+        # dep_map_repo_catalogue.md must NOT be created (eliminated in Bug #995)
+        assert not (tmp_path / "dep_map_repo_catalogue.md").exists()
 
-        claude_content = claude_md.read_text()
-        assert "dep_map_repo_catalogue.md" in claude_content
-        assert "cidx-local" in claude_content
+        content = claude_md.read_text()
+        assert "cidx-meta/" in content
+        assert "_dep_types.md" in content
+        assert "_analysis_guidelines.md" in content
+        assert "cidx-local" in content
+        assert "dep_map_repo_catalogue.md" not in content
 
-        cat_content = catalogue.read_text()
-        assert "CIDX Dependency Map Analysis" in cat_content
-        assert "Available Repositories" in cat_content
-        assert "**repo1**: First repository" in cat_content
-        assert "**repo2**: Second repository" in cat_content
-        assert "dependency" in cat_content.lower()
-
-    def test_generate_orientation_files_overwrites_both_existing(self, tmp_path):
-        """Test that generate_orientation_files overwrites both existing files."""
+    def test_generate_orientation_files_overwrites_existing_claude_md(self, tmp_path):
+        """generate_orientation_files must overwrite existing CLAUDE.md with new content."""
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
             pass_timeout=600,
         )
-
         claude_md = tmp_path / "CLAUDE.md"
-        catalogue = tmp_path / "dep_map_repo_catalogue.md"
         claude_md.write_text("Old CLAUDE.md content")
-        catalogue.write_text("Old catalogue content")
 
-        repo_list = [{"alias": "repo1", "description_summary": "New repo"}]
+        analyzer.generate_orientation_files(
+            [{"alias": "repo1", "description_summary": "New"}]
+        )
+
+        content = claude_md.read_text()
+        assert "Old CLAUDE.md content" not in content
+        assert "cidx-meta/" in content
+
+    def test_claude_md_size_regression_guard(self, tmp_path):
+        """CLAUDE.md must stay under 2KB regardless of repo count — context-bloat guard.
+
+        The 2KB budget accommodates the richer domain-definition and workspace
+        context added in Bug #995 Phase 2 (domain definition, directory structure,
+        cidx-meta layout). CLAUDE.md is static content that does not scale with
+        repo count, so 50 repos must produce the same size as 1 repo.
+        """
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        repo_list = [
+            {"alias": f"repo{i}", "description_summary": f"Repo {i}"} for i in range(50)
+        ]
         analyzer.generate_orientation_files(repo_list)
 
-        claude_content = claude_md.read_text()
-        assert "Old CLAUDE.md content" not in claude_content
-        assert "dep_map_repo_catalogue.md" in claude_content
+        size = len((tmp_path / "CLAUDE.md").read_text().encode("utf-8"))
+        assert size < 2048, (
+            f"CLAUDE.md is {size} bytes — exceeds 2KB context-bloat budget"
+        )
 
-        cat_content = catalogue.read_text()
-        assert "Old catalogue content" not in cat_content
-        assert "**repo1**: New repo" in cat_content
+    def test_reference_files_written_to_dep_map_dir_when_provided(self, tmp_path):
+        """Both _dep_types.md and _analysis_guidelines.md must be written to dep_map_dir."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        dep_map_dir = tmp_path / "dep-map"
+        dep_map_dir.mkdir()
+
+        analyzer.generate_orientation_files([], dep_map_dir=dep_map_dir)
+
+        assert (dep_map_dir / "_dep_types.md").exists()
+        assert (dep_map_dir / "_analysis_guidelines.md").exists()
+
+    def test_dep_types_md_contains_all_8_dependency_types(self, tmp_path):
+        """_dep_types.md must contain all 8 canonical dependency type names."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        dep_map_dir = tmp_path / "dep-map"
+        dep_map_dir.mkdir()
+        analyzer.generate_orientation_files([], dep_map_dir=dep_map_dir)
+
+        content = (dep_map_dir / "_dep_types.md").read_text()
+        for dep_type in [
+            "Code-level",
+            "Data contracts",
+            "Service integration",
+            "External tool invocation",
+            "Configuration coupling",
+            "Message/event contracts",
+            "Deployment dependency",
+            "Semantic coupling",
+        ]:
+            assert dep_type in content, f"Missing dependency type: {dep_type!r}"
+
+    def test_analysis_guidelines_md_contains_key_sections(self, tmp_path):
+        """_analysis_guidelines.md must contain exploration mandate and verification sections."""
+        analyzer = DependencyMapAnalyzer(
+            golden_repos_root=tmp_path,
+            cidx_meta_path=tmp_path / "cidx-meta",
+            pass_timeout=600,
+        )
+        dep_map_dir = tmp_path / "dep-map"
+        dep_map_dir.mkdir()
+        analyzer.generate_orientation_files([], dep_map_dir=dep_map_dir)
+
+        content = (dep_map_dir / "_analysis_guidelines.md").read_text()
+        assert "Source Code Exploration Mandate" in content
+        assert "Evidence-Based Claims" in content
+        assert "Technology Stack Verification" in content
+        assert "Granularity Guidelines" in content
 
 
 class TestPass1Synthesis:
@@ -113,8 +182,6 @@ class TestPass1Synthesis:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        repo_descriptions = {"repo1": "Content 1", "repo2": "Content 2"}
-
         # Provide repo_list with matching aliases and clone_paths for validation
         repo_list = [
             {
@@ -130,7 +197,7 @@ class TestPass1Synthesis:
         ]
 
         result = analyzer.run_pass_1_synthesis(
-            staging_dir, repo_descriptions, repo_list=repo_list, max_turns=50
+            staging_dir, repo_list=repo_list, max_turns=50
         )
 
         # Verify subprocess called with correct arguments
@@ -196,7 +263,7 @@ class TestPass1Synthesis:
             ]
 
             analyzer.run_pass_1_synthesis(
-                staging_dir, {}, repo_list=repo_list, max_turns=50
+                staging_dir, repo_list=repo_list, max_turns=50
             )
 
             domains_file = staging_dir / "_domains.json"
@@ -351,15 +418,8 @@ class TestPass2PerDomain:
         mock_dispatcher.dispatch.assert_called_once()
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        # Verify the Technology Stack Verification section exists
-        assert "## MANDATORY: Technology Stack Verification" in prompt
-        assert "Search for dependency manifests" in prompt
-        assert "Check actual source file extensions" in prompt
-        assert "Do NOT assume technology based on tool names" in prompt
-        assert (
-            "If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X"
-            in prompt
-        )
+        # Verify the analysis guidelines file is referenced (Bug #995 moved inline content to file)
+        assert "_analysis_guidelines.md" in prompt
 
 
 class TestPass3Index:
@@ -469,7 +529,7 @@ class TestPassOneValidation:
             },
         ]
         result = analyzer.run_pass_1_synthesis(
-            staging, {}, repo_list=repo_list, max_turns=50
+            staging, repo_list=repo_list, max_turns=50
         )
         assert len(result) == 1
         assert result[0]["name"] == "my-repo"
@@ -500,7 +560,7 @@ class TestPassOneValidation:
             },
         ]
         result = analyzer.run_pass_1_synthesis(
-            staging, {}, repo_list=repo_list, max_turns=50
+            staging, repo_list=repo_list, max_turns=50
         )
         assert result[0]["description"] == "my-repo (standalone repository)"
 
@@ -537,7 +597,7 @@ class TestPassOneValidation:
             },
         ]
         result = analyzer.run_pass_1_synthesis(
-            staging, {}, repo_list=repo_list, max_turns=50
+            staging, repo_list=repo_list, max_turns=50
         )
         # flask-large should NOT be filtered - the .versioned path contains the alias
         domain_repos = result[0]["participating_repos"]
@@ -574,7 +634,7 @@ class TestPassOneValidation:
             },
         ]
         result = analyzer.run_pass_1_synthesis(
-            staging, {}, repo_list=repo_list, max_turns=50
+            staging, repo_list=repo_list, max_turns=50
         )
         # my-repo should be filtered from the domain and auto-created as standalone
         # The original domain should be removed (empty after filtering)
@@ -614,7 +674,7 @@ class TestPassOneValidation:
             },
         ]
         result = analyzer.run_pass_1_synthesis(
-            staging, {}, repo_list=repo_list, max_turns=50
+            staging, repo_list=repo_list, max_turns=50
         )
         # "db" should be filtered because "adobe-tools" doesn't contain "db" as a delimited segment
         standalone = [d for d in result if d["name"] == "db"]
@@ -704,9 +764,7 @@ class TestPass1PromptGuardrails:
             },
         ]
 
-        analyzer.run_pass_1_synthesis(
-            staging_dir, {}, repo_list=repo_list, max_turns=50
-        )
+        analyzer.run_pass_1_synthesis(staging_dir, repo_list=repo_list, max_turns=50)
 
         # Verify prompt contains critical guardrails
         mock_subprocess.assert_called_once()
@@ -755,7 +813,7 @@ class TestPass1JsonParseFailure:
         with pytest.raises(
             RuntimeError, match="Pass 1 \\(Synthesis\\) failed after retry"
         ):
-            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
+            analyzer.run_pass_1_synthesis(staging_dir, repo_list=[], max_turns=50)
 
     @patch("subprocess.run")
     def test_pass_1_agentic_retry_with_file_reminder_succeeds(
@@ -810,7 +868,7 @@ class TestPass1JsonParseFailure:
         ]
 
         result = analyzer.run_pass_1_synthesis(
-            staging_dir, {}, repo_list=repo_list, max_turns=50
+            staging_dir, repo_list=repo_list, max_turns=50
         )
 
         # Verify subprocess was called twice (agentic + agentic retry)
@@ -871,7 +929,7 @@ class TestPass1JsonParseFailure:
             RuntimeError, match="Pass 1 \\(Synthesis\\) failed after retry"
         ):
             analyzer.run_pass_1_synthesis(
-                staging_dir, {}, repo_list=repo_list, max_turns=50
+                staging_dir, repo_list=repo_list, max_turns=50
             )
 
         # Verify subprocess was called twice
@@ -913,7 +971,7 @@ class TestPass1JsonParseFailure:
         ]
 
         result = analyzer.run_pass_1_synthesis(
-            staging_dir, {}, repo_list=repo_list, max_turns=50
+            staging_dir, repo_list=repo_list, max_turns=50
         )
 
         # Verify subprocess was called only once (no retry)
@@ -1031,7 +1089,7 @@ class TestAllowedToolsPerPass:
             },
         ]
 
-        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=0)
+        analyzer.run_pass_1_synthesis(staging_dir, repo_list=repo_list, max_turns=0)
 
         # Verify --allowedTools is NOT present (allowed_tools=None means no flag)
         # Verify --max-turns is NOT present (max_turns=0 means single-shot mode)
@@ -1146,7 +1204,7 @@ class TestSingleShotVsAgenticMode:
         ]
 
         # max_turns=0 should omit --max-turns from command
-        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=0)
+        analyzer.run_pass_1_synthesis(staging_dir, repo_list=repo_list, max_turns=0)
 
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
@@ -1199,9 +1257,7 @@ class TestSingleShotVsAgenticMode:
         ]
 
         # max_turns=50 should include --max-turns 50
-        analyzer.run_pass_1_synthesis(
-            staging_dir, {}, repo_list=repo_list, max_turns=50
-        )
+        analyzer.run_pass_1_synthesis(staging_dir, repo_list=repo_list, max_turns=50)
 
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
@@ -1692,10 +1748,11 @@ class TestPass2PromptGuardrails:
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         assert "## PROHIBITED Content" in prompt
-        assert "YAML frontmatter blocks (the system adds these automatically)" in prompt
+        # Bug #995 Phase 2: inline items replaced with _analysis_guidelines.md reference
+        assert "_analysis_guidelines.md" in prompt
 
     def test_prompt_prohibits_speculative_content(self, tmp_path):
-        """Test that Pass 2 prompt prohibits speculative/advisory content."""
+        """Test that Pass 2 prompt prohibits speculative/advisory content via reference file."""
         from code_indexer.server.services.intelligence_cli_invoker import (
             InvocationResult,
         )
@@ -1732,9 +1789,10 @@ class TestPass2PromptGuardrails:
         mock_dispatcher.dispatch.assert_called_once()
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        # Check for exact text in PROHIBITED section
+        # Bug #995 Phase 2: inline PROHIBITED items replaced with _analysis_guidelines.md
+        # reference. Check that the section header and file reference are present.
         assert "## PROHIBITED Content" in prompt
-        assert "Speculative sections" in prompt
+        assert "_analysis_guidelines.md" in prompt
 
 
 class TestHeadingBasedMetaStripping:
@@ -2522,7 +2580,7 @@ class TestIteration13LargeDomainDetection:
         assert "OPTIONAL" in prompt  # Searches are optional
 
     def test_small_domain_uses_standard_prompt(self, tmp_path):
-        """With 3 or fewer repos, verify prompt DOES contain Source Code Exploration Mandate."""
+        """With 3 or fewer repos, verify prompt references the analysis guidelines file."""
         from code_indexer.server.services.intelligence_cli_invoker import (
             InvocationResult,
         )
@@ -2559,9 +2617,8 @@ class TestIteration13LargeDomainDetection:
         mock_dispatcher.dispatch.assert_called_once()
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        # Verify standard prompt characteristics (existing behavior)
-        assert "Source Code Exploration Mandate" in prompt
-        assert "Required Searches" in prompt
+        # Verify analysis guidelines file is referenced (Bug #995 moved inline content to file)
+        assert "_analysis_guidelines.md" in prompt
 
     @patch("subprocess.run")
     def test_large_domain_earlier_hook_thresholds(self, mock_subprocess, tmp_path):
@@ -3064,7 +3121,7 @@ class TestIteration15InsideOutAndConciseness:
 
     @patch("subprocess.run")
     def test_repo_sizes_in_pass1_prompt(self, mock_subprocess, tmp_path):
-        """Test that Pass 1 prompt includes file_count and MB size for each repo."""
+        """Test that Pass 1 prompt includes repo alias and clone path for each repo."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps(
@@ -3098,9 +3155,7 @@ class TestIteration15InsideOutAndConciseness:
             },
         ]
 
-        analyzer.run_pass_1_synthesis(
-            staging_dir, {}, repo_list=repo_list, max_turns=50
-        )
+        analyzer.run_pass_1_synthesis(staging_dir, repo_list=repo_list, max_turns=50)
 
         # Extract the shell string from the subprocess command list.
         # Since Bug #936 the prompt is embedded in cmd[4] (the shell string),
@@ -3109,9 +3164,10 @@ class TestIteration15InsideOutAndConciseness:
         cmd = mock_subprocess.call_args[0][0]
         shell_cmd = cmd[_SCRIPT_SHELL_CMD_IDX]
 
-        # Verify file count and MB size are embedded in the shell string.
-        assert "150 files" in shell_cmd
-        assert "5.0 MB" in shell_cmd or "5 MB" in shell_cmd
+        # Verify repo alias and clone path are embedded in the shell string.
+        # Bug #995 removed per-repo size metadata from inline prompt.
+        assert "repo1" in shell_cmd
+        assert "/path/to/repo1" in shell_cmd
 
     # ---------------------------------------------------------------------------
     # Shared helper for Pass 2 dispatcher-injection tests (Story #848)
