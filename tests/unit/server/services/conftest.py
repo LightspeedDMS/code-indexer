@@ -5,6 +5,7 @@ Story #310: JobTracker Class, TrackedJob Dataclass, Schema Migration (Epic #261 
 """
 
 import sqlite3
+from unittest.mock import patch
 
 import pytest
 
@@ -49,3 +50,12 @@ def db_path(tmp_path):
 def tracker(db_path):
     """Create a JobTracker connected to the temporary database."""
     return JobTracker(db_path)
+
+
+@pytest.fixture(autouse=True)
+def _disable_pace_maker_guard():
+    with patch("code_indexer.server.services.claude_invoker.enforce_pace_maker_config"):
+        with patch(
+            "code_indexer.server.services.research_assistant_service.enforce_pace_maker_config"
+        ):
+            yield

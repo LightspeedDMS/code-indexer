@@ -68,6 +68,11 @@ CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS = 180  # How long to wait for npm global insta
 # Story #845: Codex CLI install timeout constants
 CODEX_CLI_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
 CODEX_VERSION_PROBE_TIMEOUT_SECONDS = 10  # Quick binary probe after install
+# Story #997: Pace-maker install/update constants
+PACE_MAKER_REPO_URL = "https://github.com/LightspeedDMS/claude-pace-maker.git"
+PACE_MAKER_GIT_TIMEOUT = 60
+PACE_MAKER_INSTALL_TIMEOUT = 120
+PACE_MAKER_CMD_TIMEOUT = 10
 
 
 class DeploymentExecutor:
@@ -2898,6 +2903,17 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 12: Story #997 - Keep pace-maker installed/updated (non-fatal)
+        if not self._ensure_pace_maker_installed():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-158",
+                    "Pace-maker install/update skipped or failed - "
+                    "pace-maker pacing enforcement may be unavailable",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         logger.info(
             "Deployment execution completed successfully",
             extra={"correlation_id": get_correlation_id()},
@@ -3075,6 +3091,177 @@ class DeploymentExecutor:
                 CODEX_VERSION_PROBE_TIMEOUT_SECONDS,
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def _ensure_pace_maker_installed(self) -> bool:
+        """Story #997: Ensure pace-maker is cloned, installed, and bootstrap config records path.
+
+        Fresh install: clone + install.sh + set master OFF.
+        Update: git pull + install.sh. Config NOT touched on update.
+        Non-fatal: failures return False, deployment continues.
+        """
+        try:
+            service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+            server_user = None
+            user_home = Path.home()
+
+            if service_path.exists():
+                content = service_path.read_text()
+                server_user = self._extract_service_user(content)
+
+            if server_user:
+                try:
+                    user_home = Path(pwd.getpwnam(server_user).pw_dir)
+                except KeyError:
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-150",
+                            f"Server user {server_user!r} not found in passwd — "
+                            "using current HOME for pace-maker clone",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+
+            clone_path = user_home / "claude-pace-maker"
+            is_fresh = not (clone_path / ".git").exists()
+
+            # Clone or pull
+            if is_fresh:
+                result = subprocess.run(
+                    ["git", "clone", PACE_MAKER_REPO_URL, str(clone_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=PACE_MAKER_GIT_TIMEOUT,
+                )
+                if result.returncode != 0:
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-151",
+                            f"pace-maker git clone failed: {result.stderr[:200]}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return False
+            else:
+                result = subprocess.run(
+                    ["git", "-C", str(clone_path), "pull"],
+                    capture_output=True,
+                    text=True,
+                    timeout=PACE_MAKER_GIT_TIMEOUT,
+                )
+                if result.returncode != 0:
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-152",
+                            f"pace-maker git pull failed: {result.stderr[:200]}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return False
+
+            # Run install.sh (idempotent)
+            # When running via sudo the env dict is NOT inherited by the child
+            # process, so we inject NONINTERACTIVE=1 directly into the command.
+            if server_user:
+                install_cmd = [
+                    "sudo",
+                    "-u",
+                    server_user,
+                    "env",
+                    "NONINTERACTIVE=1",
+                    "bash",
+                    str(clone_path / "install.sh"),
+                ]
+                install_env = None
+            else:
+                install_cmd = ["bash", str(clone_path / "install.sh")]
+                install_env = os.environ.copy()
+                install_env["NONINTERACTIVE"] = "1"
+
+            result = subprocess.run(
+                install_cmd,
+                capture_output=True,
+                text=True,
+                timeout=PACE_MAKER_INSTALL_TIMEOUT,
+                env=install_env,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-153",
+                        f"pace-maker install.sh failed: {result.stderr[:200]}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+
+            # Fresh install only: set master switch OFF
+            if is_fresh:
+                off_cmd = ["pace-maker", "off"]
+                if server_user:
+                    off_cmd = ["sudo", "-u", server_user] + off_cmd
+                result = subprocess.run(
+                    off_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=PACE_MAKER_CMD_TIMEOUT,
+                )
+                if result.returncode != 0:
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-154",
+                            f"pace-maker off failed: {result.stderr[:200]}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+
+            # Record clone path in bootstrap config
+            try:
+                import json
+
+                config_path = _cidx_data_dir / "config.json"
+                config_dict: dict = {}
+                if config_path.exists():
+                    with open(config_path) as f:
+                        config_dict = json.load(f)
+                config_dict["pace_maker_clone_path"] = str(clone_path)
+                _cidx_data_dir.mkdir(parents=True, exist_ok=True)
+                with open(config_path, "w") as f:
+                    json.dump(config_dict, f, indent=2)
+                    f.write("\n")
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-155",
+                        f"Failed to record pace_maker_clone_path in config: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+            logger.info(
+                "pace-maker %s completed successfully",
+                "installed" if is_fresh else "updated",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except subprocess.TimeoutExpired as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-156",
+                    f"pace-maker operation timed out: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-157",
+                    f"pace-maker install/update failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
 
     def _ensure_codex_cli_installed(self) -> bool:
         """Story #845: idempotently install/update @openai/codex via npm.

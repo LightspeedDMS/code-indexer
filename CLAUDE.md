@@ -211,6 +211,18 @@ Runtime settings belong in the Web UI Config Screen via `get_config_service().ge
 
 All systemd/env/config changes flow through auto-updater: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. Pattern: `_ensure_X_config()` -- idempotent check-then-apply. `CIDX_DATA_DIR` honored for IPC path alignment when server and auto-updater run as different OS users (Bug #879).
 
+### Pace-Maker Pre-Invocation Guard (Story #997)
+
+Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step 12 in `DeploymentExecutor.execute()`). Fresh install sets master switch OFF. Updates never touch config.
+
+**Config split**: `pace_maker_clone_path` (bootstrap, written by installer/auto-updater) + `enforce_pace_maker_pacing_only` (runtime, Web UI toggle, default `false`).
+
+**Three-layer guard** (`enforce_pace_maker_config()` in `pace_maker_guard.py`): (1) Location awareness -- clone path from bootstrap must exist (dev environments are no-op). (2) Runtime toggle from Web UI. (3) Idempotent CLI enforcement via `pace-maker status` + corrective commands.
+
+**Two injection points**: `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()`. NOT CodexInvoker (Codex uses OpenAI credits). Guard is non-fatal -- all failures logged, never raised.
+
+**Toggle ON**: pacing-only mode (5h + weekly limits ON, everything else OFF). **Toggle OFF**: master switch OFF (dormant).
+
 ### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
 
 **Key invariants** (see `docs/server-memory-invariants.md` for full detail):

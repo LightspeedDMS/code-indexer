@@ -17,6 +17,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, TypedDict
 
+from code_indexer.server.services.pace_maker_guard import (  # Story #997
+    enforce_pace_maker_config,
+)
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 import bleach  # type: ignore[import-untyped]
@@ -1336,6 +1339,12 @@ class ResearchAssistantService:
             if not session:
                 session = self.get_default_session()
             working_dir = Path(session["folder_path"])
+
+            # Story #997: Enforce pace-maker config before Claude CLI invocation (non-fatal)
+            try:
+                enforce_pace_maker_config()
+            except Exception as exc:
+                logger.debug("enforce_pace_maker_config failed (non-fatal): %s", exc)
 
             # Load timeout and analysis_model from config (defaults: 1200s, "opus")
             timeout_seconds = 1200

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.12.0 (2026-05-09) — Pace-maker integration for token cost control
+
+Story #997: Integrates pace-maker into the CIDX auto-updater and installer for pacing-only mode enforcement. Prevents token runaway scenarios by throttling Claude CLI consumption via 5-hour and weekly quotas.
+
+### Added
+- **Pre-invocation guard** (`pace_maker_guard.py`): Three-layer safety model (location awareness, runtime toggle, idempotent CLI enforcement) called before every Claude CLI invocation.
+- **Runtime config toggle**: `enforce_pace_maker_pacing_only` (default `false`) exposed in Web UI Config Screen for hot-toggling without server restart.
+- **Auto-updater Step 12**: `_ensure_pace_maker_installed()` in `DeploymentExecutor` -- clones/updates pace-maker repo, runs `install.sh` as server user, sets master OFF on fresh install only.
+- **Installer Step 5.5**: Pace-maker clone and install in `install-cidx-server.sh` with fresh-install guard.
+- **Guard wiring**: `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()` (NOT CodexInvoker -- Codex uses OpenAI credits).
+- 55 unit tests covering guard behavior, config service integration, deployment executor, and wiring verification.
+
+### Fixed
+- Guard subprocess return codes now checked (Holzmann Rule #7 compliance).
+- `sudo -u` passthrough for `NONINTERACTIVE` env var in auto-updater install path.
+- Installer script respects fresh-install guard (re-runs no longer reset pace-maker config).
+
 ## v10.11.0 (2026-05-09) — Dep-map prompt coherence and _index.md corruption fix
 
 Bug #995 Phase 2: rewrote all dep-map prompt builders for coherence — consolidated duplicated content (granularity guidelines, evidence rules, PROHIBITED items) into `_analysis_guidelines.md`, expanded CLAUDE.md into a proper workspace orientation file, fixed `_CROSS_DOMAIN_SCHEMA` to list all 8 dependency types with canonical names, and removed inline content duplication across 6 prompt functions.

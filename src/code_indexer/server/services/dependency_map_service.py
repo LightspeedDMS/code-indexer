@@ -3002,6 +3002,7 @@ class DependencyMapService:
 
             try:
                 from .dep_map_index_regenerator import IndexRegenerator
+
                 IndexRegenerator().regenerate(dependency_map_dir)
             except Exception as e:
                 logger.warning("Delta: Failed to regenerate _index.md: %s", e)
@@ -3445,6 +3446,7 @@ class DependencyMapService:
                     logger.debug(f"Non-fatal journal log error: {e}")
                 try:
                     from .dep_map_index_regenerator import IndexRegenerator
+
                     IndexRegenerator().regenerate(dependency_map_dir)
                 except Exception as e:
                     logger.warning("Refinement: Failed to regenerate _index.md: %s", e)
