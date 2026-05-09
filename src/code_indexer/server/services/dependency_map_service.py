@@ -509,14 +509,14 @@ class DependencyMapService:
                     )
             raise
         finally:
-            # Cleanup orientation files (CLAUDE.md + dep_map_repo_catalogue.md)
+            # Cleanup orientation files (CLAUDE.md)
             try:
                 _gr_root = (
                     paths.get("golden_repos_root", Path())
                     if "paths" in locals()
                     else Path(self._golden_repos_manager.golden_repos_dir)
                 )
-                for _fname in ("CLAUDE.md", "dep_map_repo_catalogue.md"):
+                for _fname in ("CLAUDE.md",):
                     _fpath = _gr_root / _fname
                     if _fpath.exists():
                         _fpath.unlink()
@@ -644,7 +644,7 @@ class DependencyMapService:
         staging_dir = paths["staging_dir"]
         final_dir = paths["final_dir"]
         _cidx_meta_path = paths["cidx_meta_path"]  # noqa: F841
-        cidx_meta_read_path = paths["cidx_meta_read_path"]  # READ: versioned path
+        _cidx_meta_read_path = paths["cidx_meta_read_path"]  # noqa: F841
 
         # Check for resumable journal (Iteration 15)
         journal = self._should_resume(staging_dir, repo_list)
@@ -686,23 +686,17 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error (resume): {e}")
 
-        # Generate orientation files (CLAUDE.md + dep_map_repo_catalogue.md)
-        self._analyzer.generate_orientation_files(repo_list)
+        # Generate orientation files (CLAUDE.md) and write reference files to dep_map_dir.
+        # dep_map_dir may not exist yet on first run; _write_reference_files handles absence.
+        dep_map_dir = staging_dir.parent / "dependency-map"
+        self._analyzer.generate_orientation_files(repo_list, dep_map_dir=dep_map_dir)
 
         # Pass 1: Synthesis (skip if already completed)
         pass1_duration_s = 0.0
         if journal.get("pass1", {}).get("status") != "completed":
-            # Read repo descriptions from cidx-meta (Fix 8: filter stale repos)
-            active_aliases = {r.get("alias") for r in repo_list}
-            repo_descriptions = self._read_repo_descriptions(
-                cidx_meta_read_path,
-                active_aliases=active_aliases,  # type: ignore[arg-type]
-            )
-
             pass1_start = time.time()
             domain_list = self._analyzer.run_pass_1_synthesis(
                 staging_dir=staging_dir,
-                repo_descriptions=repo_descriptions,
                 repo_list=repo_list,
                 max_turns=config.dependency_map_pass1_max_turns,
             )
@@ -2901,9 +2895,11 @@ class DependencyMapService:
                     "affected_domains": 0,
                 }
 
-            # Generate orientation files (CLAUDE.md + dep_map_repo_catalogue.md)
+            # Generate orientation files (CLAUDE.md) and reference files in dep map dir.
             all_repos = self._get_activated_repos()
-            self._analyzer.generate_orientation_files(all_repos)
+            self._analyzer.generate_orientation_files(
+                all_repos, dep_map_dir=dependency_map_dir
+            )
 
             # Handle new repo domain discovery (AC6, Story #216)
             discovery_write_success = True
@@ -3005,6 +3001,12 @@ class DependencyMapService:
                 )
 
             try:
+                from .dep_map_index_regenerator import IndexRegenerator
+                IndexRegenerator().regenerate(dependency_map_dir)
+            except Exception as e:
+                logger.warning("Delta: Failed to regenerate _index.md: %s", e)
+
+            try:
                 self._activity_journal.log("Delta analysis complete")
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error: {e}")
@@ -3098,10 +3100,10 @@ class DependencyMapService:
             raise
 
         finally:
-            # Cleanup orientation files (CLAUDE.md + dep_map_repo_catalogue.md)
+            # Cleanup orientation files (CLAUDE.md)
             try:
                 _gr_root = Path(self._golden_repos_manager.golden_repos_dir)
-                for _fname in ("CLAUDE.md", "dep_map_repo_catalogue.md"):
+                for _fname in ("CLAUDE.md",):
                     _fpath = _gr_root / _fname
                     if _fpath.exists():
                         _fpath.unlink()
@@ -3442,9 +3444,8 @@ class DependencyMapService:
                 except Exception as e:
                     logger.debug(f"Non-fatal journal log error: {e}")
                 try:
-                    self._analyzer._generate_index_md(
-                        dependency_map_dir, domain_list_ordered, []
-                    )
+                    from .dep_map_index_regenerator import IndexRegenerator
+                    IndexRegenerator().regenerate(dependency_map_dir)
                 except Exception as e:
                     logger.warning("Refinement: Failed to regenerate _index.md: %s", e)
 

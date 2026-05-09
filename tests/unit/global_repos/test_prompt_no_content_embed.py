@@ -10,7 +10,7 @@ Sites covered:
 - Site #4: build_refinement_prompt (existing_body not embedded)
 - Site #2: _build_standard_prompt pass-2 previous analysis (not embedded)
 - Site #3: _build_output_first_prompt pass-2 previous analysis (not embedded)
-- Site #6: build_pass1_prompt repo descriptions conditional staging
+- Site #6: build_pass1_prompt never inlines descriptions (Bug #995: file references only)
 
 Test inventory (8 tests):
 1. test_build_delta_merge_prompt_does_not_embed_existing_content
@@ -18,8 +18,8 @@ Test inventory (8 tests):
 3. test_build_refinement_prompt_does_not_embed_existing_body
 4. test_pass2_standard_prompt_does_not_embed_previous_analysis
 5. test_pass2_output_first_prompt_does_not_embed_previous_analysis
-6. test_pass1_prompt_embeds_descriptions_below_threshold
-7. test_pass1_prompt_uses_staging_file_above_threshold
+6. test_pass1_prompt_never_inlines_descriptions (Bug #995)
+7. test_pass1_prompt_references_cidx_meta_files (Bug #995)
 8. test_pass1_prompt_size_bounded_for_large_repo_sets
 """
 
@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from code_indexer.global_repos.dependency_map_analyzer import (
-    PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES,
     DependencyMapAnalyzer,
 )
 
@@ -386,12 +385,18 @@ def test_pass2_output_first_prompt_does_not_embed_previous_analysis(
 # ---------------------------------------------------------------------------
 
 
-def test_pass1_prompt_embeds_descriptions_below_threshold(
+def test_pass1_prompt_never_inlines_descriptions(
     tmp_path: Path,
 ) -> None:
-    """Site #6: Small repo set (total <= threshold) must embed descriptions inline."""
+    """Site #6 (Bug #995): Descriptions must NEVER be inlined — file references only.
+
+    build_pass1_prompt no longer accepts repo_descriptions (Bug #995).
+    descriptions_that_must_be_absent defines content that the OLD code
+    would have inlined; we verify none of it appears in the prompt and
+    that the directory-level file reference pattern is present instead.
+    """
     analyzer = _make_analyzer(tmp_path)
-    repo_descriptions = {
+    descriptions_that_must_be_absent = {
         "repo-a": "Small service for auth.",
         "repo-b": "Small service for storage.",
         "repo-c": "Small service for gateway.",
@@ -403,19 +408,26 @@ def test_pass1_prompt_embeds_descriptions_below_threshold(
             "total_bytes": PASS1_SMALL_FIXTURE_TOTAL_BYTES,
             "file_count": PASS1_SMALL_FIXTURE_FILE_COUNT,
         }
-        for alias in repo_descriptions
+        for alias in descriptions_that_must_be_absent
     ]
 
-    prompt = analyzer.build_pass1_prompt(
-        repo_descriptions=repo_descriptions,
-        repo_list=repo_list,
-    )
+    prompt = analyzer.build_pass1_prompt(repo_list=repo_list)
 
-    for alias, desc in repo_descriptions.items():
-        assert desc in prompt, (
-            f"Description for '{alias}' must be embedded inline when total "
-            "description bytes are below PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES."
+    for alias, desc in descriptions_that_must_be_absent.items():
+        assert desc not in prompt, (
+            f"Description for '{alias}' must NOT be embedded inline (Bug #995). "
+            "Claude reads cidx-meta/*.md files directly."
         )
+
+    assert "Each `.md` file in `cidx-meta/` describes one repository" in prompt, (
+        "Prompt must contain the directory-level file reference sentence (Bug #995)."
+    )
+    assert "_dep_types.md" in prompt, (
+        "Prompt must reference _dep_types.md for dependency type definitions."
+    )
+    assert "_analysis_guidelines.md" in prompt, (
+        "Prompt must reference _analysis_guidelines.md for analysis methodology."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -423,51 +435,41 @@ def test_pass1_prompt_embeds_descriptions_below_threshold(
 # ---------------------------------------------------------------------------
 
 
-def test_pass1_prompt_uses_staging_file_above_threshold(
+def test_pass1_prompt_references_cidx_meta_files(
     tmp_path: Path,
 ) -> None:
-    """Site #6: Large repo set (total > threshold) must NOT embed descriptions inline.
+    """Site #6 (Bug #995): Even with many repos, descriptions are never inlined.
 
-    The prompt must reference a staging file path instead.
+    build_pass1_prompt no longer takes repo_descriptions. This test verifies
+    the prompt uses directory-level file references for a large repo set,
+    with no staging file or inline description content.
     """
     analyzer = _make_analyzer(tmp_path)
-    repo_descriptions = {
-        _make_repo_alias(i, PASS1_LARGE_REPO_ID_WIDTH): (
-            f"REPO_{i:0{PASS1_LARGE_REPO_ID_WIDTH}d}_DESCRIPTION_MARKER "
-            + "X" * PASS1_LARGE_DESC_PADDING_BYTES
-        )
-        for i in range(REPO_ZERO_INDEX_START, PASS1_LARGE_REPO_COUNT)
-    }
-    total_bytes = sum(len(v) for v in repo_descriptions.values())
-    assert total_bytes > PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES, (
-        f"Test setup error: total_bytes={total_bytes} must exceed "
-        f"PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES={PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES}"
-    )
-
     repo_list = [
         {
-            "alias": alias,
-            "clone_path": str(tmp_path / alias),
+            "alias": _make_repo_alias(i, PASS1_LARGE_REPO_ID_WIDTH),
+            "clone_path": str(
+                tmp_path / _make_repo_alias(i, PASS1_LARGE_REPO_ID_WIDTH)
+            ),
             "total_bytes": PASS1_LARGE_FIXTURE_TOTAL_BYTES,
             "file_count": PASS1_LARGE_FIXTURE_FILE_COUNT,
         }
-        for alias in repo_descriptions
+        for i in range(REPO_ZERO_INDEX_START, PASS1_LARGE_REPO_COUNT)
     ]
 
-    prompt = analyzer.build_pass1_prompt(
-        repo_descriptions=repo_descriptions,
-        repo_list=repo_list,
-    )
+    prompt = analyzer.build_pass1_prompt(repo_list=repo_list)
 
-    # Derive sample key from the same alias helper and start index — no duplication
-    sample_key = _make_repo_alias(REPO_ZERO_INDEX_START, PASS1_LARGE_REPO_ID_WIDTH)
-    sample_desc = repo_descriptions[sample_key]
-    assert sample_desc not in prompt, (
-        "Repo description content must NOT be embedded inline when total bytes "
-        "exceed PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES."
+    sample_marker = (
+        f"REPO_{REPO_ZERO_INDEX_START:0{PASS1_LARGE_REPO_ID_WIDTH}d}_DESCRIPTION_MARKER"
     )
-    assert "Read" in prompt or ".json" in prompt or "staging" in prompt.lower(), (
-        "Prompt must reference a staging file when descriptions exceed threshold."
+    assert sample_marker not in prompt, (
+        "Repo description content must NOT be embedded inline (Bug #995)."
+    )
+    assert "Each `.md` file in `cidx-meta/` describes one repository" in prompt, (
+        "Prompt must contain directory-level file reference (Bug #995)."
+    )
+    assert "staging" not in prompt.lower(), (
+        "Prompt must NOT reference staging files — descriptions are on disk (Bug #995)."
     )
 
 
@@ -479,16 +481,12 @@ def test_pass1_prompt_uses_staging_file_above_threshold(
 def test_pass1_prompt_size_bounded_for_large_repo_sets(
     tmp_path: Path,
 ) -> None:
-    """Site #6: Prompt for 500 repos must stay under 20KB (descriptions staged out)."""
+    """Site #6: Prompt for 500 repos must stay under 20KB (descriptions on disk, not inlined)."""
     analyzer = _make_analyzer(tmp_path)
-    repo_descriptions = {
-        _make_repo_alias(i, PASS1_HUGE_REPO_ID_WIDTH): (
-            "Z" * PASS1_HUGE_DESC_PADDING_BYTES
-            + " "
-            + _make_repo_alias(i, PASS1_HUGE_REPO_ID_WIDTH)
-        )
+    aliases = [
+        _make_repo_alias(i, PASS1_HUGE_REPO_ID_WIDTH)
         for i in range(REPO_ZERO_INDEX_START, PASS1_HUGE_REPO_COUNT)
-    }
+    ]
     repo_list = [
         {
             "alias": alias,
@@ -496,11 +494,10 @@ def test_pass1_prompt_size_bounded_for_large_repo_sets(
             "total_bytes": PASS1_HUGE_FIXTURE_TOTAL_BYTES,
             "file_count": PASS1_HUGE_FIXTURE_FILE_COUNT,
         }
-        for alias in repo_descriptions
+        for alias in aliases
     ]
 
     prompt = analyzer.build_pass1_prompt(
-        repo_descriptions=repo_descriptions,
         repo_list=repo_list,
     )
 
@@ -508,5 +505,5 @@ def test_pass1_prompt_size_bounded_for_large_repo_sets(
     assert prompt_size < MAX_LARGE_REPO_PROMPT_BYTES, (
         f"Prompt size is {prompt_size} bytes for {PASS1_HUGE_REPO_COUNT} repos — "
         f"must be under {MAX_LARGE_REPO_PROMPT_BYTES} bytes. "
-        "Descriptions must be staged to a file, not embedded inline."
+        "Descriptions live on disk in cidx-meta/, not embedded inline."
     )

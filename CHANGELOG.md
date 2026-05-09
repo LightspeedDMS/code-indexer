@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.11.0 (2026-05-09) — Dep-map prompt coherence and _index.md corruption fix
+
+Bug #995 Phase 2: rewrote all dep-map prompt builders for coherence — consolidated duplicated content (granularity guidelines, evidence rules, PROHIBITED items) into `_analysis_guidelines.md`, expanded CLAUDE.md into a proper workspace orientation file, fixed `_CROSS_DOMAIN_SCHEMA` to list all 8 dependency types with canonical names, and removed inline content duplication across 6 prompt functions.
+
+Additionally fixed two code paths that corrupted `_index.md` (the dep-map health index file): refinement called `_generate_index_md` with an empty repo list (wiping the Repo-to-Domain Matrix), and delta analysis never regenerated `_index.md` after domain updates. Both now use `IndexRegenerator.regenerate()` which derives repo data from domain files deterministically.
+
+### Fixed
+- **_index.md corruption (refinement)**: Refinement path passed `repo_list=[]` to `_generate_index_md()`, producing `repos_analyzed_count: 0` and an empty Repo-to-Domain Matrix after every successful refinement cycle. Now uses `IndexRegenerator.regenerate()`.
+- **_index.md staleness (delta)**: Delta analysis updated domain docs but never regenerated `_index.md`, leaving it stale when domain assignments changed. Now regenerates after domain updates.
+- **Prompt coherence**: All dep-map prompts (Pass 2, delta merge, new domain, refinement) now reference `_analysis_guidelines.md` and `_dep_types.md` instead of inlining inconsistent subsets of shared content.
+- **CLAUDE.md expansion**: Transient CLAUDE.md now explains workspace structure, domain concepts, cidx-meta layout, and available tools — providing proper grounding for Claude CLI.
+- **`_CROSS_DOMAIN_SCHEMA`**: Added missing "Message/event contracts" and "Semantic coupling" types; renamed "External tool" to "External tool invocation" to match `_dep_types.md`.
+- **Repair prompt coherence**: Added verification guidance for 4 missing dependency types (External tool invocation, Message/event contracts, Deployment dependency, Semantic coupling) to `bidirectional_mismatch_audit.md`.
+- **Startup migration**: Changed oversized CLAUDE.md migration from rename to delete (catalogue file no longer used).
+
+### Added
+- 3 new regression tests in `test_index_md_regeneration_paths.py` guarding against _index.md corruption in refinement and delta paths.
+
 ## v10.10.0 (2026-05-08) — Fix X-Ray path disclosure (security)
 
 Security fix: X-Ray search/explore results leaked absolute host filesystem paths (e.g. `/opt/code-indexer/.cidx-server/data/golden-repos/.versioned/alias/v_TIMESTAMP/code/src/...`) in `file_path` fields of matches, evaluation_errors, and file_metadata. This exposed internal server directory structure, versioned snapshot naming conventions, and deployment paths to API consumers and evaluator scripts.

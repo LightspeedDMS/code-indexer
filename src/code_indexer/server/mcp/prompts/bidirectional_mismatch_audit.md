@@ -59,6 +59,33 @@ By dependency type, search for:
       referenced as a producer in one and consumer in the other.
     - REJECT generic names: DATABASE_URL, PORT, LOG_LEVEL, NODE_ENV, etc.
 
+  External tool invocation:
+    - subprocess.run / subprocess.Popen / os.system / exec calls in source repos
+      that invoke a CLI binary, script, or command defined in target repos
+    - Shell scripts in source repos that call executables from target repos
+    - Makefile or CI pipeline steps that invoke target repo tools
+
+  Message/event contracts:
+    - Queue publish/subscribe calls (Kafka, RabbitMQ, SQS, Redis pub/sub)
+      where the event name or topic string matches between source and target repos
+    - Webhook URL registration in one repo pointing at an endpoint in the other
+    - Shared event schema definitions (.avsc, .proto, JSON) referenced by both
+
+  Deployment dependency:
+    - Health checks or readiness probes in source repos that poll target repo endpoints
+    - Connection initialization code that fails if target service is unreachable
+    - Docker Compose / Kubernetes manifests declaring depends_on or init-container
+      relationships between services owned by source and target repos
+
+  Semantic coupling:
+    - Source repo code that parses or interprets data structures defined by target
+      repo WITHOUT a shared schema (e.g., hardcoded field-name strings matching
+      target repo's output format)
+    - Business logic in source repo that assumes specific behavioral contracts
+      from target repo (e.g., ordering guarantees, idempotency, field presence)
+    - REJECT vague conceptual overlap -- require a concrete code path in source
+      that would break if target changed a specific behavior
+
 --- WHAT IS *NOT* EVIDENCE (REJECT THESE) ---
 - Repo names appearing in README, documentation, comments, or commit messages
 - Conceptual similarity ("both deal with authentication", "both handle payments")

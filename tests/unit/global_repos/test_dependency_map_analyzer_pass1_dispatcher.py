@@ -105,7 +105,6 @@ def _run_pass1(analyzer: DependencyMapAnalyzer, tmp_path: Path) -> list[Any]:
 
     result = analyzer.run_pass_1_synthesis(
         staging_dir=staging_dir,
-        repo_descriptions={"repo-a": "A test repository."},
         repo_list=[{"alias": "repo-a", "clone_path": str(tmp_path / "repo-a")}],
         max_turns=5,
     )

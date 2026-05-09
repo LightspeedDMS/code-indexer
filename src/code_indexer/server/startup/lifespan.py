@@ -1269,14 +1269,13 @@ def make_lifespan(
             # Late-bind the closure into the service
             dependency_map_service.set_repair_invoker_fn(_dep_map_repair_invoker_fn)
 
-            # Startup migration: rename oversized CLAUDE.md → dep_map_repo_catalogue.md.
-            # Pre-v10.7 code wrote the entire repo catalogue (~350K tokens at scale)
-            # into CLAUDE.md, which Claude CLI auto-loads from cwd — overflowing the
-            # 200K context window. The catalogue content is still useful for on-demand
-            # reads, so rename rather than delete.
+            # Startup migration: delete oversized CLAUDE.md from pre-v10.10 deployments.
+            # Pre-v10.7 code wrote the entire repo catalogue into CLAUDE.md (context overflow).
+            # Pre-v10.10 code renamed it to dep_map_repo_catalogue.md.
+            # v10.10+ no longer creates either file — delete any oversized CLAUDE.md that
+            # remains from a prior version so it does not bloat Claude CLI context.
             _gr_root = Path(golden_repos_manager.golden_repos_dir)
             _old_claude_md = _gr_root / "CLAUDE.md"
-            _catalogue_file = _gr_root / "dep_map_repo_catalogue.md"
             _CLAUDE_MD_MAX_SAFE_SIZE = 10_000  # 10KB; new CLAUDE.md is ~500 bytes
             try:
                 if (
@@ -1284,15 +1283,14 @@ def make_lifespan(
                     and _old_claude_md.stat().st_size > _CLAUDE_MD_MAX_SAFE_SIZE
                 ):
                     logger.info(
-                        "Startup migration: renaming oversized CLAUDE.md (%d bytes) "
-                        "to dep_map_repo_catalogue.md at %s",
+                        "Startup migration: deleting oversized CLAUDE.md (%d bytes) at %s",
                         _old_claude_md.stat().st_size,
                         _gr_root,
                     )
-                    _old_claude_md.rename(_catalogue_file)
+                    _old_claude_md.unlink()
             except Exception as _mig_err:
                 logger.warning(
-                    "Startup migration: failed to rename oversized CLAUDE.md (non-fatal): %s",
+                    "Startup migration: failed to delete oversized CLAUDE.md (non-fatal): %s",
                     _mig_err,
                 )
 
