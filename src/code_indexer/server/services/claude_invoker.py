@@ -39,6 +39,9 @@ from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
     InvocationResult,
 )
+from code_indexer.server.services.pace_maker_guard import (  # Story #997
+    enforce_pace_maker_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +226,12 @@ class ClaudeInvoker:
         Returns:
             InvocationResult with all fields set appropriately.
         """
+        # Story #997: Enforce pace-maker config before Claude CLI invocation (non-fatal)
+        try:
+            enforce_pace_maker_config()
+        except Exception as exc:
+            logger.debug("enforce_pace_maker_config failed (non-fatal): %s", exc)
+
         validation_error = self._validate_inputs(flow, cwd, prompt, timeout)
         if validation_error is not None:
             return validation_error

@@ -2177,6 +2177,55 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Story #997: Pace-maker pacing-only enforcement -->
+<details class="config-section" id="section-pace_maker">
+    <summary>
+        <h2>Pace Maker</h2>
+    </summary>
+    <p class="section-description">
+        Controls pace-maker enforcement before Claude CLI invocations. When ON, enforces pacing-only mode
+        (5-hour and weekly credit limits active, all other features disabled). When OFF, ensures pace-maker
+        master switch is OFF (dormant). Only effective when pace-maker was installed by the CIDX auto-updater.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-pace_maker">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enforce Pacing-Only Mode</td>
+                        <td class="config-value">{{ config.pace_maker.enforce_pace_maker_pacing_only }}</td>
+                        <td class="config-note"><small>OFF = pace-maker dormant. ON = enforce 5h + weekly credit limits before every Claude invocation.</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('pace_maker')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-pace_maker" method="post" action="/admin/config/pace_maker" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="enforce_pace_maker_pacing_only" value="false">
+            {% if validation_errors.pace_maker %}
+            <div class="validation-error">{{ validation_errors.pace_maker }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="pace-maker-enforce">
+                    <input type="checkbox" id="pace-maker-enforce" name="enforce_pace_maker_pacing_only" value="true"
+                        {% if config.pace_maker.enforce_pace_maker_pacing_only %}checked{% endif %}>
+                    Enforce Pacing-Only Mode
+                    <small>OFF = pace-maker dormant. ON = enforce 5h + weekly credit limits before every Claude invocation.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('pace_maker')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 
 </div>
 

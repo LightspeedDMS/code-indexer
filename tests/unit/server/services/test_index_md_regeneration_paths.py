@@ -256,9 +256,7 @@ class TestIndexRegeneratorProducesCorrectContent:
         assert "repos_analyzed_count: 2" in text, (
             "repos_analyzed_count must be 2, not 0"
         )
-        assert "auth-service" in text, (
-            "repos_analyzed list must contain auth-service"
-        )
+        assert "auth-service" in text, "repos_analyzed list must contain auth-service"
         assert "token-validator" in text, (
             "repos_analyzed list must contain token-validator"
         )

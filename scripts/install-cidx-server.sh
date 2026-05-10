@@ -116,6 +116,7 @@ echo ""
 
 echo "--- Step 2: Clone/update repository ---"
 
+IS_FRESH_INSTALL=0
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "Repository exists at $INSTALL_DIR, pulling latest..."
     cd "$INSTALL_DIR"
@@ -123,6 +124,7 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
     git checkout "$BRANCH"
     git pull origin "$BRANCH"
 else
+    IS_FRESH_INSTALL=1
     echo "Cloning repository..."
     git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
@@ -227,6 +229,58 @@ sudo systemctl daemon-reload
 sudo systemctl enable cidx-server
 
 echo "Systemd service created and enabled"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Step 5.5: Install pace-maker (Story #997, non-fatal)
+# ---------------------------------------------------------------------------
+
+echo "--- Step 5.5: Installing pace-maker (credit throttling) ---"
+
+PACE_MAKER_DIR="${HOME}/claude-pace-maker"
+PACE_MAKER_REPO="https://github.com/LightspeedDMS/claude-pace-maker.git"
+
+if [[ -d "${PACE_MAKER_DIR}/.git" ]]; then
+    echo "pace-maker already cloned, pulling latest..."
+    git -C "$PACE_MAKER_DIR" pull || echo "WARNING: pace-maker git pull failed (non-fatal)"
+else
+    echo "Cloning pace-maker..."
+    if ! git clone "$PACE_MAKER_REPO" "$PACE_MAKER_DIR"; then
+        echo "WARNING: pace-maker clone failed (non-fatal)"
+        PACE_MAKER_DIR=""
+    fi
+fi
+
+if [[ -n "${PACE_MAKER_DIR}" && -d "${PACE_MAKER_DIR}" ]]; then
+    echo "Running pace-maker install.sh..."
+    NONINTERACTIVE=1 bash "${PACE_MAKER_DIR}/install.sh" || echo "WARNING: pace-maker install.sh failed (non-fatal)"
+
+    # Fresh install only: set master switch OFF (dormant until explicitly enabled via Web UI)
+    # On re-run/update, preserve the existing master switch state.
+    if [[ $IS_FRESH_INSTALL -eq 1 ]] && command -v pace-maker &>/dev/null; then
+        pace-maker off || echo "WARNING: pace-maker off failed (non-fatal)"
+        echo "pace-maker installed and set to dormant (master OFF)"
+    fi
+
+    # Record clone path in bootstrap config
+    if [[ -f "${DATA_DIR}/config.json" ]]; then
+        $PYTHON -c "
+import json, sys
+config_path = '${DATA_DIR}/config.json'
+try:
+    with open(config_path) as f:
+        config = json.load(f)
+    config['pace_maker_clone_path'] = '${PACE_MAKER_DIR}'
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+        f.write('\n')
+    print('pace_maker_clone_path recorded in bootstrap config')
+except Exception as e:
+    print(f'WARNING: Failed to record pace_maker_clone_path: {e}', file=sys.stderr)
+" || echo "WARNING: Failed to record pace_maker_clone_path (non-fatal)"
+    fi
+fi
+
 echo ""
 
 # ---------------------------------------------------------------------------

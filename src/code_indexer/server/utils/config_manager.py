@@ -1159,6 +1159,12 @@ class ServerConfig:
     graph_repair_garbage_domain: Optional[str] = None
     graph_repair_bidirectional_mismatch: Optional[str] = None
 
+    # Story #997 - Pace-maker integration
+    # Bootstrap-only: path where pace-maker repo was cloned (set by installer/auto-updater).
+    pace_maker_clone_path: Optional[str] = None
+    # Runtime (Web UI): enforce pacing-only mode before Claude CLI invocations.
+    enforce_pace_maker_pacing_only: bool = False
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

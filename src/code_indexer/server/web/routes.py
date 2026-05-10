@@ -196,6 +196,8 @@ _VALID_CONFIG_SECTIONS = (
     # Story #844 - Codex CLI integration configuration
     "codex_integration",
     "cidx_meta_backup",
+    # Story #997 - Pace-maker pacing-only enforcement
+    "pace_maker",
 )
 
 
@@ -5787,6 +5789,8 @@ def _get_current_config() -> dict:
         "password_security": settings["password_security"],
         # Bug #943: TOTP step-up elevation runtime config
         "totp_elevation": settings.get("totp_elevation", {}),
+        # Story #997: Pace-maker pacing-only enforcement
+        "pace_maker": settings.get("pace_maker", {}),
         "oidc": oidc_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,

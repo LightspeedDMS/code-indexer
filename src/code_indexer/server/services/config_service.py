@@ -74,6 +74,7 @@ BOOTSTRAP_KEYS = frozenset(
         "fault_injection_enabled",  # Story #746
         "fault_injection_nonprod_ack",  # Story #746
         "server_threadpool_size",  # startup threadpool config
+        "pace_maker_clone_path",  # Story #997 - bootstrap-only (written by auto-updater pre-DB)
     }
 )
 CONFIG_KEY_RUNTIME = "runtime"
@@ -349,6 +350,10 @@ class ConfigService:
                 "elevation_enforcement_enabled": config.elevation_enforcement_enabled,
                 "elevation_idle_timeout_seconds": config.elevation_idle_timeout_seconds,
                 "elevation_max_age_seconds": config.elevation_max_age_seconds,
+            },
+            # Story #997: Pace-maker pacing-only enforcement
+            "pace_maker": {
+                "enforce_pace_maker_pacing_only": config.enforce_pace_maker_pacing_only,
             },
             # Claude CLI integration (Story #15 AC3, Story #20: moved to claude_integration_config)
             "claude_cli": {
@@ -784,6 +789,8 @@ class ConfigService:
             self._update_codex_integration_setting(config, key, value)
         elif category == "cidx_meta_backup":
             self._update_cidx_meta_backup_setting(config, key, value)
+        elif category == "pace_maker":
+            self._update_pace_maker_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1496,6 +1503,31 @@ class ConfigService:
             backup.remote_url = str(value).strip()
         else:
             raise ValueError(f"Unknown cidx_meta_backup setting: {key}")
+
+    def _update_pace_maker_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update pace-maker runtime settings (Story #997).
+
+        Validation rules:
+        - enforce_pace_maker_pacing_only: coerce to bool; raise ValueError on unknown string.
+        """
+        if key == "enforce_pace_maker_pacing_only":
+            if isinstance(value, bool):
+                config.enforce_pace_maker_pacing_only = value
+            else:
+                str_val = str(value).lower()
+                if str_val in self._TOTP_TRUTHY:
+                    config.enforce_pace_maker_pacing_only = True
+                elif str_val in self._TOTP_FALSY:
+                    config.enforce_pace_maker_pacing_only = False
+                else:
+                    raise ValueError(
+                        f"Invalid value for enforce_pace_maker_pacing_only: {value!r}. "
+                        "Accepted: true/on/1 or false/off/0."
+                    )
+        else:
+            raise ValueError(f"Unknown pace_maker setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any
