@@ -820,6 +820,31 @@ button.danger, .button.danger {
     font-style: italic;
 }
 
+/* Config section checkbox description text - render below label, not inline */
+.form-grid label small {
+    display: block;
+    margin-top: 0.25rem;
+}
+
+/* Config display-mode table — prevent label/note overlap */
+.config-table {
+    table-layout: fixed;
+    width: 100%;
+}
+.config-table .config-label {
+    width: 25%;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.config-table .config-value {
+    width: 15%;
+}
+.config-table .config-note {
+    width: 60%;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
 .all-indexes-present {
     color: var(--pico-muted-color);
     font-size: 0.85rem;
