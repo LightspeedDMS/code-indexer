@@ -3,6 +3,7 @@ name: execute_open_delegation
 category: admin
 required_permission: delegate_open
 tl_dr: Submit any free-form coding objective to Claude Server with engine and mode selection.
+slim_description: "Submit a coding objective to Claude Server with engine, mode (single/collaborative/competitive), and repository list. Returns job_id for async polling."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: set_session_impersonation
 category: admin
 required_permission: query_repos
 tl_dr: '[ADMIN ONLY] Set or clear session impersonation to act as another user.'
+slim_description: "Set or clear admin session impersonation by providing a username (to impersonate) or null (to clear)."
 inputSchema:
   type: object
   properties:

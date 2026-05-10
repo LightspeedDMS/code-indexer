@@ -3,6 +3,7 @@ name: admin_delete_user_mcp_credential
 category: admin
 required_permission: manage_users
 tl_dr: Delete an MCP credential for a specific user (admin only).
+slim_description: "Revoke an MCP credential for a specific user (admin only) using username and credential_id."
 inputSchema:
   type: object
   properties:

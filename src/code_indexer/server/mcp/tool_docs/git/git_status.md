@@ -3,6 +3,7 @@ name: git_status
 category: git
 required_permission: repository:read
 tl_dr: Get working tree status showing staged/unstaged/untracked files.
+slim_description: "Get working tree status for a repository, returning separate lists of staged, unstaged, and untracked files."
 inputSchema:
   type: object
   properties:

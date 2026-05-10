@@ -3,6 +3,7 @@ name: git_file_history
 category: git
 required_permission: query_repos
 tl_dr: Get all commits that modified a specific file.
+slim_description: "Get all commits that modified a specific file, optionally following renames."
 inputSchema:
   type: object
   properties:

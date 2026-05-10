@@ -3,6 +3,7 @@ name: list_global_repos
 category: repos
 required_permission: query_repos
 tl_dr: List all globally accessible repositories.
+slim_description: "List all globally accessible repositories registered via add_golden_repo, queryable as '{name}-global' aliases."
 inputSchema:
   type: object
   properties: {}

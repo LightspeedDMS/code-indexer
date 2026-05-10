@@ -3,6 +3,7 @@ name: cs_register_repository
 category: admin
 required_permission: delegate_open
 tl_dr: Register a CIDX golden repo alias on Claude Server for delegation use.
+slim_description: "Register a CIDX golden repo alias on Claude Server for use in delegation jobs (requires delegate_open permission)."
 inputSchema:
   type: object
   properties:

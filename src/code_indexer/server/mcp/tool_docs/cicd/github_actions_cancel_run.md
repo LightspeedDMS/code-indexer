@@ -3,6 +3,7 @@ name: github_actions_cancel_run
 category: cicd
 required_permission: repository:write
 tl_dr: Cancel a running GitHub Actions workflow run.
+slim_description: "Cancel a running GitHub Actions workflow run by run ID."
 inputSchema:
   type: object
   properties:

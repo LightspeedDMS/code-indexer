@@ -3,6 +3,7 @@ name: git_push
 category: git
 required_permission: repository:write
 tl_dr: Push local commits to remote repository using your personal access token. Requires a git credential configured via configure_git_credential. Push uses HTTPS with PAT authentication and sets author/committer from your stored forge identity.
+slim_description: "Push local commits to a remote repository using a stored PAT credential; requires configure_git_credential to be set up first."
 inputSchema:
   type: object
   properties:

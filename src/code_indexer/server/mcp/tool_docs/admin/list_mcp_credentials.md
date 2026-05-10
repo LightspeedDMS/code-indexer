@@ -3,6 +3,7 @@ name: list_mcp_credentials
 category: admin
 required_permission: query_repos
 tl_dr: List all MCP credentials for the authenticated user.
+slim_description: "List all MCP credentials for the authenticated user without parameters."
 inputSchema:
   type: object
   properties: {}

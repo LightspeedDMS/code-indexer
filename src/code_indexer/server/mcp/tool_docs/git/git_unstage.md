@@ -3,6 +3,7 @@ name: git_unstage
 category: git
 required_permission: repository:write
 tl_dr: Remove files from staging area (git reset HEAD).
+slim_description: "Remove one or more files from the staging area (git reset HEAD) by providing an array of file_paths."
 inputSchema:
   type: object
   properties:

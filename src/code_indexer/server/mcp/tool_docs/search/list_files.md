@@ -3,6 +3,7 @@ name: list_files
 category: search
 required_permission: query_repos
 tl_dr: List all files in a repository with metadata (size, date, language, indexed).
+slim_description: "List all files in a repository (or multiple repos) with metadata, optionally scoped to a subdirectory and filtered by glob pattern."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: add_member_to_group
 category: admin
 required_permission: manage_users
 tl_dr: Assign a user to a group.
+slim_description: "Assign a user to a group by group_id and user_id, moving them from any prior group."
 inputSchema:
   type: object
   properties:

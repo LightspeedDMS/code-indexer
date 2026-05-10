@@ -3,6 +3,7 @@ name: github_actions_get_job_logs
 category: cicd
 required_permission: repository:read
 tl_dr: Get full log output for a specific GitHub Actions job.
+slim_description: "Retrieve the full log output for a specific GitHub Actions job by job ID."
 inputSchema:
   type: object
   properties:

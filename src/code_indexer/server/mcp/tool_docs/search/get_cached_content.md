@@ -3,6 +3,7 @@ name: get_cached_content
 category: search
 required_permission: query_repos
 tl_dr: Retrieve cached content by handle with pagination support.
+slim_description: "Retrieve a full cached content payload by handle with page-based pagination."
 inputSchema:
   type: object
   properties:

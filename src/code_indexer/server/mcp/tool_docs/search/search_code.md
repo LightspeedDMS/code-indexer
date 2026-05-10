@@ -3,6 +3,7 @@ name: search_code
 category: search
 required_permission: query_repos
 tl_dr: Search code using pre-built indexes.
+slim_description: "Search indexed repositories using semantic, full-text, hybrid, or regex modes with multi-repo wildcards, language/path filtering, and optional reranking."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: get_provider_health
 category: repos
 required_permission: query_repos
 tl_dr: Get health metrics for embedding providers (latency, error rate, availability).
+slim_description: "Get embedding provider health metrics including latency percentiles, error rate, and availability."
 inputSchema:
   type: object
   properties:

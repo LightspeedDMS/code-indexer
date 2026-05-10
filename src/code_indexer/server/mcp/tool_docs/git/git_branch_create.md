@@ -3,6 +3,7 @@ name: git_branch_create
 category: git
 required_permission: repository:write
 tl_dr: Create a new git branch at current HEAD.
+slim_description: "Create a new branch at current HEAD using branch_name."
 inputSchema:
   type: object
   properties:

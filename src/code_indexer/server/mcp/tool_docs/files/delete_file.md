@@ -3,6 +3,7 @@ name: delete_file
 category: files
 required_permission: repository:write
 tl_dr: Delete a file from an activated repository.
+slim_description: "Delete a file at file_path from an activated repository by repository_alias."
 inputSchema:
   type: object
   properties:

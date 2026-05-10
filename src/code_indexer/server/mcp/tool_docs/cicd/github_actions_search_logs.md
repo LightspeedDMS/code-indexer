@@ -3,6 +3,7 @@ name: github_actions_search_logs
 category: cicd
 required_permission: repository:read
 tl_dr: Search GitHub Actions workflow run logs for a pattern using regex matching.
+slim_description: "Search log output across all jobs in a GitHub Actions workflow run using a case-insensitive regex query."
 inputSchema:
   type: object
   properties:

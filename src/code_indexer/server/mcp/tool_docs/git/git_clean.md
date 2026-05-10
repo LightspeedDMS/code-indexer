@@ -3,6 +3,7 @@ name: git_clean
 category: git
 required_permission: repository:admin
 tl_dr: Remove untracked files from working tree (DESTRUCTIVE).
+slim_description: "Remove all untracked files from the working tree (DESTRUCTIVE)."
 inputSchema:
   type: object
   properties:

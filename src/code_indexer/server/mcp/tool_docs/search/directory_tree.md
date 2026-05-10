@@ -3,6 +3,7 @@ name: directory_tree
 category: search
 required_permission: query_repos
 tl_dr: Visual ASCII tree of directory structure (like 'tree' command).
+slim_description: "Render a visual ASCII tree of a repository's directory structure, similar to the Unix 'tree' command."
 inputSchema:
   type: object
   properties:

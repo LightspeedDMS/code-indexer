@@ -3,6 +3,7 @@ name: xray_explore
 category: search
 required_permission: query_repos
 tl_dr: Debug-mode X-Ray search — same two-phase driver+evaluator as xray_search but enriches every match with a serialised AST tree so you can understand the node structure tree-sitter produces for your code.
+slim_description: "Debug variant of xray_search enriching matches with AST node details and BFS-serialized ast_debug tree for evaluator development."
 inputSchema:
   type: object
   properties:

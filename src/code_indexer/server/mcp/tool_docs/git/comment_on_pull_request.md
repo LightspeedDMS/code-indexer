@@ -3,6 +3,7 @@ name: comment_on_pull_request
 category: git
 required_permission: query_repos
 tl_dr: Add a comment to a GitHub pull request or GitLab merge request. Supports both general conversation comments and inline review comments attached to a specific file and line.
+slim_description: "Add a general or inline review comment to a pull request or merge request."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: cidx_ssh_key_assign_host
 category: ssh
 required_permission: repository:admin
 tl_dr: Assign SSH key to hostname in SSH config (~/.
+slim_description: "Add an SSH config Host entry mapping a hostname to a named CIDX-managed key."
 inputSchema:
   type: object
   properties:

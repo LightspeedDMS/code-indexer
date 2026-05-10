@@ -3,6 +3,7 @@ name: git_file_at_revision
 category: git
 required_permission: query_repos
 tl_dr: View a file's contents as it existed at any commit, branch, or tag.
+slim_description: "Retrieve the raw content of a file at any commit, branch, or tag via path and revision."
 inputSchema:
   type: object
   properties:

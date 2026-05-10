@@ -3,6 +3,7 @@ name: get_tool_categories
 category: guides
 required_permission: query_repos
 tl_dr: Get organized list of all available MCP tools grouped by category.
+slim_description: "Return all available MCP tools organized by category (search, git, files, SCIP, admin, etc.) with no parameters required."
 inputSchema:
   type: object
   properties: {}

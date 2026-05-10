@@ -3,6 +3,7 @@ name: depmap_get_stale_domains
 category: depmap
 required_permission: query_repos
 tl_dr: List domains older than N days (use days_threshold=0 for a full freshness inventory); sorted most-stale first.
+slim_description: "List dependency-map domains whose last_analyzed timestamp is older than days_threshold days, sorted most-stale first."
 inputSchema:
   type: object
   required:

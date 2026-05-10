@@ -3,6 +3,7 @@ name: list_pull_requests
 category: git
 required_permission: query_repos
 tl_dr: List pull requests / merge requests for a repository. Supports filtering by state (open/closed/merged/all) and author. Auto-detects forge type (github/gitlab) from remote URL.
+slim_description: "List pull requests or merge requests filtered by state (open/closed/merged/all) and optional author."
 inputSchema:
   type: object
   properties:

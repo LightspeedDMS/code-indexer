@@ -3,6 +3,7 @@ name: cidx_ssh_key_delete
 category: ssh
 required_permission: repository:admin
 tl_dr: Delete CIDX-managed SSH key and remove from SSH config.
+slim_description: "Delete a CIDX-managed SSH key by name, removing both key files from ~/.ssh and all associated Host entries from SSH config."
 inputSchema:
   type: object
   properties:

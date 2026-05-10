@@ -3,6 +3,7 @@ name: remove_member_from_group
 category: admin
 required_permission: manage_users
 tl_dr: Remove a user from a group.
+slim_description: "Remove a user from a group by group_id and user_id, leaving the user without any group assignment."
 inputSchema:
   type: object
   properties:

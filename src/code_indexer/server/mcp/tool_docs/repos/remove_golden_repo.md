@@ -3,6 +3,7 @@ name: remove_golden_repo
 category: repos
 required_permission: manage_golden_repos
 tl_dr: Remove global shared repository from CIDX server.
+slim_description: "Permanently remove a global shared repository, its indexes, and all associated storage for all users."
 inputSchema:
   type: object
   properties:

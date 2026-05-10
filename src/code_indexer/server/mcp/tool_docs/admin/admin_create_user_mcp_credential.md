@@ -3,6 +3,7 @@ name: admin_create_user_mcp_credential
 category: admin
 required_permission: manage_users
 tl_dr: Create a new MCP credential for a specific user (admin only).
+slim_description: "Create an MCP credential on behalf of a specific user (admin only), given username and optional description."
 inputSchema:
   type: object
   properties:

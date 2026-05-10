@@ -3,6 +3,7 @@ name: global_repo_status
 category: repos
 required_permission: query_repos
 tl_dr: 'Get GLOBAL (shared, read-only) repo status: refresh time and temporal info.'
+slim_description: "Get status of a global repository by alias including last_refresh and temporal flag."
 inputSchema:
   type: object
   properties:

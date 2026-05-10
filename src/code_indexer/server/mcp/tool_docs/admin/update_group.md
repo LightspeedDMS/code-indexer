@@ -3,6 +3,7 @@ name: update_group
 category: admin
 required_permission: manage_users
 tl_dr: Update a custom group name and/or description.
+slim_description: "Update a custom group's name and/or description by group_id (requires manage_users)."
 inputSchema:
   type: object
   properties:

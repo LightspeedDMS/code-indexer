@@ -3,6 +3,7 @@ name: gitlab_ci_cancel_pipeline
 category: cicd
 required_permission: repository:write
 tl_dr: Cancel a running GitLab CI pipeline.
+slim_description: "Cancel a running GitLab CI pipeline by pipeline ID."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: admin_list_user_mcp_credentials
 category: admin
 required_permission: manage_users
 tl_dr: List all MCP credentials for a specific user (admin only).
+slim_description: "List all MCP credentials for a specific username (admin only)."
 inputSchema:
   type: object
   properties:

@@ -4,6 +4,7 @@ category: tracing
 required_permission: query_repos
 requires_config: langfuse_enabled
 tl_dr: End the active Langfuse trace with optional scoring and session outcome capture.
+slim_description: "End the active Langfuse trace with optional score, summary, outcome, and metadata."
 inputSchema:
   type: object
   properties:

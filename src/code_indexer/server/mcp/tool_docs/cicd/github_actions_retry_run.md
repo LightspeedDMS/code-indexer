@@ -3,6 +3,7 @@ name: github_actions_retry_run
 category: cicd
 required_permission: repository:write
 tl_dr: Retry a failed GitHub Actions workflow run.
+slim_description: "Retry a failed GitHub Actions workflow run by run ID."
 inputSchema:
   type: object
   properties:

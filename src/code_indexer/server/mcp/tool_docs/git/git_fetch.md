@@ -3,6 +3,7 @@ name: git_fetch
 category: git
 required_permission: repository:write
 tl_dr: Download remote changes without merging.
+slim_description: "Download remote refs without merging (git fetch)."
 inputSchema:
   type: object
   properties:

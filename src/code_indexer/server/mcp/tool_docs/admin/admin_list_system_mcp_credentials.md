@@ -3,6 +3,7 @@ name: admin_list_system_mcp_credentials
 category: admin
 required_permission: manage_users
 tl_dr: List system-managed MCP credentials owned by the admin user (admin only).
+slim_description: "List MCP credentials owned by the built-in admin user and created automatically by CIDX (admin only)."
 inputSchema:
   type: object
   properties: {}

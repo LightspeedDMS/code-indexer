@@ -3,6 +3,7 @@ name: update_pull_request
 category: git
 required_permission: query_repos
 tl_dr: Update metadata of a GitHub pull request or GitLab merge request. Supports updating title, description, labels, assignees, and reviewers. At least one field must be provided.
+slim_description: "Update metadata of a pull request or merge request — title, description, labels, assignees, or reviewers — by number."
 inputSchema:
   type: object
   properties:

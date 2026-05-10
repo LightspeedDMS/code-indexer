@@ -3,6 +3,7 @@ name: cidx_ssh_key_create
 category: ssh
 required_permission: repository:admin
 tl_dr: Create new SSH key pair managed by CIDX server.
+slim_description: "Generate a new CIDX-managed SSH key pair (ed25519 or rsa) with a required name identifier and optional email/description metadata."
 inputSchema:
   type: object
   properties:

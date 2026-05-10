@@ -3,6 +3,7 @@ name: git_commit
 category: git
 required_permission: repository:write
 tl_dr: Create a commit with staged changes.
+slim_description: "Create a git commit from currently staged files, with required message and optional author_name/author_email for attribution."
 inputSchema:
   type: object
   properties:

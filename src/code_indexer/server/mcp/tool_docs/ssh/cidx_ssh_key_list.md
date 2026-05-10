@@ -3,6 +3,7 @@ name: cidx_ssh_key_list
 category: ssh
 required_permission: repository:admin
 tl_dr: List all SSH keys (CIDX-managed and unmanaged).
+slim_description: "List all SSH keys: managed keys with metadata and unmanaged keys detected in ~/.ssh."
 inputSchema:
   type: object
   properties: {}

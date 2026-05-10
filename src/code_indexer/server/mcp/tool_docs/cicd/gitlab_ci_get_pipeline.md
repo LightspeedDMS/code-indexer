@@ -3,6 +3,7 @@ name: gitlab_ci_get_pipeline
 category: cicd
 required_permission: repository:read
 tl_dr: Get detailed information for a specific GitLab CI pipeline.
+slim_description: "Get detailed information for a specific GitLab CI pipeline by pipeline ID."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: get_repository_status
 category: repos
 required_permission: query_repos
 tl_dr: 'YOUR activated repo status: indexing state, file counts, branch, temporal.'
+slim_description: "Get status of an activated user repository including file count, indexes, branches, and timestamps."
 inputSchema:
   type: object
   properties:

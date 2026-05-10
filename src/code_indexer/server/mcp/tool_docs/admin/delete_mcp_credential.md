@@ -3,6 +3,7 @@ name: delete_mcp_credential
 category: admin
 required_permission: query_repos
 tl_dr: Delete an MCP credential belonging to the authenticated user.
+slim_description: "Delete an MCP credential belonging to the authenticated user by credential_id, immediately invalidating it."
 inputSchema:
   type: object
   properties:

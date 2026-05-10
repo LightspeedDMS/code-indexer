@@ -3,6 +3,7 @@ name: git_checkout_file
 category: git
 required_permission: repository:write
 tl_dr: Discard local changes and restore file to HEAD.
+slim_description: "Discard local changes to a file and restore it to the HEAD version (git checkout -- file_path)."
 inputSchema:
   type: object
   properties:

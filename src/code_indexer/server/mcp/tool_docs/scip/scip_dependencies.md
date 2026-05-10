@@ -3,6 +3,7 @@ name: scip_dependencies
 category: scip
 required_permission: query_repos
 tl_dr: '[SCIP Code Intelligence] Find what a symbol depends on (imports, calls, uses).'
+slim_description: "Find what a symbol depends on (its outgoing imports, calls, and inheritance) using SCIP indexes."
 inputSchema:
   type: object
   properties:

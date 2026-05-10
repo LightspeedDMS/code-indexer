@@ -3,6 +3,7 @@ name: list_repo_categories
 category: repos
 required_permission: query_repos
 tl_dr: List all repository categories with their patterns and priorities.
+slim_description: "List all repository categories with their id, name, regex pattern, and priority used for auto-assignment and UI display ordering."
 inputSchema:
   type: object
   properties: {}

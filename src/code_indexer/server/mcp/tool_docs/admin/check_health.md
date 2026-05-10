@@ -3,6 +3,7 @@ name: check_health
 category: admin
 required_permission: query_repos
 tl_dr: Check CIDX server health and availability.
+slim_description: "Check CIDX server health without parameters."
 inputSchema:
   type: object
   properties: {}

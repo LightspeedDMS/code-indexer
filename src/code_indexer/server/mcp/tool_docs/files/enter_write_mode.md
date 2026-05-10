@@ -3,6 +3,7 @@ name: enter_write_mode
 category: files
 required_permission: repository:write
 tl_dr: Enter write mode for a write-exception repository (e.g. cidx-meta-global).
+slim_description: "Acquire an exclusive write lock on a write-exception repository (e.g."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: cs_check_health
 category: admin
 required_permission: delegate_open
 tl_dr: Check Claude Server connectivity and health status.
+slim_description: "Check Claude Server connectivity and component health (requires delegate_open permission)."
 inputSchema:
   type: object
   properties: {}

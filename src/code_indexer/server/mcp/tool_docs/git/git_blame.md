@@ -3,6 +3,7 @@ name: git_blame
 category: git
 required_permission: query_repos
 tl_dr: See who wrote each line of a file and when (line-by-line attribution).
+slim_description: "Show line-by-line commit attribution for a file at an optional revision, with optional start_line/end_line range."
 inputSchema:
   type: object
   properties:

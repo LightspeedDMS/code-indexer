@@ -3,6 +3,7 @@ name: github_actions_get_run
 category: cicd
 required_permission: repository:read
 tl_dr: Get detailed information for a specific GitHub Actions workflow run.
+slim_description: "Get detailed information for a specific GitHub Actions workflow run by run ID."
 inputSchema:
   type: object
   properties:

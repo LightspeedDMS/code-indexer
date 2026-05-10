@@ -3,6 +3,7 @@ name: git_stash
 category: git
 required_permission: repository:write
 tl_dr: Stash and restore uncommitted changes in a git repository. Supports push, pop, apply, list, and drop actions.
+slim_description: "Manage git stash with push, pop, apply, list, and drop actions."
 inputSchema:
   type: object
   properties:

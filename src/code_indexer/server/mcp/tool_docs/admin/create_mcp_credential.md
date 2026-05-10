@@ -3,6 +3,7 @@ name: create_mcp_credential
 category: admin
 required_permission: query_repos
 tl_dr: Create a new MCP credential for MCP client connections.
+slim_description: "Create a new MCP credential for the authenticated user with an optional description."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: exit_write_mode
 category: files
 required_permission: repository:write
 tl_dr: Exit write mode for a write-exception repository, triggering a synchronous refresh.
+slim_description: "Release the exclusive write lock on a write-exception repository (e.g."
 inputSchema:
   type: object
   properties:

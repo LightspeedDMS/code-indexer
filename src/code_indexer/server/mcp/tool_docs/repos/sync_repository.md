@@ -3,6 +3,7 @@ name: sync_repository
 category: repos
 required_permission: activate_repos
 tl_dr: Synchronize an activated repository with its golden repository source.
+slim_description: "Pull latest changes from golden repo source into an activated user repository and re-index."
 inputSchema:
   type: object
   properties:

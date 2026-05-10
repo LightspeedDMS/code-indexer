@@ -3,6 +3,7 @@ name: dependency_analysis_workflow
 category: guides
 required_permission: query_repos
 tl_dr: Two-phase workflow for repository dependency analysis — semantic search first, then structured depmap_* tools for exhaustive, deterministic answers.
+slim_description: "Guidance describing the two-phase dependency analysis workflow: semantic search for discovery, then deterministic depmap_* tools for structured answers."
 quick_reference: true
 inputSchema:
   type: object

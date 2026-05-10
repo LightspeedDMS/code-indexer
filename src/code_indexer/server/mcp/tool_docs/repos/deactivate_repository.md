@@ -3,6 +3,7 @@ name: deactivate_repository
 category: repos
 required_permission: activate_repos
 tl_dr: Remove a user-specific repository activation and delete associated user indexes.
+slim_description: "Remove a user-specific repository activation by user_alias, deleting all associated user indexes and freeing disk space."
 inputSchema:
   type: object
   properties:

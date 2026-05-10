@@ -3,6 +3,7 @@ name: gitlab_ci_retry_pipeline
 category: cicd
 required_permission: repository:write
 tl_dr: Retry a failed GitLab CI pipeline.
+slim_description: "Retry a failed GitLab CI pipeline by pipeline ID."
 inputSchema:
   type: object
   properties:

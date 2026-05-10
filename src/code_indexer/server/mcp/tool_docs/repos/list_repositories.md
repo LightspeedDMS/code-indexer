@@ -3,6 +3,7 @@ name: list_repositories
 category: repos
 required_permission: query_repos
 tl_dr: List YOUR activated repositories (user workspaces), distinct from global repos.
+slim_description: "List the current user's activated repositories (editable user workspaces), optionally filtered by category name."
 inputSchema:
   type: object
   properties:

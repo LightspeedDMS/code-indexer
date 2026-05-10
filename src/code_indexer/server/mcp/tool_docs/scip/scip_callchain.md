@@ -3,6 +3,7 @@ name: scip_callchain
 category: scip
 required_permission: query_repos
 tl_dr: '[SCIP] Trace execution paths from entry point to target symbol.'
+slim_description: "Trace execution paths from one symbol to another through intermediate call steps using SCIP indexes."
 inputSchema:
   type: object
   properties:

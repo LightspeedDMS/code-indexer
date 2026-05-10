@@ -3,6 +3,7 @@ name: get_pull_request
 category: git
 required_permission: query_repos
 tl_dr: Get full details of a pull request / merge request including description, labels, reviewers, CI status, merge status, and diff statistics.
+slim_description: "Fetch full details of a single pull request or merge request by number."
 inputSchema:
   type: object
   properties:

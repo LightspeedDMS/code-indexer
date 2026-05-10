@@ -3,6 +3,7 @@ name: scip_cleanup_history
 category: scip
 required_permission: manage_users
 tl_dr: Get SCIP workspace cleanup history (admin only).
+slim_description: "Retrieve the history of SCIP workspace cleanup operations (admin only)."
 inputSchema:
   type: object
   properties:

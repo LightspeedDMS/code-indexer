@@ -3,6 +3,7 @@ name: add_repos_to_group
 category: admin
 required_permission: manage_users
 tl_dr: Grant a group access to one or more repositories.
+slim_description: "Grant a group access to one or more repositories by supplying group_id and repo_names array."
 inputSchema:
   type: object
   properties:

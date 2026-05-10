@@ -3,6 +3,7 @@ name: refresh_golden_repo
 category: repos
 required_permission: manage_golden_repos
 tl_dr: Update global repo by pulling latest changes from git remote and re-indexing.
+slim_description: "Force an immediate git pull from remote origin and re-indexing of a global repository identified by alias."
 inputSchema:
   type: object
   properties:

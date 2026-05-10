@@ -3,6 +3,7 @@ name: git_mark_resolved
 category: git
 required_permission: repository:write
 tl_dr: Mark a conflicted file as resolved after editing to remove conflict markers.
+slim_description: "Stage a conflict-resolved file (git add) after conflict markers have been removed."
 inputSchema:
   type: object
   properties:

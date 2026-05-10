@@ -3,6 +3,7 @@ name: delete_memory
 category: memory
 required_permission: repository:write
 tl_dr: Permanently remove a memory from the store with optimistic concurrency.
+slim_description: "Permanently delete a memory entry by memory_id and expected_content_hash (for optimistic concurrency)."
 inputSchema:
   type: object
   properties:

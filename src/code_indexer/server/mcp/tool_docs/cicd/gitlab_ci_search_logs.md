@@ -3,6 +3,7 @@ name: gitlab_ci_search_logs
 category: cicd
 required_permission: repository:read
 tl_dr: Search GitLab CI pipeline logs for a pattern using regex matching.
+slim_description: "Search log output across all jobs in a GitLab CI pipeline using a regex pattern."
 inputSchema:
   type: object
   properties:

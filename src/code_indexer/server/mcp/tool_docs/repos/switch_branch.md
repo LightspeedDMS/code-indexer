@@ -3,6 +3,7 @@ name: switch_branch
 category: repos
 required_permission: activate_repos
 tl_dr: Switch YOUR activated repository to different branch and re-index automatically.
+slim_description: "Switch a user-activated repository to a different branch by user_alias and branch_name, with automatic re-indexing."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: get_global_config
 category: repos
 required_permission: query_repos
 tl_dr: Get current auto-refresh interval for ALL global repositories.
+slim_description: "Retrieve the current auto-refresh interval (in seconds) applied to all global repositories system-wide."
 inputSchema:
   type: object
   properties: {}

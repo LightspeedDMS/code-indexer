@@ -3,6 +3,7 @@ name: delete_git_credential
 category: admin
 required_permission: query_repos
 tl_dr: Delete a git forge credential.
+slim_description: "Delete a previously configured git forge credential by credential_id, immediately removing it."
 inputSchema:
   type: object
   properties:

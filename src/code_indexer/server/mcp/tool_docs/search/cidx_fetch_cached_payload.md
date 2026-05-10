@@ -3,6 +3,7 @@ name: cidx_fetch_cached_payload
 category: search
 required_permission: query_repos
 tl_dr: Retrieve the full payload for a truncated xray_search or xray_explore result using the cache_handle returned when a result was too large to return inline.
+slim_description: "Retrieve the full payload for a truncated xray result using its cache_handle."
 inputSchema:
   type: object
   properties:

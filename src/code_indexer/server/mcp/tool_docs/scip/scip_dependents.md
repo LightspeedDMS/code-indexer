@@ -3,6 +3,7 @@ name: scip_dependents
 category: scip
 required_permission: query_repos
 tl_dr: '[SCIP Code Intelligence] Find what depends on a symbol (reverse dependencies).'
+slim_description: "Find all symbols that depend on (call, import, or inherit from) a given symbol using SCIP indexes."
 inputSchema:
   type: object
   properties:

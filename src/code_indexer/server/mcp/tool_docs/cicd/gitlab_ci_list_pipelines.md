@@ -3,6 +3,7 @@ name: gitlab_ci_list_pipelines
 category: cicd
 required_permission: repository:read
 tl_dr: List recent GitLab CI pipelines with optional filtering by ref and status.
+slim_description: "List recent GitLab CI pipelines for a project with optional filtering by branch/tag ref and status."
 inputSchema:
   type: object
   properties:

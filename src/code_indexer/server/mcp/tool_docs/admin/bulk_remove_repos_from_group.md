@@ -3,6 +3,7 @@ name: bulk_remove_repos_from_group
 category: admin
 required_permission: manage_users
 tl_dr: Revoke a group's access to multiple repositories in a single operation.
+slim_description: "Revoke a group's access to multiple repositories in one call using group_id and repo_names array."
 inputSchema:
   type: object
   properties:

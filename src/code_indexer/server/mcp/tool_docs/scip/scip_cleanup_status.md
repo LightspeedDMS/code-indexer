@@ -3,6 +3,7 @@ name: scip_cleanup_status
 category: scip
 required_permission: manage_users
 tl_dr: Get SCIP workspace cleanup job status (admin only).
+slim_description: "Get the current status of the SCIP workspace cleanup job (admin only)."
 inputSchema:
   type: object
   properties: {}

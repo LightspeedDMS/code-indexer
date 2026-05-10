@@ -3,6 +3,7 @@ name: set_global_config
 category: repos
 required_permission: manage_golden_repos
 tl_dr: Configure auto-refresh interval for ALL global repositories system-wide.
+slim_description: "Set the auto-refresh interval in seconds (minimum 60) applied to all global repositories system-wide."
 inputSchema:
   type: object
   properties:

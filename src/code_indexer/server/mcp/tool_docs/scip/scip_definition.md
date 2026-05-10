@@ -3,6 +3,7 @@ name: scip_definition
 category: scip
 required_permission: query_repos
 tl_dr: '[SCIP] Find where a symbol is defined (class, function, method, variable).'
+slim_description: "Find where a symbol (class, function, method, variable) is defined using SCIP indexes."
 inputSchema:
   type: object
   properties:

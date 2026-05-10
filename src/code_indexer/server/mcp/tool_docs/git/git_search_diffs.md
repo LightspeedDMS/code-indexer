@@ -3,6 +3,7 @@ name: git_search_diffs
 category: git
 required_permission: query_repos
 tl_dr: Find when specific code was added/removed in git history (pickaxe search).
+slim_description: "Find commits where specific code was added or removed (pickaxe search) using search_string (literal) or search_pattern (regex)."
 inputSchema:
   type: object
   properties:

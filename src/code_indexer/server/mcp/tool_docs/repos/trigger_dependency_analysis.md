@@ -3,6 +3,7 @@ name: trigger_dependency_analysis
 category: repos
 required_permission: manage_golden_repos
 tl_dr: Manually trigger dependency map analysis (full or delta mode).
+slim_description: "Trigger dependency map analysis in full or delta mode with optional dry_run for graph-channel preview."
 inputSchema:
   type: object
   properties:

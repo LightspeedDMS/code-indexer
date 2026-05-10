@@ -3,6 +3,7 @@ name: git_merge_abort
 category: git
 required_permission: repository:write
 tl_dr: Cancel in-progress merge and restore pre-merge state.
+slim_description: "Abort an in-progress merge and restore the pre-merge state (git merge --abort)."
 inputSchema:
   type: object
   properties:

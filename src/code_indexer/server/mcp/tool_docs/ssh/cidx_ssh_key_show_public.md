@@ -3,6 +3,7 @@ name: cidx_ssh_key_show_public
 category: ssh
 required_permission: repository:admin
 tl_dr: Get public key content for copying to remote servers.
+slim_description: "Retrieve the full public key content for a named CIDX-managed SSH key."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: cs_list_repositories
 category: admin
 required_permission: delegate_open
 tl_dr: List all repositories registered on Claude Server.
+slim_description: "List all repositories registered on Claude Server (requires delegate_open permission)."
 inputSchema:
   type: object
   properties: {}

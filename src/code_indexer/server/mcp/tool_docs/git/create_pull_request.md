@@ -3,6 +3,7 @@ name: create_pull_request
 category: git
 required_permission: repository:write
 tl_dr: Create a GitHub pull request or GitLab merge request from a repository in write mode. Auto-detects forge type (github/gitlab) from the remote URL. Requires write mode to be active.
+slim_description: "Create a GitHub pull request or GitLab merge request from head to base branch."
 inputSchema:
   type: object
   properties:

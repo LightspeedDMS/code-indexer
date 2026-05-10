@@ -3,6 +3,7 @@ name: gitlab_ci_get_job_logs
 category: cicd
 required_permission: repository:read
 tl_dr: Get full log output for a specific GitLab CI job.
+slim_description: "Retrieve the full log output for a specific GitLab CI job by job ID."
 inputSchema:
   type: object
   properties:

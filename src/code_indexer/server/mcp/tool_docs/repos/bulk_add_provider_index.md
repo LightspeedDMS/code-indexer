@@ -3,6 +3,7 @@ name: bulk_add_provider_index
 category: repos
 required_permission: repository:write
 tl_dr: Add a provider's semantic index to all repositories that lack it.
+slim_description: "Add a provider's semantic index to all golden repositories that currently lack it, with an optional category filter pattern."
 inputSchema:
   type: object
   properties:

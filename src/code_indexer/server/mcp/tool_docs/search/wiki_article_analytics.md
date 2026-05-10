@@ -3,6 +3,7 @@ name: wiki_article_analytics
 category: search
 required_permission: query_repos
 tl_dr: Query wiki article view analytics with sort, filter, and search capabilities.
+slim_description: "Query view analytics for articles in a wiki-enabled golden repository, sorted by view count."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: scip_impact
 category: scip
 required_permission: query_repos
 tl_dr: '[SCIP] Recursive impact analysis - find symbols and files affected by change.'
+slim_description: "Perform recursive impact analysis to find all symbols and files transitively affected by changing a given symbol using SCIP indexes."
 inputSchema:
   type: object
   properties:

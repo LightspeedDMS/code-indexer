@@ -3,6 +3,7 @@ name: get_branches
 category: repos
 required_permission: query_repos
 tl_dr: List all git branches with metadata (current, last commit, index, remote).
+slim_description: "List git branches with commit info, index status, and remote tracking metadata."
 inputSchema:
   type: object
   properties:

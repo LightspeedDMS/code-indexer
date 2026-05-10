@@ -3,6 +3,7 @@ name: change_golden_repo_branch
 category: repos
 required_permission: manage_golden_repos
 tl_dr: Change the active branch of a golden repository with automatic re-indexing (async, returns job_id).
+slim_description: "Switch a golden repository to a different branch with automatic re-indexing."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: poll_delegation_job
 category: admin
 required_permission: query_repos
 tl_dr: Non-blocking check for delegation job result. Returns immediately with result or waiting status.
+slim_description: "Non-blocking check for a delegation job result by job_id."
 inputSchema:
   type: object
   properties:

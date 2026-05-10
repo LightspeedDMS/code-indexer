@@ -3,6 +3,7 @@ name: first_time_user_guide
 category: guides
 required_permission: query_repos
 tl_dr: Get step-by-step quick start guide for new CIDX MCP server users.
+slim_description: "Return a step-by-step onboarding guide for new CIDX MCP server users (no parameters required)."
 inputSchema:
   type: object
   properties: {}

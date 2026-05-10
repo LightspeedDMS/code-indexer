@@ -3,6 +3,7 @@ name: create_file
 category: files
 required_permission: repository:write
 tl_dr: Create a new file in an activated repository.
+slim_description: "Create a new file at file_path in an activated repository identified by repository_alias, with UTF-8 content."
 inputSchema:
   type: object
   properties:

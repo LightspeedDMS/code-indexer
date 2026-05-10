@@ -3,6 +3,7 @@ name: check_hnsw_health
 category: repos
 required_permission: query_repos
 tl_dr: Check HNSW index health and integrity for a repository.
+slim_description: "Check HNSW vector index integrity for a repository, validating file existence, readability, loadability, and graph connectivity."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: git_log
 category: git
 required_permission: query_repos
 tl_dr: Browse commit history with filtering by path, author, date, or branch.
+slim_description: "Browse commit history with optional filtering by path, author, date range, or branch."
 inputSchema:
   type: object
   properties:

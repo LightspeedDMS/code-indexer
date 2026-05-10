@@ -3,6 +3,7 @@ name: github_actions_list_runs
 category: cicd
 required_permission: repository:read
 tl_dr: List GitHub Actions workflow runs with filtering by workflow, status, or branch.
+slim_description: "List GitHub Actions workflow runs for a repository with optional filtering by workflow, status, and branch."
 inputSchema:
   type: object
   properties:

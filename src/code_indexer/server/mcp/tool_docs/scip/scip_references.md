@@ -3,6 +3,7 @@ name: scip_references
 category: scip
 required_permission: query_repos
 tl_dr: '[SCIP] Find all places where a symbol is used (imports, calls, instances).'
+slim_description: "Find all locations where a symbol is used (called, imported, instantiated) using SCIP indexes."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: depmap_get_domain_summary
 category: depmap
 required_permission: query_repos
 tl_dr: Retrieve the structured summary for a named dependency-map domain.
+slim_description: "Get summary for a dependency-map domain including participating repos, roles, and cross-domain connections."
 inputSchema:
   type: object
   required:

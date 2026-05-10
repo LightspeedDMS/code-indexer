@@ -3,6 +3,7 @@ name: discover_repositories
 category: repos
 required_permission: query_repos
 tl_dr: List repos from external sources (GitHub orgs, local paths) not yet indexed.
+slim_description: "List repositories available from external source configurations (GitHub orgs, local paths) that are not yet indexed in CIDX."
 inputSchema:
   type: object
   properties:

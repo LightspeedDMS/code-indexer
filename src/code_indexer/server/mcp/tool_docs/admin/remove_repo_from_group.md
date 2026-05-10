@@ -3,6 +3,7 @@ name: remove_repo_from_group
 category: admin
 required_permission: manage_users
 tl_dr: Revoke a group's access to a single repository.
+slim_description: "Revoke a group's access to a single repository by group_id and repo_name."
 inputSchema:
   type: object
   properties:

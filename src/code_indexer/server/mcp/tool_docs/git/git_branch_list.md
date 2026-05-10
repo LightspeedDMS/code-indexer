@@ -3,6 +3,7 @@ name: git_branch_list
 category: git
 required_permission: repository:read
 tl_dr: List all branches with current branch indicator.
+slim_description: "List all local and remote branches for a repository."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: manage_composite_repository
 category: repos
 required_permission: activate_repos
 tl_dr: Perform operations on composite repositories (multi-repo activations).
+slim_description: "Create, update, or delete a composite repository that combines multiple golden repositories into a single searchable unit."
 inputSchema:
   type: object
   properties:

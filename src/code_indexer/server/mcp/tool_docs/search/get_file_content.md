@@ -3,6 +3,7 @@ name: get_file_content
 category: search
 required_permission: query_repos
 tl_dr: Read file content with metadata and token-based pagination to avoid exhaustion.
+slim_description: "Read file content from an indexed repository with token-based pagination (default ~5000 tokens per response)."
 inputSchema:
   type: object
   properties:
