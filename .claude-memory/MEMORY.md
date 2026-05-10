@@ -24,3 +24,4 @@
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - Targeted improvement requests (pagination, one endpoint) must NOT trigger UI rewrites, column/button deletions, or styling changes — preserve template exactly and patch only requested behavior
 - [feedback_storage_backend_dual.md](feedback_storage_backend_dual.md) - NEVER say "SQLite" as if PostgreSQL doesn't exist — CIDX runs on BOTH; cover both backends or use agnostic language
 - [feedback_convert_tool_docs_destructive.md](feedback_convert_tool_docs_destructive.md) - NEVER run tools/convert_tool_docs.py — it regenerates 165 tool_docs/*.md files WITHOUT inputSchema, silently breaking the entire MCP tool surface (TOOL_REGISTRY collapses to ~1 tool)
+- [feedback_no_unnecessary_questions.md](feedback_no_unnecessary_questions.md) - Never stop for obvious next steps (commit, continue, proceed) — only stop if genuinely blocked

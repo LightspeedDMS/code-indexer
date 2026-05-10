@@ -6,6 +6,13 @@ tl_dr: Get quick reference for CIDX MCP tools with decision guidance.
 inputSchema:
   type: object
   properties:
+    tool:
+      type:
+      - string
+      - 'null'
+      default: null
+      description: 'Optional tool name. When present, returns the full documentation body for that specific tool. Takes precedence
+        over category - when tool is set, category is ignored. Returns error if tool name not found.'
     category:
       type:
       - string
@@ -24,8 +31,8 @@ inputSchema:
       - meta
       - null
       default: null
-      description: 'Optional category filter. null/omitted returns all tools. Options: search, scip, git_exploration, git_operations,
-        files, repo_management, golden_repos, system, user_management, ssh_keys, meta.'
+      description: 'Optional category filter. null/omitted returns all tools. Ignored when tool parameter is present. Options: search,
+        scip, git_exploration, git_operations, files, repo_management, golden_repos, system, user_management, ssh_keys, meta.'
   required: []
 outputSchema:
   type: object

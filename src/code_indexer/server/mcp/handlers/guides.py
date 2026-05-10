@@ -214,9 +214,22 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         category_filter = params.get("category")
 
+        # Story #987 AC6: 'tool' parameter takes precedence over 'category'
+        requested_tool = params.get("tool")
+        if requested_tool:
+            loader = _get_tool_doc_loader()
+            body = loader.get_extended_description(requested_tool)
+            if body is None:
+                return _mcp_response(
+                    {"success": False, "error": f"Tool '{requested_tool}' not found"}
+                )
+            return _mcp_response(
+                {"success": True, "tool": requested_tool, "body": body}
+            )
+
         # Load tool docs from singleton (Story #222 code review Finding 1: avoid per-call disk I/O)
         loader = _get_tool_doc_loader()
-        all_docs = loader._cache
+        all_docs = loader.get_all_docs()  # Story #987 AC5: use public accessor
 
         # Build grouped tools_by_category dict (Story #222 TODO 9)
         tools_by_category: Dict[str, list] = {}

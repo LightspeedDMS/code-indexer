@@ -1,0 +1,7 @@
+# Story #987 AC8: Tools allowed to exceed 500-char slim_description nominal cap (hard cap is 800).
+# One tool name per line. Lines starting with # are comments.
+xray_search
+xray_explore
+search_code
+regex_search
+execute_open_delegation

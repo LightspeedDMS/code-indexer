@@ -11,6 +11,7 @@ This module provides:
 """
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -53,6 +54,9 @@ class ToolDoc:
     inputSchema: Optional[Dict[str, Any]] = None
     outputSchema: Optional[Dict[str, Any]] = None
     requires_config: Optional[str] = None  # Story #185: Conditional tool visibility
+    slim_description: Optional[str] = (
+        None  # Story #987: Slim description for list views
+    )
     source_path: Optional[Path] = None  # Path of the .md file this doc was loaded from
 
 
@@ -60,18 +64,28 @@ class ToolDoc:
 # (Story #222 code review Finding 1: ~650ms latency regression from per-call instantiation)
 _singleton_loader: "Optional[ToolDocLoader]" = None
 
+# Story #987: Module-level extended-description cache (tool_name -> full body string).
+# Populated lazily on each get_extended_description() call.
+_extended_cache: Dict[str, str] = {}
+
+# Story #987: Lock protecting _singleton_loader creation under concurrent access.
+_loader_lock: threading.Lock = threading.Lock()
+
 
 def _get_tool_doc_loader() -> "ToolDocLoader":
     """Return the module-level ToolDocLoader singleton, creating it on first call.
 
     Tool docs are static files that only change on deployment, not at runtime.
     Caching avoids parsing 127 YAML files from disk on every quick_reference() call.
+    Singleton creation is guarded by _loader_lock (Story #987 AC5).
     """
     global _singleton_loader
     if _singleton_loader is None:
-        docs_dir = Path(__file__).parent / "tool_docs"
-        _singleton_loader = ToolDocLoader(docs_dir)
-        _singleton_loader.load_all_docs()
+        with _loader_lock:
+            if _singleton_loader is None:  # double-checked locking
+                docs_dir = Path(__file__).parent / "tool_docs"
+                _singleton_loader = ToolDocLoader(docs_dir)
+                _singleton_loader.load_all_docs()
     return _singleton_loader
 
 
@@ -90,6 +104,7 @@ class ToolDocLoader:
         "cicd",
         "tracing",
         "depmap",
+        "memory",  # Story #987: Memory tools category
     }
 
     def __init__(self, docs_dir: Path):
@@ -190,6 +205,12 @@ class ToolDocLoader:
 
         body = parts[2].lstrip("\n")
 
+        # Story #987: Read slim_description; normalize whitespace-only to None
+        raw_slim = frontmatter.get("slim_description")
+        slim_description: Optional[str] = None
+        if isinstance(raw_slim, str) and raw_slim.strip():
+            slim_description = raw_slim
+
         return ToolDoc(
             name=frontmatter["name"],
             category=frontmatter["category"],
@@ -200,14 +221,41 @@ class ToolDocLoader:
             inputSchema=frontmatter.get("inputSchema"),
             outputSchema=frontmatter.get("outputSchema"),
             requires_config=frontmatter.get("requires_config"),  # Story #185
+            slim_description=slim_description,  # Story #987
             source_path=md_file,
         )
+
+    def get_all_docs(self) -> Dict[str, "ToolDoc"]:
+        """Return all loaded tool docs as a dict keyed by tool name.
+
+        Story #987 AC5: Public accessor so callers in guides.py and elsewhere
+        never need to reference loader._cache directly.
+        """
+        if not self._loaded:
+            self.load_all_docs()
+        return self._cache
 
     def get_description(self, tool_name: str) -> str:
         """Get the description for a tool. Raises ToolDocNotFoundError if missing."""
         if tool_name not in self._cache:
             raise ToolDocNotFoundError(f"No documentation found for tool: {tool_name}")
         return self._cache[tool_name].description
+
+    def get_extended_description(self, tool_name: str) -> Optional[str]:
+        """Return the full markdown body for a tool, with module-level caching.
+
+        Story #987 AC4: Provides the full body for cidx_quick_reference(tool='X').
+        Results are cached in the module-level _extended_cache dict (lazy, idempotent).
+        Returns None for unknown tools.
+        """
+        if tool_name in _extended_cache:
+            return _extended_cache[tool_name]
+        if tool_name not in self._cache:
+            return None
+        body = self._cache[tool_name].description
+        with _loader_lock:
+            _extended_cache[tool_name] = body
+        return body
 
     def get_permission(self, tool_name: str) -> str:
         """Get the required permission for a tool."""
@@ -250,9 +298,15 @@ class ToolDocLoader:
         for name, doc in self._cache.items():
             if doc.inputSchema is None:
                 continue  # Skip tools without inputSchema (like guides)
+            # Story #987: Prefer slim_description for list views; fall back to body[:500]
+            description = (
+                doc.slim_description
+                if doc.slim_description is not None
+                else doc.description[:500]
+            )
             tool_def = {
                 "name": name,
-                "description": doc.description,
+                "description": description,
                 "inputSchema": doc.inputSchema,
                 "required_permission": doc.required_permission,
             }

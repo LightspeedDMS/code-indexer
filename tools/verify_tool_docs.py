@@ -16,14 +16,109 @@ Exit codes:
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 
 import yaml
 
 
 DEFAULT_DOCS_DIR = Path("src/code_indexer/server/mcp/tool_docs")
 
+# Story #987 AC8: slim_description length caps
+SLIM_HARD_CAP = 800  # exit non-zero if exceeded
+SLIM_NOMINAL_CAP = 500  # warning unless in allowlist
+DEFAULT_SLIM_OVERRIDE_ALLOWLIST = Path("tools/slim_override_allowlist.txt")
+
 REQUIRED_FRONTMATTER_FIELDS = ["name", "category", "required_permission", "tl_dr"]
+
+
+def _load_slim_override_allowlist(allowlist_path: Path) -> Set[str]:
+    """Load tool names from the slim override allowlist file.
+
+    Lines starting with # and blank lines are ignored.
+    Returns empty set if file does not exist.
+    """
+    if not allowlist_path.exists():
+        return set()
+    names: Set[str] = set()
+    for line in allowlist_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            names.add(stripped)
+    return names
+
+
+def verify_slim_descriptions(
+    docs_dir: Path,
+    allowlist_path: Path = DEFAULT_SLIM_OVERRIDE_ALLOWLIST,
+) -> Dict[str, Any]:
+    """Verify slim_description length constraints for all tool docs (Story #987 AC8).
+
+    Checks:
+      - HARD cap: slim_description > 800 chars -> error (exit non-zero)
+      - NOMINAL cap: slim_description > 500 chars and tool NOT in allowlist -> warning
+      - Missing slim_description -> warning (incremental rollout allowed)
+
+    Returns:
+        Dict with keys: success, errors, warnings, message
+    """
+    allowlist = _load_slim_override_allowlist(allowlist_path)
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    for category_dir in sorted(docs_dir.iterdir()):
+        if not category_dir.is_dir():
+            continue
+        for md_file in sorted(category_dir.glob("*.md")):
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                if not content.startswith("---"):
+                    continue
+                parts = content.split("---", 2)
+                if len(parts) < 3:
+                    continue
+                frontmatter = yaml.safe_load(parts[1])
+                if not isinstance(frontmatter, dict):
+                    continue
+
+                tool_name = frontmatter.get("name", md_file.stem)
+                slim = frontmatter.get("slim_description")
+
+                if slim is None or (isinstance(slim, str) and not slim.strip()):
+                    warnings.append(f"{tool_name}: missing slim_description")
+                    continue
+
+                slim_str = str(slim)
+                slim_len = len(slim_str)
+
+                if slim_len > SLIM_HARD_CAP:
+                    errors.append(
+                        f"{tool_name}: slim_description exceeds hard cap "
+                        f"({slim_len} > {SLIM_HARD_CAP} chars)"
+                    )
+                elif slim_len > SLIM_NOMINAL_CAP and tool_name not in allowlist:
+                    warnings.append(
+                        f"{tool_name}: slim_description exceeds nominal cap "
+                        f"({slim_len} > {SLIM_NOMINAL_CAP} chars) - "
+                        f"add to slim_override_allowlist.txt to suppress"
+                    )
+
+            except Exception as e:
+                errors.append(f"{md_file.name}: error reading file - {e}")
+
+    success = len(errors) == 0
+    if errors:
+        msg = f"slim_description: {len(errors)} hard-cap error(s), {len(warnings)} warning(s)"
+    elif warnings:
+        msg = f"slim_description: 0 errors, {len(warnings)} warning(s)"
+    else:
+        msg = "slim_description: all checks passed"
+
+    return {
+        "success": success,
+        "errors": errors,
+        "warnings": warnings,
+        "message": msg,
+    }
 
 
 def count_md_files(docs_dir: Path) -> int:
@@ -148,16 +243,22 @@ def verify_registry_coverage(
     return result
 
 
-def verify_all(docs_dir: Path, tool_registry: Dict[str, Any]) -> Dict[str, Any]:
+def verify_all(
+    docs_dir: Path,
+    tool_registry: Dict[str, Any],
+    allowlist_path: Path = DEFAULT_SLIM_OVERRIDE_ALLOWLIST,
+) -> Dict[str, Any]:
     """Run all verification checks."""
     file_count_result = verify_file_count(docs_dir, tool_registry)
     frontmatter_result = verify_frontmatter(docs_dir)
     coverage_result = verify_registry_coverage(docs_dir, tool_registry)
+    slim_result = verify_slim_descriptions(docs_dir, allowlist_path)
 
     all_success = (
         file_count_result["success"]
         and frontmatter_result["success"]
         and coverage_result["success"]
+        and slim_result["success"]
     )
 
     return {
@@ -165,6 +266,7 @@ def verify_all(docs_dir: Path, tool_registry: Dict[str, Any]) -> Dict[str, Any]:
         "file_count": file_count_result,
         "frontmatter": frontmatter_result,
         "coverage": coverage_result,
+        "slim": slim_result,
     }
 
 
@@ -216,6 +318,20 @@ def main(argv: List[str] = None) -> int:  # type: ignore[assignment]
         print(f"  Extra docs: {', '.join(result['coverage']['extra'][:10])}")
     print(f"  Status: {'PASS' if result['coverage']['success'] else 'FAIL'}\n")
 
+    # Story #987 AC8: slim_description length validation
+    print("Slim Description Check:")
+    print(f"  {result['slim']['message']}")
+    for err in result["slim"].get("errors", [])[:10]:
+        print(f"    ERROR: {err}")
+    if len(result["slim"].get("errors", [])) > 10:
+        print(f"    ... and {len(result['slim']['errors']) - 10} more errors")
+    for warn in result["slim"].get("warnings", [])[:10]:
+        print(f"    WARNING: {warn}")
+    if len(result["slim"].get("warnings", [])) > 10:
+        print(f"    ... and {len(result['slim']['warnings']) - 10} more warnings")
+    print(f"  Status: {'PASS' if result['slim']['success'] else 'FAIL'}\n")
+
+    # result["success"] is set by verify_all() and already incorporates slim["success"]
     if result["success"]:
         print("VERIFICATION PASSED: All checks successful")
         return 0
