@@ -2121,8 +2121,8 @@ function saveLlmCredsConfig() {
                 <tbody>
                     <tr>
                         <td class="config-label">Enforcement Enabled</td>
-                        <td class="config-value">{{ config.totp_elevation.elevation_enforcement_enabled }}</td>
-                        <td class="config-note"><small>OFF = passthru (no TOTP prompt). ON = require TOTP step-up on protected operations.</small></td>
+                        <td class="config-value">{{ 'Yes' if config.totp_elevation.elevation_enforcement_enabled else 'No' }}</td>
+                        <td class="config-note"><small>No = passthru (no TOTP prompt). Yes = require TOTP step-up on protected operations.</small></td>
                     </tr>
                     <tr>
                         <td class="config-label">Idle Timeout (seconds)</td>
@@ -2143,16 +2143,17 @@ function saveLlmCredsConfig() {
         <!-- Edit Mode -->
         <form id="edit-form-totp_elevation" method="post" action="/admin/config/totp_elevation" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="elevation_enforcement_enabled" value="false">
             {% if validation_errors.totp_elevation %}
             <div class="validation-error">{{ validation_errors.totp_elevation }}</div>
             {% endif %}
             <div class="form-grid">
                 <label for="totp-enforcement-enabled">
-                    <input type="checkbox" id="totp-enforcement-enabled" name="elevation_enforcement_enabled" value="true"
-                        {% if config.totp_elevation.elevation_enforcement_enabled %}checked{% endif %}>
                     Enforcement Enabled
-                    <small>OFF = passthru (no TOTP prompt). ON = require TOTP step-up on protected operations.</small>
+                    <select id="totp-enforcement-enabled" name="elevation_enforcement_enabled">
+                        <option value="true" {% if config.totp_elevation.elevation_enforcement_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.totp_elevation.elevation_enforcement_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>No = passthru (no TOTP prompt). Yes = require TOTP step-up on protected operations.</small>
                 </label>
                 <label for="totp-idle-timeout">
                     Idle Timeout (seconds)
@@ -2194,8 +2195,8 @@ function saveLlmCredsConfig() {
                 <tbody>
                     <tr>
                         <td class="config-label">Enforce Pacing-Only Mode</td>
-                        <td class="config-value">{{ config.pace_maker.enforce_pace_maker_pacing_only }}</td>
-                        <td class="config-note"><small>OFF = pace-maker dormant. ON = enforce 5h + weekly credit limits before every Claude invocation.</small></td>
+                        <td class="config-value">{{ 'Yes' if config.pace_maker.enforce_pace_maker_pacing_only else 'No' }}</td>
+                        <td class="config-note"><small>No = pace-maker dormant. Yes = enforce 5h + weekly credit limits before every Claude invocation.</small></td>
                     </tr>
                 </tbody>
             </table>
@@ -2206,16 +2207,17 @@ function saveLlmCredsConfig() {
         <!-- Edit Mode -->
         <form id="edit-form-pace_maker" method="post" action="/admin/config/pace_maker" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="enforce_pace_maker_pacing_only" value="false">
             {% if validation_errors.pace_maker %}
             <div class="validation-error">{{ validation_errors.pace_maker }}</div>
             {% endif %}
             <div class="form-grid">
                 <label for="pace-maker-enforce">
-                    <input type="checkbox" id="pace-maker-enforce" name="enforce_pace_maker_pacing_only" value="true"
-                        {% if config.pace_maker.enforce_pace_maker_pacing_only %}checked{% endif %}>
                     Enforce Pacing-Only Mode
-                    <small>OFF = pace-maker dormant. ON = enforce 5h + weekly credit limits before every Claude invocation.</small>
+                    <select id="pace-maker-enforce" name="enforce_pace_maker_pacing_only">
+                        <option value="true" {% if config.pace_maker.enforce_pace_maker_pacing_only %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.pace_maker.enforce_pace_maker_pacing_only %}selected{% endif %}>No</option>
+                    </select>
+                    <small>No = pace-maker dormant. Yes = enforce 5h + weekly credit limits before every Claude invocation.</small>
                 </label>
             </div>
             <div class="form-actions">
