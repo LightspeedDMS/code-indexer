@@ -38,7 +38,7 @@ _ESM_PATH = "code_indexer.server.mcp.auth.elevation_decorator.elevated_session_m
 def _parse_mcp_response(response: dict) -> dict:
     """Unwrap MCP-formatted response to the inner data dict."""
     content = response.get("content", [])
-    return json.loads(content[0]["text"])
+    return json.loads(content[0]["text"])  # type: ignore[no-any-return]
 
 
 def _make_user(username: str) -> User:

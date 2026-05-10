@@ -19,27 +19,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.mcp.handlers import (
-    # Helpers (new in Story #404)
+    # Helpers (Story #404)
     _derive_forge_host,
     _resolve_cicd_project_access,
     _resolve_cicd_read_token,
     _resolve_cicd_write_token,
-    # GitLab read handlers
-    handle_gitlab_ci_list_pipelines,
-    handle_gitlab_ci_get_pipeline,
-    handle_gitlab_ci_search_logs,
-    handle_gitlab_ci_get_job_logs,
-    # GitLab write handlers
-    handle_gitlab_ci_retry_pipeline,
-    handle_gitlab_ci_cancel_pipeline,
-    # GitHub read handlers
-    handle_github_actions_list_runs,
-    handle_github_actions_get_run,
-    handle_github_actions_search_logs,
-    handle_github_actions_get_job_logs,
-    # GitHub write handlers
-    handle_github_actions_retry_run,
-    handle_github_actions_cancel_run,
+    # Unified CI/CD handlers (Story #991 - replaces 12 forge-specific handlers)
+    handle_ci_list_runs,
+    handle_ci_get_run,
+    handle_ci_get_job_logs,
+    handle_ci_search_logs,
+    handle_ci_cancel_run,
+    handle_ci_retry_run,
 )
 
 
@@ -495,25 +486,44 @@ class TestResolveCicdWriteToken:
         assert error is None
 
 
+# Common repo dict used by end-to-end tests (GitHub remote)
+_GITHUB_REPO_DICT = {
+    "alias_name": "myrepo-global",
+    "repo_url": "https://github.com/myorg/myrepo.git",
+}
+
+# Common repo dict used by end-to-end tests (GitLab remote)
+_GITLAB_REPO_DICT = {
+    "alias_name": "myproject-global",
+    "repo_url": "https://gitlab.com/myns/myproject.git",
+}
+
+
 # ---------------------------------------------------------------------------
-# AC1 (end-to-end): GitLab handler with group access check
+# AC1 (end-to-end): GitLab unified handler with group access check
 # ---------------------------------------------------------------------------
 
 
 class TestGitLabListPipelinesGroupAccess:
-    """End-to-end test: gitlab_ci_list_pipelines enforces group access."""
+    """End-to-end test: ci_list_runs (GitLab) enforces group access."""
 
     @pytest.mark.asyncio
     async def test_denied_project_returns_not_found(self):
         """User without group access receives invisible-repo 'not found' error."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject"}
+        args = {"repository_alias": "myproject-global"}
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="Project 'myns/myproject' not found.",
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="Project 'myns/myproject' not found.",
+            ),
         ):
-            response = await handle_gitlab_ci_list_pipelines(args, user)
+            response = await handle_ci_list_runs(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is False
@@ -523,11 +533,15 @@ class TestGitLabListPipelinesGroupAccess:
     async def test_allowed_project_proceeds_to_token_resolution(self):
         """User with group access proceeds past access check to token resolution."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject"}
+        args = {"repository_alias": "myproject-global"}
 
         pipelines = [{"id": 42, "status": "success"}]
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,  # allowed
@@ -545,21 +559,25 @@ class TestGitLabListPipelinesGroupAccess:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            response = await handle_gitlab_ci_list_pipelines(args, user)
+            response = await handle_ci_list_runs(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is True
-        assert data["pipelines"] == pipelines
+        assert data["runs"] == pipelines
 
     @pytest.mark.asyncio
     async def test_access_check_before_token_resolution(self):
         """Group check runs before token resolution (fail fast)."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject"}
+        args = {"repository_alias": "myproject-global"}
 
         token_resolver_called = []
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value="Project 'myns/myproject' not found.",
@@ -570,7 +588,7 @@ class TestGitLabListPipelinesGroupAccess:
                 or "token",
             ),
         ):
-            await handle_gitlab_ci_list_pipelines(args, user)
+            await handle_ci_list_runs(args, user)
 
         # Token resolver must NOT have been called
         assert len(token_resolver_called) == 0, (
@@ -579,24 +597,30 @@ class TestGitLabListPipelinesGroupAccess:
 
 
 # ---------------------------------------------------------------------------
-# AC1 (end-to-end): GitHub handler with group access check
+# AC1 (end-to-end): GitHub unified handler with group access check
 # ---------------------------------------------------------------------------
 
 
 class TestGitHubListRunsGroupAccess:
-    """End-to-end test: github_actions_list_runs enforces group access."""
+    """End-to-end test: ci_list_runs (GitHub) enforces group access."""
 
     @pytest.mark.asyncio
     async def test_denied_project_returns_not_found(self):
         """User without group access receives invisible-repo 'not found' error."""
         user = _make_user("bob")
-        args = {"owner": "myorg", "repo": "myrepo"}
+        args = {"repository_alias": "myrepo-global"}
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="Project 'myorg/myrepo' not found.",
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="Project 'myorg/myrepo' not found.",
+            ),
         ):
-            response = await handle_github_actions_list_runs(args, user)
+            response = await handle_ci_list_runs(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is False
@@ -606,11 +630,15 @@ class TestGitHubListRunsGroupAccess:
     async def test_allowed_project_proceeds_to_api_call(self):
         """Allowed user proceeds to the GitHub API call."""
         user = _make_user("bob")
-        args = {"owner": "myorg", "repo": "myrepo"}
+        args = {"repository_alias": "myrepo-global"}
 
         runs = [{"id": 100, "status": "completed"}]
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -628,7 +656,7 @@ class TestGitHubListRunsGroupAccess:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            response = await handle_github_actions_list_runs(args, user)
+            response = await handle_ci_list_runs(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is True
@@ -641,15 +669,19 @@ class TestGitHubListRunsGroupAccess:
 
 
 class TestWriteHandlersUsePerUserPat:
-    """All 4 write handlers must route through _resolve_cicd_write_token."""
+    """All write handlers must route through _resolve_cicd_write_token."""
 
     @pytest.mark.asyncio
     async def test_gitlab_retry_pipeline_fails_without_personal_credential(self):
-        """gitlab_ci_retry_pipeline returns clear error when no personal PAT."""
+        """ci_retry_run (GitLab) returns clear error when no personal PAT."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject", "pipeline_id": 123}
+        args = {"repository_alias": "myproject-global", "run_id": 123}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -662,7 +694,7 @@ class TestWriteHandlersUsePerUserPat:
                 ),
             ),
         ):
-            response = await handle_gitlab_ci_retry_pipeline(args, user)
+            response = await handle_ci_retry_run(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is False
@@ -670,11 +702,15 @@ class TestWriteHandlersUsePerUserPat:
 
     @pytest.mark.asyncio
     async def test_gitlab_cancel_pipeline_fails_without_personal_credential(self):
-        """gitlab_ci_cancel_pipeline returns clear error when no personal PAT."""
+        """ci_cancel_run (GitLab) returns clear error when no personal PAT."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject", "pipeline_id": 456}
+        args = {"repository_alias": "myproject-global", "run_id": 456}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -687,7 +723,7 @@ class TestWriteHandlersUsePerUserPat:
                 ),
             ),
         ):
-            response = await handle_gitlab_ci_cancel_pipeline(args, user)
+            response = await handle_ci_cancel_run(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is False
@@ -695,11 +731,15 @@ class TestWriteHandlersUsePerUserPat:
 
     @pytest.mark.asyncio
     async def test_github_retry_run_fails_without_personal_credential(self):
-        """github_actions_retry_run returns clear error when no personal PAT."""
+        """ci_retry_run (GitHub) returns clear error when no personal PAT."""
         user = _make_user("bob")
-        args = {"owner": "myorg", "repo": "myrepo", "run_id": 789}
+        args = {"repository_alias": "myrepo-global", "run_id": 789}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -712,7 +752,7 @@ class TestWriteHandlersUsePerUserPat:
                 ),
             ),
         ):
-            response = await handle_github_actions_retry_run(args, user)
+            response = await handle_ci_retry_run(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is False
@@ -720,11 +760,15 @@ class TestWriteHandlersUsePerUserPat:
 
     @pytest.mark.asyncio
     async def test_github_cancel_run_fails_without_personal_credential(self):
-        """github_actions_cancel_run returns clear error when no personal PAT."""
+        """ci_cancel_run (GitHub) returns clear error when no personal PAT."""
         user = _make_user("bob")
-        args = {"owner": "myorg", "repo": "myrepo", "run_id": 999}
+        args = {"repository_alias": "myrepo-global", "run_id": 999}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -737,7 +781,7 @@ class TestWriteHandlersUsePerUserPat:
                 ),
             ),
         ):
-            response = await handle_github_actions_cancel_run(args, user)
+            response = await handle_ci_cancel_run(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is False
@@ -745,11 +789,15 @@ class TestWriteHandlersUsePerUserPat:
 
     @pytest.mark.asyncio
     async def test_gitlab_retry_pipeline_uses_personal_pat_not_global(self):
-        """gitlab_ci_retry_pipeline uses personal PAT, global token NOT consulted."""
+        """ci_retry_run (GitLab) uses personal PAT, global token NOT consulted."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject", "pipeline_id": 123}
+        args = {"repository_alias": "myproject-global", "run_id": 123}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -769,7 +817,7 @@ class TestWriteHandlersUsePerUserPat:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            response = await handle_gitlab_ci_retry_pipeline(args, user)
+            response = await handle_ci_retry_run(args, user)
 
         mock_write_token.assert_called_once()
         data = _parse_mcp_response(response)
@@ -777,11 +825,15 @@ class TestWriteHandlersUsePerUserPat:
 
     @pytest.mark.asyncio
     async def test_github_cancel_run_uses_personal_pat_not_global(self):
-        """github_actions_cancel_run uses personal PAT, global token NOT consulted."""
+        """ci_cancel_run (GitHub) uses personal PAT, global token NOT consulted."""
         user = _make_user("bob")
-        args = {"owner": "myorg", "repo": "myrepo", "run_id": 999}
+        args = {"repository_alias": "myrepo-global", "run_id": 999}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -799,7 +851,7 @@ class TestWriteHandlersUsePerUserPat:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            response = await handle_github_actions_cancel_run(args, user)
+            response = await handle_ci_cancel_run(args, user)
 
         mock_write_token.assert_called_once()
         data = _parse_mcp_response(response)
@@ -812,15 +864,19 @@ class TestWriteHandlersUsePerUserPat:
 
 
 class TestAuditTrailInWriteHandlers:
-    """All 4 write handlers produce INFO audit log with required fields."""
+    """Write handlers produce INFO audit log with required fields."""
 
     @pytest.mark.asyncio
     async def test_gitlab_retry_pipeline_logs_audit_entry(self, caplog):
-        """gitlab_ci_retry_pipeline logs username, op, project_id, pipeline_id."""
+        """ci_retry_run (GitLab) logs username, op, project, run_id."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject", "pipeline_id": 42}
+        args = {"repository_alias": "myproject-global", "run_id": 42}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -839,22 +895,30 @@ class TestAuditTrailInWriteHandlers:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            await handle_gitlab_ci_retry_pipeline(args, user)
+            await handle_ci_retry_run(args, user)
 
         audit_logs = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any(
             "alice" in r.message
-            and ("retry" in r.message.lower() or "myproject" in r.message)
+            and (
+                "retry" in r.message.lower()
+                or "myproject" in r.message
+                or "myns" in r.message
+            )
             for r in audit_logs
         ), f"Audit log missing. Records: {[r.message for r in audit_logs]}"
 
     @pytest.mark.asyncio
     async def test_gitlab_cancel_pipeline_logs_audit_entry(self, caplog):
-        """gitlab_ci_cancel_pipeline logs username, op, project_id, pipeline_id."""
+        """ci_cancel_run (GitLab) logs username, op, project, run_id."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject", "pipeline_id": 55}
+        args = {"repository_alias": "myproject-global", "run_id": 55}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -875,22 +939,30 @@ class TestAuditTrailInWriteHandlers:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            await handle_gitlab_ci_cancel_pipeline(args, user)
+            await handle_ci_cancel_run(args, user)
 
         audit_logs = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any(
             "alice" in r.message
-            and ("cancel" in r.message.lower() or "myproject" in r.message)
+            and (
+                "cancel" in r.message.lower()
+                or "myproject" in r.message
+                or "myns" in r.message
+            )
             for r in audit_logs
         ), f"Audit log missing. Records: {[r.message for r in audit_logs]}"
 
     @pytest.mark.asyncio
     async def test_github_retry_run_logs_audit_entry(self, caplog):
-        """github_actions_retry_run logs username, op, owner/repo, run_id."""
+        """ci_retry_run (GitHub) logs username, op, owner/repo, run_id."""
         user = _make_user("bob")
-        args = {"owner": "myorg", "repo": "myrepo", "run_id": 77}
+        args = {"repository_alias": "myrepo-global", "run_id": 77}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -909,22 +981,30 @@ class TestAuditTrailInWriteHandlers:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            await handle_github_actions_retry_run(args, user)
+            await handle_ci_retry_run(args, user)
 
         audit_logs = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any(
             "bob" in r.message
-            and ("retry" in r.message.lower() or "myrepo" in r.message)
+            and (
+                "retry" in r.message.lower()
+                or "myrepo" in r.message
+                or "myorg" in r.message
+            )
             for r in audit_logs
         ), f"Audit log missing. Records: {[r.message for r in audit_logs]}"
 
     @pytest.mark.asyncio
     async def test_github_cancel_run_logs_audit_entry(self, caplog):
-        """github_actions_cancel_run logs username, op, owner/repo, run_id."""
+        """ci_cancel_run (GitHub) logs username, op, owner/repo, run_id."""
         user = _make_user("charlie")
-        args = {"owner": "myorg", "repo": "myrepo", "run_id": 88}
+        args = {"repository_alias": "myrepo-global", "run_id": 88}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -943,12 +1023,16 @@ class TestAuditTrailInWriteHandlers:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            await handle_github_actions_cancel_run(args, user)
+            await handle_ci_cancel_run(args, user)
 
         audit_logs = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any(
             "charlie" in r.message
-            and ("cancel" in r.message.lower() or "myrepo" in r.message)
+            and (
+                "cancel" in r.message.lower()
+                or "myrepo" in r.message
+                or "myorg" in r.message
+            )
             for r in audit_logs
         ), f"Audit log missing. Records: {[r.message for r in audit_logs]}"
 
@@ -956,9 +1040,13 @@ class TestAuditTrailInWriteHandlers:
     async def test_audit_log_includes_correlation_id(self, caplog):
         """Write handler audit log entry includes correlation_id in extra."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject", "pipeline_id": 42}
+        args = {"repository_alias": "myproject-global", "run_id": 42}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -981,7 +1069,7 @@ class TestAuditTrailInWriteHandlers:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            await handle_gitlab_ci_retry_pipeline(args, user)
+            await handle_ci_retry_run(args, user)
 
         # Check that at least one INFO record has correlation_id in its extras
         audit_logs = [r for r in caplog.records if r.levelno == logging.INFO]
@@ -1002,11 +1090,15 @@ class TestReadHandlerTokenFallback:
 
     @pytest.mark.asyncio
     async def test_gitlab_list_pipelines_uses_read_token_resolver(self):
-        """handle_gitlab_ci_list_pipelines calls _resolve_cicd_read_token."""
+        """ci_list_runs (GitLab) calls _resolve_cicd_read_token."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject"}
+        args = {"repository_alias": "myproject-global"}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -1024,17 +1116,21 @@ class TestReadHandlerTokenFallback:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            await handle_gitlab_ci_list_pipelines(args, user)
+            await handle_ci_list_runs(args, user)
 
         mock_read_token.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_github_list_runs_uses_read_token_resolver(self):
-        """handle_github_actions_list_runs calls _resolve_cicd_read_token."""
+        """ci_list_runs (GitHub) calls _resolve_cicd_read_token."""
         user = _make_user("bob")
-        args = {"owner": "myorg", "repo": "myrepo"}
+        args = {"repository_alias": "myrepo-global"}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -1052,7 +1148,7 @@ class TestReadHandlerTokenFallback:
             mock_instance.last_rate_limit = None
             MockClient.return_value = mock_instance
 
-            await handle_github_actions_list_runs(args, user)
+            await handle_ci_list_runs(args, user)
 
         mock_read_token.assert_called_once()
 
@@ -1060,9 +1156,13 @@ class TestReadHandlerTokenFallback:
     async def test_read_handler_preserves_error_when_both_tokens_unavailable(self):
         """When both global and personal tokens unavailable, current error preserved."""
         user = _make_user("alice")
-        args = {"project_id": "myns/myproject"}
+        args = {"repository_alias": "myproject-global"}
 
         with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
                 return_value=None,
@@ -1072,7 +1172,7 @@ class TestReadHandlerTokenFallback:
                 return_value=None,  # Both unavailable
             ),
         ):
-            response = await handle_gitlab_ci_list_pipelines(args, user)
+            response = await handle_ci_list_runs(args, user)
 
         data = _parse_mcp_response(response)
         assert data["success"] is False
@@ -1081,157 +1181,189 @@ class TestReadHandlerTokenFallback:
 
 
 # ---------------------------------------------------------------------------
-# Regression: All 12 handlers have group access + correct token routing
+# Regression: All 6 unified handlers have group access + correct token routing
 # ---------------------------------------------------------------------------
 
 
 class TestAllHandlersCoverage:
-    """Smoke tests verifying all 12 handlers call the new helpers."""
-
-    def _patch_read_handler_deps(self, project_denied: bool = False):
-        """Common patches for read handler tests."""
-        return [
-            patch(
-                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-                return_value="not found" if project_denied else None,
-            ),
-            patch(
-                "code_indexer.server.mcp.handlers._resolve_cicd_read_token",
-                return_value="test_token",
-            ),
-        ]
-
-    def _patch_write_handler_deps(self, project_denied: bool = False):
-        """Common patches for write handler tests."""
-        return [
-            patch(
-                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-                return_value="not found" if project_denied else None,
-            ),
-            patch(
-                "code_indexer.server.mcp.handlers._resolve_cicd_write_token",
-                return_value=(
-                    (None, "no cred") if project_denied else ("test_token", None)
-                ),
-            ),
-        ]
+    """Smoke tests verifying all 6 unified handlers call the new helpers."""
 
     @pytest.mark.asyncio
     async def test_gitlab_get_pipeline_checks_access(self):
         user = _make_user()
-        args = {"project_id": "ns/proj", "pipeline_id": 1}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="ns/proj not found.",
+        args = {"repository_alias": "myproject-global", "run_id": 1}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="ns/proj not found.",
+            ),
         ):
-            response = await handle_gitlab_ci_get_pipeline(args, user)
+            response = await handle_ci_get_run(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_gitlab_search_logs_checks_access(self):
         user = _make_user()
-        args = {"project_id": "ns/proj", "pipeline_id": 1, "pattern": "error"}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="ns/proj not found.",
+        args = {"repository_alias": "myproject-global", "run_id": 1, "pattern": "error"}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="ns/proj not found.",
+            ),
         ):
-            response = await handle_gitlab_ci_search_logs(args, user)
+            response = await handle_ci_search_logs(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_gitlab_get_job_logs_checks_access(self):
         user = _make_user()
-        args = {"project_id": "ns/proj", "job_id": 1}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="ns/proj not found.",
+        args = {"repository_alias": "myproject-global", "job_id": 1}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="ns/proj not found.",
+            ),
         ):
-            response = await handle_gitlab_ci_get_job_logs(args, user)
+            response = await handle_ci_get_job_logs(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_github_get_run_checks_access(self):
         user = _make_user()
-        args = {"owner": "o", "repo": "r", "run_id": 1}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="o/r not found.",
+        args = {"repository_alias": "myrepo-global", "run_id": 1}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="o/r not found.",
+            ),
         ):
-            response = await handle_github_actions_get_run(args, user)
+            response = await handle_ci_get_run(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_github_search_logs_checks_access(self):
         user = _make_user()
-        args = {"owner": "o", "repo": "r", "run_id": 1, "pattern": "fail"}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="o/r not found.",
+        args = {"repository_alias": "myrepo-global", "run_id": 1, "pattern": "fail"}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="o/r not found.",
+            ),
         ):
-            response = await handle_github_actions_search_logs(args, user)
+            response = await handle_ci_search_logs(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_github_get_job_logs_checks_access(self):
         user = _make_user()
-        args = {"owner": "o", "repo": "r", "job_id": 1}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="o/r not found.",
+        args = {"repository_alias": "myrepo-global", "job_id": 1}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="o/r not found.",
+            ),
         ):
-            response = await handle_github_actions_get_job_logs(args, user)
+            response = await handle_ci_get_job_logs(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_gitlab_retry_pipeline_checks_access(self):
         user = _make_user()
-        args = {"project_id": "ns/proj", "pipeline_id": 1}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="ns/proj not found.",
+        args = {"repository_alias": "myproject-global", "run_id": 1}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="ns/proj not found.",
+            ),
         ):
-            response = await handle_gitlab_ci_retry_pipeline(args, user)
+            response = await handle_ci_retry_run(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_gitlab_cancel_pipeline_checks_access(self):
         user = _make_user()
-        args = {"project_id": "ns/proj", "pipeline_id": 1}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="ns/proj not found.",
+        args = {"repository_alias": "myproject-global", "run_id": 1}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITLAB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="ns/proj not found.",
+            ),
         ):
-            response = await handle_gitlab_ci_cancel_pipeline(args, user)
+            response = await handle_ci_cancel_run(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_github_retry_run_checks_access(self):
         user = _make_user()
-        args = {"owner": "o", "repo": "r", "run_id": 1}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="o/r not found.",
+        args = {"repository_alias": "myrepo-global", "run_id": 1}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="o/r not found.",
+            ),
         ):
-            response = await handle_github_actions_retry_run(args, user)
+            response = await handle_ci_retry_run(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False
 
     @pytest.mark.asyncio
     async def test_github_cancel_run_checks_access(self):
         user = _make_user()
-        args = {"owner": "o", "repo": "r", "run_id": 1}
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
-            return_value="o/r not found.",
+        args = {"repository_alias": "myrepo-global", "run_id": 1}
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=_GITHUB_REPO_DICT,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_cicd_project_access",
+                return_value="o/r not found.",
+            ),
         ):
-            response = await handle_github_actions_cancel_run(args, user)
+            response = await handle_ci_cancel_run(args, user)
         data = _parse_mcp_response(response)
         assert data["success"] is False

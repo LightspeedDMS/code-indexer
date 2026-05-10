@@ -1,4 +1,4 @@
-"""Tests proving bugs in list_files, get_file_content, and get_repository_statistics handlers.
+"""Tests proving bugs in list_files, get_file_content, and repository statistics handlers.
 
 These tests expose runtime errors caused by calling non-existent methods or using wrong parameters.
 """
@@ -172,53 +172,3 @@ class TestGetRepositoryStatisticsBug:
         assert "GoldenRepoManager" not in source, (
             "RepositoryStatsService should not use GoldenRepoManager anymore"
         )
-
-    def test_get_repository_statistics_handler_needs_username_parameter(
-        self, mock_user
-    ):
-        """
-        Test that handler can successfully call get_repository_stats with username.
-
-        Currently the service method doesn't accept username, so it can't
-        differentiate between users' activated repositories.
-        """
-        from code_indexer.server.mcp.handlers import get_repository_statistics
-
-        params = {"repository_alias": "my-repo"}
-
-        # Mock stats service to expect username parameter
-        mock_stats_service = MagicMock()
-        mock_response = Mock()
-        mock_response.model_dump = Mock(
-            return_value={"file_count": 100, "total_lines": 5000}
-        )
-        # Service should accept username parameter
-        mock_stats_service.get_repository_stats = Mock(return_value=mock_response)
-
-        with patch(
-            "code_indexer.server.services.stats_service.stats_service",
-            mock_stats_service,
-        ):
-            result = get_repository_statistics(params, mock_user)
-
-            # Parse MCP response
-            data = json.loads(result["content"][0]["text"])
-
-            # Verify successful call
-            assert data["success"] is True
-
-            # Verify service was called with username
-            # This will fail if service doesn't support username parameter
-            call_args = mock_stats_service.get_repository_stats.call_args
-            # Check if username was passed (either positional or keyword)
-            if call_args.args and len(call_args.args) > 1:
-                # Username passed as positional arg
-                assert True
-            elif "username" in call_args.kwargs:
-                # Username passed as keyword arg
-                assert call_args.kwargs["username"] == mock_user.username
-            else:
-                pytest.fail(
-                    f"get_repository_stats should be called with username parameter. "
-                    f"Got args={call_args.args}, kwargs={call_args.kwargs}"
-                )

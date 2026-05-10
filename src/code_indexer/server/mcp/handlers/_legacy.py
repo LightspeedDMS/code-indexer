@@ -463,24 +463,27 @@ from .cicd import (  # noqa: F401, E402
     _resolve_cicd_project_access,
     _resolve_cicd_read_token,
     _resolve_cicd_write_token,
+    # REST-only old-style handlers (NOT registered in MCP, kept for REST routes)
     handle_gh_actions_list_runs,
     handle_gh_actions_get_run,
     handle_gh_actions_search_logs,
     handle_gh_actions_get_job_logs,
     handle_gh_actions_retry_run,
     handle_gh_actions_cancel_run,
+    # GitLab CI handlers preserved for REST routes (Story #991: removed from MCP registry)
     handle_gitlab_ci_list_pipelines,
     handle_gitlab_ci_get_pipeline,
     handle_gitlab_ci_search_logs,
     handle_gitlab_ci_get_job_logs,
     handle_gitlab_ci_retry_pipeline,
     handle_gitlab_ci_cancel_pipeline,
-    handle_github_actions_list_runs,
-    handle_github_actions_get_run,
-    handle_github_actions_search_logs,
-    handle_github_actions_get_job_logs,
-    handle_github_actions_retry_run,
-    handle_github_actions_cancel_run,
+    # Unified CI/CD handlers (Story #991 - replaces 12 forge-specific handlers)
+    handle_ci_list_runs,
+    handle_ci_get_run,
+    handle_ci_get_job_logs,
+    handle_ci_search_logs,
+    handle_ci_cancel_run,
+    handle_ci_retry_run,
 )
 
 _cicd_register(HANDLER_REGISTRY)

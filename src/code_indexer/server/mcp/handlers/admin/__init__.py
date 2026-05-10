@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.auth import dependencies
+from code_indexer.server.auth import dependencies as dependencies
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 

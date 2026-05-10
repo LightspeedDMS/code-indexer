@@ -119,8 +119,7 @@ def _check_pacing_only_status(status_output: str) -> bool:
     """
     lines = [line.strip() for line in status_output.splitlines()]
     return all(
-        any(expected in line for line in lines)
-        for expected in _PACING_ONLY_EXPECTED
+        any(expected in line for line in lines) for expected in _PACING_ONLY_EXPECTED
     )
 
 

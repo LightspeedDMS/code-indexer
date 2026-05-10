@@ -31,7 +31,7 @@ import code_indexer.server.mcp.handlers.admin as admin_handlers
 def _parse_mcp_response(response: dict) -> dict:
     """Unwrap a MCP-formatted response: {"content": [{"type": "text", "text": "..."}]}."""
     content = response.get("content", [])
-    return json.loads(content[0]["text"])
+    return json.loads(content[0]["text"])  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------

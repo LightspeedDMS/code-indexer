@@ -37,6 +37,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **OLD** (`global_repo_status`): `{"success": true, "alias": "backend-global", "repo_name": "backend", "url": "...", "last_refresh": "...", "enable_temporal": true}`
 - **NEW** (`repository_status`): `{"success": true, "kind": "global", "detail": "basic", "status": {"alias": "backend-global", "repo_name": "backend", "url": "...", "last_refresh": "...", "enable_temporal": true}}`
 
+- **BREAKING (MCP Tool Surface)**: 12 CI/CD forge-specific tools consolidated into 6 unified `ci_*` tools with auto-detection (Story #991 / Epic #985). Hard-cut migration -- no shims.
+
+### MCP Tool Migration: CI/CD Operations (Story #991)
+
+| Old Tool | New Tool | Parameter Mapping |
+|----------|----------|-------------------|
+| `github_actions_list_runs(owner, repo, ...)` | `ci_list_runs(repository_alias=..., forge='auto')` | `owner`+`repo` replaced by `repository_alias`; auto-detects GitHub |
+| `gitlab_ci_list_pipelines(project_id, ...)` | `ci_list_runs(repository_alias=..., forge='auto')` | `project_id` replaced by `repository_alias`; auto-detects GitLab |
+| `github_actions_get_run(owner, repo, run_id)` | `ci_get_run(repository_alias=..., run_id=..., forge='auto')` | |
+| `gitlab_ci_get_pipeline(project_id, pipeline_id)` | `ci_get_run(repository_alias=..., run_id=..., forge='auto')` | `pipeline_id` renamed to `run_id` |
+| `github_actions_get_job_logs(owner, repo, job_id, ...)` | `ci_get_job_logs(repository_alias=..., job_id=..., forge='auto')` | |
+| `gitlab_ci_get_job_logs(project_id, job_id, ...)` | `ci_get_job_logs(repository_alias=..., job_id=..., forge='auto')` | |
+| `github_actions_search_logs(owner, repo, run_id, pattern, ...)` | `ci_search_logs(repository_alias=..., run_id=..., pattern=..., forge='auto')` | |
+| `gitlab_ci_search_logs(project_id, pipeline_id, query, ...)` | `ci_search_logs(repository_alias=..., run_id=..., pattern=..., forge='auto')` | `pipeline_id` renamed to `run_id`, `query` renamed to `pattern` |
+| `github_actions_cancel_run(owner, repo, run_id)` | `ci_cancel_run(repository_alias=..., run_id=..., forge='auto')` | |
+| `gitlab_ci_cancel_pipeline(project_id, pipeline_id)` | `ci_cancel_run(repository_alias=..., run_id=..., forge='auto')` | `pipeline_id` renamed to `run_id` |
+| `github_actions_retry_run(owner, repo, run_id)` | `ci_retry_run(repository_alias=..., run_id=..., forge='auto')` | |
+| `gitlab_ci_retry_pipeline(project_id, pipeline_id)` | `ci_retry_run(repository_alias=..., run_id=..., forge='auto')` | `pipeline_id` renamed to `run_id` |
+
+**Auto-detection**: Unified tools resolve `repository_alias` to its remote URL, then call `detect_forge_type()` to determine GitHub vs GitLab. Pass `forge='github'` or `forge='gitlab'` to override.
+
+**Auto-detect failure**: If the remote URL hostname matches neither "github" nor "gitlab" (e.g., self-hosted forge), the tool returns `{"success": false, "error": "Could not auto-detect forge from repository remote URL. Pass forge='github' or forge='gitlab' explicitly.", "remote_url": "..."}`.
+
 ### Fixed
 - Config section checkbox labels replaced with Yes/No dropdowns matching existing UI pattern.
 - Fixed label/description text overlap in config display tables (added fixed table layout CSS).
