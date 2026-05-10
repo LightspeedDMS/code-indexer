@@ -139,7 +139,7 @@ _GATED_HANDLERS = [
         id="remove_member_from_group",
     ),
     pytest.param(
-        lambda h: admin_handlers.handle_admin_create_user_mcp_credential(
+        lambda h: admin_handlers.mcp_credentials._create_user(
             {}, h, session_key=_SESSION_KEY
         ),
         id="admin_create_user_mcp_credential",

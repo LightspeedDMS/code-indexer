@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## v10.13.0 (2026-05-09) — Config UI cosmetic fixes
 
+### Changed
+- **BREAKING (MCP Tool Surface)**: 8 scattered MCP credential tools consolidated into 2 unified action-param tools (Story #989 / Epic #985). Hard-cut migration — no shims, no deprecation period.
+
+### MCP Tool Migration: Credential Operations (Story #989)
+
+| Old Tool | New Tool | Parameter Mapping |
+|----------|----------|-------------------|
+| `list_mcp_credentials()` (no args) | `list_mcp_credentials(scope='self')` | **BREAKING**: same name, new required `scope` param |
+| `admin_list_user_mcp_credentials(username)` | `list_mcp_credentials(scope='user', username=...)` | |
+| `admin_list_all_mcp_credentials()` | `list_mcp_credentials(scope='all')` | |
+| `admin_list_system_mcp_credentials()` | `list_mcp_credentials(scope='system')` | |
+| `create_mcp_credential(description?)` | `manage_mcp_credential(action='create', description=?)` | |
+| `delete_mcp_credential(credential_id)` | `manage_mcp_credential(action='delete', credential_id=...)` | |
+| `admin_create_user_mcp_credential(username, description?)` | `manage_mcp_credential(action='create', target_user=..., description=?)` | |
+| `admin_delete_user_mcp_credential(username, credential_id)` | `manage_mcp_credential(action='delete', target_user=..., credential_id=...)` | |
+
 ### Fixed
 - Config section checkbox labels replaced with Yes/No dropdowns matching existing UI pattern.
 - Fixed label/description text overlap in config display tables (added fixed table layout CSS).
