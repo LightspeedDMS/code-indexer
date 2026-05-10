@@ -409,40 +409,6 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get detailed status of a repository."""
-    try:
-        user_alias = params.get("repository_alias", "")
-        if not user_alias:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Missing required parameter: repository_alias",
-                    "status": {},
-                }
-            )
-
-        category_map = _load_category_map()
-
-        # Global repository path
-        if user_alias.endswith("-global"):
-            return _get_global_repo_status(user_alias, category_map, user)
-
-        # Activated repository
-        status = _utils.app_module.repository_listing_manager.get_repository_details(
-            user_alias, user.username
-        )
-        golden_alias = status.get("golden_repo_alias")
-        if golden_alias:
-            category_info = category_map.get(golden_alias, {})
-            status["repo_category"] = category_info.get("category_name")
-
-        return _mcp_response({"success": True, "status": status})
-    except Exception as e:
-        logger.warning("get_repository_status failed: %s", e, exc_info=True)
-        return _mcp_response({"success": False, "error": str(e), "status": {}})
-
-
 def _get_global_repo_status(
     user_alias: str, category_map: dict, user: User
 ) -> Dict[str, Any]:
@@ -473,35 +439,6 @@ def _get_global_repo_status(
     category_info = category_map.get(golden_alias, {})
     status["repo_category"] = category_info.get("category_name")
     return _mcp_response({"success": True, "status": status})
-
-
-def get_repository_statistics(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get repository statistics."""
-    try:
-        repository_alias = params.get("repository_alias", "")
-        if not repository_alias:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Missing required parameter: repository_alias",
-                    "statistics": {},
-                }
-            )
-
-        if repository_alias.endswith("-global"):
-            return _get_global_repo_statistics(repository_alias, user)
-
-        from code_indexer.server.services.stats_service import stats_service
-
-        stats_response = stats_service.get_repository_stats(
-            repository_alias, username=user.username
-        )
-        return _mcp_response(
-            {"success": True, "statistics": stats_response.model_dump(mode="json")}
-        )
-    except Exception as e:
-        logger.warning("get_repository_statistics failed: %s", e, exc_info=True)
-        return _mcp_response({"success": False, "error": str(e), "statistics": {}})
 
 
 def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -542,15 +479,34 @@ def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str,
         )
 
 
-def _get_global_repo_statistics(repository_alias: str, user: User) -> Dict[str, Any]:
-    """Build statistics response for a global repository."""
+def _build_global_repo_statistics(repository_alias: str, user: User) -> Dict[str, Any]:
+    """Build statistics dict for a global repository (no MCP wrapping).
+
+    Returns a plain dict with the statistics, or {} on error.
+    """
     golden_repos_dir = _get_golden_repos_dir()
     global_repos = _list_global_repos()
-
     repo_entry = next(
         (r for r in global_repos if r["alias_name"] == repository_alias), None
     )
     if not repo_entry:
+        return {}
+    alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+    target_path = alias_manager.read_alias(repository_alias)
+    if not target_path:
+        return {}
+    return {
+        "repository_alias": repository_alias,
+        "is_global": True,
+        "path": target_path,
+        "index_path": repo_entry.get("index_path"),
+    }
+
+
+def _get_global_repo_statistics(repository_alias: str, user: User) -> Dict[str, Any]:
+    """Build statistics response for a global repository."""
+    statistics = _build_global_repo_statistics(repository_alias, user)
+    if not statistics:
         available_repos = _get_available_repos(user)
         error_envelope = _error_with_suggestions(
             error_msg=f"Global repository '{repository_alias}' not found",
@@ -559,25 +515,6 @@ def _get_global_repo_statistics(repository_alias: str, user: User) -> Dict[str, 
         )
         error_envelope["statistics"] = {}
         return _mcp_response(error_envelope)
-
-    alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
-    target_path = alias_manager.read_alias(repository_alias)
-    if not target_path:
-        available_repos = _get_available_repos(user)
-        error_envelope = _error_with_suggestions(
-            error_msg=f"Alias for '{repository_alias}' not found",
-            attempted_value=repository_alias,
-            available_values=available_repos,
-        )
-        error_envelope["statistics"] = {}
-        return _mcp_response(error_envelope)
-
-    statistics = {
-        "repository_alias": repository_alias,
-        "is_global": True,
-        "path": target_path,
-        "index_path": repo_entry.get("index_path"),
-    }
     return _mcp_response({"success": True, "statistics": statistics})
 
 
@@ -1213,29 +1150,97 @@ def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]
         return _mcp_response({"success": False, "error": str(e), "repos": []})
 
 
-def handle_global_repo_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for global_repo_status tool."""
-    from code_indexer.global_repos.shared_operations import GlobalRepoOperations
+_VALID_DETAIL_VALUES = frozenset({"basic", "stats"})
 
+
+def handle_repository_status(
+    args: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """Unified handler for repository_status tool (Story #990).
+
+    Auto-detects global vs activated repo from alias suffix.
+    Returns pinned envelope: {success, kind, detail, status[, statistics]}.
+    """
     alias = args.get("alias", "")
     if not alias:
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]  # _mcp_response returns dict but mypy sees Any from json.loads internals
             {"success": False, "error": "Missing required parameter: alias"}
         )
+
+    detail = args.get("detail", "basic")
+    if detail not in _VALID_DETAIL_VALUES:
+        return _mcp_response(  # type: ignore[no-any-return]  # _mcp_response returns dict but mypy sees Any from json.loads internals
+            {
+                "success": False,
+                "error": f"Invalid detail value '{detail}': must be 'basic' or 'stats'",
+            }
+        )
+
+    is_global = alias.endswith("-global")
+    kind = "global" if is_global else "activated"
+
+    try:
+        if is_global:
+            return _handle_repository_status_global(alias, detail, kind, user)  # type: ignore[no-any-return]  # _mcp_response returns dict but mypy sees Any
+        return _handle_repository_status_activated(alias, detail, kind, user)  # type: ignore[no-any-return]  # _mcp_response returns dict but mypy sees Any
+    except Exception as e:
+        logger.warning("handle_repository_status failed: %s", e, exc_info=True)
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]  # _mcp_response returns dict but mypy sees Any
+
+
+def _handle_repository_status_global(
+    alias: str, detail: str, kind: str, user: User
+) -> Dict[str, Any]:
+    """Route global-alias repository_status requests."""
+    from code_indexer.global_repos.shared_operations import GlobalRepoOperations
 
     try:
         golden_repos_dir = _get_golden_repos_dir()
         ops = GlobalRepoOperations(golden_repos_dir)
         status = ops.get_status(alias)
-        return _mcp_response({"success": True, **status})
     except ValueError as ve:
         logger.warning("Global repo '%s' not found: %s", alias, ve)
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]  # _mcp_response returns dict but mypy sees Any from json.loads internals
             {"success": False, "error": f"Global repo '{alias}' not found"}
         )
-    except Exception as e:
-        logger.warning("handle_global_repo_status failed: %s", e, exc_info=True)
-        return _mcp_response({"success": False, "error": str(e)})
+
+    envelope: Dict[str, Any] = {
+        "success": True,
+        "kind": kind,
+        "detail": detail,
+        "status": status,
+    }
+
+    if detail == "stats":
+        envelope["statistics"] = _build_global_repo_statistics(alias, user)
+
+    return _mcp_response(envelope)  # type: ignore[no-any-return]  # _mcp_response returns dict but mypy sees Any
+
+
+def _handle_repository_status_activated(
+    alias: str, detail: str, kind: str, user: User
+) -> Dict[str, Any]:
+    """Route activated-alias repository_status requests."""
+    status = _utils.app_module.repository_listing_manager.get_repository_details(
+        alias, user.username
+    )
+
+    envelope: Dict[str, Any] = {
+        "success": True,
+        "kind": kind,
+        "detail": detail,
+        "status": status,
+    }
+
+    if detail == "stats":
+        from code_indexer.server.services.stats_service import stats_service
+
+        stats_response = stats_service.get_repository_stats(
+            alias, username=user.username
+        )
+        envelope["statistics"] = stats_response.model_dump(mode="json")
+
+    return _mcp_response(envelope)  # type: ignore[no-any-return]  # _mcp_response returns dict but mypy sees Any
 
 
 # Maximum characters to include from stdout/stderr tail in provider index job results.
@@ -2144,7 +2149,7 @@ def _register(registry: dict) -> None:
     registry["list_repositories"] = list_repositories
     registry["activate_repository"] = activate_repository
     registry["deactivate_repository"] = deactivate_repository
-    registry["get_repository_status"] = get_repository_status
+    registry["repository_status"] = handle_repository_status
     registry["sync_repository"] = sync_repository
     registry["switch_branch"] = switch_branch
     registry["get_branches"] = get_branches
@@ -2154,11 +2159,9 @@ def _register(registry: dict) -> None:
     registry["remove_golden_repo"] = remove_golden_repo
     registry["refresh_golden_repo"] = refresh_golden_repo
     registry["change_golden_repo_branch"] = change_golden_repo_branch
-    registry["get_repository_statistics"] = get_repository_statistics
     registry["get_all_repositories_status"] = get_all_repositories_status
     registry["manage_composite_repository"] = manage_composite_repository
     registry["list_global_repos"] = handle_list_global_repos
-    registry["global_repo_status"] = handle_global_repo_status
     registry["add_golden_repo_index"] = handle_add_golden_repo_index
     registry["get_golden_repo_indexes"] = handle_get_golden_repo_indexes
     registry["list_repo_categories"] = list_repo_categories

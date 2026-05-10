@@ -203,23 +203,25 @@ class TestMcpRouteSmoke:
         resp = _mcp_call(client, admin_token, "list_repo_categories", {})
         _assert_no_crash(resp, "list_repo_categories")
 
-    def test_get_repository_status_no_crash(self, client, admin_token):
+    def test_repository_status_basic_no_crash(self, client, admin_token):
+        # Migrated from get_repository_status (Story #990 hard-cut)
         resp = _mcp_call(
             client,
             admin_token,
-            "get_repository_status",
-            {"repository_alias": "nonexistent-repo"},
+            "repository_status",
+            {"alias": "nonexistent-repo", "detail": "basic"},
         )
-        _assert_no_crash(resp, "get_repository_status")
+        _assert_no_crash(resp, "repository_status")
 
-    def test_get_repository_statistics_no_crash(self, client, admin_token):
+    def test_repository_status_stats_no_crash(self, client, admin_token):
+        # Migrated from get_repository_statistics (Story #990 hard-cut)
         resp = _mcp_call(
             client,
             admin_token,
-            "get_repository_statistics",
-            {"repository_alias": "nonexistent-repo"},
+            "repository_status",
+            {"alias": "nonexistent-repo", "detail": "stats"},
         )
-        _assert_no_crash(resp, "get_repository_statistics")
+        _assert_no_crash(resp, "repository_status")
 
     def test_check_hnsw_health_no_crash(self, client, admin_token):
         resp = _mcp_call(client, admin_token, "check_hnsw_health", {})

@@ -351,8 +351,8 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {
                 "step_number": 4,
                 "title": "Check repository capabilities",
-                "description": "Use global_repo_status() to see what indexes exist for a repository.",
-                "example_call": "global_repo_status('backend-global')",
+                "description": "Use repository_status() to see what indexes exist for a repository.",
+                "example_call": "repository_status(alias='backend-global')",
                 "expected_result": "Index status showing semantic, FTS, temporal, and SCIP availability",
             },
             {
@@ -395,7 +395,7 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             "1. whoami() - Check your permissions",
             "2. list_global_repos() - Find available repositories",
             "3. search_code('topic', 'cidx-meta-global') - Discover which repo has your topic",
-            "4. global_repo_status('repo-global') - Check index capabilities",
+            "4. repository_status(alias='repo-global') - Check index capabilities",
             "5. search_code('query', 'repo-global', limit=5) - Search code",
             "6. browse_directory('repo-global', 'src') - Explore structure",
             "7. scip_definition('symbol', 'repo-global') - Find definitions",
@@ -417,11 +417,11 @@ def first_time_user_guide(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             },
             {
                 "error": "Empty temporal query results",
-                "solution": "Temporal indexing may not be enabled. Check with global_repo_status() - look for enable_temporal: true.",
+                "solution": "Temporal indexing may not be enabled. Check with repository_status() - look for enable_temporal: true.",
             },
             {
                 "error": "SCIP definition/references returns no results",
-                "solution": "SCIP indexes may not exist for this repository. Check global_repo_status() for SCIP availability.",
+                "solution": "SCIP indexes may not exist for this repository. Check repository_status() for SCIP availability.",
             },
             {
                 "error": "Repository 'cidx-meta-global' not found",

@@ -67,7 +67,7 @@ WHEN TO USE:
 - To refresh without waiting for scheduled analysis
 
 ASYNC BEHAVIOR:
-Returns immediately with a job_id. Analysis runs in background. Use get_repository_status or check cidx-meta indexing status to monitor progress.
+Returns immediately with a job_id. Analysis runs in background. Use repository_status or check cidx-meta indexing status to monitor progress.
 
 CONCURRENCY:
 Only one dependency map analysis can run at a time. Concurrent requests will be rejected with "already in progress" error.

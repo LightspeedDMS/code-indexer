@@ -87,7 +87,7 @@ inputSchema:
     time_range:
       type: string
       description: 'Time range filter (format: YYYY-MM-DD..YYYY-MM-DD). Requires temporal index (cidx index --index-commits).
-        Check enable_temporal via global_repo_status.'
+        Check enable_temporal via repository_status.'
     time_range_all:
       type: boolean
       default: false

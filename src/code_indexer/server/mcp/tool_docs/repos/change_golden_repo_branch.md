@@ -50,4 +50,4 @@ DUPLICATE JOB: If a change_branch job is already running for this repository, re
 
 ERROR CASES: Repository not found (alias does not exist). Invalid branch name (syntactically invalid). Duplicate job already running (use existing_job_id to poll). Git operation failure (network, permissions) — job status will be 'failed'.
 
-RELATED TOOLS: get_job_details (poll job status), refresh_golden_repo (pull latest on same branch), global_repo_status (check current branch), get_job_statistics (monitor background jobs).
+RELATED TOOLS: get_job_details (poll job status), refresh_golden_repo (pull latest on same branch), repository_status (check current branch), get_job_statistics (monitor background jobs).

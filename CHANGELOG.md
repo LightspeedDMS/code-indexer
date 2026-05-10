@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `admin_create_user_mcp_credential(username, description?)` | `manage_mcp_credential(action='create', target_user=..., description=?)` | |
 | `admin_delete_user_mcp_credential(username, credential_id)` | `manage_mcp_credential(action='delete', target_user=..., credential_id=...)` | |
 
+- **BREAKING (MCP Tool Surface)**: 3 repo-status tools consolidated into 1 unified `repository_status` tool (Story #990 / Epic #985). Hard-cut migration -- no shims. `get_all_repositories_status` unchanged.
+
+### MCP Tool Migration: Repository Status (Story #990)
+
+| Old Tool | New Tool | Parameter Mapping |
+|----------|----------|-------------------|
+| `get_repository_status(user_alias=X)` | `repository_status(alias=X, detail='basic')` | `user_alias` renamed to `alias`; response nested under `status` with `kind='activated'` |
+| `global_repo_status(alias=X)` | `repository_status(alias=X, detail='basic')` | Response now nested under `status` with `kind='global'` (was flat top-level) |
+| `get_repository_statistics(repository_alias=X)` | `repository_status(alias=X, detail='stats')` | `repository_alias` renamed to `alias`; stats in `statistics` alongside `status` |
+
+**Envelope shape change for global aliases (hard-cut)**:
+- **OLD** (`global_repo_status`): `{"success": true, "alias": "backend-global", "repo_name": "backend", "url": "...", "last_refresh": "...", "enable_temporal": true}`
+- **NEW** (`repository_status`): `{"success": true, "kind": "global", "detail": "basic", "status": {"alias": "backend-global", "repo_name": "backend", "url": "...", "last_refresh": "...", "enable_temporal": true}}`
+
 ### Fixed
 - Config section checkbox labels replaced with Yes/No dropdowns matching existing UI pattern.
 - Fixed label/description text overlap in config display tables (added fixed table layout CSS).

@@ -30,20 +30,21 @@ from tests.e2e.server.mcp_helpers import (
 # ---------------------------------------------------------------------------
 TOOL_LIST_REPOSITORIES: str = "list_repositories"
 TOOL_LIST_GLOBAL_REPOS: str = "list_global_repos"
-TOOL_GET_REPOSITORY_STATUS: str = "get_repository_status"
+# Story #990: unified replacement for get_repository_status, get_repository_statistics,
+# and global_repo_status (hard-cut — old tool names removed from registry).
+TOOL_REPOSITORY_STATUS: str = "repository_status"
 TOOL_GET_ALL_REPOSITORIES_STATUS: str = "get_all_repositories_status"
 TOOL_GET_BRANCHES: str = "get_branches"
-TOOL_GET_REPOSITORY_STATISTICS: str = "get_repository_statistics"
 TOOL_GET_INDEX_STATUS: str = "get_index_status"
 TOOL_GET_GLOBAL_CONFIG: str = "get_global_config"
 TOOL_LIST_REPO_CATEGORIES: str = "list_repo_categories"
-TOOL_GLOBAL_REPO_STATUS: str = "global_repo_status"
 TOOL_CHECK_HNSW_HEALTH: str = "check_hnsw_health"
 
 # ---------------------------------------------------------------------------
 # Argument key and value constants
 # ---------------------------------------------------------------------------
 ARG_KEY_REPOSITORY_ALIAS: str = "repository_alias"
+ARG_KEY_ALIAS: str = "alias"
 ARG_ALIAS_CIDX_META: str = "cidx-meta"
 
 # ---------------------------------------------------------------------------
@@ -61,9 +62,10 @@ REPOS_TOOLS: list[tuple[str, str, JsonArgs]] = [
         {},
     ),
     (
-        "get_repository_status",
-        TOOL_GET_REPOSITORY_STATUS,
-        {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META},
+        # Replaces get_repository_status + get_repository_statistics + global_repo_status
+        "repository_status",
+        TOOL_REPOSITORY_STATUS,
+        {ARG_KEY_ALIAS: ARG_ALIAS_CIDX_META},
     ),
     (
         "get_all_repositories_status",
@@ -73,11 +75,6 @@ REPOS_TOOLS: list[tuple[str, str, JsonArgs]] = [
     (
         "get_branches",
         TOOL_GET_BRANCHES,
-        {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META},
-    ),
-    (
-        "get_repository_statistics",
-        TOOL_GET_REPOSITORY_STATISTICS,
         {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META},
     ),
     (
@@ -93,11 +90,6 @@ REPOS_TOOLS: list[tuple[str, str, JsonArgs]] = [
     (
         "list_repo_categories",
         TOOL_LIST_REPO_CATEGORIES,
-        {},
-    ),
-    (
-        "global_repo_status",
-        TOOL_GLOBAL_REPO_STATUS,
         {},
     ),
     (
