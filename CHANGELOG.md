@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.13.0 (2026-05-09) — Config UI cosmetic fixes
+
+### Fixed
+- Config section checkbox labels replaced with Yes/No dropdowns matching existing UI pattern.
+- Fixed label/description text overlap in config display tables (added fixed table layout CSS).
+- TOTP Elevation and Pace Maker sections now use consistent Yes/No display values.
+
 ## v10.12.0 (2026-05-09) — Pace-maker integration for token cost control
 
 Story #997: Integrates pace-maker into the CIDX auto-updater and installer for pacing-only mode enforcement. Prevents token runaway scenarios by throttling Claude CLI consumption via 5-hour and weekly quotas.
