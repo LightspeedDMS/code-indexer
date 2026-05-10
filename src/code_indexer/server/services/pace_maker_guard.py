@@ -43,7 +43,6 @@ _PACING_ONLY_COMMANDS = [
     ["pace-maker", "tdd", "off"],
     ["pace-maker", "reminder", "off"],
     ["pace-maker", "langfuse", "off"],
-    ["pace-maker", "cross-session-awareness", "off"],
     ["pace-maker", "memory-localization", "off"],
     ["pace-maker", "danger-bash", "off"],
 ]
