@@ -124,14 +124,14 @@ ADMIN_TOOLS: list[tuple[str, str, JsonArgs]] = [
         {"group_name": E2E_GROUP},
     ),
     (
-        "add_member_to_group",
-        "add_member_to_group",
-        {"group_name": E2E_GROUP, "username": "admin"},
+        "manage_group_members_add",
+        "manage_group_members",
+        {"action": "add", "group_id": E2E_GROUP, "users": ["admin"]},
     ),
     (
-        "remove_member_from_group",
-        "remove_member_from_group",
-        {"group_name": E2E_GROUP, "username": "admin"},
+        "manage_group_members_remove",
+        "manage_group_members",
+        {"action": "remove", "group_id": E2E_GROUP, "users": ["admin"]},
     ),
     (
         "update_group",
@@ -149,26 +149,26 @@ ADMIN_TOOLS: list[tuple[str, str, JsonArgs]] = [
         "list_api_keys",
         {},
     ),
-    # MCP credential management
+    # MCP credential management (Story #989: consolidated)
     (
-        "create_mcp_credential",
-        "create_mcp_credential",
-        {"name": E2E_MCP_CRED_NAME},
+        "manage_mcp_credential_create",
+        "manage_mcp_credential",
+        {"action": "create", "description": E2E_MCP_CRED_NAME},
     ),
     (
+        "list_mcp_credentials_self",
         "list_mcp_credentials",
+        {"scope": "self"},
+    ),
+    (
+        "list_mcp_credentials_all",
         "list_mcp_credentials",
-        {},
+        {"scope": "all"},
     ),
     (
-        "admin_list_all_mcp_credentials",
-        "admin_list_all_mcp_credentials",
-        {},
-    ),
-    (
-        "admin_list_system_mcp_credentials",
-        "admin_list_system_mcp_credentials",
-        {},
+        "list_mcp_credentials_system",
+        "list_mcp_credentials",
+        {"scope": "system"},
     ),
     # Health & maintenance
     (
@@ -213,9 +213,9 @@ ADMIN_TOOLS: list[tuple[str, str, JsonArgs]] = [
     ),
     # Cleanup — delete created objects last (accept any rc < 500)
     (
-        "delete_mcp_credential",
-        "delete_mcp_credential",
-        {"name": E2E_MCP_CRED_NAME},
+        "manage_mcp_credential_delete",
+        "manage_mcp_credential",
+        {"action": "delete", "credential_id": "placeholder_cleaned_by_test99"},
     ),
     (
         "delete_api_key",
