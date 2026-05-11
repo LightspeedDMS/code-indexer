@@ -5,27 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v10.13.0 (2026-05-09) — Config UI cosmetic fixes
+## v10.14.0 (2026-05-10) — MCP Tool Surface Compression and Consolidation (Epic #985)
+
+Reduces MCP tool count from 167 to 147 (net -20, ~12%) via action-param dispatcher pattern. All migrations are hard-cut -- no shims, no deprecation period. Old tool names removed from both HANDLER_REGISTRY and TOOL_REGISTRY.
+
+### Added
+- `slim_description` YAML frontmatter field on all 147 tool docs for compressed tool listing (Stories #987, #988).
+- `cidx_quick_reference` tool for instant tool lookup by keyword (Story #987).
 
 ### Changed
-- **BREAKING (MCP Tool Surface)**: 10 SSH and group-CRUD tools consolidated into 4 unified action-param tools (Story #992 / Epic #985). Hard-cut migration -- no shims.
-
-### MCP Tool Migration: SSH and Group Operations (Story #992)
-
-| Old Tool | New Tool | Parameter Mapping |
-|----------|----------|-------------------|
-| `cidx_ssh_key_create(...)` | `manage_ssh_key(action='create', ...)` | |
-| `cidx_ssh_key_delete(name)` | `manage_ssh_key(action='delete', name=...)` | |
-| `cidx_ssh_key_assign_host(name, hostname)` | `manage_ssh_key(action='assign_host', name=..., hostname=...)` | |
-| `cidx_ssh_key_show_public(name)` | `manage_ssh_key(action='show_public', name=...)` | |
-| `cidx_ssh_key_list(...)` | `list_ssh_keys(...)` | Renamed only; same signature |
-| `add_member_to_group(group_id, user_id)` | `manage_group_members(action='add', group_id=..., user_id=...)` | |
-| `remove_member_from_group(group_id, user_id)` | `manage_group_members(action='remove', group_id=..., user_id=...)` | |
-| `add_repos_to_group(group_id, repo_names)` | `manage_group_repos(action='add', group_id=..., repos=[...])` | `repo_names` renamed to `repos` |
-| `remove_repo_from_group(group_id, repo_name)` | `manage_group_repos(action='remove', group_id=..., repo_name=...)` | |
-| `bulk_remove_repos_from_group(group_id, repo_names)` | `manage_group_repos(action='bulk_remove', group_id=..., repos=[...])` | `repo_names` renamed to `repos` |
-
-- **BREAKING (MCP Tool Surface)**: 8 scattered MCP credential tools consolidated into 2 unified action-param tools (Story #989 / Epic #985). Hard-cut migration — no shims, no deprecation period.
+- **BREAKING (MCP)**: 8 MCP credential tools consolidated into 2 (`list_mcp_credentials`, `manage_mcp_credential`) via scope/action params (Story #989).
+- **BREAKING (MCP)**: 3 repo-status tools consolidated into 1 (`repository_status`) with detail param (Story #990). `get_all_repositories_status` unchanged.
+- **BREAKING (MCP)**: 12 CI/CD forge-specific tools consolidated into 6 unified `ci_*` tools with auto-detection (Story #991).
+- **BREAKING (MCP)**: 10 SSH/group-CRUD tools consolidated into 4 (`manage_ssh_key`, `list_ssh_keys`, `manage_group_members`, `manage_group_repos`) via action params (Story #992).
 
 ### MCP Tool Migration: Credential Operations (Story #989)
 
@@ -40,8 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `admin_create_user_mcp_credential(username, description?)` | `manage_mcp_credential(action='create', target_user=..., description=?)` | |
 | `admin_delete_user_mcp_credential(username, credential_id)` | `manage_mcp_credential(action='delete', target_user=..., credential_id=...)` | |
 
-- **BREAKING (MCP Tool Surface)**: 3 repo-status tools consolidated into 1 unified `repository_status` tool (Story #990 / Epic #985). Hard-cut migration -- no shims. `get_all_repositories_status` unchanged.
-
 ### MCP Tool Migration: Repository Status (Story #990)
 
 | Old Tool | New Tool | Parameter Mapping |
@@ -49,12 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `get_repository_status(user_alias=X)` | `repository_status(alias=X, detail='basic')` | `user_alias` renamed to `alias`; response nested under `status` with `kind='activated'` |
 | `global_repo_status(alias=X)` | `repository_status(alias=X, detail='basic')` | Response now nested under `status` with `kind='global'` (was flat top-level) |
 | `get_repository_statistics(repository_alias=X)` | `repository_status(alias=X, detail='stats')` | `repository_alias` renamed to `alias`; stats in `statistics` alongside `status` |
-
-**Envelope shape change for global aliases (hard-cut)**:
-- **OLD** (`global_repo_status`): `{"success": true, "alias": "backend-global", "repo_name": "backend", "url": "...", "last_refresh": "...", "enable_temporal": true}`
-- **NEW** (`repository_status`): `{"success": true, "kind": "global", "detail": "basic", "status": {"alias": "backend-global", "repo_name": "backend", "url": "...", "last_refresh": "...", "enable_temporal": true}}`
-
-- **BREAKING (MCP Tool Surface)**: 12 CI/CD forge-specific tools consolidated into 6 unified `ci_*` tools with auto-detection (Story #991 / Epic #985). Hard-cut migration -- no shims.
 
 ### MCP Tool Migration: CI/CD Operations (Story #991)
 
@@ -73,9 +57,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `github_actions_retry_run(owner, repo, run_id)` | `ci_retry_run(repository_alias=..., run_id=..., forge='auto')` | |
 | `gitlab_ci_retry_pipeline(project_id, pipeline_id)` | `ci_retry_run(repository_alias=..., run_id=..., forge='auto')` | `pipeline_id` renamed to `run_id` |
 
-**Auto-detection**: Unified tools resolve `repository_alias` to its remote URL, then call `detect_forge_type()` to determine GitHub vs GitLab. Pass `forge='github'` or `forge='gitlab'` to override.
+### MCP Tool Migration: SSH and Group Operations (Story #992)
 
-**Auto-detect failure**: If the remote URL hostname matches neither "github" nor "gitlab" (e.g., self-hosted forge), the tool returns `{"success": false, "error": "Could not auto-detect forge from repository remote URL. Pass forge='github' or forge='gitlab' explicitly.", "remote_url": "..."}`.
+| Old Tool | New Tool | Parameter Mapping |
+|----------|----------|-------------------|
+| `cidx_ssh_key_create(...)` | `manage_ssh_key(action='create', ...)` | |
+| `cidx_ssh_key_delete(name)` | `manage_ssh_key(action='delete', name=...)` | |
+| `cidx_ssh_key_assign_host(name, hostname)` | `manage_ssh_key(action='assign_host', name=..., hostname=...)` | |
+| `cidx_ssh_key_show_public(name)` | `manage_ssh_key(action='show_public', name=...)` | |
+| `cidx_ssh_key_list(...)` | `list_ssh_keys(...)` | Renamed only; same signature |
+| `add_member_to_group(group_id, user_id)` | `manage_group_members(action='add', group_id=..., user_id=...)` | |
+| `remove_member_from_group(group_id, user_id)` | `manage_group_members(action='remove', group_id=..., user_id=...)` | |
+| `add_repos_to_group(group_id, repo_names)` | `manage_group_repos(action='add', group_id=..., repos=[...])` | `repo_names` renamed to `repos` |
+| `remove_repo_from_group(group_id, repo_name)` | `manage_group_repos(action='remove', group_id=..., repo_name=...)` | |
+| `bulk_remove_repos_from_group(group_id, repo_names)` | `manage_group_repos(action='bulk_remove', group_id=..., repos=[...])` | `repo_names` renamed to `repos` |
+
+### Fixed
+- TOTP config section test updated to match checkbox-to-dropdown migration from v10.13.0.
+
+## v10.13.0 (2026-05-09) — Config UI cosmetic fixes
 
 ### Fixed
 - Config section checkbox labels replaced with Yes/No dropdowns matching existing UI pattern.
