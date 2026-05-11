@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.16.0 (2026-05-11) — Fix elevation session_key injection for consolidated MCP dispatchers
+
+### Fixed
+- Consolidated MCP dispatchers (`manage_group_members`, `manage_group_repos`, `list_mcp_credentials`, `manage_mcp_credential`) now propagate `session_key` to inner elevation-gated handlers. The `__mcp_requires_session_key__` marker was missing on the undecorated dispatcher functions, causing protocol.py to skip `session_key` injection and all elevation-dependent tool calls to fail with "No session key" (Epic #985 regression).
+
+### Added
+- Unit tests for dispatcher session_key marker presence and protocol.py injection flow.
+
 ## v10.15.0 (2026-05-10) — Epic #985 E2E regression coverage and CLI API client fixes
 
 ### Fixed

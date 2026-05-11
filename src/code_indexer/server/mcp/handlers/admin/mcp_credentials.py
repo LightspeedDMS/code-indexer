@@ -312,6 +312,9 @@ def handle_list_mcp_credentials(
         )
 
 
+handle_list_mcp_credentials.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
 def handle_manage_mcp_credential(
     args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
@@ -347,3 +350,6 @@ def handle_manage_mcp_credential(
                 "error": f"Unknown action: {action!r}. Valid: create, delete",
             }
         )
+
+
+handle_manage_mcp_credential.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
