@@ -44,6 +44,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${E2E_TYPEFEST_TAG:=v4.8.3}"
 : "${E2E_TRIES_URL:=https://github.com/LightspeedDMS/tries.git}"
 : "${E2E_TRIES_TAG:=HEAD}"
+: "${E2E_MOCK_REPO_URL:=https://github.com/LightspeedDMS/code-indexer-mock-test-repo.git}"
+: "${E2E_MOCK_REPO_TAG:=HEAD}"
+: "${E2E_SCIP_MOCK_URL:=https://github.com/LightspeedDMS/scip-python-mock.git}"
+: "${E2E_SCIP_MOCK_TAG:=HEAD}"
 # Timeout defaults — overridable via .e2e-automation
 : "${E2E_SERVER_READINESS_TIMEOUT:=30}"
 : "${E2E_SERVER_READINESS_POLL:=1}"
@@ -392,9 +396,11 @@ mkdir -p "$E2E_SERVER_DATA_DIR"
 
 # Clone seed repos into persistent cache
 _bold "--- Seed Repo Cache ---"
-clone_seed_repo "markupsafe" "$E2E_MARKUPSAFE_URL" "$E2E_MARKUPSAFE_TAG"
-clone_seed_repo "type-fest"  "$E2E_TYPEFEST_URL"   "$E2E_TYPEFEST_TAG"
-clone_seed_repo "tries"      "$E2E_TRIES_URL"       "$E2E_TRIES_TAG"
+clone_seed_repo "markupsafe"    "$E2E_MARKUPSAFE_URL"  "$E2E_MARKUPSAFE_TAG"
+clone_seed_repo "type-fest"     "$E2E_TYPEFEST_URL"    "$E2E_TYPEFEST_TAG"
+clone_seed_repo "tries"         "$E2E_TRIES_URL"        "$E2E_TRIES_TAG"
+clone_seed_repo "mock-test-repo" "$E2E_MOCK_REPO_URL"  "$E2E_MOCK_REPO_TAG"
+clone_seed_repo "scip-python-mock" "$E2E_SCIP_MOCK_URL" "$E2E_SCIP_MOCK_TAG"
 echo ""
 
 # Copy fresh working copies for this run
@@ -402,6 +408,8 @@ _bold "--- Copying Working Copies ---"
 copy_seed_repo "markupsafe"
 copy_seed_repo "type-fest"
 copy_seed_repo "tries"
+copy_seed_repo "mock-test-repo"
+copy_seed_repo "scip-python-mock"
 echo ""
 
 # Run phases
