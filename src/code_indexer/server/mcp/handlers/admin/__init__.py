@@ -1002,8 +1002,8 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 @require_mcp_elevation()
-def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Assign a user to a group."""
+def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
+    """Assign a user to a group (inner handler — Story #992)."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
@@ -1044,8 +1044,8 @@ def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, An
 
 
 @require_mcp_elevation()
-def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Remove a user from a group."""
+def _remove_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
+    """Remove a user from a group (inner handler — Story #992)."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
@@ -1084,8 +1084,8 @@ def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[st
 
 
 @require_mcp_elevation()
-def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Grant a group access to one or more repositories."""
+def _add_repos(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
+    """Grant a group access to one or more repositories (inner handler — Story #992)."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
@@ -1129,8 +1129,8 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
 
 
 @require_mcp_elevation()
-def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Revoke a group's access to a single repository."""
+def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
+    """Revoke a group's access to a single repository (inner handler — Story #992)."""
     from ....services.group_access_manager import CidxMetaCannotBeRevokedError
 
     try:
@@ -1187,10 +1187,10 @@ def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str,
 
 
 @require_mcp_elevation()
-def handle_bulk_remove_repos_from_group(
-    args: Dict[str, Any], user: User
+def _bulk_remove_repos(
+    args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
-    """Revoke a group's access to multiple repositories."""
+    """Revoke a group's access to multiple repositories (inner handler — Story #992)."""
     from ....services.group_access_manager import CidxMetaCannotBeRevokedError
     from ....services.constants import CIDX_META_REPO
 
@@ -1683,6 +1683,97 @@ def handle_trigger_dependency_analysis(
 
 
 # =============================================================================
+# Story #992: Unified Group Management Dispatchers
+# =============================================================================
+
+_VALID_MEMBER_ACTIONS = frozenset({"add", "remove"})
+_VALID_REPO_ACTIONS = frozenset({"add", "remove", "bulk_remove"})
+
+
+def handle_manage_group_members(
+    args: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """
+    Unified group member management dispatcher (Story #992).
+
+    Dispatches to elevation-gated inner handlers based on 'action':
+      - 'add'    -> _add_member(args, user, **kwargs)
+      - 'remove' -> _remove_member(args, user, **kwargs)
+
+    Public dispatcher is UNDECORATED; elevation is enforced by each inner handler.
+    """
+    action = args.get("action", "")
+    if not action:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"success": False, "error": "Missing required parameter: action"}
+        )
+    if action not in _VALID_MEMBER_ACTIONS:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {
+                "success": False,
+                "error": (
+                    f"Invalid action '{action}'. "
+                    f"Valid actions: {sorted(_VALID_MEMBER_ACTIONS)}"
+                ),
+            }
+        )
+    if action == "add":
+        return _add_member(args, user, **kwargs)  # type: ignore[no-any-return]
+    # action == "remove"
+    return _remove_member(args, user, **kwargs)  # type: ignore[no-any-return]
+
+
+def handle_manage_group_repos(
+    args: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """
+    Unified group repo management dispatcher (Story #992).
+
+    Dispatches to elevation-gated inner handlers based on 'action':
+      - 'add'         -> _add_repos(args, user, **kwargs)
+      - 'remove'      -> _remove_repo(args, user, **kwargs)
+      - 'bulk_remove' -> _bulk_remove_repos(args, user, **kwargs)
+
+    Public dispatcher is UNDECORATED; elevation is enforced by each inner handler.
+    The 'repos' list parameter is forwarded as 'repo_names' for add/bulk_remove,
+    and 'repo_name' (first element) for remove.
+    """
+    action = args.get("action", "")
+    if not action:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"success": False, "error": "Missing required parameter: action"}
+        )
+    if action not in _VALID_REPO_ACTIONS:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {
+                "success": False,
+                "error": (
+                    f"Invalid action '{action}'. "
+                    f"Valid actions: {sorted(_VALID_REPO_ACTIONS)}"
+                ),
+            }
+        )
+    if action == "add":
+        # Forward 'repos' as 'repo_names' for inner handler compatibility
+        inner_args = {**args}
+        if "repos" in inner_args and "repo_names" not in inner_args:
+            inner_args["repo_names"] = inner_args.pop("repos")
+        return _add_repos(inner_args, user, **kwargs)  # type: ignore[no-any-return]
+    if action == "remove":
+        # Forward 'repos' (list) or accept 'repo_name' (scalar) for inner handler
+        inner_args = {**args}
+        if "repos" in inner_args and "repo_name" not in inner_args:
+            repos_list = inner_args.pop("repos")
+            inner_args["repo_name"] = repos_list[0] if repos_list else ""
+        return _remove_repo(inner_args, user, **kwargs)  # type: ignore[no-any-return]
+    # action == "bulk_remove"
+    inner_args = {**args}
+    if "repos" in inner_args and "repo_names" not in inner_args:
+        inner_args["repo_names"] = inner_args.pop("repos")
+    return _bulk_remove_repos(inner_args, user, **kwargs)  # type: ignore[no-any-return]
+
+
+# =============================================================================
 # Registration
 # =============================================================================
 
@@ -1707,11 +1798,9 @@ def _register(registry: dict) -> None:
     registry["get_group"] = handle_get_group
     registry["update_group"] = handle_update_group
     registry["delete_group"] = handle_delete_group
-    registry["add_member_to_group"] = handle_add_member_to_group
-    registry["remove_member_from_group"] = handle_remove_member_from_group
-    registry["add_repos_to_group"] = handle_add_repos_to_group
-    registry["remove_repo_from_group"] = handle_remove_repo_from_group
-    registry["bulk_remove_repos_from_group"] = handle_bulk_remove_repos_from_group
+    # Story #992: 5 narrow group tools replaced by 2 action-param tools (hard-cut).
+    registry["manage_group_members"] = handle_manage_group_members
+    registry["manage_group_repos"] = handle_manage_group_repos
     registry["list_api_keys"] = handle_list_api_keys
     registry["create_api_key"] = handle_create_api_key
     registry["delete_api_key"] = handle_delete_api_key

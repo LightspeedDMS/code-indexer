@@ -65,11 +65,9 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "directory_tree",
         "authenticate",
         "elevate_session",
-        "cidx_ssh_key_create",
-        "cidx_ssh_key_list",
-        "cidx_ssh_key_delete",
-        "cidx_ssh_key_show_public",
-        "cidx_ssh_key_assign_host",
+        # Story #992: 5 SSH tools consolidated into 2 action-param tools (hard-cut).
+        "manage_ssh_key",
+        "list_ssh_keys",
         "cidx_quick_reference",
         "trigger_reindex",
         "get_index_status",
@@ -138,11 +136,9 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "get_group",
         "update_group",
         "delete_group",
-        "add_member_to_group",
-        "remove_member_from_group",
-        "add_repos_to_group",
-        "remove_repo_from_group",
-        "bulk_remove_repos_from_group",
+        # Story #992: 5 group CRUD tools consolidated into 2 action-param tools (hard-cut).
+        "manage_group_members",
+        "manage_group_repos",
         "list_api_keys",
         "create_api_key",
         "delete_api_key",
@@ -273,7 +269,7 @@ def test_all_public_handlers_importable():
     assert hasattr(h, "create_pull_request")
     assert hasattr(h, "scip_definition")
     assert hasattr(h, "handle_authenticate")
-    assert hasattr(h, "handle_ssh_key_create")
+    assert hasattr(h, "handle_manage_ssh_key")
     assert hasattr(h, "handle_list_delegation_functions")
     assert hasattr(h, "quick_reference")
 

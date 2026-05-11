@@ -126,16 +126,13 @@ _GATED_HANDLERS = [
         lambda h: admin_handlers.handle_delete_group({}, h, session_key=_SESSION_KEY),
         id="delete_group",
     ),
+    # Story #992: inner handlers preserve @require_mcp_elevation()
     pytest.param(
-        lambda h: admin_handlers.handle_add_member_to_group(
-            {}, h, session_key=_SESSION_KEY
-        ),
+        lambda h: admin_handlers._add_member({}, h, session_key=_SESSION_KEY),
         id="add_member_to_group",
     ),
     pytest.param(
-        lambda h: admin_handlers.handle_remove_member_from_group(
-            {}, h, session_key=_SESSION_KEY
-        ),
+        lambda h: admin_handlers._remove_member({}, h, session_key=_SESSION_KEY),
         id="remove_member_from_group",
     ),
     pytest.param(

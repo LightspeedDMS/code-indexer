@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## v10.13.0 (2026-05-09) — Config UI cosmetic fixes
 
 ### Changed
+- **BREAKING (MCP Tool Surface)**: 10 SSH and group-CRUD tools consolidated into 4 unified action-param tools (Story #992 / Epic #985). Hard-cut migration -- no shims.
+
+### MCP Tool Migration: SSH and Group Operations (Story #992)
+
+| Old Tool | New Tool | Parameter Mapping |
+|----------|----------|-------------------|
+| `cidx_ssh_key_create(...)` | `manage_ssh_key(action='create', ...)` | |
+| `cidx_ssh_key_delete(name)` | `manage_ssh_key(action='delete', name=...)` | |
+| `cidx_ssh_key_assign_host(name, hostname)` | `manage_ssh_key(action='assign_host', name=..., hostname=...)` | |
+| `cidx_ssh_key_show_public(name)` | `manage_ssh_key(action='show_public', name=...)` | |
+| `cidx_ssh_key_list(...)` | `list_ssh_keys(...)` | Renamed only; same signature |
+| `add_member_to_group(group_id, user_id)` | `manage_group_members(action='add', group_id=..., user_id=...)` | |
+| `remove_member_from_group(group_id, user_id)` | `manage_group_members(action='remove', group_id=..., user_id=...)` | |
+| `add_repos_to_group(group_id, repo_names)` | `manage_group_repos(action='add', group_id=..., repos=[...])` | `repo_names` renamed to `repos` |
+| `remove_repo_from_group(group_id, repo_name)` | `manage_group_repos(action='remove', group_id=..., repo_name=...)` | |
+| `bulk_remove_repos_from_group(group_id, repo_names)` | `manage_group_repos(action='bulk_remove', group_id=..., repos=[...])` | `repo_names` renamed to `repos` |
+
 - **BREAKING (MCP Tool Surface)**: 8 scattered MCP credential tools consolidated into 2 unified action-param tools (Story #989 / Epic #985). Hard-cut migration — no shims, no deprecation period.
 
 ### MCP Tool Migration: Credential Operations (Story #989)

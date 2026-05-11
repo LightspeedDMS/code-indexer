@@ -76,9 +76,9 @@ def _metadata_payload(meta: Any, include_public: bool = False) -> Dict[str, Any]
     return payload
 
 
-def handle_ssh_key_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
-    Create a new SSH key pair.
+    Create a new SSH key pair (inner handler).
 
     Args:
         args: Dict with name, key_type (optional), email (optional), description (optional)
@@ -120,9 +120,9 @@ def handle_ssh_key_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _ssh_error("Error creating SSH key", e)
 
 
-def handle_ssh_key_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
-    List all managed and unmanaged SSH keys.
+    List all managed and unmanaged SSH keys (inner handler).
 
     Args:
         args: Empty dict (no parameters needed)
@@ -165,9 +165,9 @@ def handle_ssh_key_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _ssh_error("Error listing SSH keys", e)
 
 
-def handle_ssh_key_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
-    Delete an SSH key.
+    Delete an SSH key (inner handler).
 
     Args:
         args: Dict with name
@@ -197,9 +197,9 @@ def handle_ssh_key_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _ssh_error("Error deleting SSH key", e)
 
 
-def handle_ssh_key_show_public(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _show_public(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
-    Get the public key content for copy/paste.
+    Get the public key content for copy/paste (inner handler).
 
     Args:
         args: Dict with name
@@ -232,9 +232,9 @@ def handle_ssh_key_show_public(args: Dict[str, Any], user: User) -> Dict[str, An
         return _ssh_error("Error getting public key", e)
 
 
-def handle_ssh_key_assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+def _assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
-    Assign a host to an SSH key.
+    Assign a host to an SSH key (inner handler).
 
     Args:
         args: Dict with name and hostname
@@ -277,10 +277,57 @@ def handle_ssh_key_assign_host(args: Dict[str, Any], user: User) -> Dict[str, An
         return _ssh_error("Error assigning host to key", e)
 
 
+_VALID_SSH_ACTIONS = frozenset({"create", "delete", "show_public", "assign_host"})
+
+
+def handle_manage_ssh_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """
+    Unified SSH key management dispatcher (Story #992).
+
+    Dispatches to inner handlers based on the 'action' parameter:
+      - 'create'      -> _create(args, user)
+      - 'delete'      -> _delete(args, user)
+      - 'show_public' -> _show_public(args, user)
+      - 'assign_host' -> _assign_host(args, user)
+
+    Permission is enforced at the tool-doc level (repository:admin).
+    """
+    action = args.get("action", "")
+    if not action:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: action"}
+        )
+    if action not in _VALID_SSH_ACTIONS:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": (
+                    f"Invalid action '{action}'. "
+                    f"Valid actions: {sorted(_VALID_SSH_ACTIONS)}"
+                ),
+            }
+        )
+    if action == "create":
+        return _create(args, user)
+    if action == "delete":
+        return _delete(args, user)
+    if action == "show_public":
+        return _show_public(args, user)
+    # action == "assign_host"
+    return _assign_host(args, user)
+
+
+def handle_list_ssh_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """
+    List all managed and unmanaged SSH keys (Story #992).
+
+    Simple rename wrapper over _list — same signature, same response shape.
+    Permission enforced at tool-doc level (repository:admin).
+    """
+    return _list(args, user)
+
+
 def _register(registry: dict) -> None:
-    """Register SSH key handlers into HANDLER_REGISTRY."""
-    registry["cidx_ssh_key_create"] = handle_ssh_key_create
-    registry["cidx_ssh_key_list"] = handle_ssh_key_list
-    registry["cidx_ssh_key_delete"] = handle_ssh_key_delete
-    registry["cidx_ssh_key_show_public"] = handle_ssh_key_show_public
-    registry["cidx_ssh_key_assign_host"] = handle_ssh_key_assign_host
+    """Register SSH key handlers into HANDLER_REGISTRY (Story #992: consolidated)."""
+    registry["manage_ssh_key"] = handle_manage_ssh_key
+    registry["list_ssh_keys"] = handle_list_ssh_keys

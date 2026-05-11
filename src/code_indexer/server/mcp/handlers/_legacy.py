@@ -328,14 +328,11 @@ _memory_register(HANDLER_REGISTRY)
 _search_register(HANDLER_REGISTRY)
 
 
-# SSH Key Management Handlers (Story #572) — extracted to ssh_keys.py
+# SSH Key Management Handlers (Story #572 extracted; Story #992 consolidated).
 from .ssh_keys import (  # noqa: F401, E402
     get_ssh_key_manager,
-    handle_ssh_key_create,
-    handle_ssh_key_list,
-    handle_ssh_key_delete,
-    handle_ssh_key_show_public,
-    handle_ssh_key_assign_host,
+    handle_manage_ssh_key,
+    handle_list_ssh_keys,
 )
 from .ssh_keys import _register as _ssh_keys_register  # noqa: E402
 from .guides import _register as _guides_register  # noqa: E402
@@ -555,11 +552,9 @@ from .admin import (  # noqa: F401, E402
     handle_get_group,
     handle_update_group,
     handle_delete_group,
-    handle_add_member_to_group,
-    handle_remove_member_from_group,
-    handle_add_repos_to_group,
-    handle_remove_repo_from_group,
-    handle_bulk_remove_repos_from_group,
+    # Story #992: 5 narrow group handlers replaced by 2 unified dispatchers (hard-cut).
+    handle_manage_group_members,
+    handle_manage_group_repos,
     handle_list_api_keys,
     handle_create_api_key,
     handle_delete_api_key,

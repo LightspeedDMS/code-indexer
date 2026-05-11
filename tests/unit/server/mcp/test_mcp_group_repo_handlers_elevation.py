@@ -10,10 +10,11 @@ from unittest.mock import patch
 
 import pytest
 
+# Story #992: public handlers renamed to private inner handlers; elevation preserved.
 _HANDLERS = [
-    "handle_add_repos_to_group",
-    "handle_remove_repo_from_group",
-    "handle_bulk_remove_repos_from_group",
+    "_add_repos",
+    "_remove_repo",
+    "_bulk_remove_repos",
 ]
 
 
