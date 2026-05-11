@@ -305,7 +305,8 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails or permission denied
         """
         result = self._call_mcp_tool(
-            "add_member_to_group", {"group_id": str(group_id), "user_id": user_id}
+            "manage_group_members",
+            {"action": "add", "group_id": str(group_id), "user_id": user_id},
         )
 
         if not result.get("success", False):
@@ -331,7 +332,8 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails or permission denied
         """
         result = self._call_mcp_tool(
-            "add_repos_to_group", {"group_id": str(group_id), "repo_names": repo_names}
+            "manage_group_repos",
+            {"action": "add", "group_name": str(group_id), "repos": repo_names},
         )
 
         if not result.get("success", False):
@@ -357,8 +359,8 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails or permission denied
         """
         result = self._call_mcp_tool(
-            "remove_repo_from_group",
-            {"group_id": str(group_id), "repo_name": repo_name},
+            "manage_group_repos",
+            {"action": "remove", "group_name": str(group_id), "repos": [repo_name]},
         )
 
         if not result.get("success", False):
@@ -386,8 +388,8 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails or permission denied
         """
         result = self._call_mcp_tool(
-            "bulk_remove_repos_from_group",
-            {"group_id": str(group_id), "repo_names": repo_names},
+            "manage_group_repos",
+            {"action": "bulk_remove", "group_name": str(group_id), "repos": repo_names},
         )
 
         if not result.get("success", False):
