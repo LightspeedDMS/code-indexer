@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.15.0 (2026-05-10) — Epic #985 E2E regression coverage and CLI API client fixes
+
+### Fixed
+- CLI API clients (`group_client.py`, `credential_client.py`) migrated to consolidated MCP tool names matching Epic #985 changes.
+- `manage_group_members` parameter corrected from `users` (list) to `user_id` (string) across all API clients and E2E tests.
+
+### Added
+- Phase 3 E2E regression suite: 63 tests validating all consolidated MCP tools via TestClient (Story #985).
+- Phase 4 E2E regression suite: 63 tests validating all consolidated MCP tools against live uvicorn server (Story #985).
+- Removed-tool regression tests: 25 old tool names verified to return clean errors (both Phase 3 and Phase 4).
+
 ## v10.14.0 (2026-05-10) — MCP Tool Surface Compression and Consolidation (Epic #985)
 
 Reduces MCP tool count from 167 to 147 (net -20, ~12%) via action-param dispatcher pattern. All migrations are hard-cut -- no shims, no deprecation period. Old tool names removed from both HANDLER_REGISTRY and TOOL_REGISTRY.
