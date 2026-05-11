@@ -225,7 +225,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
             AuthenticationError: If authentication fails
         """
-        result = self._call_mcp_tool("list_mcp_credentials", {})
+        result = self._call_mcp_tool("list_mcp_credentials", {"scope": "self"})
 
         if not result.get("success", False):
             error = result.get("error", "Unknown error")
@@ -250,7 +250,8 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
         if description:
             arguments["description"] = description
 
-        result = self._call_mcp_tool("create_mcp_credential", arguments)
+        arguments["action"] = "create"
+        result = self._call_mcp_tool("manage_mcp_credential", arguments)
 
         if not result.get("success", False):
             raise APIClientError(
@@ -277,7 +278,8 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails
         """
         result = self._call_mcp_tool(
-            "delete_mcp_credential", {"credential_id": credential_id}
+            "manage_mcp_credential",
+            {"action": "delete", "credential_id": credential_id},
         )
 
         if not result.get("success", False):
@@ -306,7 +308,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails or permission denied
         """
         result = self._call_mcp_tool(
-            "admin_list_user_mcp_credentials", {"username": username}
+            "list_mcp_credentials", {"scope": "user", "username": username}
         )
 
         if not result.get("success", False):
@@ -337,7 +339,8 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
         if description:
             arguments["description"] = description
 
-        result = self._call_mcp_tool("admin_create_user_mcp_credential", arguments)
+        arguments["action"] = "create"
+        result = self._call_mcp_tool("manage_mcp_credential", arguments)
 
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
@@ -368,8 +371,8 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             AuthenticationError: If authentication fails or permission denied
         """
         result = self._call_mcp_tool(
-            "admin_delete_user_mcp_credential",
-            {"username": username, "credential_id": credential_id},
+            "manage_mcp_credential",
+            {"action": "delete", "username": username, "credential_id": credential_id},
         )
 
         if not result.get("success", False):
@@ -392,7 +395,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             APIClientError: If API request fails
             AuthenticationError: If authentication fails or permission denied
         """
-        result = self._call_mcp_tool("admin_list_all_mcp_credentials", {})
+        result = self._call_mcp_tool("list_mcp_credentials", {"scope": "all"})
 
         if not result.get("success", False):
             error = result.get("error", "Unknown error")
