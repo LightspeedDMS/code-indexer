@@ -3,6 +3,7 @@ name: list_users
 category: admin
 required_permission: manage_users
 tl_dr: List all users in CIDX system with roles and creation timestamps.
+slim_description: "List all users in the CIDX system (requires manage_users)."
 inputSchema:
   type: object
   properties: {}

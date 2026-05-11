@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.auth import dependencies
+from code_indexer.server.auth import dependencies as dependencies
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 
@@ -27,6 +27,10 @@ from code_indexer.server.mcp.handlers._utils import (
 )
 from code_indexer.server.mcp.auth.elevation_decorator import require_mcp_elevation
 from . import elevate_session as _elevate_session_module
+from .mcp_credentials import (
+    handle_list_mcp_credentials,
+    handle_manage_mcp_credential,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -998,8 +1002,8 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 @require_mcp_elevation()
-def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Assign a user to a group."""
+def _add_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
+    """Assign a user to a group (inner handler — Story #992)."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
@@ -1040,8 +1044,8 @@ def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, An
 
 
 @require_mcp_elevation()
-def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Remove a user from a group."""
+def _remove_member(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
+    """Remove a user from a group (inner handler — Story #992)."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
@@ -1080,8 +1084,8 @@ def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[st
 
 
 @require_mcp_elevation()
-def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Grant a group access to one or more repositories."""
+def _add_repos(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
+    """Grant a group access to one or more repositories (inner handler — Story #992)."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
@@ -1125,8 +1129,8 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
 
 
 @require_mcp_elevation()
-def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Revoke a group's access to a single repository."""
+def _remove_repo(args: Dict[str, Any], user: User, **kwargs: Any) -> Dict[str, Any]:
+    """Revoke a group's access to a single repository (inner handler — Story #992)."""
     from ....services.group_access_manager import CidxMetaCannotBeRevokedError
 
     try:
@@ -1183,10 +1187,10 @@ def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str,
 
 
 @require_mcp_elevation()
-def handle_bulk_remove_repos_from_group(
-    args: Dict[str, Any], user: User
+def _bulk_remove_repos(
+    args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
-    """Revoke a group's access to multiple repositories."""
+    """Revoke a group's access to multiple repositories (inner handler — Story #992)."""
     from ....services.group_access_manager import CidxMetaCannotBeRevokedError
     from ....services.constants import CIDX_META_REPO
 
@@ -1320,306 +1324,6 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             format_error_log(
                 "QUERY-GENERAL-005",
                 f"Error in handle_delete_api_key: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
-
-
-# =============================================================================
-# CREDENTIAL MANAGEMENT HANDLERS (Story #743)
-# User Self-Service MCP Credentials
-# =============================================================================
-
-
-def handle_list_mcp_credentials(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """List all MCP credentials for the authenticated user."""
-    try:
-        credentials = dependencies.mcp_credential_manager.get_credentials(user.username)
-        return _mcp_response(  # type: ignore[no-any-return]
-            {
-                "success": True,
-                "credentials": [
-                    {
-                        "id": c.get("credential_id", c.get("id", "")),
-                        "description": c.get("name", c.get("description", "")),
-                        "created_at": c.get("created_at", ""),
-                    }
-                    for c in credentials
-                ],
-            }
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "QUERY-GENERAL-006",
-                f"Error in handle_list_mcp_credentials: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
-
-
-@require_mcp_elevation()
-def handle_create_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Create a new MCP credential for the authenticated user."""
-    try:
-        description = args.get("description", "")
-        result = dependencies.mcp_credential_manager.generate_credential(
-            user.username, name=description
-        )
-        return _mcp_response(  # type: ignore[no-any-return]
-            {
-                "success": True,
-                "credential_id": result.get("credential_id", ""),
-                "credential": result.get("client_secret", ""),
-                "client_id": result.get("client_id", ""),
-                "client_secret": result.get("client_secret", ""),
-                "description": description,
-            }
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "QUERY-GENERAL-007",
-                f"Error in handle_create_mcp_credential: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
-
-
-@require_mcp_elevation()
-def handle_delete_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Delete an MCP credential belonging to the authenticated user."""
-    try:
-        credential_id = args.get("credential_id", "")
-        if not credential_id:
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "Missing required parameter: credential_id",
-                }
-            )
-
-        result = dependencies.mcp_credential_manager.revoke_credential(
-            user.username, credential_id
-        )
-        return _mcp_response({"success": result})  # type: ignore[no-any-return]
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-001",
-                f"Error in handle_delete_mcp_credential: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
-
-
-# =============================================================================
-# CREDENTIAL MANAGEMENT HANDLERS (Story #743)
-# Admin Operations - Part 1
-# =============================================================================
-
-
-@require_mcp_elevation()
-def handle_admin_list_user_mcp_credentials(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
-    """List all MCP credentials for a specific user (admin only)."""
-    try:
-        username = args.get("username", "")
-        if not username:
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "Missing required parameter: username",
-                }
-            )
-
-        credentials = dependencies.mcp_credential_manager.get_credentials(username)
-        return _mcp_response(  # type: ignore[no-any-return]
-            {
-                "success": True,
-                "credentials": [
-                    {
-                        "id": c.get("credential_id", c.get("id", "")),
-                        "description": c.get("name", c.get("description", "")),
-                        "created_at": c.get("created_at", ""),
-                    }
-                    for c in credentials
-                ],
-            }
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-002",
-                f"Error in handle_admin_list_user_mcp_credentials: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
-
-
-@require_mcp_elevation()
-def handle_admin_create_user_mcp_credential(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
-    """Create a new MCP credential for a specific user (admin only)."""
-    try:
-        username = args.get("username", "")
-        if not username:
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "Missing required parameter: username",
-                }
-            )
-
-        description = args.get("description", "")
-        result = dependencies.mcp_credential_manager.generate_credential(
-            username, name=description
-        )
-        return _mcp_response(  # type: ignore[no-any-return]
-            {
-                "success": True,
-                "credential_id": result.get("credential_id", ""),
-                "credential": result.get("client_secret", ""),
-                "client_id": result.get("client_id", ""),
-                "client_secret": result.get("client_secret", ""),
-                "description": description,
-            }
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-003",
-                f"Error in handle_admin_create_user_mcp_credential: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
-
-
-# =============================================================================
-# CREDENTIAL MANAGEMENT HANDLERS (Story #743)
-# Admin Operations - Part 2
-# =============================================================================
-
-
-@require_mcp_elevation()
-def handle_admin_delete_user_mcp_credential(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
-    """Delete an MCP credential for a specific user (admin only)."""
-    try:
-        username = args.get("username", "")
-        credential_id = args.get("credential_id", "")
-
-        if not username:
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "Missing required parameter: username",
-                }
-            )
-        if not credential_id:
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "Missing required parameter: credential_id",
-                }
-            )
-
-        result = dependencies.mcp_credential_manager.revoke_credential(
-            username, credential_id
-        )
-        return _mcp_response({"success": result})  # type: ignore[no-any-return]
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-004",
-                f"Error in handle_admin_delete_user_mcp_credential: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
-
-
-@require_mcp_elevation()
-def handle_admin_list_all_mcp_credentials(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
-    """List all MCP credentials across all users (admin only)."""
-    try:
-        all_credentials = []
-        all_users = _utils.app_module.user_manager.get_all_users()
-
-        for target_user in all_users:
-            user_creds = dependencies.mcp_credential_manager.get_credentials(
-                target_user.username
-            )
-            for c in user_creds:
-                all_credentials.append(
-                    {
-                        "id": c.get("credential_id", c.get("id", "")),
-                        "username": target_user.username,
-                        "description": c.get("name", c.get("description", "")),
-                        "created_at": c.get("created_at", ""),
-                    }
-                )
-
-        return _mcp_response(  # type: ignore[no-any-return]
-            {
-                "success": True,
-                "credentials": all_credentials,
-            }
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-005",
-                f"Error in handle_admin_list_all_mcp_credentials: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
-
-
-# =============================================================================
-# SYSTEM CREDENTIAL HANDLERS (Story #275)
-# =============================================================================
-
-
-@require_mcp_elevation()
-def handle_admin_list_system_mcp_credentials(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
-    """List system-managed MCP credentials owned by the admin user (admin only)."""
-    try:
-        if user.role != UserRole.ADMIN:
-            return _mcp_response(  # type: ignore[no-any-return]
-                {
-                    "success": False,
-                    "error": "Permission denied: admin role required",
-                }
-            )
-
-        system_credentials = dependencies.user_manager.get_system_mcp_credentials()
-        return _mcp_response(  # type: ignore[no-any-return]
-            {
-                "success": True,
-                "system_credentials": system_credentials,
-                "count": len(system_credentials),
-            }
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "MCP-CRED-001",
-                f"Error in handle_admin_list_system_mcp_credentials: {e}",
                 extra={"correlation_id": get_correlation_id()},
             )
         )
@@ -1979,6 +1683,97 @@ def handle_trigger_dependency_analysis(
 
 
 # =============================================================================
+# Story #992: Unified Group Management Dispatchers
+# =============================================================================
+
+_VALID_MEMBER_ACTIONS = frozenset({"add", "remove"})
+_VALID_REPO_ACTIONS = frozenset({"add", "remove", "bulk_remove"})
+
+
+def handle_manage_group_members(
+    args: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """
+    Unified group member management dispatcher (Story #992).
+
+    Dispatches to elevation-gated inner handlers based on 'action':
+      - 'add'    -> _add_member(args, user, **kwargs)
+      - 'remove' -> _remove_member(args, user, **kwargs)
+
+    Public dispatcher is UNDECORATED; elevation is enforced by each inner handler.
+    """
+    action = args.get("action", "")
+    if not action:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"success": False, "error": "Missing required parameter: action"}
+        )
+    if action not in _VALID_MEMBER_ACTIONS:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {
+                "success": False,
+                "error": (
+                    f"Invalid action '{action}'. "
+                    f"Valid actions: {sorted(_VALID_MEMBER_ACTIONS)}"
+                ),
+            }
+        )
+    if action == "add":
+        return _add_member(args, user, **kwargs)  # type: ignore[no-any-return]
+    # action == "remove"
+    return _remove_member(args, user, **kwargs)  # type: ignore[no-any-return]
+
+
+def handle_manage_group_repos(
+    args: Dict[str, Any], user: User, **kwargs: Any
+) -> Dict[str, Any]:
+    """
+    Unified group repo management dispatcher (Story #992).
+
+    Dispatches to elevation-gated inner handlers based on 'action':
+      - 'add'         -> _add_repos(args, user, **kwargs)
+      - 'remove'      -> _remove_repo(args, user, **kwargs)
+      - 'bulk_remove' -> _bulk_remove_repos(args, user, **kwargs)
+
+    Public dispatcher is UNDECORATED; elevation is enforced by each inner handler.
+    The 'repos' list parameter is forwarded as 'repo_names' for add/bulk_remove,
+    and 'repo_name' (first element) for remove.
+    """
+    action = args.get("action", "")
+    if not action:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {"success": False, "error": "Missing required parameter: action"}
+        )
+    if action not in _VALID_REPO_ACTIONS:
+        return _mcp_response(  # type: ignore[no-any-return]
+            {
+                "success": False,
+                "error": (
+                    f"Invalid action '{action}'. "
+                    f"Valid actions: {sorted(_VALID_REPO_ACTIONS)}"
+                ),
+            }
+        )
+    if action == "add":
+        # Forward 'repos' as 'repo_names' for inner handler compatibility
+        inner_args = {**args}
+        if "repos" in inner_args and "repo_names" not in inner_args:
+            inner_args["repo_names"] = inner_args.pop("repos")
+        return _add_repos(inner_args, user, **kwargs)  # type: ignore[no-any-return]
+    if action == "remove":
+        # Forward 'repos' (list) or accept 'repo_name' (scalar) for inner handler
+        inner_args = {**args}
+        if "repos" in inner_args and "repo_name" not in inner_args:
+            repos_list = inner_args.pop("repos")
+            inner_args["repo_name"] = repos_list[0] if repos_list else ""
+        return _remove_repo(inner_args, user, **kwargs)  # type: ignore[no-any-return]
+    # action == "bulk_remove"
+    inner_args = {**args}
+    if "repos" in inner_args and "repo_names" not in inner_args:
+        inner_args["repo_names"] = inner_args.pop("repos")
+    return _bulk_remove_repos(inner_args, user, **kwargs)  # type: ignore[no-any-return]
+
+
+# =============================================================================
 # Registration
 # =============================================================================
 
@@ -2003,28 +1798,14 @@ def _register(registry: dict) -> None:
     registry["get_group"] = handle_get_group
     registry["update_group"] = handle_update_group
     registry["delete_group"] = handle_delete_group
-    registry["add_member_to_group"] = handle_add_member_to_group
-    registry["remove_member_from_group"] = handle_remove_member_from_group
-    registry["add_repos_to_group"] = handle_add_repos_to_group
-    registry["remove_repo_from_group"] = handle_remove_repo_from_group
-    registry["bulk_remove_repos_from_group"] = handle_bulk_remove_repos_from_group
+    # Story #992: 5 narrow group tools replaced by 2 action-param tools (hard-cut).
+    registry["manage_group_members"] = handle_manage_group_members
+    registry["manage_group_repos"] = handle_manage_group_repos
     registry["list_api_keys"] = handle_list_api_keys
     registry["create_api_key"] = handle_create_api_key
     registry["delete_api_key"] = handle_delete_api_key
     registry["list_mcp_credentials"] = handle_list_mcp_credentials
-    registry["create_mcp_credential"] = handle_create_mcp_credential
-    registry["delete_mcp_credential"] = handle_delete_mcp_credential
-    registry["admin_list_user_mcp_credentials"] = handle_admin_list_user_mcp_credentials
-    registry["admin_create_user_mcp_credential"] = (
-        handle_admin_create_user_mcp_credential
-    )
-    registry["admin_delete_user_mcp_credential"] = (
-        handle_admin_delete_user_mcp_credential
-    )
-    registry["admin_list_all_mcp_credentials"] = handle_admin_list_all_mcp_credentials
-    registry["admin_list_system_mcp_credentials"] = (
-        handle_admin_list_system_mcp_credentials
-    )
+    registry["manage_mcp_credential"] = handle_manage_mcp_credential
     registry["query_audit_logs"] = handle_query_audit_logs
     # Story #924: enter/exit maintenance MCP tools removed — endpoints
     # are localhost-only and auto-updater driven, not exposed via MCP.

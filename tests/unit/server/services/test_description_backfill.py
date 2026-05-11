@@ -281,7 +281,7 @@ class TestStartCallsReconcileTerse:
                 with patch.object(
                     sched,
                     "reconcile_terse_descriptions",
-                    side_effect=lambda: terse_called.append(True) or 0,
+                    side_effect=lambda: terse_called.append(True) or 0,  # type: ignore[func-returns-value]
                 ):
                     with patch(f"{SCHEDULER_MODULE}.threading") as mock_threading:
                         mock_threading.Event = threading.Event

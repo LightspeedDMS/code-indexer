@@ -3,6 +3,7 @@ name: get_all_repositories_status
 category: repos
 required_permission: query_repos
 tl_dr: Get status summary of ALL repositories (global and user-activated) in one call.
+slim_description: "Retrieve a high-level status summary of all repositories (both global shared and user-activated) in one call with no parameters."
 inputSchema:
   type: object
   properties: {}

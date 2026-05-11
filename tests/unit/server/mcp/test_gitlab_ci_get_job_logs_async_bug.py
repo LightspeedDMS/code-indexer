@@ -1,10 +1,11 @@
 """
-Test suite for Bug #138 - Missing await in handle_gitlab_ci_get_job_logs.
+Test suite for Bug #138 - Missing await in handle_ci_get_job_logs.
 
-This test suite verifies that the handle_gitlab_ci_get_job_logs handler
+This test suite verifies that the handle_ci_get_job_logs unified handler
 properly awaits the async GitLabCIClient.get_job_logs() method and returns
 serializable data instead of a coroutine object.
 
+Story #991: Migrated from handle_gitlab_ci_get_job_logs to handle_ci_get_job_logs.
 Foundation #1 Compliant: Uses real async execution with minimal mocking.
 """
 
@@ -13,11 +14,28 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import json
 
 from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.mcp.handlers import handle_gitlab_ci_get_job_logs
+from code_indexer.server.mcp.handlers import handle_ci_get_job_logs
 
 
-class TestGitLabCIGetJobLogsAsyncBug:
-    """Test that handle_gitlab_ci_get_job_logs properly awaits async call."""
+# Repo dict returned by _get_global_repo for GitLab alias resolution
+_GITLAB_REPO_DICT = {
+    "repo_url": "https://gitlab.com/myorg/myproject.git",
+    "alias": "myproject-global",
+    "branch": "main",
+}
+
+# Resolved 5-tuple for GitLab forge (forge_type, project_identifier, base_url, forge_host, error)
+_GITLAB_RESOLVED = (
+    "gitlab",
+    "myorg/myproject",
+    "https://gitlab.com",
+    "gitlab.com",
+    None,
+)
+
+
+class TestCIGetJobLogsAsyncBug:
+    """Test that handle_ci_get_job_logs properly awaits async call."""
 
     @pytest.fixture
     def mock_user(self):
@@ -28,17 +46,27 @@ class TestGitLabCIGetJobLogsAsyncBug:
         return user
 
     @pytest.fixture
-    def mock_gitlab_token(self):
-        """Mock the TokenAuthenticator.resolve_token to return a test token."""
-        with patch(
-            "code_indexer.server.services.git_state_manager.TokenAuthenticator.resolve_token",
-            return_value="test_gitlab_token_123",
+    def bypass_alias_resolution(self):
+        """Bypass _resolve_repo_alias_for_cicd and access control for async bug tests."""
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.cicd._resolve_repo_alias_for_cicd",
+                return_value=_GITLAB_RESOLVED,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.cicd._resolve_cicd_project_access",
+                return_value=None,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.cicd._resolve_cicd_read_token",
+                return_value="test_gitlab_token_123",
+            ),
         ):
             yield
 
     @pytest.mark.asyncio
-    async def test_handle_gitlab_ci_get_job_logs_awaits_async_call(
-        self, mock_user, mock_gitlab_token
+    async def test_handle_ci_get_job_logs_awaits_async_call(
+        self, mock_user, bypass_alias_resolution
     ):
         """
         Test that handler properly awaits async get_job_logs() method.
@@ -54,11 +82,11 @@ class TestGitLabCIGetJobLogsAsyncBug:
         """
         # Arrange
         test_logs = "2024-01-01 10:00:00 Starting job...\n2024-01-01 10:00:05 Job completed successfully"
-        test_project_id = "myorg/myproject"
+        test_repository_alias = "myproject-global"
         test_job_id = 12345
 
         args = {
-            "project_id": test_project_id,
+            "repository_alias": test_repository_alias,
             "job_id": test_job_id,
         }
 
@@ -75,7 +103,7 @@ class TestGitLabCIGetJobLogsAsyncBug:
 
             # Act
             # CRITICAL: This will fail if handler is not async or doesn't await
-            response = await handle_gitlab_ci_get_job_logs(args, mock_user)
+            response = await handle_ci_get_job_logs(args, mock_user)
 
             # Assert
             # 1. Verify response is a dict (not a coroutine)
@@ -103,12 +131,12 @@ class TestGitLabCIGetJobLogsAsyncBug:
 
             # 5. Verify client.get_job_logs was called with correct args
             mock_client_instance.get_job_logs.assert_awaited_once_with(
-                project_id=test_project_id, job_id=test_job_id
+                project_id="myorg/myproject", job_id=test_job_id
             )
 
     @pytest.mark.asyncio
-    async def test_handle_gitlab_ci_get_job_logs_is_awaitable(
-        self, mock_user, mock_gitlab_token
+    async def test_handle_ci_get_job_logs_is_awaitable(
+        self, mock_user, bypass_alias_resolution
     ):
         """
         Test that handler function is actually async (awaitable).
@@ -117,7 +145,7 @@ class TestGitLabCIGetJobLogsAsyncBug:
         impossible to properly await the async client call.
         """
         # Arrange
-        args = {"project_id": "test/project", "job_id": 123}
+        args = {"repository_alias": "myproject-global", "job_id": 123}
 
         with patch(
             "code_indexer.server.clients.gitlab_ci_client.GitLabCIClient"
@@ -129,19 +157,19 @@ class TestGitLabCIGetJobLogsAsyncBug:
 
             # Act - Try to await the handler
             try:
-                result = await handle_gitlab_ci_get_job_logs(args, mock_user)
+                result = await handle_ci_get_job_logs(args, mock_user)
                 # If we get here, handler is properly async
                 assert result is not None
             except TypeError as e:
                 # This will happen if handler is not async
                 pytest.fail(
                     f"Handler is not async (cannot be awaited): {e}\n"
-                    "Expected 'async def handle_gitlab_ci_get_job_logs' but got 'def'"
+                    "Expected 'async def handle_ci_get_job_logs' but got 'def'"
                 )
 
     @pytest.mark.asyncio
     async def test_response_does_not_contain_coroutine_object(
-        self, mock_user, mock_gitlab_token
+        self, mock_user, bypass_alias_resolution
     ):
         """
         Test that response doesn't contain any coroutine objects.
@@ -151,7 +179,7 @@ class TestGitLabCIGetJobLogsAsyncBug:
         which cannot be JSON serialized.
         """
         # Arrange
-        args = {"project_id": "test/project", "job_id": 123}
+        args = {"repository_alias": "myproject-global", "job_id": 123}
 
         with patch(
             "code_indexer.server.clients.gitlab_ci_client.GitLabCIClient"
@@ -162,7 +190,7 @@ class TestGitLabCIGetJobLogsAsyncBug:
             MockClient.return_value = mock_client_instance
 
             # Act
-            response = await handle_gitlab_ci_get_job_logs(args, mock_user)
+            response = await handle_ci_get_job_logs(args, mock_user)
 
             # Assert - Check that no part of response is a coroutine
             def check_for_coroutines(obj, path="response"):

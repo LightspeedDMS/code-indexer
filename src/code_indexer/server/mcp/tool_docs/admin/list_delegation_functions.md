@@ -3,6 +3,7 @@ name: list_delegation_functions
 category: admin
 required_permission: query_repos
 tl_dr: List available delegation functions for the current user.
+slim_description: "List pre-approved delegation functions accessible to the current user based on their group membership."
 inputSchema:
   type: object
   properties: {}

@@ -3,6 +3,7 @@ name: git_pull
 category: git
 required_permission: repository:write
 tl_dr: Fetch and merge changes from remote repository.
+slim_description: "Fetch and merge changes from a remote repository into the current branch."
 inputSchema:
   type: object
   properties:

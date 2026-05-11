@@ -3,6 +3,7 @@ name: browse_directory
 category: search
 required_permission: query_repos
 tl_dr: List files with metadata (size, language, date) - flat list for filtering.
+slim_description: "List files in a repository directory as a flat array with per-file metadata, optionally filtered and sorted."
 inputSchema:
   type: object
   properties:

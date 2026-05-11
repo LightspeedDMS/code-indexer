@@ -3,6 +3,7 @@ name: scip_context
 category: scip
 required_permission: query_repos
 tl_dr: '[SCIP] Get smart, curated file list for understanding a symbol in context.'
+slim_description: "Get a relevance-ranked list of files related to a symbol by combining definition, references, and dependents."
 inputSchema:
   type: object
   properties:

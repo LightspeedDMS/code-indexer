@@ -3,6 +3,7 @@ name: get_index_status
 category: repos
 required_permission: repository:read
 tl_dr: Query current index status for all index types in a repository.
+slim_description: "Query current index status for all index types (semantic, fts, temporal, scip) in a repository."
 inputSchema:
   type: object
   properties:

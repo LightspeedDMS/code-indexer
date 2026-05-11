@@ -3,6 +3,7 @@ name: admin_logs_query
 category: admin
 required_permission: manage_users
 tl_dr: Query operational logs from SQLite database with pagination and filtering.
+slim_description: "Query paginated operational logs with optional filters for search text, log level, and correlation_id."
 inputSchema:
   type: object
   properties:

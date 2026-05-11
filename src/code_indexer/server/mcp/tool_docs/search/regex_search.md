@@ -3,6 +3,7 @@ name: regex_search
 category: search
 required_permission: query_repos
 tl_dr: Direct pattern search on files without index - comprehensive but slower.
+slim_description: "Exhaustive regex search on repository files using ripgrep with multiline, PCRE2, context lines, glob filters, and optional reranking."
 inputSchema:
   type: object
   properties:

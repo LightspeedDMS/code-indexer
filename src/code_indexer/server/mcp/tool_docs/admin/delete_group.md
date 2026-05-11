@@ -3,6 +3,7 @@ name: delete_group
 category: admin
 required_permission: manage_users
 tl_dr: Delete a custom group (DESTRUCTIVE).
+slim_description: "Delete a custom group by group_id (requires manage_users)."
 inputSchema:
   type: object
   properties:

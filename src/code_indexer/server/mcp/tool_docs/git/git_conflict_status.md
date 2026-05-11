@@ -3,6 +3,7 @@ name: git_conflict_status
 category: git
 required_permission: repository:read
 tl_dr: Get detailed merge conflict status with conflict marker regions per file.
+slim_description: "Get detailed merge conflict status during an active merge, including per-file conflict regions with ours/theirs content."
 inputSchema:
   type: object
   properties:

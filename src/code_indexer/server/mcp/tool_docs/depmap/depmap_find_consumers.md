@@ -4,6 +4,7 @@ category: depmap
 required_permission: query_repos
 quick_reference: true
 tl_dr: Find all repos that depend on a given repo across every dependency-map domain.
+slim_description: "Find every repository that depends on a given repo_name by scanning all dependency-map domain files exhaustively."
 inputSchema:
   type: object
   required:

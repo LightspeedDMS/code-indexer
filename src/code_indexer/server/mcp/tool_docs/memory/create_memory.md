@@ -3,6 +3,7 @@ name: create_memory
 category: memory
 required_permission: repository:write
 tl_dr: Create a persistent, evidence-backed technical memory in the shared memory store.
+slim_description: "Create a persistent technical memory entry with type, scope, summary, and evidence references."
 inputSchema:
   type: object
   properties:

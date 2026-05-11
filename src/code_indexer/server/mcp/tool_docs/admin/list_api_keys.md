@@ -3,6 +3,7 @@ name: list_api_keys
 category: admin
 required_permission: query_repos
 tl_dr: List all API keys for the authenticated user.
+slim_description: "List all API keys for the authenticated user without parameters."
 inputSchema:
   type: object
   properties: {}

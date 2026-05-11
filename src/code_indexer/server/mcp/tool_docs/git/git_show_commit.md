@@ -3,6 +3,7 @@ name: git_show_commit
 category: git
 required_permission: query_repos
 tl_dr: View detailed info about a single commit (message, stats, diff).
+slim_description: "View full details of a single commit by commit_hash, including author, message, and optional file stats or full diff."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: xray_dump_ast
 category: search
 required_permission: query_repos
 tl_dr: Synchronously dump the complete tree-sitter AST for a single file — no job polling required.
+slim_description: "Synchronously dump the complete tree-sitter AST for a single file in a repository."
 inputSchema:
   type: object
   properties:

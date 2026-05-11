@@ -3,6 +3,7 @@ name: check_hnsw_health
 category: repos
 required_permission: query_repos
 tl_dr: Check HNSW index health and integrity for a repository.
+slim_description: "Check HNSW vector index integrity for a repository, validating file existence, readability, loadability, and graph connectivity."
 inputSchema:
   type: object
   properties:
@@ -82,4 +83,4 @@ CACHING: Results cached for 5 minutes. Use force_refresh=true to bypass.
 
 TROUBLESHOOTING: valid=false -> check errors array. file_exists=false -> index not built, run indexing. loadable=false -> corrupted, rebuild required.
 
-USE INSTEAD OF get_repository_status or global_repo_status for general repo info. This tool is specifically for HNSW vector index integrity.
+USE INSTEAD OF repository_status for general repo info. This tool is specifically for HNSW vector index integrity.

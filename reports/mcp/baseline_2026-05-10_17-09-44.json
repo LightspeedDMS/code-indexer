@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-05-10T17:09:44.899297+00:00",
+  "git_sha": "b0f781c0",
+  "roles": {
+    "anonymous": {
+      "byte_size": 504,
+      "tiktoken_count": 128,
+      "tool_count": 1
+    },
+    "normal_user": {
+      "byte_size": 117613,
+      "tiktoken_count": 28141,
+      "tool_count": 92
+    },
+    "power_user": {
+      "byte_size": 156954,
+      "tiktoken_count": 37578,
+      "tool_count": 128
+    },
+    "admin": {
+      "byte_size": 190140,
+      "tiktoken_count": 45522,
+      "tool_count": 167
+    }
+  }
+}

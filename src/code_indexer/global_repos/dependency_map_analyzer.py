@@ -786,7 +786,7 @@ Document ONLY verified, factual dependencies and relationships found in source c
             desc = desc.lstrip("#").strip()
 
             # If description equals alias name or is empty, use better default
-            if not desc or desc.lower() == alias.lower():
+            if not desc or desc.lower() == alias.lower():  # type: ignore[union-attr]
                 desc = f"{alias} (standalone repository)"
 
             domain_list.append(
@@ -929,7 +929,9 @@ Document ONLY verified, factual dependencies and relationships found in source c
 
         prompt += "## PROHIBITED Content\n\n"
         prompt += "See `cidx-meta/dependency-map/_analysis_guidelines.md` for the full list of\n"
-        prompt += "prohibited content types. Additionally: do NOT include meta-commentary\n"
+        prompt += (
+            "prohibited content types. Additionally: do NOT include meta-commentary\n"
+        )
         prompt += "about your process or thinking.\n\n"
 
         prompt += "## Output Format\n\n"
@@ -1121,7 +1123,9 @@ Rules:
         prompt += "\n"
         prompt += "## PROHIBITED Content\n\n"
         prompt += "See `cidx-meta/dependency-map/_analysis_guidelines.md` for the full list of\n"
-        prompt += "prohibited content types. Additionally for this analysis: do NOT include\n"
+        prompt += (
+            "prohibited content types. Additionally for this analysis: do NOT include\n"
+        )
         prompt += "'MCP Searches Performed' sections, code snippets, JSON schemas, or directory listings.\n\n"
         prompt += "## Output Format\n\n"
         prompt += "CRITICAL: Your output MUST begin with a markdown heading (# Domain Analysis: domain-name).\n"
@@ -3338,7 +3342,9 @@ Rules:
 
         prompt += "## Reference Material\n\n"
         prompt += "Read dependency type definitions from `cidx-meta/dependency-map/_dep_types.md`.\n"
-        prompt += "Read analysis methodology, evidence rules, and output constraints from\n"
+        prompt += (
+            "Read analysis methodology, evidence rules, and output constraints from\n"
+        )
         prompt += "`cidx-meta/dependency-map/_analysis_guidelines.md`.\n\n"
 
         prompt += "## Source Code Exploration\n\n"

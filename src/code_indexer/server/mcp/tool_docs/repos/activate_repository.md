@@ -3,6 +3,7 @@ name: activate_repository
 category: repos
 required_permission: activate_repos
 tl_dr: Create user workspace for editing files, non-default branches, or composites.
+slim_description: "Create a user-specific workspace for editing files, working on non-default branches, or combining multiple repos into a composite."
 inputSchema:
   type: object
   properties:

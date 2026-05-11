@@ -3,6 +3,7 @@ name: admin_logs_export
 category: admin
 required_permission: manage_users
 tl_dr: Export operational logs in JSON or CSV format for offline analysis or import.
+slim_description: "Export operational logs in JSON or CSV format with optional filters (search, level, correlation_id)."
 inputSchema:
   type: object
   properties:

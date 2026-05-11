@@ -3,6 +3,7 @@ name: edit_file
 category: files
 required_permission: repository:write
 tl_dr: Edit existing file using exact string replacement with optimistic locking.
+slim_description: "Edit a file in an activated repository using exact string replacement with content_hash locking."
 inputSchema:
   type: object
   properties:

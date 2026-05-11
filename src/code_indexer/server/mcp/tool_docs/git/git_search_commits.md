@@ -3,6 +3,7 @@ name: git_search_commits
 category: git
 required_permission: query_repos
 tl_dr: Search commit messages for keywords, ticket numbers, or patterns.
+slim_description: "Search commit messages for keywords, ticket numbers, or regex patterns via query and optional is_regex flag."
 inputSchema:
   type: object
   properties:

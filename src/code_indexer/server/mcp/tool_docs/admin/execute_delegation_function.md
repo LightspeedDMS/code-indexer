@@ -3,6 +3,7 @@ name: execute_delegation_function
 category: admin
 required_permission: query_repos
 tl_dr: Execute a delegation function by delegating to Claude Server.
+slim_description: "Execute a named pre-defined delegation function on Claude Server by supplying function_name, parameters object, and prompt."
 inputSchema:
   type: object
   properties:

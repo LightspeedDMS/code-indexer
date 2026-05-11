@@ -161,14 +161,14 @@ class TestCredentialHandlersNoAttributeError:
 
     def test_list_mcp_credentials_handler_no_attribute_error(self, normal_user):
         """
-        Verify list_mcp_credentials handler does NOT raise AttributeError.
+        Verify list_mcp_credentials(scope='self') does NOT raise AttributeError.
 
-        After the fix, the handler uses dependencies.mcp_credential_manager.
+        Story #989: scope parameter now required; self-scope has no elevation gate.
         """
         handler = HANDLER_REGISTRY["list_mcp_credentials"]
 
         try:
-            result = handler({}, normal_user)
+            result = handler({"scope": "self"}, normal_user)
             assert "content" in result, "Handler should return MCP-compliant response"
             content = json.loads(result["content"][0]["text"])
             if "error" in content:
@@ -178,34 +178,36 @@ class TestCredentialHandlersNoAttributeError:
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    def test_create_mcp_credential_handler_no_attribute_error(self, normal_user):
+    def test_manage_mcp_credential_create_no_attribute_error(self, normal_user):
         """
-        Verify create_mcp_credential handler does NOT raise AttributeError.
+        Verify manage_mcp_credential(action='create') does NOT raise AttributeError.
 
-        After the fix, the handler uses dependencies.mcp_credential_manager.
-        Since Story #925 this handler is elevation-gated and may return a raw
-        error dict when no elevation window is active. Either outcome is valid.
+        Story #989: unified handler replaces create_mcp_credential.
+        Elevation-gated; may return error dict when no window is active.
+        Either outcome is valid — the key invariant is no AttributeError.
         """
-        handler = HANDLER_REGISTRY["create_mcp_credential"]
+        handler = HANDLER_REGISTRY["manage_mcp_credential"]
 
         try:
-            result = handler({"description": "Test"}, normal_user)
+            result = handler({"action": "create", "description": "Test"}, normal_user)
             _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    def test_delete_mcp_credential_handler_no_attribute_error(self, normal_user):
+    def test_manage_mcp_credential_delete_no_attribute_error(self, normal_user):
         """
-        Verify delete_mcp_credential handler does NOT raise AttributeError.
+        Verify manage_mcp_credential(action='delete') does NOT raise AttributeError.
 
-        After the fix, the handler uses dependencies.mcp_credential_manager.
-        Since Story #925 this handler is elevation-gated and may return a raw
-        error dict when no elevation window is active. Either outcome is valid.
+        Story #989: unified handler replaces delete_mcp_credential.
+        Elevation-gated; may return error dict when no window is active.
+        Either outcome is valid — the key invariant is no AttributeError.
         """
-        handler = HANDLER_REGISTRY["delete_mcp_credential"]
+        handler = HANDLER_REGISTRY["manage_mcp_credential"]
 
         try:
-            result = handler({"credential_id": "cred-123"}, normal_user)
+            result = handler(
+                {"action": "delete", "credential_id": "cred-123"}, normal_user
+            )
             _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
@@ -213,7 +215,10 @@ class TestCredentialHandlersNoAttributeError:
 
 class TestAdminCredentialHandlersNoAttributeError:
     """
-    Tests that verify admin credential handlers do NOT raise AttributeError.
+    Tests that verify unified admin credential handlers do NOT raise AttributeError.
+
+    Story #989: Old admin_* handlers replaced by list_mcp_credentials (scope=user/all)
+    and manage_mcp_credential (action=create/delete + target_user).
     """
 
     @pytest.fixture
@@ -226,51 +231,58 @@ class TestAdminCredentialHandlersNoAttributeError:
             created_at=datetime.now(timezone.utc),
         )
 
-    def test_admin_list_user_mcp_credentials_no_attribute_error(self, admin_user):
-        """Verify admin_list_user_mcp_credentials does NOT raise AttributeError."""
-        handler = HANDLER_REGISTRY["admin_list_user_mcp_credentials"]
+    def test_list_user_scope_no_attribute_error(self, admin_user):
+        """Verify list_mcp_credentials(scope='user') does NOT raise AttributeError."""
+        handler = HANDLER_REGISTRY["list_mcp_credentials"]
         try:
-            result = handler({"username": "testuser"}, admin_user)
+            result = handler({"scope": "user", "username": "testuser"}, admin_user)
             _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    def test_admin_create_user_mcp_credential_no_attribute_error(self, admin_user):
-        """Verify admin_create_user_mcp_credential does NOT raise AttributeError.
+    def test_manage_mcp_credential_admin_create_no_attribute_error(self, admin_user):
+        """Verify manage_mcp_credential(action='create', target_user=...) no AttributeError.
 
-        Since Story #925 this handler is elevation-gated and may return a raw
-        error dict (e.g. elevation_enforcement_disabled) when no elevation window
-        is active.  Either outcome is valid — the key invariant is no AttributeError.
+        Story #989: unified handler replaces admin_create_user_mcp_credential.
+        Elevation-gated; may return error dict when no elevation window is active.
+        Either outcome is valid — the key invariant is no AttributeError.
         """
-        handler = HANDLER_REGISTRY["admin_create_user_mcp_credential"]
+        handler = HANDLER_REGISTRY["manage_mcp_credential"]
         try:
             result = handler(
-                {"username": "testuser", "description": "Test"}, admin_user
+                {"action": "create", "target_user": "testuser", "description": "Test"},
+                admin_user,
             )
             _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    def test_admin_delete_user_mcp_credential_no_attribute_error(self, admin_user):
-        """Verify admin_delete_user_mcp_credential does NOT raise AttributeError.
+    def test_manage_mcp_credential_admin_delete_no_attribute_error(self, admin_user):
+        """Verify manage_mcp_credential(action='delete', target_user=...) no AttributeError.
 
-        Since Story #925 this handler is elevation-gated and may return a raw
-        error dict when no elevation window is active.  Either outcome is valid.
+        Story #989: unified handler replaces admin_delete_user_mcp_credential.
+        Elevation-gated; may return error dict when no elevation window is active.
+        Either outcome is valid — the key invariant is no AttributeError.
         """
-        handler = HANDLER_REGISTRY["admin_delete_user_mcp_credential"]
+        handler = HANDLER_REGISTRY["manage_mcp_credential"]
         try:
             result = handler(
-                {"username": "testuser", "credential_id": "cred-123"}, admin_user
+                {
+                    "action": "delete",
+                    "target_user": "testuser",
+                    "credential_id": "cred-123",
+                },
+                admin_user,
             )
             _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 
-    def test_admin_list_all_mcp_credentials_no_attribute_error(self, admin_user):
-        """Verify admin_list_all_mcp_credentials does NOT raise AttributeError."""
-        handler = HANDLER_REGISTRY["admin_list_all_mcp_credentials"]
+    def test_list_all_scope_no_attribute_error(self, admin_user):
+        """Verify list_mcp_credentials(scope='all') does NOT raise AttributeError."""
+        handler = HANDLER_REGISTRY["list_mcp_credentials"]
         try:
-            result = handler({}, admin_user)
+            result = handler({"scope": "all"}, admin_user)
             _assert_no_mcp_credential_manager_attribute_error(result)
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")

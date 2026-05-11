@@ -3,6 +3,7 @@ name: authenticate
 category: admin
 required_permission: public
 tl_dr: Authenticate with username and API key to establish session.
+slim_description: "Authenticate with username and api_key (format: cidx_sk_...) to establish a session."
 inputSchema:
   type: object
   properties:

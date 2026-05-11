@@ -3,6 +3,7 @@ name: edit_memory
 category: memory
 required_permission: repository:write
 tl_dr: Update mutable fields on an existing memory entry with optimistic concurrency.
+slim_description: "Update fields on an existing memory entry with optimistic concurrency via content_hash."
 inputSchema:
   type: object
   properties:

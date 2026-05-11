@@ -3,6 +3,7 @@ name: create_api_key
 category: admin
 required_permission: query_repos
 tl_dr: Create a new API key for programmatic access.
+slim_description: "Create a new API key for the authenticated user with an optional description."
 inputSchema:
   type: object
   properties:

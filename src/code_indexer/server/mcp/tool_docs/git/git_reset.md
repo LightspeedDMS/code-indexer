@@ -3,6 +3,7 @@ name: git_reset
 category: git
 required_permission: repository:admin
 tl_dr: Reset working tree to specific state (DESTRUCTIVE).
+slim_description: "Reset the working tree to a specific state using soft, mixed, or hard mode; optionally targeting a commit_hash."
 inputSchema:
   type: object
   properties:

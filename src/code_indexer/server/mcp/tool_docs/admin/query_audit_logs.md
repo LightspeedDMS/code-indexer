@@ -3,6 +3,7 @@ name: query_audit_logs
 category: admin
 required_permission: manage_users
 tl_dr: Query security audit logs with optional filtering (admin only).
+slim_description: "Query security audit logs with optional filters for user, action, date range, and limit."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: add_golden_repo_index
 category: repos
 required_permission: manage_golden_repos
 tl_dr: Add an index type to an existing golden repository.
+slim_description: "Add an index type (semantic, fts, temporal, or scip) to an existing golden repository identified by alias."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: manage_provider_indexes
 category: repos
 required_permission: repository:write
 tl_dr: Manage provider-specific semantic indexes (add, recreate, remove, status, list_providers).
+slim_description: "Manage provider-specific semantic indexes: list, check status, add, recreate, or remove collections."
 inputSchema:
   type: object
   properties:

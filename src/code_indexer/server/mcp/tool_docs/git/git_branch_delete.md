@@ -3,6 +3,7 @@ name: git_branch_delete
 category: git
 required_permission: repository:admin
 tl_dr: Delete a git branch (DESTRUCTIVE).
+slim_description: "Delete a git branch by name (DESTRUCTIVE)."
 inputSchema:
   type: object
   properties:

@@ -3,6 +3,7 @@ name: list_groups
 category: admin
 required_permission: manage_users
 tl_dr: List all groups with member counts and repository access information.
+slim_description: "List all groups (default and custom) with member and repository counts (requires manage_users)."
 inputSchema:
   type: object
   properties: {}

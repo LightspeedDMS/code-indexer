@@ -3,6 +3,7 @@ name: get_maintenance_status
 category: admin
 required_permission: query_repos
 tl_dr: Get current server maintenance mode status.
+slim_description: "Check current server maintenance mode status without parameters."
 inputSchema:
   type: object
   properties: {}

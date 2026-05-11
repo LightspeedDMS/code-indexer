@@ -3,6 +3,7 @@ name: depmap_get_hub_domains
 category: depmap
 required_permission: query_repos
 tl_dr: Return the top-N domains ranked by cross-domain edge degree (out, in, or total); on-the-fly computation, no cache.
+slim_description: "Identify the top-N most connected domains in the dependency graph ranked by out_degree, in_degree, or total_degree."
 inputSchema:
   type: object
   properties:

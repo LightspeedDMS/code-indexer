@@ -3,6 +3,7 @@ name: list_pull_request_comments
 category: git
 required_permission: query_repos
 tl_dr: Read all comments and review notes on a pull request / merge request. Returns both inline review comments and general conversation in unified format.
+slim_description: "Read all comments on a pull/merge request as a unified list sorted by creation time."
 inputSchema:
   type: object
   properties:

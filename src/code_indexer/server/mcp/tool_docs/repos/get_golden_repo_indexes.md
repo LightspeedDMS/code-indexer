@@ -3,6 +3,7 @@ name: get_golden_repo_indexes
 category: repos
 required_permission: query_repos
 tl_dr: Get structured status of all index types for a golden repository.
+slim_description: "Get index existence, path, and last_updated for semantic, fts, temporal, and scip indexes of a golden repo."
 inputSchema:
   type: object
   properties:

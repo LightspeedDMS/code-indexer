@@ -109,7 +109,6 @@ from .repos import (  # noqa: F401, E402
     activate_repository,
     deactivate_repository,
     list_repo_categories,
-    get_repository_status,
     sync_repository,
     switch_branch,
     get_branches,
@@ -119,11 +118,9 @@ from .repos import (  # noqa: F401, E402
     remove_golden_repo,
     refresh_golden_repo,
     change_golden_repo_branch,
-    get_repository_statistics,
     get_all_repositories_status,
     manage_composite_repository,
     handle_list_global_repos,
-    handle_global_repo_status,
     handle_add_golden_repo_index,
     handle_get_golden_repo_indexes,
     manage_provider_indexes,
@@ -331,14 +328,11 @@ _memory_register(HANDLER_REGISTRY)
 _search_register(HANDLER_REGISTRY)
 
 
-# SSH Key Management Handlers (Story #572) — extracted to ssh_keys.py
+# SSH Key Management Handlers (Story #572 extracted; Story #992 consolidated).
 from .ssh_keys import (  # noqa: F401, E402
     get_ssh_key_manager,
-    handle_ssh_key_create,
-    handle_ssh_key_list,
-    handle_ssh_key_delete,
-    handle_ssh_key_show_public,
-    handle_ssh_key_assign_host,
+    handle_manage_ssh_key,
+    handle_list_ssh_keys,
 )
 from .ssh_keys import _register as _ssh_keys_register  # noqa: E402
 from .guides import _register as _guides_register  # noqa: E402
@@ -466,24 +460,27 @@ from .cicd import (  # noqa: F401, E402
     _resolve_cicd_project_access,
     _resolve_cicd_read_token,
     _resolve_cicd_write_token,
+    # REST-only old-style handlers (NOT registered in MCP, kept for REST routes)
     handle_gh_actions_list_runs,
     handle_gh_actions_get_run,
     handle_gh_actions_search_logs,
     handle_gh_actions_get_job_logs,
     handle_gh_actions_retry_run,
     handle_gh_actions_cancel_run,
+    # GitLab CI handlers preserved for REST routes (Story #991: removed from MCP registry)
     handle_gitlab_ci_list_pipelines,
     handle_gitlab_ci_get_pipeline,
     handle_gitlab_ci_search_logs,
     handle_gitlab_ci_get_job_logs,
     handle_gitlab_ci_retry_pipeline,
     handle_gitlab_ci_cancel_pipeline,
-    handle_github_actions_list_runs,
-    handle_github_actions_get_run,
-    handle_github_actions_search_logs,
-    handle_github_actions_get_job_logs,
-    handle_github_actions_retry_run,
-    handle_github_actions_cancel_run,
+    # Unified CI/CD handlers (Story #991 - replaces 12 forge-specific handlers)
+    handle_ci_list_runs,
+    handle_ci_get_run,
+    handle_ci_get_job_logs,
+    handle_ci_search_logs,
+    handle_ci_cancel_run,
+    handle_ci_retry_run,
 )
 
 _cicd_register(HANDLER_REGISTRY)
@@ -555,22 +552,14 @@ from .admin import (  # noqa: F401, E402
     handle_get_group,
     handle_update_group,
     handle_delete_group,
-    handle_add_member_to_group,
-    handle_remove_member_from_group,
-    handle_add_repos_to_group,
-    handle_remove_repo_from_group,
-    handle_bulk_remove_repos_from_group,
+    # Story #992: 5 narrow group handlers replaced by 2 unified dispatchers (hard-cut).
+    handle_manage_group_members,
+    handle_manage_group_repos,
     handle_list_api_keys,
     handle_create_api_key,
     handle_delete_api_key,
     handle_list_mcp_credentials,
-    handle_create_mcp_credential,
-    handle_delete_mcp_credential,
-    handle_admin_list_user_mcp_credentials,
-    handle_admin_create_user_mcp_credential,
-    handle_admin_delete_user_mcp_credential,
-    handle_admin_list_all_mcp_credentials,
-    handle_admin_list_system_mcp_credentials,
+    handle_manage_mcp_credential,
     handle_query_audit_logs,
     handle_enter_maintenance_mode,
     handle_exit_maintenance_mode,

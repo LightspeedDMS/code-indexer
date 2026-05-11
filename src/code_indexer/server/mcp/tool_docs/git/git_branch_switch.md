@@ -3,6 +3,7 @@ name: git_branch_switch
 category: git
 required_permission: repository:write
 tl_dr: Switch to a different branch (git checkout).
+slim_description: "Switch the working tree to a different existing branch (git checkout)."
 inputSchema:
   type: object
   properties:

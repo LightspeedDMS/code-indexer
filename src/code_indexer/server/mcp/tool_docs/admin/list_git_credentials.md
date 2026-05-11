@@ -3,6 +3,7 @@ name: list_git_credentials
 category: admin
 required_permission: query_repos
 tl_dr: List your configured git forge credentials.
+slim_description: "List all git forge credentials configured for the authenticated user without parameters."
 inputSchema:
   type: object
   properties: {}

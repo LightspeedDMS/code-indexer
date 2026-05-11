@@ -20,6 +20,7 @@ from ._utils import (
     _coerce_int,
     _mcp_response,
     _list_global_repos,
+    _get_global_repo,
     _get_access_filtering_service,
 )
 
@@ -1567,765 +1568,724 @@ async def handle_gitlab_ci_cancel_pipeline(
         return _mcp_response({"success": False, "error": str(e)})
 
 
-# =============================================================================
-# GITHUB ACTIONS HANDLERS (Story #633)
-# =============================================================================
+# ============================================================================
+# Unified CI/CD Handlers (Story #991 - forge auto-detection consolidation)
+# ============================================================================
+
+# Default limit for ci_list_runs; named to avoid magic numbers across handlers.
+DEFAULT_CI_RUN_LIMIT = 20
 
 
-async def handle_github_actions_list_runs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
-    """
-    Handler for github_actions_list_runs tool.
+def _resolve_repo_alias_for_cicd(
+    repository_alias: str,
+    forge: str,
+    user: Any,
+) -> Tuple[
+    Optional[str], Optional[str], Optional[str], Optional[str], Optional[Dict[str, Any]]
+]:
+    """Resolve repository alias to forge type, project identifier, base_url.
 
-    Lists workflow runs for a GitHub repository with optional filtering.
-    Implements AC1-AC3 of Story #633.
+    Story #991: Shared resolution helper for all 6 unified ci_* handlers.
+
+    Algorithm:
+    1. Look up alias via _get_global_repo(); strip -global suffix and retry if needed
+    2. If forge='auto': call detect_forge_type(repo_url); fail explicitly if None
+    3. Call extract_owner_repo(repo_url) to get (owner, repo)
+    4. Build project_identifier as "owner/repo"
+    5. Derive base_url from repo_url for GitLab; GitHub clients don't use it
 
     Args:
-        args: Tool arguments containing:
-            - owner (str): Repository owner
-            - repo (str): Repository name
-            - workflow_id (str, optional): Filter by workflow ID or filename
-            - status (str, optional): Filter by run status
-            - branch (str, optional): Filter by branch name
-            - limit (int, optional): Maximum runs to return (default 20)
-        user: Authenticated user
+        repository_alias: Golden repo alias name
+        forge: 'auto', 'github', or 'gitlab'
+        user: Authenticated user (for future extensibility)
 
     Returns:
-        MCP response with workflow runs list
+        5-tuple (forge_type, project_identifier, base_url, forge_host, error_response).
+        On success: error_response is None; all other values are populated.
+        On failure: forge_type/project_identifier/base_url/forge_host are all None;
+                    error_response holds the ready-to-return MCP dict.
+    """
+    from code_indexer.server.clients.forge_client import (
+        detect_forge_type,
+        extract_owner_repo,
+    )
+
+    # Step 1: Resolve alias
+    repo_dict = _get_global_repo(repository_alias)
+    if repo_dict is None:
+        # Try stripping -global suffix
+        base_alias = repository_alias
+        if base_alias.lower().endswith("-global"):
+            base_alias = base_alias[: -len("-global")]
+            repo_dict = _get_global_repo(base_alias)
+
+    if repo_dict is None:
+        return (
+            None,
+            None,
+            None,
+            None,
+            _mcp_response(
+                {
+                    "success": False,
+                    "error": f"Repository alias '{repository_alias}' not found.",
+                }
+            ),
+        )
+
+    repo_url = repo_dict.get("repo_url", "")
+
+    # Step 2: Determine forge type
+    if forge == "auto":
+        forge_type = detect_forge_type(repo_url)
+        if forge_type is None:
+            return (
+                None,
+                None,
+                None,
+                None,
+                _mcp_response(
+                    {
+                        "success": False,
+                        "error": (
+                            "Could not auto-detect forge from repository remote URL. "
+                            "Pass forge='github' or forge='gitlab' explicitly."
+                        ),
+                        "remote_url": repo_url,
+                    }
+                ),
+            )
+    elif forge in ("github", "gitlab"):
+        forge_type = forge
+    else:
+        return (
+            None,
+            None,
+            None,
+            None,
+            _mcp_response(
+                {
+                    "success": False,
+                    "error": f"Invalid forge value '{forge}'. Must be 'auto', 'github', or 'gitlab'.",
+                }
+            ),
+        )
+
+    # Step 3: Extract owner/repo from URL
+    try:
+        owner, repo_name = extract_owner_repo(repo_url)
+    except ValueError as e:
+        return (
+            None,
+            None,
+            None,
+            None,
+            _mcp_response({"success": False, "error": f"Cannot parse repo URL: {e}"}),
+        )
+
+    # Step 4: Build project identifier
+    project_identifier = f"{owner}/{repo_name}"
+
+    # Step 5: Derive base_url for GitLab (extract scheme + host from repo_url)
+    if forge_type == "gitlab":
+        # Extract scheme + host: "https://gitlab.com/..." -> "https://gitlab.com"
+        base_url: Optional[str] = "https://gitlab.com"
+        for prefix in ("https://", "http://"):
+            if repo_url.startswith(prefix):
+                rest = repo_url[len(prefix) :]
+                slash_idx = rest.find("/")
+                host = rest[:slash_idx] if slash_idx != -1 else rest
+                base_url = f"{prefix}{host}"
+                break
+        forge_host = _derive_forge_host(base_url, "gitlab")
+    else:
+        base_url = None
+        forge_host = _derive_forge_host(None, "github")
+
+    return forge_type, project_identifier, base_url, forge_host, None
+
+
+def _handle_cicd_client_error(
+    exc: Exception,
+    project_identifier: str,
+    op_name: str,
+    error_code: str,
+) -> Dict[str, Any]:
+    """Map CI/CD client exceptions to MCP error responses.
+
+    Centralises the repetitive try/except pattern used in all 6 ci_* handlers.
+    Three error categories:
+    - Auth errors -> 'Authentication failed' message
+    - Not-found errors -> repo-not-found message with project_identifier
+    - Generic exceptions -> str(exc) fallback
+
+    Args:
+        exc: The caught exception instance
+        project_identifier: "owner/repo" string for the error message
+        op_name: Human-readable operation name for the log message
+        error_code: MCP error code string (e.g. "MCP-GENERAL-120")
+
+    Returns:
+        Ready-to-return MCP response dict with success=False
     """
     from code_indexer.server.clients.github_actions_client import (
-        GitHubActionsClient,
         GitHubAuthenticationError,
         GitHubRepositoryNotFoundError,
     )
+    from code_indexer.server.clients.gitlab_ci_client import (
+        GitLabAuthenticationError,
+        GitLabProjectNotFoundError,
+    )
+
+    if isinstance(exc, (GitHubAuthenticationError, GitLabAuthenticationError)):
+        logger.error(
+            format_error_log(
+                error_code,
+                f"CI/CD authentication failed in {op_name}: {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Authentication failed. Check token validity.",
+                "details": str(exc),
+            }
+        )
+
+    if isinstance(exc, (GitHubRepositoryNotFoundError, GitLabProjectNotFoundError)):
+        logger.error(
+            format_error_log(
+                error_code,
+                f"CI/CD repository not found in {op_name}: {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return _mcp_response(
+            {
+                "success": False,
+                "error": f"Repository '{project_identifier}' not found or not accessible.",
+                "details": str(exc),
+            }
+        )
+
+    logger.exception(
+        f"Error in {op_name}: {exc}",
+        extra={"correlation_id": get_correlation_id()},
+    )
+    return _mcp_response({"success": False, "error": str(exc)})
+
+
+async def handle_ci_list_runs(args: Dict[str, Any], user: Any) -> Dict[str, Any]:
+    """Unified handler for ci_list_runs tool.
+
+    Lists CI/CD runs for a repository, auto-detecting GitHub or GitLab
+    from the golden repo's remote URL.
+
+    Story #991: Replaces github_actions_list_runs + gitlab_ci_list_pipelines.
+    """
+    from code_indexer.server.clients.github_actions_client import GitHubActionsClient
+    from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
+
+    repository_alias = args.get("repository_alias")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+
+    forge = args.get("forge", "auto")
+    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
+    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    if error_resp is not None:
+        return error_resp
+
+    # forge_type and project_identifier are guaranteed non-None when error_resp is None
+    assert forge_type is not None and project_identifier is not None  # noqa: S101
+    assert forge_host is not None  # noqa: S101
+
+    access_error = _resolve_cicd_project_access(
+        project_identifier, forge_type, user.username
+    )
+    if access_error:
+        return _mcp_response({"success": False, "error": access_error})
+
+    token = _resolve_cicd_read_token(forge_type, user, forge_host)
+    if not token:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": f"{forge_type.title()} token not found. Configure token storage.",
+            }
+        )
+
+    branch = args.get("branch")
+    status = args.get("status")
+    limit = _coerce_int(args.get("limit"), DEFAULT_CI_RUN_LIMIT)
 
     try:
-        # Validate required parameters
-        owner = args.get("owner")
-        repo = args.get("repo")
-        if not owner:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: owner"}
+        if forge_type == "github":
+            client = GitHubActionsClient(token)
+            runs = await client.list_runs(
+                repository=project_identifier, branch=branch, status=status
             )
-        if not repo:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: repo"}
-            )
-
-        # Story #404 AC1: Group access check BEFORE token resolution (fail fast)
-        project_identifier = f"{owner}/{repo}"
-        access_error = _resolve_cicd_project_access(
-            project_identifier, "github", user.username
-        )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Story #404 AC4: Resilient read token (global CI -> personal PAT fallback)
-        forge_host = _derive_forge_host(args.get("base_url"), "github")
-        token = _resolve_cicd_read_token("github", user, forge_host)
-        if not token:
+            if limit:
+                runs = runs[:limit]
             return _mcp_response(
                 {
-                    "success": False,
-                    "error": "GitHub token not found. Set GITHUB_TOKEN environment variable or configure token storage.",
+                    "success": True,
+                    "repository_alias": repository_alias,
+                    "forge": forge_type,
+                    "runs": runs,
+                    "count": len(runs),
+                    "rate_limit": client.last_rate_limit,
                 }
             )
-
-        # Extract optional parameters
-        workflow_id = args.get("workflow_id")
-        status = args.get("status")
-        branch = args.get("branch")
-        limit = _coerce_int(args.get("limit"), 20)
-
-        # Combine owner and repo into repository format
-        repository = f"{owner}/{repo}"
-
-        # Create client and list runs (CRITICAL: keyword)
-        client = GitHubActionsClient(token)
-        runs = await client.list_runs(
-            repository=repository, branch=branch, status=status
-        )
-
-        # Apply limit to results
-        if limit:
-            runs = runs[:limit]
-
-        return _mcp_response(
-            {
-                "success": True,
-                "owner": owner,
-                "repo": repo,
-                "runs": runs,
-                "count": len(runs),
-                "filters": {
-                    "workflow_id": workflow_id,
-                    "status": status,
-                    "branch": branch,
-                    "limit": limit,
-                },
-                "rate_limit": client.last_rate_limit,
-            }
-        )
-
-    except GitHubAuthenticationError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-105",
-                f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
+        else:
+            client = GitLabCIClient(token, base_url=base_url)
+            pipelines = await client.list_pipelines(
+                project_id=project_identifier,
+                ref=branch,
+                status=status,
             )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": "GitHub authentication failed. Check token validity.",
-                "details": str(e),
-            }
-        )
-    except GitHubRepositoryNotFoundError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-106",
-                f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            return _mcp_response(
+                {
+                    "success": True,
+                    "repository_alias": repository_alias,
+                    "forge": forge_type,
+                    "runs": pipelines,
+                    "count": len(pipelines),
+                    "rate_limit": client.last_rate_limit,
+                }
             )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"Repository '{owner}/{repo}' not found or not accessible.",
-                "details": str(e),
-            }
-        )
     except Exception as e:
-        logger.exception(
-            f"Error in github_actions_list_runs: {e}",
-            extra={"correlation_id": get_correlation_id()},
+        return _handle_cicd_client_error(
+            e, project_identifier, "ci_list_runs", "MCP-GENERAL-120"
         )
-        return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_get_run(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+async def handle_ci_get_run(args: Dict[str, Any], user: Any) -> Dict[str, Any]:
+    """Unified handler for ci_get_run tool.
+
+    Gets detailed information for a specific CI/CD run or pipeline.
+
+    Story #991: Replaces github_actions_get_run + gitlab_ci_get_pipeline.
     """
-    Handler for github_actions_get_run tool.
+    from code_indexer.server.clients.github_actions_client import GitHubActionsClient
+    from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
-    Gets detailed information for a specific workflow run.
-    Implements AC4 of Story #633.
+    repository_alias = args.get("repository_alias")
+    run_id = args.get("run_id")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+    if not run_id:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: run_id"}
+        )
 
-    Args:
-        args: Tool arguments containing:
-            - owner (str): Repository owner
-            - repo (str): Repository name
-            - run_id (int): Workflow run ID
-        user: Authenticated user
+    forge = args.get("forge", "auto")
+    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
+    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    if error_resp is not None:
+        return error_resp
 
-    Returns:
-        MCP response with detailed run information
-    """
-    from code_indexer.server.clients.github_actions_client import (
-        GitHubActionsClient,
-        GitHubAuthenticationError,
-        GitHubRepositoryNotFoundError,
+    assert forge_type is not None and project_identifier is not None  # noqa: S101
+    assert forge_host is not None  # noqa: S101
+
+    access_error = _resolve_cicd_project_access(
+        project_identifier, forge_type, user.username
     )
+    if access_error:
+        return _mcp_response({"success": False, "error": access_error})
+
+    token = _resolve_cicd_read_token(forge_type, user, forge_host)
+    if not token:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": f"{forge_type.title()} token not found. Configure token storage.",
+            }
+        )
 
     try:
-        # Validate required parameters
-        owner = args.get("owner")
-        repo = args.get("repo")
-        run_id = args.get("run_id")
-        if not owner:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: owner"}
+        if forge_type == "github":
+            client = GitHubActionsClient(token)
+            run_info = await client.get_run(
+                repository=project_identifier, run_id=run_id
             )
-        if not repo:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: repo"}
-            )
-        if not run_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: run_id"}
-            )
-
-        # Story #404 AC1: Group access check BEFORE token resolution (fail fast)
-        project_identifier = f"{owner}/{repo}"
-        access_error = _resolve_cicd_project_access(
-            project_identifier, "github", user.username
-        )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Story #404 AC4: Resilient read token (global CI -> personal PAT fallback)
-        forge_host = _derive_forge_host(args.get("base_url"), "github")
-        token = _resolve_cicd_read_token("github", user, forge_host)
-        if not token:
             return _mcp_response(
                 {
-                    "success": False,
-                    "error": "GitHub token not found. Set GITHUB_TOKEN environment variable or configure token storage.",
+                    "success": True,
+                    "repository_alias": repository_alias,
+                    "forge": forge_type,
+                    "run_id": run_id,
+                    "run": run_info,
+                    "rate_limit": client.last_rate_limit,
                 }
             )
-
-        # Combine owner and repo into repository format
-        repository = f"{owner}/{repo}"
-
-        # Create client and get run details (CRITICAL: keyword)
-        client = GitHubActionsClient(token)
-        run_details = await client.get_run(repository=repository, run_id=run_id)
-
-        return _mcp_response(
-            {
-                "success": True,
-                "owner": owner,
-                "repo": repo,
-                "run": run_details,
-                "rate_limit": client.last_rate_limit,
-            }
-        )
-
-    except GitHubAuthenticationError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-107",
-                f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
+        else:
+            client = GitLabCIClient(token, base_url=base_url)
+            pipeline_info = await client.get_pipeline(
+                project_id=project_identifier, pipeline_id=run_id
             )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": "GitHub authentication failed. Check token validity.",
-                "details": str(e),
-            }
-        )
-    except GitHubRepositoryNotFoundError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-108",
-                f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
+            return _mcp_response(
+                {
+                    "success": True,
+                    "repository_alias": repository_alias,
+                    "forge": forge_type,
+                    "run_id": run_id,
+                    "run": pipeline_info,
+                    "rate_limit": client.last_rate_limit,
+                }
             )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"Repository '{owner}/{repo}' not found or not accessible.",
-                "details": str(e),
-            }
-        )
     except Exception as e:
-        logger.exception(
-            f"Error in github_actions_get_run: {e}",
-            extra={"correlation_id": get_correlation_id()},
+        return _handle_cicd_client_error(
+            e, project_identifier, "ci_get_run", "MCP-GENERAL-121"
         )
-        return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_search_logs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+async def handle_ci_get_job_logs(args: Dict[str, Any], user: Any) -> Dict[str, Any]:
+    """Unified handler for ci_get_job_logs tool.
+
+    Gets full log output for a specific CI/CD job.
+
+    Story #991: Replaces github_actions_get_job_logs + gitlab_ci_get_job_logs.
     """
-    Handler for github_actions_search_logs tool.
+    from code_indexer.server.clients.github_actions_client import GitHubActionsClient
+    from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
-    Searches workflow run logs for a pattern.
-    Implements AC5 of Story #633.
+    repository_alias = args.get("repository_alias")
+    job_id = args.get("job_id")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+    if not job_id:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: job_id"}
+        )
 
-    Args:
-        args: Tool arguments containing:
-            - owner (str): Repository owner
-            - repo (str): Repository name
-            - run_id (int): Workflow run ID
-            - query (str): Search query string
-        user: Authenticated user
+    forge = args.get("forge", "auto")
+    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
+    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    if error_resp is not None:
+        return error_resp
 
-    Returns:
-        MCP response with matching log lines
-    """
-    from code_indexer.server.clients.github_actions_client import (
-        GitHubActionsClient,
-        GitHubAuthenticationError,
-        GitHubRepositoryNotFoundError,
+    assert forge_type is not None and project_identifier is not None  # noqa: S101
+    assert forge_host is not None  # noqa: S101
+
+    access_error = _resolve_cicd_project_access(
+        project_identifier, forge_type, user.username
     )
+    if access_error:
+        return _mcp_response({"success": False, "error": access_error})
+
+    token = _resolve_cicd_read_token(forge_type, user, forge_host)
+    if not token:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": f"{forge_type.title()} token not found. Configure token storage.",
+            }
+        )
 
     try:
-        # Validate required parameters
-        owner = args.get("owner")
-        repo = args.get("repo")
-        run_id = args.get("run_id")
-        query = args.get("query")
-        if not owner:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: owner"}
+        if forge_type == "github":
+            client = GitHubActionsClient(token)
+            logs = await client.get_job_logs(
+                repository=project_identifier, job_id=job_id
             )
-        if not repo:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: repo"}
+        else:
+            client = GitLabCIClient(token, base_url=base_url)
+            logs = await client.get_job_logs(
+                project_id=project_identifier, job_id=job_id
             )
-        if not run_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: run_id"}
-            )
-        if not query:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: query"}
-            )
-
-        # Story #404 AC1: Group access check BEFORE token resolution (fail fast)
-        project_identifier = f"{owner}/{repo}"
-        access_error = _resolve_cicd_project_access(
-            project_identifier, "github", user.username
-        )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Story #404 AC4: Resilient read token (global CI -> personal PAT fallback)
-        forge_host = _derive_forge_host(args.get("base_url"), "github")
-        token = _resolve_cicd_read_token("github", user, forge_host)
-        if not token:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "GitHub token not found. Set GITHUB_TOKEN environment variable or configure token storage.",
-                }
-            )
-
-        # Combine owner and repo into repository format
-        repository = f"{owner}/{repo}"
-
-        # Create client and search logs (CRITICAL: keyword)
-        client = GitHubActionsClient(token)
-        matches = await client.search_logs(
-            repository=repository, run_id=run_id, pattern=query
-        )
 
         return _mcp_response(
             {
                 "success": True,
-                "owner": owner,
-                "repo": repo,
-                "run_id": run_id,
-                "query": query,
-                "matches": matches,
-                "count": len(matches),
-                "rate_limit": client.last_rate_limit,
-            }
-        )
-
-    except GitHubAuthenticationError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-109",
-                f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": "GitHub authentication failed. Check token validity.",
-                "details": str(e),
-            }
-        )
-    except GitHubRepositoryNotFoundError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-110",
-                f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"Repository '{owner}/{repo}' not found or not accessible.",
-                "details": str(e),
-            }
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error in github_actions_search_logs: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-async def handle_github_actions_get_job_logs(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
-    """
-    Handler for github_actions_get_job_logs tool.
-
-    Gets full log output for a specific job.
-    Implements AC6 of Story #633.
-
-    Args:
-        args: Tool arguments containing:
-            - owner (str): Repository owner
-            - repo (str): Repository name
-            - job_id (int): Job ID
-        user: Authenticated user
-
-    Returns:
-        MCP response with full job logs
-    """
-    from code_indexer.server.clients.github_actions_client import (
-        GitHubActionsClient,
-        GitHubAuthenticationError,
-        GitHubRepositoryNotFoundError,
-    )
-
-    try:
-        # Validate required parameters
-        owner = args.get("owner")
-        repo = args.get("repo")
-        job_id = args.get("job_id")
-        if not owner:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: owner"}
-            )
-        if not repo:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: repo"}
-            )
-        if not job_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: job_id"}
-            )
-
-        # Story #404 AC1: Group access check BEFORE token resolution (fail fast)
-        project_identifier = f"{owner}/{repo}"
-        access_error = _resolve_cicd_project_access(
-            project_identifier, "github", user.username
-        )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Story #404 AC4: Resilient read token (global CI -> personal PAT fallback)
-        forge_host = _derive_forge_host(args.get("base_url"), "github")
-        token = _resolve_cicd_read_token("github", user, forge_host)
-        if not token:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "GitHub token not found. Set GITHUB_TOKEN environment variable or configure token storage.",
-                }
-            )
-
-        # Combine owner and repo into repository format
-        repository = f"{owner}/{repo}"
-
-        # Create client and get job logs (CRITICAL: keyword)
-        client = GitHubActionsClient(token)
-        logs = await client.get_job_logs(repository=repository, job_id=job_id)
-
-        return _mcp_response(
-            {
-                "success": True,
-                "owner": owner,
-                "repo": repo,
+                "repository_alias": repository_alias,
+                "forge": forge_type,
                 "job_id": job_id,
                 "logs": logs,
                 "rate_limit": client.last_rate_limit,
             }
         )
-
-    except GitHubAuthenticationError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-111",
-                f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": "GitHub authentication failed. Check token validity.",
-                "details": str(e),
-            }
-        )
-    except GitHubRepositoryNotFoundError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-112",
-                f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"Repository '{owner}/{repo}' not found or not accessible.",
-                "details": str(e),
-            }
-        )
     except Exception as e:
-        logger.exception(
-            f"Error in github_actions_get_job_logs: {e}",
-            extra={"correlation_id": get_correlation_id()},
+        return _handle_cicd_client_error(
+            e, project_identifier, "ci_get_job_logs", "MCP-GENERAL-122"
         )
-        return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_retry_run(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+async def handle_ci_search_logs(args: Dict[str, Any], user: Any) -> Dict[str, Any]:
+    """Unified handler for ci_search_logs tool.
+
+    Searches CI/CD run logs for a pattern.
+
+    Story #991: Replaces github_actions_search_logs + gitlab_ci_search_logs.
     """
-    Handler for github_actions_retry_run tool.
+    from code_indexer.server.clients.github_actions_client import GitHubActionsClient
+    from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
-    Retries a failed workflow run.
-    Implements AC7 of Story #633.
+    repository_alias = args.get("repository_alias")
+    run_id = args.get("run_id")
+    pattern = args.get("pattern")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+    if not run_id:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: run_id"}
+        )
+    if not pattern:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: pattern"}
+        )
 
-    Args:
-        args: Tool arguments containing:
-            - owner (str): Repository owner
-            - repo (str): Repository name
-            - run_id (int): Workflow run ID to retry
-        user: Authenticated user
+    forge = args.get("forge", "auto")
+    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
+    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    if error_resp is not None:
+        return error_resp
 
-    Returns:
-        MCP response confirming retry operation
-    """
-    from code_indexer.server.clients.github_actions_client import (
-        GitHubActionsClient,
-        GitHubAuthenticationError,
-        GitHubRepositoryNotFoundError,
+    assert forge_type is not None and project_identifier is not None  # noqa: S101
+    assert forge_host is not None  # noqa: S101
+
+    access_error = _resolve_cicd_project_access(
+        project_identifier, forge_type, user.username
     )
+    if access_error:
+        return _mcp_response({"success": False, "error": access_error})
+
+    token = _resolve_cicd_read_token(forge_type, user, forge_host)
+    if not token:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": f"{forge_type.title()} token not found. Configure token storage.",
+            }
+        )
 
     try:
-        # Validate required parameters
-        owner = args.get("owner")
-        repo = args.get("repo")
-        run_id = args.get("run_id")
-        if not owner:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: owner"}
+        if forge_type == "github":
+            client = GitHubActionsClient(token)
+            matches = await client.search_logs(
+                repository=project_identifier, run_id=run_id, pattern=pattern
             )
-        if not repo:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: repo"}
+        else:
+            case_sensitive = args.get("case_sensitive", True)
+            client = GitLabCIClient(token, base_url=base_url)
+            matches = await client.search_logs(
+                project_id=project_identifier,
+                pipeline_id=run_id,
+                pattern=pattern,
+                case_sensitive=case_sensitive,
             )
-        if not run_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: run_id"}
-            )
-
-        # Story #404 AC1: Group access check BEFORE token resolution (fail fast)
-        project_identifier = f"{owner}/{repo}"
-        access_error = _resolve_cicd_project_access(
-            project_identifier, "github", user.username
-        )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Story #404 AC2: Per-user write token ONLY (never global CI token)
-        forge_host = _derive_forge_host(args.get("base_url"), "github")
-        token, token_error = _resolve_cicd_write_token("github", user, forge_host)
-        if token_error:
-            return _mcp_response({"success": False, "error": token_error})
-
-        # Story #404 AC3: Audit log BEFORE API call
-        logger.info(
-            f"CI/CD write operation: user={user.username} op=retry_run "
-            f"project={owner}/{repo} run={run_id}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-        # Combine owner and repo into repository format
-        repository = f"{owner}/{repo}"
-
-        # Create client and retry run (CRITICAL: keyword)
-        client = GitHubActionsClient(token)
-        result = await client.retry_run(repository=repository, run_id=run_id)
 
         return _mcp_response(
             {
                 "success": True,
-                "owner": owner,
-                "repo": repo,
+                "repository_alias": repository_alias,
+                "forge": forge_type,
                 "run_id": run_id,
-                "message": "Workflow run retry triggered successfully",
-                "result": result,
+                "pattern": pattern,
+                "matches": matches,
+                "count": len(matches),
                 "rate_limit": client.last_rate_limit,
             }
         )
-
-    except GitHubAuthenticationError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-113",
-                f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": "GitHub authentication failed. Check token validity.",
-                "details": str(e),
-            }
-        )
-    except GitHubRepositoryNotFoundError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-114",
-                f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"Repository '{owner}/{repo}' not found or not accessible.",
-                "details": str(e),
-            }
-        )
     except Exception as e:
-        logger.exception(
-            f"Error in github_actions_retry_run: {e}",
-            extra={"correlation_id": get_correlation_id()},
+        return _handle_cicd_client_error(
+            e, project_identifier, "ci_search_logs", "MCP-GENERAL-123"
         )
-        return _mcp_response({"success": False, "error": str(e)})
 
 
-async def handle_github_actions_cancel_run(
-    args: Dict[str, Any], user: User
-) -> Dict[str, Any]:
+async def handle_ci_cancel_run(args: Dict[str, Any], user: Any) -> Dict[str, Any]:
+    """Unified handler for ci_cancel_run tool.
+
+    Cancels a running CI/CD workflow or pipeline. WRITE operation.
+
+    Story #991: Replaces github_actions_cancel_run + gitlab_ci_cancel_pipeline.
     """
-    Handler for github_actions_cancel_run tool.
+    from code_indexer.server.clients.github_actions_client import GitHubActionsClient
+    from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
 
-    Cancels a running workflow.
-    Implements AC8 of Story #633.
+    repository_alias = args.get("repository_alias")
+    run_id = args.get("run_id")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+    if not run_id:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: run_id"}
+        )
 
-    Args:
-        args: Tool arguments containing:
-            - owner (str): Repository owner
-            - repo (str): Repository name
-            - run_id (int): Workflow run ID to cancel
-        user: Authenticated user
+    forge = args.get("forge", "auto")
+    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
+    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    if error_resp is not None:
+        return error_resp
 
-    Returns:
-        MCP response confirming cancellation operation
-    """
-    from code_indexer.server.clients.github_actions_client import (
-        GitHubActionsClient,
-        GitHubAuthenticationError,
-        GitHubRepositoryNotFoundError,
+    assert forge_type is not None and project_identifier is not None  # noqa: S101
+    assert forge_host is not None  # noqa: S101
+
+    access_error = _resolve_cicd_project_access(
+        project_identifier, forge_type, user.username
+    )
+    if access_error:
+        return _mcp_response({"success": False, "error": access_error})
+
+    # Story #404 AC2: Write operations use personal PAT ONLY
+    token, token_error = _resolve_cicd_write_token(forge_type, user, forge_host)
+    if token_error:
+        return _mcp_response({"success": False, "error": token_error})
+
+    # Story #404 AC3: Audit log BEFORE API call
+    logger.info(
+        f"CI/CD write operation: user={user.username} op=cancel_run "
+        f"project={project_identifier} run={run_id}",
+        extra={"correlation_id": get_correlation_id()},
     )
 
     try:
-        # Validate required parameters
-        owner = args.get("owner")
-        repo = args.get("repo")
-        run_id = args.get("run_id")
-        if not owner:
+        if forge_type == "github":
+            client = GitHubActionsClient(token)
+            result = await client.cancel_run(
+                repository=project_identifier, run_id=run_id
+            )
             return _mcp_response(
-                {"success": False, "error": "Missing required parameter: owner"}
+                {
+                    "success": True,
+                    "repository_alias": repository_alias,
+                    "forge": forge_type,
+                    "run_id": run_id,
+                    "message": "Run cancelled successfully",
+                    "result": result,
+                    "rate_limit": client.last_rate_limit,
+                }
             )
-        if not repo:
+        else:
+            client = GitLabCIClient(token, base_url=base_url)
+            result = await client.cancel_pipeline(
+                project_id=project_identifier, pipeline_id=run_id
+            )
             return _mcp_response(
-                {"success": False, "error": "Missing required parameter: repo"}
+                {
+                    "success": True,
+                    "repository_alias": repository_alias,
+                    "forge": forge_type,
+                    "run_id": run_id,
+                    "message": "Pipeline cancelled successfully",
+                    "result": result,
+                    "rate_limit": client.last_rate_limit,
+                }
             )
-        if not run_id:
-            return _mcp_response(
-                {"success": False, "error": "Missing required parameter: run_id"}
-            )
-
-        # Story #404 AC1: Group access check BEFORE token resolution (fail fast)
-        project_identifier = f"{owner}/{repo}"
-        access_error = _resolve_cicd_project_access(
-            project_identifier, "github", user.username
-        )
-        if access_error:
-            return _mcp_response({"success": False, "error": access_error})
-
-        # Story #404 AC2: Per-user write token ONLY (never global CI token)
-        forge_host = _derive_forge_host(args.get("base_url"), "github")
-        token, token_error = _resolve_cicd_write_token("github", user, forge_host)
-        if token_error:
-            return _mcp_response({"success": False, "error": token_error})
-
-        # Story #404 AC3: Audit log BEFORE API call
-        logger.info(
-            f"CI/CD write operation: user={user.username} op=cancel_run "
-            f"project={owner}/{repo} run={run_id}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-        # Combine owner and repo into repository format
-        repository = f"{owner}/{repo}"
-
-        # Create client and cancel run (CRITICAL: keyword)
-        client = GitHubActionsClient(token)
-        result = await client.cancel_run(repository=repository, run_id=run_id)
-
-        return _mcp_response(
-            {
-                "success": True,
-                "owner": owner,
-                "repo": repo,
-                "run_id": run_id,
-                "message": "Workflow run cancelled successfully",
-                "result": result,
-                "rate_limit": client.last_rate_limit,
-            }
-        )
-
-    except GitHubAuthenticationError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-115",
-                f"GitHub authentication failed: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": "GitHub authentication failed. Check token validity.",
-                "details": str(e),
-            }
-        )
-    except GitHubRepositoryNotFoundError as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-116",
-                f"GitHub repository not found: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"Repository '{owner}/{repo}' not found or not accessible.",
-                "details": str(e),
-            }
-        )
     except Exception as e:
-        logger.exception(
-            f"Error in github_actions_cancel_run: {e}",
-            extra={"correlation_id": get_correlation_id()},
+        return _handle_cicd_client_error(
+            e, project_identifier, "ci_cancel_run", "MCP-GENERAL-124"
         )
-        return _mcp_response({"success": False, "error": str(e)})
+
+
+async def handle_ci_retry_run(args: Dict[str, Any], user: Any) -> Dict[str, Any]:
+    """Unified handler for ci_retry_run tool.
+
+    Retries a failed CI/CD workflow or pipeline. WRITE operation.
+
+    Story #991: Replaces github_actions_retry_run + gitlab_ci_retry_pipeline.
+    """
+    from code_indexer.server.clients.github_actions_client import GitHubActionsClient
+    from code_indexer.server.clients.gitlab_ci_client import GitLabCIClient
+
+    repository_alias = args.get("repository_alias")
+    run_id = args.get("run_id")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+    if not run_id:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: run_id"}
+        )
+
+    forge = args.get("forge", "auto")
+    resolved = _resolve_repo_alias_for_cicd(repository_alias, forge, user)
+    forge_type, project_identifier, base_url, forge_host, error_resp = resolved
+    if error_resp is not None:
+        return error_resp
+
+    assert forge_type is not None and project_identifier is not None  # noqa: S101
+    assert forge_host is not None  # noqa: S101
+
+    access_error = _resolve_cicd_project_access(
+        project_identifier, forge_type, user.username
+    )
+    if access_error:
+        return _mcp_response({"success": False, "error": access_error})
+
+    # Story #404 AC2: Write operations use personal PAT ONLY
+    token, token_error = _resolve_cicd_write_token(forge_type, user, forge_host)
+    if token_error:
+        return _mcp_response({"success": False, "error": token_error})
+
+    # Story #404 AC3: Audit log BEFORE API call
+    logger.info(
+        f"CI/CD write operation: user={user.username} op=retry_run "
+        f"project={project_identifier} run={run_id}",
+        extra={"correlation_id": get_correlation_id()},
+    )
+
+    try:
+        if forge_type == "github":
+            client = GitHubActionsClient(token)
+            result = await client.retry_run(
+                repository=project_identifier, run_id=run_id
+            )
+            return _mcp_response(
+                {
+                    "success": True,
+                    "repository_alias": repository_alias,
+                    "forge": forge_type,
+                    "run_id": run_id,
+                    "message": "Run retried successfully",
+                    "result": result,
+                    "rate_limit": client.last_rate_limit,
+                }
+            )
+        else:
+            client = GitLabCIClient(token, base_url=base_url)
+            result = await client.retry_pipeline(
+                project_id=project_identifier, pipeline_id=run_id
+            )
+            return _mcp_response(
+                {
+                    "success": True,
+                    "repository_alias": repository_alias,
+                    "forge": forge_type,
+                    "run_id": run_id,
+                    "message": "Pipeline retried successfully",
+                    "result": result,
+                    "rate_limit": client.last_rate_limit,
+                }
+            )
+    except Exception as e:
+        return _handle_cicd_client_error(
+            e, project_identifier, "ci_retry_run", "MCP-GENERAL-125"
+        )
 
 
 def _register(registry: dict) -> None:
     """Register CI/CD handlers into the HANDLER_REGISTRY."""
-    # GitLab CI handlers
-    registry["gitlab_ci_list_pipelines"] = handle_gitlab_ci_list_pipelines
-    registry["gitlab_ci_get_pipeline"] = handle_gitlab_ci_get_pipeline
-    registry["gitlab_ci_search_logs"] = handle_gitlab_ci_search_logs
-    registry["gitlab_ci_get_job_logs"] = handle_gitlab_ci_get_job_logs
-    registry["gitlab_ci_retry_pipeline"] = handle_gitlab_ci_retry_pipeline
-    registry["gitlab_ci_cancel_pipeline"] = handle_gitlab_ci_cancel_pipeline
-    # GitHub Actions handlers (new style)
-    registry["github_actions_list_runs"] = handle_github_actions_list_runs
-    registry["github_actions_get_run"] = handle_github_actions_get_run
-    registry["github_actions_search_logs"] = handle_github_actions_search_logs
-    registry["github_actions_get_job_logs"] = handle_github_actions_get_job_logs
-    registry["github_actions_retry_run"] = handle_github_actions_retry_run
-    registry["github_actions_cancel_run"] = handle_github_actions_cancel_run
+    # Unified CI/CD handlers (Story #991 - forge auto-detection consolidation)
+    registry["ci_list_runs"] = handle_ci_list_runs
+    registry["ci_get_run"] = handle_ci_get_run
+    registry["ci_get_job_logs"] = handle_ci_get_job_logs
+    registry["ci_search_logs"] = handle_ci_search_logs
+    registry["ci_cancel_run"] = handle_ci_cancel_run
+    registry["ci_retry_run"] = handle_ci_retry_run
     # NOTE: handle_gh_actions_* (old style) are NOT registered per Story #222 TODO 5.
     # They are preserved for REST routes only.
+    # NOTE: handle_github_actions_* and handle_gitlab_ci_* removed per Story #991.
+    # Hard-cut migration: old tool docs deleted, 6 unified ci_* handlers replace 12 old ones.

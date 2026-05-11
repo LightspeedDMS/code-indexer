@@ -38,7 +38,7 @@ from code_indexer.server.mcp.auth.elevation_decorator import require_mcp_elevati
 def _parse_mcp_response(response: dict) -> dict:
     """Unwrap MCP-formatted response to the inner data dict."""
     content = response.get("content", [])
-    return json.loads(content[0]["text"])
+    return json.loads(content[0]["text"])  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------

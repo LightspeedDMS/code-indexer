@@ -145,38 +145,15 @@ class TestGroupMCPToolsExistInRegistry:
         assert "delete_group" in TOOL_REGISTRY
         assert TOOL_REGISTRY["delete_group"]["name"] == "delete_group"
 
-    def test_add_member_to_group_exists_in_registry(self):
-        """AC6: add_member_to_group tool exists in TOOL_REGISTRY."""
-        assert "add_member_to_group" in TOOL_REGISTRY
-        assert TOOL_REGISTRY["add_member_to_group"]["name"] == "add_member_to_group"
+    def test_manage_group_members_exists_in_registry(self):
+        """AC6+AC6b: manage_group_members unified tool exists in TOOL_REGISTRY (Story #992)."""
+        assert "manage_group_members" in TOOL_REGISTRY
+        assert TOOL_REGISTRY["manage_group_members"]["name"] == "manage_group_members"
 
-    def test_remove_member_from_group_exists_in_registry(self):
-        """AC6b: remove_member_from_group tool exists in TOOL_REGISTRY."""
-        assert "remove_member_from_group" in TOOL_REGISTRY
-        assert (
-            TOOL_REGISTRY["remove_member_from_group"]["name"]
-            == "remove_member_from_group"
-        )
-
-    def test_add_repos_to_group_exists_in_registry(self):
-        """AC7: add_repos_to_group tool exists in TOOL_REGISTRY."""
-        assert "add_repos_to_group" in TOOL_REGISTRY
-        assert TOOL_REGISTRY["add_repos_to_group"]["name"] == "add_repos_to_group"
-
-    def test_remove_repo_from_group_exists_in_registry(self):
-        """AC8: remove_repo_from_group tool exists in TOOL_REGISTRY."""
-        assert "remove_repo_from_group" in TOOL_REGISTRY
-        assert (
-            TOOL_REGISTRY["remove_repo_from_group"]["name"] == "remove_repo_from_group"
-        )
-
-    def test_bulk_remove_repos_from_group_exists_in_registry(self):
-        """AC9: bulk_remove_repos_from_group tool exists in TOOL_REGISTRY."""
-        assert "bulk_remove_repos_from_group" in TOOL_REGISTRY
-        assert (
-            TOOL_REGISTRY["bulk_remove_repos_from_group"]["name"]
-            == "bulk_remove_repos_from_group"
-        )
+    def test_manage_group_repos_exists_in_registry(self):
+        """AC7+AC8+AC9: manage_group_repos unified tool exists in TOOL_REGISTRY (Story #992)."""
+        assert "manage_group_repos" in TOOL_REGISTRY
+        assert TOOL_REGISTRY["manage_group_repos"]["name"] == "manage_group_repos"
 
 
 # =============================================================================
@@ -207,25 +184,13 @@ class TestGroupMCPHandlersExistInRegistry:
         """delete_group handler exists in HANDLER_REGISTRY."""
         assert "delete_group" in HANDLER_REGISTRY
 
-    def test_add_member_to_group_handler_exists(self):
-        """add_member_to_group handler exists in HANDLER_REGISTRY."""
-        assert "add_member_to_group" in HANDLER_REGISTRY
+    def test_manage_group_members_handler_exists(self):
+        """manage_group_members handler exists in HANDLER_REGISTRY (Story #992)."""
+        assert "manage_group_members" in HANDLER_REGISTRY
 
-    def test_remove_member_from_group_handler_exists(self):
-        """remove_member_from_group handler exists in HANDLER_REGISTRY."""
-        assert "remove_member_from_group" in HANDLER_REGISTRY
-
-    def test_add_repos_to_group_handler_exists(self):
-        """add_repos_to_group handler exists in HANDLER_REGISTRY."""
-        assert "add_repos_to_group" in HANDLER_REGISTRY
-
-    def test_remove_repo_from_group_handler_exists(self):
-        """remove_repo_from_group handler exists in HANDLER_REGISTRY."""
-        assert "remove_repo_from_group" in HANDLER_REGISTRY
-
-    def test_bulk_remove_repos_from_group_handler_exists(self):
-        """bulk_remove_repos_from_group handler exists in HANDLER_REGISTRY."""
-        assert "bulk_remove_repos_from_group" in HANDLER_REGISTRY
+    def test_manage_group_repos_handler_exists(self):
+        """manage_group_repos handler exists in HANDLER_REGISTRY (Story #992)."""
+        assert "manage_group_repos" in HANDLER_REGISTRY
 
 
 # =============================================================================
@@ -256,38 +221,17 @@ class TestGroupMCPToolsPermissions:
         """delete_group tool requires manage_users permission (admin only)."""
         assert TOOL_REGISTRY["delete_group"]["required_permission"] == "manage_users"
 
-    def test_add_member_to_group_requires_manage_users_permission(self):
-        """add_member_to_group tool requires manage_users permission (admin only)."""
+    def test_manage_group_members_requires_manage_users_permission(self):
+        """manage_group_members unified tool requires manage_users permission (Story #992)."""
         assert (
-            TOOL_REGISTRY["add_member_to_group"]["required_permission"]
+            TOOL_REGISTRY["manage_group_members"]["required_permission"]
             == "manage_users"
         )
 
-    def test_remove_member_from_group_requires_manage_users_permission(self):
-        """remove_member_from_group tool requires manage_users permission (admin only)."""
+    def test_manage_group_repos_requires_manage_users_permission(self):
+        """manage_group_repos unified tool requires manage_users permission (Story #992)."""
         assert (
-            TOOL_REGISTRY["remove_member_from_group"]["required_permission"]
-            == "manage_users"
-        )
-
-    def test_add_repos_to_group_requires_manage_users_permission(self):
-        """add_repos_to_group tool requires manage_users permission (admin only)."""
-        assert (
-            TOOL_REGISTRY["add_repos_to_group"]["required_permission"] == "manage_users"
-        )
-
-    def test_remove_repo_from_group_requires_manage_users_permission(self):
-        """remove_repo_from_group tool requires manage_users permission (admin only)."""
-        assert (
-            TOOL_REGISTRY["remove_repo_from_group"]["required_permission"]
-            == "manage_users"
-        )
-
-    def test_bulk_remove_repos_from_group_requires_manage_users_permission(self):
-        """bulk_remove_repos_from_group requires manage_users permission (admin only)."""
-        assert (
-            TOOL_REGISTRY["bulk_remove_repos_from_group"]["required_permission"]
-            == "manage_users"
+            TOOL_REGISTRY["manage_group_repos"]["required_permission"] == "manage_users"
         )
 
 
@@ -404,132 +348,64 @@ class TestDeleteGroupSchema:
         assert "group_id" in schema.get("required", [])
 
 
-class TestAddMemberToGroupSchema:
-    """Tests for add_member_to_group tool schema."""
+class TestManageGroupMembersSchema:
+    """Tests for manage_group_members unified tool schema (Story #992)."""
 
-    def test_add_member_to_group_has_input_schema(self):
-        """add_member_to_group tool has inputSchema defined."""
-        schema = TOOL_REGISTRY["add_member_to_group"]
+    def test_manage_group_members_has_input_schema(self):
+        """manage_group_members tool has inputSchema defined."""
+        schema = TOOL_REGISTRY["manage_group_members"]
         assert "inputSchema" in schema
         assert schema["inputSchema"]["type"] == "object"
 
-    def test_add_member_to_group_requires_group_id(self):
-        """add_member_to_group requires group_id parameter."""
-        schema = TOOL_REGISTRY["add_member_to_group"]["inputSchema"]
+    def test_manage_group_members_requires_action(self):
+        """manage_group_members requires action parameter."""
+        schema = TOOL_REGISTRY["manage_group_members"]["inputSchema"]
+        assert "action" in schema["properties"]
+        assert "action" in schema.get("required", [])
+
+    def test_manage_group_members_requires_group_id(self):
+        """manage_group_members requires group_id parameter."""
+        schema = TOOL_REGISTRY["manage_group_members"]["inputSchema"]
         assert "group_id" in schema["properties"]
-        assert "group_id" in schema.get("required", [])
 
-    def test_add_member_to_group_requires_user_id(self):
-        """add_member_to_group requires user_id parameter."""
-        schema = TOOL_REGISTRY["add_member_to_group"]["inputSchema"]
+    def test_manage_group_members_requires_user_id(self):
+        """manage_group_members requires user_id parameter."""
+        schema = TOOL_REGISTRY["manage_group_members"]["inputSchema"]
         assert "user_id" in schema["properties"]
-        assert "user_id" in schema.get("required", [])
 
-
-class TestRemoveMemberFromGroupSchema:
-    """Tests for remove_member_from_group tool schema."""
-
-    def test_remove_member_from_group_has_input_schema(self):
-        """remove_member_from_group tool has inputSchema defined."""
-        schema = TOOL_REGISTRY["remove_member_from_group"]
-        assert "inputSchema" in schema
-        assert schema["inputSchema"]["type"] == "object"
-
-    def test_remove_member_from_group_requires_group_id(self):
-        """remove_member_from_group requires group_id parameter."""
-        schema = TOOL_REGISTRY["remove_member_from_group"]["inputSchema"]
-        assert "group_id" in schema["properties"]
-        assert "group_id" in schema.get("required", [])
-
-    def test_remove_member_from_group_requires_user_id(self):
-        """remove_member_from_group requires user_id parameter."""
-        schema = TOOL_REGISTRY["remove_member_from_group"]["inputSchema"]
-        assert "user_id" in schema["properties"]
-        assert "user_id" in schema.get("required", [])
-
-    def test_remove_member_from_group_has_description(self):
-        """remove_member_from_group has a meaningful description."""
-        tool = TOOL_REGISTRY["remove_member_from_group"]
+    def test_manage_group_members_has_description(self):
+        """manage_group_members has a meaningful description."""
+        tool = TOOL_REGISTRY["manage_group_members"]
         assert "description" in tool
         assert len(tool["description"]) > 10
 
 
-class TestAddReposToGroupSchema:
-    """Tests for add_repos_to_group tool schema."""
+class TestManageGroupReposSchema:
+    """Tests for manage_group_repos unified tool schema (Story #992)."""
 
-    def test_add_repos_to_group_has_input_schema(self):
-        """add_repos_to_group tool has inputSchema defined."""
-        schema = TOOL_REGISTRY["add_repos_to_group"]
+    def test_manage_group_repos_has_input_schema(self):
+        """manage_group_repos tool has inputSchema defined."""
+        schema = TOOL_REGISTRY["manage_group_repos"]
         assert "inputSchema" in schema
         assert schema["inputSchema"]["type"] == "object"
 
-    def test_add_repos_to_group_requires_group_id(self):
-        """add_repos_to_group requires group_id parameter."""
-        schema = TOOL_REGISTRY["add_repos_to_group"]["inputSchema"]
+    def test_manage_group_repos_requires_action(self):
+        """manage_group_repos requires action parameter."""
+        schema = TOOL_REGISTRY["manage_group_repos"]["inputSchema"]
+        assert "action" in schema["properties"]
+        assert "action" in schema.get("required", [])
+
+    def test_manage_group_repos_requires_group_id(self):
+        """manage_group_repos requires group_id parameter."""
+        schema = TOOL_REGISTRY["manage_group_repos"]["inputSchema"]
         assert "group_id" in schema["properties"]
-        assert "group_id" in schema.get("required", [])
 
-    def test_add_repos_to_group_requires_repo_names(self):
-        """add_repos_to_group requires repo_names parameter."""
-        schema = TOOL_REGISTRY["add_repos_to_group"]["inputSchema"]
-        assert "repo_names" in schema["properties"]
-        assert "repo_names" in schema.get("required", [])
-
-    def test_add_repos_to_group_repo_names_is_array(self):
-        """add_repos_to_group repo_names is an array of strings."""
-        schema = TOOL_REGISTRY["add_repos_to_group"]["inputSchema"]
-        assert schema["properties"]["repo_names"]["type"] == "array"
-        assert schema["properties"]["repo_names"]["items"]["type"] == "string"
-
-
-class TestRemoveRepoFromGroupSchema:
-    """Tests for remove_repo_from_group tool schema."""
-
-    def test_remove_repo_from_group_has_input_schema(self):
-        """remove_repo_from_group tool has inputSchema defined."""
-        schema = TOOL_REGISTRY["remove_repo_from_group"]
-        assert "inputSchema" in schema
-        assert schema["inputSchema"]["type"] == "object"
-
-    def test_remove_repo_from_group_requires_group_id(self):
-        """remove_repo_from_group requires group_id parameter."""
-        schema = TOOL_REGISTRY["remove_repo_from_group"]["inputSchema"]
-        assert "group_id" in schema["properties"]
-        assert "group_id" in schema.get("required", [])
-
-    def test_remove_repo_from_group_requires_repo_name(self):
-        """remove_repo_from_group requires repo_name parameter."""
-        schema = TOOL_REGISTRY["remove_repo_from_group"]["inputSchema"]
-        assert "repo_name" in schema["properties"]
-        assert "repo_name" in schema.get("required", [])
-
-
-class TestBulkRemoveReposFromGroupSchema:
-    """Tests for bulk_remove_repos_from_group tool schema."""
-
-    def test_bulk_remove_repos_from_group_has_input_schema(self):
-        """bulk_remove_repos_from_group tool has inputSchema defined."""
-        schema = TOOL_REGISTRY["bulk_remove_repos_from_group"]
-        assert "inputSchema" in schema
-        assert schema["inputSchema"]["type"] == "object"
-
-    def test_bulk_remove_repos_from_group_requires_group_id(self):
-        """bulk_remove_repos_from_group requires group_id parameter."""
-        schema = TOOL_REGISTRY["bulk_remove_repos_from_group"]["inputSchema"]
-        assert "group_id" in schema["properties"]
-        assert "group_id" in schema.get("required", [])
-
-    def test_bulk_remove_repos_from_group_requires_repo_names(self):
-        """bulk_remove_repos_from_group requires repo_names parameter."""
-        schema = TOOL_REGISTRY["bulk_remove_repos_from_group"]["inputSchema"]
-        assert "repo_names" in schema["properties"]
-        assert "repo_names" in schema.get("required", [])
-
-    def test_bulk_remove_repos_from_group_repo_names_is_array(self):
-        """bulk_remove_repos_from_group repo_names is an array of strings."""
-        schema = TOOL_REGISTRY["bulk_remove_repos_from_group"]["inputSchema"]
-        assert schema["properties"]["repo_names"]["type"] == "array"
-        assert schema["properties"]["repo_names"]["items"]["type"] == "string"
+    def test_manage_group_repos_has_repos_array(self):
+        """manage_group_repos has repos array parameter."""
+        schema = TOOL_REGISTRY["manage_group_repos"]["inputSchema"]
+        assert "repos" in schema["properties"]
+        assert schema["properties"]["repos"]["type"] == "array"
+        assert schema["properties"]["repos"]["items"]["type"] == "string"
 
 
 # =============================================================================
@@ -794,152 +670,129 @@ class TestDeleteGroupHandler:
             assert "error" in content
 
 
-class TestAddMemberToGroupHandler:
-    """Tests for add_member_to_group handler functionality."""
+class TestManageGroupMembersHandler:
+    """Tests for manage_group_members unified handler (Story #992)."""
 
     @pytest.fixture
     def mock_group_manager(self, temp_groups_db):
-        """Create mock group manager for testing handlers."""
         from code_indexer.server.services.group_access_manager import GroupAccessManager
 
-        manager = GroupAccessManager(temp_groups_db)
-        return manager
+        return GroupAccessManager(temp_groups_db)
 
-    def test_add_member_to_group_succeeds(
-        self, admin_user, mock_group_manager, tmp_path
-    ):
-        """add_member_to_group handler succeeds for valid inputs."""
+    def test_add_member_succeeds(self, admin_user, mock_group_manager, tmp_path):
+        """manage_group_members add action succeeds for valid inputs."""
         with (
             patch(
-                "code_indexer.server.mcp.handlers._get_group_manager",
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
                 return_value=mock_group_manager,
             ),
             _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
-            # Get a valid group
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
 
-            handler = HANDLER_REGISTRY["add_member_to_group"]
+            handler = HANDLER_REGISTRY["manage_group_members"]
             result = handler(
-                {"group_id": str(group_id), "user_id": "test_user"},
+                {"action": "add", "group_id": str(group_id), "user_id": "test_user"},
                 admin_user,
                 session_key=session_key,
             )
-
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-
-class TestRemoveMemberFromGroupHandler:
-    """Tests for remove_member_from_group handler functionality."""
-
-    @pytest.fixture
-    def mock_group_manager(self, temp_groups_db):
-        """Create mock group manager for testing handlers."""
-        from code_indexer.server.services.group_access_manager import GroupAccessManager
-
-        manager = GroupAccessManager(temp_groups_db)
-        return manager
-
-    def test_remove_member_from_group_succeeds(
-        self, admin_user, mock_group_manager, tmp_path
-    ):
-        """remove_member_from_group handler succeeds for valid inputs."""
+    def test_remove_member_succeeds(self, admin_user, mock_group_manager, tmp_path):
+        """manage_group_members remove action succeeds for valid inputs."""
         with (
             patch(
-                "code_indexer.server.mcp.handlers._get_group_manager",
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
                 return_value=mock_group_manager,
             ),
             _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
-            # Get a valid group and add a member first
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
             mock_group_manager.assign_user_to_group("test_user", group_id, "admin_test")
 
-            handler = HANDLER_REGISTRY["remove_member_from_group"]
+            handler = HANDLER_REGISTRY["manage_group_members"]
             result = handler(
-                {"group_id": str(group_id), "user_id": "test_user"},
+                {"action": "remove", "group_id": str(group_id), "user_id": "test_user"},
                 admin_user,
                 session_key=session_key,
             )
-
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-    def test_remove_member_from_group_user_not_in_group(
+    def test_remove_nonexistent_user_returns_success_field(
         self, admin_user, mock_group_manager, tmp_path
     ):
-        """remove_member_from_group handler returns success even if user not in that specific group."""
+        """manage_group_members remove for nonexistent user returns success field."""
         with (
             patch(
-                "code_indexer.server.mcp.handlers._get_group_manager",
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
                 return_value=mock_group_manager,
             ),
             _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
-            # Get a valid group
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
 
-            handler = HANDLER_REGISTRY["remove_member_from_group"]
+            handler = HANDLER_REGISTRY["manage_group_members"]
             result = handler(
-                {"group_id": str(group_id), "user_id": "nonexistent_user"},
+                {
+                    "action": "remove",
+                    "group_id": str(group_id),
+                    "user_id": "nonexistent_user",
+                },
                 admin_user,
                 session_key=session_key,
             )
-
             content = json.loads(result["content"][0]["text"])
-            # Should succeed (idempotent operation) or return appropriate error
             assert "success" in content
 
 
 @pytest.mark.slow
-class TestAddReposToGroupHandler:
-    """Tests for add_repos_to_group handler functionality."""
+class TestManageGroupReposHandler:
+    """Tests for manage_group_repos unified handler (Story #992)."""
 
     @pytest.fixture
     def mock_group_manager(self, temp_groups_db):
-        """Create mock group manager for testing handlers."""
         from code_indexer.server.services.group_access_manager import GroupAccessManager
 
-        manager = GroupAccessManager(temp_groups_db)
-        return manager
+        return GroupAccessManager(temp_groups_db)
 
-    def test_add_repos_to_group_succeeds(
-        self, admin_user, mock_group_manager, tmp_path
-    ):
-        """add_repos_to_group handler succeeds for valid inputs."""
+    def test_add_repos_succeeds(self, admin_user, mock_group_manager, tmp_path):
+        """manage_group_repos add action succeeds for valid inputs."""
         with (
             patch(
-                "code_indexer.server.mcp.handlers._get_group_manager",
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
                 return_value=mock_group_manager,
             ),
             _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
-            # Get a valid group
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
 
-            handler = HANDLER_REGISTRY["add_repos_to_group"]
+            handler = HANDLER_REGISTRY["manage_group_repos"]
             result = handler(
-                {"group_id": str(group_id), "repo_names": ["repo1", "repo2"]},
+                {
+                    "action": "add",
+                    "group_id": str(group_id),
+                    "repos": ["repo1", "repo2"],
+                },
                 admin_user,
                 session_key=session_key,
             )
-
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
             assert "added_count" in content
 
-    def test_add_repos_to_group_returns_added_count(
+    def test_add_repos_returns_correct_count(
         self, admin_user, mock_group_manager, tmp_path
     ):
-        """add_repos_to_group handler returns count of repos added."""
+        """manage_group_repos add returns count of repos added."""
         with (
             patch(
-                "code_indexer.server.mcp.handlers._get_group_manager",
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
                 return_value=mock_group_manager,
             ),
             _with_elevation(admin_user.username, str(tmp_path)) as session_key,
@@ -947,102 +800,80 @@ class TestAddReposToGroupHandler:
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
 
-            handler = HANDLER_REGISTRY["add_repos_to_group"]
+            handler = HANDLER_REGISTRY["manage_group_repos"]
             result = handler(
-                {"group_id": str(group_id), "repo_names": ["repo1", "repo2", "repo3"]},
+                {
+                    "action": "add",
+                    "group_id": str(group_id),
+                    "repos": ["repo1", "repo2", "repo3"],
+                },
                 admin_user,
                 session_key=session_key,
             )
-
             content = json.loads(result["content"][0]["text"])
             assert content["added_count"] == 3
 
-
-class TestRemoveRepoFromGroupHandler:
-    """Tests for remove_repo_from_group handler functionality."""
-
-    @pytest.fixture
-    def mock_group_manager(self, temp_groups_db):
-        """Create mock group manager for testing handlers."""
-        from code_indexer.server.services.group_access_manager import GroupAccessManager
-
-        manager = GroupAccessManager(temp_groups_db)
-        return manager
-
-    def test_remove_repo_from_group_succeeds(
-        self, admin_user, mock_group_manager, tmp_path
-    ):
-        """remove_repo_from_group handler succeeds for existing repo access."""
+    def test_remove_repo_succeeds(self, admin_user, mock_group_manager, tmp_path):
+        """manage_group_repos remove action succeeds for existing repo."""
         with (
             patch(
-                "code_indexer.server.mcp.handlers._get_group_manager",
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
                 return_value=mock_group_manager,
             ),
             _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
-            # Get a valid group and add a repo first
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
             mock_group_manager.grant_repo_access("test_repo", group_id, "admin_test")
 
-            handler = HANDLER_REGISTRY["remove_repo_from_group"]
+            handler = HANDLER_REGISTRY["manage_group_repos"]
             result = handler(
-                {"group_id": str(group_id), "repo_name": "test_repo"},
+                {
+                    "action": "remove",
+                    "group_id": str(group_id),
+                    "repo_name": "test_repo",
+                },
                 admin_user,
                 session_key=session_key,
             )
-
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
 
-
-@pytest.mark.slow
-class TestBulkRemoveReposFromGroupHandler:
-    """Tests for bulk_remove_repos_from_group handler functionality."""
-
-    @pytest.fixture
-    def mock_group_manager(self, temp_groups_db):
-        """Create mock group manager for testing handlers."""
-        from code_indexer.server.services.group_access_manager import GroupAccessManager
-
-        manager = GroupAccessManager(temp_groups_db)
-        return manager
-
-    def test_bulk_remove_repos_from_group_succeeds(
-        self, admin_user, mock_group_manager, tmp_path
-    ):
-        """bulk_remove_repos_from_group handler succeeds for valid inputs."""
+    def test_bulk_remove_repos_succeeds(self, admin_user, mock_group_manager, tmp_path):
+        """manage_group_repos bulk_remove action succeeds for valid inputs."""
         with (
             patch(
-                "code_indexer.server.mcp.handlers._get_group_manager",
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
                 return_value=mock_group_manager,
             ),
             _with_elevation(admin_user.username, str(tmp_path)) as session_key,
         ):
-            # Get a valid group and add repos first
             groups = mock_group_manager.get_all_groups()
             group_id = groups[0].id
             mock_group_manager.grant_repo_access("repo1", group_id, "admin_test")
             mock_group_manager.grant_repo_access("repo2", group_id, "admin_test")
 
-            handler = HANDLER_REGISTRY["bulk_remove_repos_from_group"]
+            handler = HANDLER_REGISTRY["manage_group_repos"]
             result = handler(
-                {"group_id": str(group_id), "repo_names": ["repo1", "repo2"]},
+                {
+                    "action": "bulk_remove",
+                    "group_id": str(group_id),
+                    "repos": ["repo1", "repo2"],
+                },
                 admin_user,
                 session_key=session_key,
             )
-
             content = json.loads(result["content"][0]["text"])
             assert content["success"] is True
             assert "removed_count" in content
 
-    def test_bulk_remove_repos_from_group_returns_removed_count(
+    def test_bulk_remove_returns_correct_count(
         self, admin_user, mock_group_manager, tmp_path
     ):
-        """bulk_remove_repos_from_group handler returns count of repos removed."""
+        """manage_group_repos bulk_remove returns count of repos removed."""
         with (
             patch(
-                "code_indexer.server.mcp.handlers._get_group_manager",
+                "code_indexer.server.mcp.handlers.admin._get_group_manager",
                 return_value=mock_group_manager,
             ),
             _with_elevation(admin_user.username, str(tmp_path)) as session_key,
@@ -1052,12 +883,15 @@ class TestBulkRemoveReposFromGroupHandler:
             mock_group_manager.grant_repo_access("repo_a", group_id, "admin_test")
             mock_group_manager.grant_repo_access("repo_b", group_id, "admin_test")
 
-            handler = HANDLER_REGISTRY["bulk_remove_repos_from_group"]
+            handler = HANDLER_REGISTRY["manage_group_repos"]
             result = handler(
-                {"group_id": str(group_id), "repo_names": ["repo_a", "repo_b"]},
+                {
+                    "action": "bulk_remove",
+                    "group_id": str(group_id),
+                    "repos": ["repo_a", "repo_b"],
+                },
                 admin_user,
                 session_key=session_key,
             )
-
             content = json.loads(result["content"][0]["text"])
             assert content["removed_count"] == 2

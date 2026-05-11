@@ -3,6 +3,7 @@ name: get_group
 category: admin
 required_permission: manage_users
 tl_dr: Get detailed information about a specific group.
+slim_description: "Get detailed information about a specific group by group_id (requires manage_users)."
 inputSchema:
   type: object
   properties:

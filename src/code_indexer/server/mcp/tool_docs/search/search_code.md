@@ -3,6 +3,7 @@ name: search_code
 category: search
 required_permission: query_repos
 tl_dr: Search code using pre-built indexes.
+slim_description: "Search indexed repositories using semantic, full-text, hybrid, or regex modes with multi-repo wildcards, language/path filtering, and optional reranking."
 inputSchema:
   type: object
   properties:
@@ -86,7 +87,7 @@ inputSchema:
     time_range:
       type: string
       description: 'Time range filter (format: YYYY-MM-DD..YYYY-MM-DD). Requires temporal index (cidx index --index-commits).
-        Check enable_temporal via global_repo_status.'
+        Check enable_temporal via repository_status.'
     time_range_all:
       type: boolean
       default: false

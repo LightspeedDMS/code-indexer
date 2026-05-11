@@ -31,7 +31,7 @@ import code_indexer.server.mcp.handlers.admin as admin_handlers
 def _parse_mcp_response(response: dict) -> dict:
     """Unwrap a MCP-formatted response: {"content": [{"type": "text", "text": "..."}]}."""
     content = response.get("content", [])
-    return json.loads(content[0]["text"])
+    return json.loads(content[0]["text"])  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------
@@ -126,20 +126,17 @@ _GATED_HANDLERS = [
         lambda h: admin_handlers.handle_delete_group({}, h, session_key=_SESSION_KEY),
         id="delete_group",
     ),
+    # Story #992: inner handlers preserve @require_mcp_elevation()
     pytest.param(
-        lambda h: admin_handlers.handle_add_member_to_group(
-            {}, h, session_key=_SESSION_KEY
-        ),
+        lambda h: admin_handlers._add_member({}, h, session_key=_SESSION_KEY),
         id="add_member_to_group",
     ),
     pytest.param(
-        lambda h: admin_handlers.handle_remove_member_from_group(
-            {}, h, session_key=_SESSION_KEY
-        ),
+        lambda h: admin_handlers._remove_member({}, h, session_key=_SESSION_KEY),
         id="remove_member_from_group",
     ),
     pytest.param(
-        lambda h: admin_handlers.handle_admin_create_user_mcp_credential(
+        lambda h: admin_handlers.mcp_credentials._create_user(
             {}, h, session_key=_SESSION_KEY
         ),
         id="admin_create_user_mcp_credential",

@@ -1194,10 +1194,10 @@ class DescriptionRefreshScheduler:
         config_manager = getattr(self, "_config_manager", None)
         config = config_manager.load_config() if config_manager else None
         if config and config.claude_integration_config:
-            return max(1, config.claude_integration_config.max_concurrent_claude_cli)
+            return max(1, config.claude_integration_config.max_concurrent_claude_cli)  # type: ignore[no-any-return]
         from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
-        return ClaudeIntegrationConfig().max_concurrent_claude_cli
+        return ClaudeIntegrationConfig().max_concurrent_claude_cli  # type: ignore[no-any-return]
 
     def _read_existing_description(
         self, repo_alias: str

@@ -3,6 +3,7 @@ name: configure_git_credential
 category: admin
 required_permission: query_repos
 tl_dr: Configure a git forge personal access token with identity discovery.
+slim_description: "Configure a git forge PAT by supplying forge_type (github/gitlab), forge_host, token, and optional name."
 inputSchema:
   type: object
   properties:

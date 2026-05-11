@@ -3,6 +3,7 @@ name: get_job_statistics
 category: admin
 required_permission: query_repos
 tl_dr: Get counts of background repository indexing jobs (active/pending/failed).
+slim_description: "Get aggregate counts of background jobs without parameters."
 inputSchema:
   type: object
   properties: {}

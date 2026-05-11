@@ -3,6 +3,7 @@ name: close_pull_request
 category: git
 required_permission: repository:write
 tl_dr: Close (without merging) a GitHub pull request or GitLab merge request. Auto-detects forge type from the remote URL. Credentials are auto-fetched from stored git credentials.
+slim_description: "Close a pull request or merge request without merging it, identified by number."
 inputSchema:
   type: object
   properties:

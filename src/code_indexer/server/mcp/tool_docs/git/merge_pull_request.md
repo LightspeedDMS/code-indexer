@@ -3,6 +3,7 @@ name: merge_pull_request
 category: git
 required_permission: repository:write
 tl_dr: Merge a GitHub pull request or GitLab merge request. Auto-detects forge type from the remote URL. Credentials are auto-fetched from stored git credentials.
+slim_description: "Merge a pull request or merge request by number using merge, squash, or rebase strategy."
 inputSchema:
   type: object
   properties:

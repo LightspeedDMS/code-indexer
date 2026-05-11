@@ -3,6 +3,7 @@ name: trigger_dependency_analysis
 category: repos
 required_permission: manage_golden_repos
 tl_dr: Manually trigger dependency map analysis (full or delta mode).
+slim_description: "Trigger dependency map analysis in full or delta mode with optional dry_run for graph-channel preview."
 inputSchema:
   type: object
   properties:
@@ -66,7 +67,7 @@ WHEN TO USE:
 - To refresh without waiting for scheduled analysis
 
 ASYNC BEHAVIOR:
-Returns immediately with a job_id. Analysis runs in background. Use get_repository_status or check cidx-meta indexing status to monitor progress.
+Returns immediately with a job_id. Analysis runs in background. Use repository_status or check cidx-meta indexing status to monitor progress.
 
 CONCURRENCY:
 Only one dependency map analysis can run at a time. Concurrent requests will be rejected with "already in progress" error.

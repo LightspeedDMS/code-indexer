@@ -3,6 +3,7 @@ name: git_amend
 category: git
 required_permission: repository:write
 tl_dr: Amend the most recent git commit. Can update the commit message or just re-commit staged changes with the existing message. Uses PAT credential identity for author/committer attribution.
+slim_description: "Amend the most recent commit, replacing its message if provided or keeping it unchanged when omitted (--no-edit)."
 inputSchema:
   type: object
   properties:

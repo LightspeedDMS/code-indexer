@@ -3,6 +3,7 @@ name: git_merge
 category: git
 required_permission: repository:write
 tl_dr: Merge a source branch into the current branch with conflict detection.
+slim_description: "Merge a source_branch into the current branch with conflict detection."
 inputSchema:
   type: object
   properties:

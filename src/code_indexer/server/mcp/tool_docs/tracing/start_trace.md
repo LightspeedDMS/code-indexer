@@ -4,6 +4,7 @@ category: tracing
 required_permission: query_repos
 requires_config: langfuse_enabled
 tl_dr: Start a Langfuse trace for a research session with automatic span logging.
+slim_description: "Start a Langfuse trace for a research session with name, optional input, strategy, and quality metrics."
 inputSchema:
   type: object
   properties:

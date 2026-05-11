@@ -3,6 +3,7 @@ name: depmap_get_cross_domain_graph
 category: depmap
 required_permission: query_repos
 tl_dr: Return all domain-to-domain edges as JSON records (source, target, dependency_count, types); no rendering — pass edges to your visualization tool of choice.
+slim_description: "Get the directed domain dependency graph as edge records with optional source/target filtering."
 inputSchema:
   type: object
   properties:

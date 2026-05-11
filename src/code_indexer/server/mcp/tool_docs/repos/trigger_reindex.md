@@ -3,6 +3,7 @@ name: trigger_reindex
 category: repos
 required_permission: repository:write
 tl_dr: Trigger manual re-indexing for specified index types.
+slim_description: "Trigger re-indexing for specified index types on a repository with optional full rebuild."
 inputSchema:
   type: object
   properties:

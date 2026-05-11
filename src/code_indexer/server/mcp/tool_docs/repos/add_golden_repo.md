@@ -3,6 +3,7 @@ name: add_golden_repo
 category: repos
 required_permission: manage_golden_repos
 tl_dr: Register a new repository for indexing (ASYNC operation).
+slim_description: "Register a repository for indexing by URL and alias with optional temporal history."
 inputSchema:
   type: object
   properties:

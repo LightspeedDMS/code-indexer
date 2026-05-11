@@ -3,6 +3,7 @@ name: xray_search
 category: search
 required_permission: query_repos
 tl_dr: Two-phase AST-aware search — regex driver narrows candidate files, Python evaluator inspects each file's AST and returns a list of matches with open-ended per-match metadata.
+slim_description: "Two-phase AST-aware code search: regex pattern narrows files, then sandboxed Python evaluator runs against each file's tree-sitter AST. Supports multi-repo, glob filters, and async polling."
 inputSchema:
   type: object
   properties:

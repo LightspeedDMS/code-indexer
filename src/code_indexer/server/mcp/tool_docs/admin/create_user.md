@@ -3,6 +3,7 @@ name: create_user
 category: admin
 required_permission: manage_users
 tl_dr: Create new user account with specified username, password, and role.
+slim_description: "Create a new user account with username, password, and role (admin/power_user/normal_user), requiring manage_users permission."
 inputSchema:
   type: object
   properties:

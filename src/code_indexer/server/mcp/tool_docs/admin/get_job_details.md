@@ -3,6 +3,7 @@ name: get_job_details
 category: admin
 required_permission: query_repos
 tl_dr: Get detailed status and progress for a specific background job using job_id.
+slim_description: "Get detailed status and progress for a background job by job_id."
 inputSchema:
   type: object
   properties:

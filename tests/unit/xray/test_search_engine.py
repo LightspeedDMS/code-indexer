@@ -945,7 +945,8 @@ class TestXRaySearchEngineRelativePaths:
             search_target="content",
         )
         errors = [
-            e for e in result["evaluation_errors"]
+            e
+            for e in result["evaluation_errors"]
             if e["error_type"] == "UnsupportedLanguage"
         ]
         assert len(errors) >= 1

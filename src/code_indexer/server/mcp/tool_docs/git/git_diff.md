@@ -3,6 +3,7 @@ name: git_diff
 category: git
 required_permission: query_repos
 tl_dr: Show line-by-line changes between two revisions (commits, branches, tags).
+slim_description: "Show line-by-line changes between two revisions (commits, branches, or tags) via from_revision and optional to_revision."
 inputSchema:
   type: object
   properties:

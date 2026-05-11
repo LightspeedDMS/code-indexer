@@ -3,6 +3,7 @@ name: git_stage
 category: git
 required_permission: repository:write
 tl_dr: Stage files for commit (git add).
+slim_description: "Stage one or more files for the next commit (git add) by providing an array of relative file_paths."
 inputSchema:
   type: object
   properties:

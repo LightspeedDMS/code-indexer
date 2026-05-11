@@ -3,6 +3,7 @@ name: depmap_get_repo_domains
 category: depmap
 required_permission: query_repos
 tl_dr: Find all domains that a given repo participates in, with its role in each domain.
+slim_description: "Find all dependency-map domains that a given repo_name participates in, with the repo's role in each domain."
 inputSchema:
   type: object
   required:

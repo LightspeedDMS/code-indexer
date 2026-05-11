@@ -3,6 +3,7 @@ name: create_group
 category: admin
 required_permission: manage_users
 tl_dr: Create a new custom group for organizing users and repository access.
+slim_description: "Create a custom group with a unique name and optional description (requires manage_users)."
 inputSchema:
   type: object
   properties:
