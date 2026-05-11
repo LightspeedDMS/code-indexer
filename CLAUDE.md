@@ -215,13 +215,11 @@ All systemd/env/config changes flow through auto-updater: `git pull` -> `pip ins
 
 Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step 12 in `DeploymentExecutor.execute()`). Fresh install sets master switch OFF. Updates never touch config.
 
-**Config split**: `pace_maker_clone_path` (bootstrap, written by installer/auto-updater) + `enforce_pace_maker_pacing_only` (runtime, Web UI toggle, default `false`).
+**Config split**: `pace_maker_clone_path` (bootstrap, written by installer/auto-updater) + `pace_maker_mode` (runtime, Web UI, default `"disabled"`).
 
-**Three-layer guard** (`enforce_pace_maker_config()` in `pace_maker_guard.py`): (1) Location awareness -- clone path from bootstrap must exist (dev environments are no-op). (2) Runtime toggle from Web UI. (3) Idempotent CLI enforcement via `pace-maker status` + corrective commands.
+**Three-way mode** (`enforce_pace_maker_config()` in `pace_maker_guard.py`): `"disabled"` = no-op, never touches pace-maker (safe for dev machines). `"on"` = enforce pacing-only mode (5h + weekly limits ON, everything else OFF). `"off"` = actively disable pace-maker master switch.
 
 **Two injection points**: `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()`. NOT CodexInvoker (Codex uses OpenAI credits). Guard is non-fatal -- all failures logged, never raised.
-
-**Toggle ON**: pacing-only mode (5h + weekly limits ON, everything else OFF). **Toggle OFF**: master switch OFF (dormant).
 
 ### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
 
