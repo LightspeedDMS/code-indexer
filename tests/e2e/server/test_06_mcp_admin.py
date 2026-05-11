@@ -126,12 +126,12 @@ ADMIN_TOOLS: list[tuple[str, str, JsonArgs]] = [
     (
         "manage_group_members_add",
         "manage_group_members",
-        {"action": "add", "group_id": E2E_GROUP, "users": ["admin"]},
+        {"action": "add", "group_id": E2E_GROUP, "user_id": "admin"},
     ),
     (
         "manage_group_members_remove",
         "manage_group_members",
-        {"action": "remove", "group_id": E2E_GROUP, "users": ["admin"]},
+        {"action": "remove", "group_id": E2E_GROUP, "user_id": "admin"},
     ),
     (
         "update_group",

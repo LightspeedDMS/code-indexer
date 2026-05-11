@@ -585,7 +585,7 @@ class TestS992GroupMembers:
         resp_add = call_mcp_tool(
             test_client,
             "manage_group_members",
-            {"action": "add", "group_id": grp, "users": ["admin"]},
+            {"action": "add", "group_id": grp, "user_id": "admin"},
             auth_headers,
         )
         _assert_no_500(resp_add, "grp_add_member")
@@ -601,7 +601,7 @@ class TestS992GroupMembers:
         resp_rm = call_mcp_tool(
             test_client,
             "manage_group_members",
-            {"action": "remove", "group_id": grp, "users": ["admin"]},
+            {"action": "remove", "group_id": grp, "user_id": "admin"},
             auth_headers,
         )
         _assert_no_500(resp_rm, "grp_remove_member")
@@ -617,7 +617,7 @@ class TestS992GroupMembers:
         resp = call_mcp_tool(
             test_client,
             "manage_group_members",
-            {"action": "invalid", "group_id": "x", "users": ["admin"]},
+            {"action": "invalid", "group_id": "x", "user_id": "admin"},
             auth_headers,
         )
         body = _assert_ok_jsonrpc(resp, "grp_members_invalid_action")
@@ -631,7 +631,7 @@ class TestS992GroupMembers:
         resp = call_mcp_tool(
             test_client,
             "manage_group_members",
-            {"group_id": "x", "users": ["admin"]},
+            {"group_id": "x", "user_id": "admin"},
             auth_headers,
         )
         body = _assert_ok_jsonrpc(resp, "grp_members_no_action")

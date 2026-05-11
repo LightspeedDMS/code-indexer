@@ -752,7 +752,7 @@ class TestS992Groups:
             add_status, add_body = _raw_mcp_call(
                 e2e_http_client,
                 "manage_group_members",
-                {"action": "add", "group_id": grp, "users": ["admin"]},
+                {"action": "add", "group_id": grp, "user_id": "admin"},
                 e2e_admin_token,
             )
             _assert_no_500(add_status, add_body, "grp_add_member")
@@ -770,7 +770,7 @@ class TestS992Groups:
             rm_status, rm_body = _raw_mcp_call(
                 e2e_http_client,
                 "manage_group_members",
-                {"action": "remove", "group_id": grp, "users": ["admin"]},
+                {"action": "remove", "group_id": grp, "user_id": "admin"},
                 e2e_admin_token,
             )
             _assert_no_500(rm_status, rm_body, "grp_remove_member")
@@ -837,7 +837,7 @@ class TestS992Groups:
         status, body = _raw_mcp_call(
             e2e_http_client,
             "manage_group_members",
-            {"action": "invalid_e2e", "group_id": "x", "users": ["admin"]},
+            {"action": "invalid_e2e", "group_id": "x", "user_id": "admin"},
             e2e_admin_token,
         )
         _assert_no_500(status, body, "grp_members_invalid_action")
@@ -875,7 +875,7 @@ class TestS992Groups:
         status, body = _raw_mcp_call(
             e2e_http_client,
             "manage_group_members",
-            {"group_id": "x", "users": ["admin"]},
+            {"group_id": "x", "user_id": "admin"},
             e2e_admin_token,
         )
         _assert_no_500(status, body, "grp_members_no_action")

@@ -306,7 +306,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
         """
         result = self._call_mcp_tool(
             "manage_group_members",
-            {"action": "add", "group_id": str(group_id), "users": [user_id]},
+            {"action": "add", "group_id": str(group_id), "user_id": user_id},
         )
 
         if not result.get("success", False):
