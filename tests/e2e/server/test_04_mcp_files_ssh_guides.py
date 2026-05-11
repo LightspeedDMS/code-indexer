@@ -35,9 +35,8 @@ TOOL_LIST_FILES: str = "list_files"
 # ---------------------------------------------------------------------------
 # Tool name constants — ssh category
 # ---------------------------------------------------------------------------
-TOOL_CIDX_SSH_KEY_LIST: str = "cidx_ssh_key_list"
-TOOL_CIDX_SSH_KEY_CREATE: str = "cidx_ssh_key_create"
-TOOL_CIDX_SSH_KEY_SHOW_PUBLIC: str = "cidx_ssh_key_show_public"
+TOOL_LIST_SSH_KEYS: str = "list_ssh_keys"
+TOOL_MANAGE_SSH_KEY: str = "manage_ssh_key"
 
 # ---------------------------------------------------------------------------
 # Tool name constants — guides category
@@ -49,7 +48,7 @@ TOOL_GET_TOOL_CATEGORIES: str = "get_tool_categories"
 # ---------------------------------------------------------------------------
 # Argument key and value constants
 # ---------------------------------------------------------------------------
-ARG_KEY_KEY_NAME: str = "key_name"
+ARG_KEY_NAME: str = "name"
 ARG_SSH_KEY_NAME_TEST: str = "test-key"
 
 # ---------------------------------------------------------------------------
@@ -65,13 +64,13 @@ OTHER_TOOLS: list[tuple[str, str, JsonArgs]] = [
     # SSH keys — read operations only (no side-effects)
     (
         "ssh_keys_list",
-        TOOL_CIDX_SSH_KEY_LIST,
+        TOOL_LIST_SSH_KEYS,
         {},
     ),
     (
         "ssh_key_show_public",
-        TOOL_CIDX_SSH_KEY_SHOW_PUBLIC,
-        {ARG_KEY_KEY_NAME: ARG_SSH_KEY_NAME_TEST},
+        TOOL_MANAGE_SSH_KEY,
+        {"action": "show_public", ARG_KEY_NAME: ARG_SSH_KEY_NAME_TEST},
     ),
     # Guides
     (
