@@ -5788,9 +5788,16 @@ def _get_current_config() -> dict:
         "timeouts": settings["timeouts"],
         "password_security": settings["password_security"],
         # Bug #943: TOTP step-up elevation runtime config
-        "totp_elevation": settings.get("totp_elevation", {}),
-        # Story #997: Pace-maker pacing-only enforcement
-        "pace_maker": settings.get("pace_maker", {}),
+        "totp_elevation": settings.get(
+            "totp_elevation",
+            {
+                "elevation_enforcement_enabled": True,
+                "elevation_idle_timeout_seconds": 300,
+                "elevation_max_age_seconds": 1800,
+            },
+        ),
+        # Story #997: Pace-maker mode enforcement
+        "pace_maker": settings.get("pace_maker", {"pace_maker_mode": "disabled"}),
         "oidc": oidc_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,

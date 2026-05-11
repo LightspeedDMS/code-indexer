@@ -351,9 +351,9 @@ class ConfigService:
                 "elevation_idle_timeout_seconds": config.elevation_idle_timeout_seconds,
                 "elevation_max_age_seconds": config.elevation_max_age_seconds,
             },
-            # Story #997: Pace-maker pacing-only enforcement
+            # Story #997: Pace-maker mode enforcement
             "pace_maker": {
-                "enforce_pace_maker_pacing_only": config.enforce_pace_maker_pacing_only,
+                "pace_maker_mode": config.pace_maker_mode,
             },
             # Claude CLI integration (Story #15 AC3, Story #20: moved to claude_integration_config)
             "claude_cli": {
@@ -1510,22 +1510,16 @@ class ConfigService:
         """Update pace-maker runtime settings (Story #997).
 
         Validation rules:
-        - enforce_pace_maker_pacing_only: coerce to bool; raise ValueError on unknown string.
+        - pace_maker_mode: must be one of "disabled", "on", "off" (case-insensitive).
         """
-        if key == "enforce_pace_maker_pacing_only":
-            if isinstance(value, bool):
-                config.enforce_pace_maker_pacing_only = value
-            else:
-                str_val = str(value).lower()
-                if str_val in self._TOTP_TRUTHY:
-                    config.enforce_pace_maker_pacing_only = True
-                elif str_val in self._TOTP_FALSY:
-                    config.enforce_pace_maker_pacing_only = False
-                else:
-                    raise ValueError(
-                        f"Invalid value for enforce_pace_maker_pacing_only: {value!r}. "
-                        "Accepted: true/on/1 or false/off/0."
-                    )
+        if key == "pace_maker_mode":
+            valid = {"disabled", "on", "off"}
+            str_val = str(value).lower()
+            if str_val not in valid:
+                raise ValueError(
+                    f"Invalid pace_maker_mode: {value!r}. Accepted: disabled, on, off."
+                )
+            config.pace_maker_mode = str_val
         else:
             raise ValueError(f"Unknown pace_maker setting: {key}")
 

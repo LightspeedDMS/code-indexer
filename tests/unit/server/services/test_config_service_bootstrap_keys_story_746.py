@@ -79,7 +79,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "cidx_meta_backup_config",  # Story #926 — runtime, not bootstrap
             "activated_reaper_config",  # Story #967 — runtime, not bootstrap
             "xray_config",  # Story #977 — runtime, not bootstrap
-            "enforce_pace_maker_pacing_only",  # Story #997 — runtime Web UI setting
+            "pace_maker_mode",  # Story #997 — runtime Web UI setting (three-way: disabled/on/off)
         }
     )
 

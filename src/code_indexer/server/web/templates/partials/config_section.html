@@ -2121,17 +2121,17 @@ function saveLlmCredsConfig() {
                 <tbody>
                     <tr>
                         <td class="config-label">Enforcement Enabled</td>
-                        <td class="config-value">{{ 'Yes' if config.totp_elevation.elevation_enforcement_enabled else 'No' }}</td>
+                        <td class="config-value">{{ 'Yes' if config.totp_elevation.elevation_enforcement_enabled | default(true) else 'No' }}</td>
                         <td class="config-note"><small>No = passthru (no TOTP prompt). Yes = require TOTP step-up on protected operations.</small></td>
                     </tr>
                     <tr>
                         <td class="config-label">Idle Timeout (seconds)</td>
-                        <td class="config-value">{{ config.totp_elevation.elevation_idle_timeout_seconds }}</td>
+                        <td class="config-value">{{ config.totp_elevation.elevation_idle_timeout_seconds | default(300) }}</td>
                         <td class="config-note"><small>1-60 minutes — window expires after this much idle time.</small></td>
                     </tr>
                     <tr>
                         <td class="config-label">Max Age (seconds)</td>
-                        <td class="config-value">{{ config.totp_elevation.elevation_max_age_seconds }}</td>
+                        <td class="config-value">{{ config.totp_elevation.elevation_max_age_seconds | default(1800) }}</td>
                         <td class="config-note"><small>5-120 minutes — absolute window cap regardless of activity.</small></td>
                     </tr>
                 </tbody>
@@ -2150,22 +2150,22 @@ function saveLlmCredsConfig() {
                 <label for="totp-enforcement-enabled">
                     Enforcement Enabled
                     <select id="totp-enforcement-enabled" name="elevation_enforcement_enabled">
-                        <option value="true" {% if config.totp_elevation.elevation_enforcement_enabled %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.totp_elevation.elevation_enforcement_enabled %}selected{% endif %}>No</option>
+                        <option value="true" {% if config.totp_elevation.elevation_enforcement_enabled | default(true) %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.totp_elevation.elevation_enforcement_enabled | default(true) %}selected{% endif %}>No</option>
                     </select>
                     <small>No = passthru (no TOTP prompt). Yes = require TOTP step-up on protected operations.</small>
                 </label>
                 <label for="totp-idle-timeout">
                     Idle Timeout (seconds)
                     <input type="number" id="totp-idle-timeout" name="elevation_idle_timeout_seconds"
-                        value="{{ config.totp_elevation.elevation_idle_timeout_seconds }}"
+                        value="{{ config.totp_elevation.elevation_idle_timeout_seconds | default(300) }}"
                         min="60" max="3600">
                     <small>1-60 minutes — window expires after this much idle time.</small>
                 </label>
                 <label for="totp-max-age">
                     Max Age (seconds)
                     <input type="number" id="totp-max-age" name="elevation_max_age_seconds"
-                        value="{{ config.totp_elevation.elevation_max_age_seconds }}"
+                        value="{{ config.totp_elevation.elevation_max_age_seconds | default(1800) }}"
                         min="300" max="7200">
                     <small>5-120 minutes — absolute window cap regardless of activity.</small>
                 </label>
@@ -2184,9 +2184,10 @@ function saveLlmCredsConfig() {
         <h2>Pace Maker</h2>
     </summary>
     <p class="section-description">
-        Controls pace-maker enforcement before Claude CLI invocations. When ON, enforces pacing-only mode
-        (5-hour and weekly credit limits active, all other features disabled). When OFF, ensures pace-maker
-        master switch is OFF (dormant). Only effective when pace-maker was installed by the CIDX auto-updater.
+        Controls pace-maker behaviour before Claude CLI invocations.
+        Disabled = never touch pace-maker (safe for dev machines).
+        On = enforce 5h + weekly limits before every Claude invocation.
+        Off = actively disable pace-maker master switch.
     </p>
     <article>
         <!-- Display Mode -->
@@ -2194,9 +2195,9 @@ function saveLlmCredsConfig() {
             <table class="config-table">
                 <tbody>
                     <tr>
-                        <td class="config-label">Enforce Pacing-Only Mode</td>
-                        <td class="config-value">{{ 'Yes' if config.pace_maker.enforce_pace_maker_pacing_only else 'No' }}</td>
-                        <td class="config-note"><small>No = pace-maker dormant. Yes = enforce 5h + weekly credit limits before every Claude invocation.</small></td>
+                        <td class="config-label">Pace-Maker Mode</td>
+                        <td class="config-value">{{ config.pace_maker.pace_maker_mode | default('disabled') | capitalize }}</td>
+                        <td class="config-note"><small>Disabled = never touch pace-maker. On = enforce 5h + weekly limits. Off = actively disable pace-maker.</small></td>
                     </tr>
                 </tbody>
             </table>
@@ -2211,13 +2212,14 @@ function saveLlmCredsConfig() {
             <div class="validation-error">{{ validation_errors.pace_maker }}</div>
             {% endif %}
             <div class="form-grid">
-                <label for="pace-maker-enforce">
-                    Enforce Pacing-Only Mode
-                    <select id="pace-maker-enforce" name="enforce_pace_maker_pacing_only">
-                        <option value="true" {% if config.pace_maker.enforce_pace_maker_pacing_only %}selected{% endif %}>Yes</option>
-                        <option value="false" {% if not config.pace_maker.enforce_pace_maker_pacing_only %}selected{% endif %}>No</option>
+                <label for="pace-maker-mode">
+                    Pace-Maker Mode
+                    <select id="pace-maker-mode" name="pace_maker_mode">
+                        <option value="disabled" {% if config.pace_maker.pace_maker_mode | default('disabled') == 'disabled' %}selected{% endif %}>Disabled</option>
+                        <option value="on" {% if config.pace_maker.pace_maker_mode | default('disabled') == 'on' %}selected{% endif %}>On</option>
+                        <option value="off" {% if config.pace_maker.pace_maker_mode | default('disabled') == 'off' %}selected{% endif %}>Off</option>
                     </select>
-                    <small>No = pace-maker dormant. Yes = enforce 5h + weekly credit limits before every Claude invocation.</small>
+                    <small>Disabled = never touch pace-maker. On = enforce 5h + weekly limits. Off = actively disable pace-maker.</small>
                 </label>
             </div>
             <div class="form-actions">
