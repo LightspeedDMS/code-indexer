@@ -2,18 +2,19 @@
 Pre-invocation guard for pace-maker configuration enforcement (Story #997).
 
 Called before every Claude CLI invocation to idempotently enforce pace-maker
-configuration based on the runtime toggle. Dev environments are protected
-via location awareness (clone path check).
+configuration based on the runtime mode setting.
+
+Three modes:
+  "disabled" - no-op, never touch pace-maker (safe for dev machines)
+  "on"        - enforce pacing-only mode (5h + weekly limits active)
+  "off"       - actively disable pace-maker master switch
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
-from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -48,29 +49,15 @@ _PACING_ONLY_COMMANDS = [
 ]
 
 
-def _get_clone_path_from_bootstrap() -> Optional[str]:
-    """Read pace_maker_clone_path from bootstrap config."""
-    data_dir = Path(os.environ.get("CIDX_DATA_DIR", str(Path.home() / ".cidx-server")))
-    config_path = data_dir / "config.json"
-    if not config_path.exists():
-        return None
-    import json
-
-    with open(config_path) as f:
-        config = json.load(f)
-    value = config.get("pace_maker_clone_path")
-    return str(value) if value is not None else None
-
-
-def _get_enforce_toggle() -> bool:
-    """Read enforce_pace_maker_pacing_only from runtime config."""
+def _get_pace_maker_mode() -> str:
+    """Read pace_maker_mode from runtime config. Returns 'disabled' on any error."""
     from code_indexer.server.services.config_service import get_config_service
 
     config = get_config_service().get_config()
-    return bool(getattr(config, "enforce_pace_maker_pacing_only", False))
+    return str(getattr(config, "pace_maker_mode", "disabled"))
 
 
-def _run_pace_maker_status() -> Optional[str]:
+def _run_pace_maker_status() -> str | None:
     """Run 'pace-maker status' and return stdout, or None on failure."""
     try:
         result = subprocess.run(
@@ -126,28 +113,24 @@ def _check_pacing_only_status(status_output: str) -> bool:
 def enforce_pace_maker_config() -> None:
     """Enforce pace-maker configuration before a Claude CLI invocation.
 
-    Three-layer safety model:
-    1. Location awareness: clone path from bootstrap config must exist
-    2. Runtime toggle: read from Web UI config
-    3. Idempotent CLI enforcement: check status, correct if drifted
+    Mode-based dispatch:
+      "disabled" -> return immediately, never touch pace-maker
+      "on"       -> ensure pacing-only mode is active; correct drift if needed
+      "off"      -> ensure pace-maker master switch is OFF
 
     This function NEVER raises -- all failures are logged and silently ignored.
     """
     try:
-        # Step 1: Location awareness -- dev environment protection
-        clone_path = _get_clone_path_from_bootstrap()
-        if clone_path is None or not Path(clone_path).exists():
+        mode = _get_pace_maker_mode()
+
+        if mode == "disabled":
             return
 
-        # Step 2: Read runtime config toggle
-        enforce = _get_enforce_toggle()
-
-        # Step 3: Check CLI availability
+        # Check CLI availability before any subprocess work
         if shutil.which("pace-maker") is None:
             return
 
-        # Step 4: Enforce based on toggle
-        if enforce:
+        if mode == "on":
             status_output = _run_pace_maker_status()
             if status_output is None:
                 return
@@ -155,15 +138,12 @@ def enforce_pace_maker_config() -> None:
                 for cmd in _PACING_ONLY_COMMANDS:
                     _run_pace_maker_command(cmd)
                 logger.warning("pace-maker config drift corrected to pacing-only")
-        else:
+        elif mode == "off":
             status_output = _run_pace_maker_status()
             if status_output is None:
                 return
             if "Pace Maker: ACTIVE" in status_output:
                 _run_pace_maker_command(["pace-maker", "off"])
-                logger.info(
-                    "pace-maker master switch set to OFF "
-                    "(enforce_pace_maker_pacing_only=false)"
-                )
+                logger.info("pace-maker master switch set to OFF (pace_maker_mode=off)")
     except Exception as exc:
         logger.debug("enforce_pace_maker_config failed: %s", exc)

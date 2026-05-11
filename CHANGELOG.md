@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.17.0 (2026-05-11) — Three-way pace-maker toggle and config screen crash fix
+
+### Changed
+- Pace-maker enforcement setting replaced from boolean (Yes/No) to three-way mode (Disabled/On/Off). "Disabled" is a complete no-op that never touches pace-maker -- safe for dev machines. "On" enforces pacing-only mode. "Off" actively disables pace-maker.
+- Removed brittle clone-path location awareness check from pace-maker guard. Gating is now purely mode-based.
+- Config field renamed: `enforce_pace_maker_pacing_only` (bool) -> `pace_maker_mode` (string: disabled/on/off). Default: "disabled".
+
+### Fixed
+- Config screen 500 crash when `totp_elevation` or `pace_maker` settings absent from database. Both sections now provide proper defaults and Jinja2 `| default()` safety filters.
+
 ## v10.16.0 (2026-05-11) — Fix elevation session_key injection for consolidated MCP dispatchers
 
 ### Fixed

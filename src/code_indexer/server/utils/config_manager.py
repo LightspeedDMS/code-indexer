@@ -1162,8 +1162,9 @@ class ServerConfig:
     # Story #997 - Pace-maker integration
     # Bootstrap-only: path where pace-maker repo was cloned (set by installer/auto-updater).
     pace_maker_clone_path: Optional[str] = None
-    # Runtime (Web UI): enforce pacing-only mode before Claude CLI invocations.
-    enforce_pace_maker_pacing_only: bool = False
+    # Runtime (Web UI): pace-maker mode before Claude CLI invocations.
+    # Values: "disabled" (no-op), "on" (enforce pacing-only), "off" (actively disable)
+    pace_maker_mode: str = "disabled"
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -1260,6 +1261,11 @@ class ServerConfig:
             self.codex_integration_config = CodexIntegrationConfig()
         if self.cidx_meta_backup_config is None:
             self.cidx_meta_backup_config = CidxMetaBackupConfig()
+        # Story #997 - Backward-compat migration: convert old bool field to three-way string.
+        # If old stored data has enforce_pace_maker_pacing_only, migrate and remove it.
+        old_enforce = self.__dict__.pop("enforce_pace_maker_pacing_only", None)
+        if old_enforce is not None:
+            self.pace_maker_mode = "on" if old_enforce else "disabled"
 
 
 class ServerConfigManager:

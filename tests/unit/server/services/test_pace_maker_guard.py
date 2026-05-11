@@ -3,6 +3,11 @@
 Tests that enforce_pace_maker_config() correctly enforces pace-maker
 configuration before Claude CLI invocations, is non-fatal, and uses
 idempotent CLI enforcement.
+
+Three-way mode:
+  "disabled" -> no-op (never touch pace-maker)
+  "on"       -> enforce pacing-only (5h + weekly limits)
+  "off"      -> actively disable pace-maker
 """
 
 from unittest.mock import MagicMock, patch
@@ -46,14 +51,48 @@ class TestCheckPacingOnlyStatus:
         assert _check_pacing_only_status(padded) is True
 
 
-class TestEnforcePaceMakerConfigNoClonePath:
-    """Tests for early-exit when clone path is absent or invalid."""
+class TestEnforcePaceMakerConfigDisabledMode:
+    """Tests for mode='disabled' (pure no-op): no subprocess calls ever made."""
 
-    def test_no_clone_path_returns_early_no_subprocess(self) -> None:
-        """When clone path is None, no subprocess calls are made."""
+    def test_disabled_mode_returns_early_no_subprocess(self) -> None:
+        """When mode is 'disabled', no subprocess calls are made."""
         with (
             patch(
-                "code_indexer.server.services.pace_maker_guard._get_clone_path_from_bootstrap",
+                "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+                return_value="disabled",
+            ),
+            patch("subprocess.run") as mock_run,
+        ):
+            enforce_pace_maker_config()
+            mock_run.assert_not_called()
+
+    def test_disabled_mode_does_not_check_cli_availability(self) -> None:
+        """When mode is 'disabled', shutil.which is never consulted."""
+        with (
+            patch(
+                "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+                return_value="disabled",
+            ),
+            patch(
+                "code_indexer.server.services.pace_maker_guard.shutil.which"
+            ) as mock_which,
+        ):
+            enforce_pace_maker_config()
+            mock_which.assert_not_called()
+
+
+class TestEnforcePaceMakerConfigCliNotFound:
+    """Tests for early-exit when pace-maker binary is absent."""
+
+    def test_cli_not_found_returns_early_mode_on(self) -> None:
+        """When pace-maker binary not in PATH and mode='on', no subprocess calls."""
+        with (
+            patch(
+                "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+                return_value="on",
+            ),
+            patch(
+                "code_indexer.server.services.pace_maker_guard.shutil.which",
                 return_value=None,
             ),
             patch("subprocess.run") as mock_run,
@@ -61,31 +100,12 @@ class TestEnforcePaceMakerConfigNoClonePath:
             enforce_pace_maker_config()
             mock_run.assert_not_called()
 
-    def test_clone_path_not_exists_returns_early(self, tmp_path) -> None:
-        """When clone path does not exist on disk, no subprocess calls are made."""
-        nonexistent = str(tmp_path / "nonexistent")
+    def test_cli_not_found_returns_early_mode_off(self) -> None:
+        """When pace-maker binary not in PATH and mode='off', no subprocess calls."""
         with (
             patch(
-                "code_indexer.server.services.pace_maker_guard._get_clone_path_from_bootstrap",
-                return_value=nonexistent,
-            ),
-            patch("subprocess.run") as mock_run,
-        ):
-            enforce_pace_maker_config()
-            mock_run.assert_not_called()
-
-    def test_cli_not_found_returns_early(self, tmp_path) -> None:
-        """When pace-maker binary not in PATH, no subprocess calls are made."""
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
-        with (
-            patch(
-                "code_indexer.server.services.pace_maker_guard._get_clone_path_from_bootstrap",
-                return_value=str(clone_dir),
-            ),
-            patch(
-                "code_indexer.server.services.pace_maker_guard._get_enforce_toggle",
-                return_value=True,
+                "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+                return_value="off",
             ),
             patch(
                 "code_indexer.server.services.pace_maker_guard.shutil.which",
@@ -97,19 +117,15 @@ class TestEnforcePaceMakerConfigNoClonePath:
             mock_run.assert_not_called()
 
 
-class TestEnforcePaceMakerConfigEnforceTrue:
-    """Tests for enforce=True (pacing-only mode) enforcement."""
+class TestEnforcePaceMakerConfigModeOn:
+    """Tests for mode='on' (pacing-only) enforcement."""
 
-    def _make_patches(self, clone_dir, status_output: str):
-        """Return a context manager bundle for enforce=True tests."""
+    def _make_patches(self, status_output: str):
+        """Return a context manager bundle for mode='on' tests."""
         return (
             patch(
-                "code_indexer.server.services.pace_maker_guard._get_clone_path_from_bootstrap",
-                return_value=str(clone_dir),
-            ),
-            patch(
-                "code_indexer.server.services.pace_maker_guard._get_enforce_toggle",
-                return_value=True,
+                "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+                return_value="on",
             ),
             patch(
                 "code_indexer.server.services.pace_maker_guard.shutil.which",
@@ -124,56 +140,40 @@ class TestEnforcePaceMakerConfigEnforceTrue:
             ),
         )
 
-    def test_enforce_true_already_correct_no_corrective_commands(
-        self, tmp_path
-    ) -> None:
+    def test_mode_on_already_correct_no_corrective_commands(self) -> None:
         """When status already matches pacing-only config, no corrective commands run."""
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
         correct_status = _make_pacing_only_status()
-        p1, p2, p3, p4, p5 = self._make_patches(clone_dir, correct_status)
-        with p1, p2, p3, p4, p5 as mock_cmd:
+        p1, p2, p3, p4 = self._make_patches(correct_status)
+        with p1, p2, p3, p4 as mock_cmd:
             enforce_pace_maker_config()
             mock_cmd.assert_not_called()
 
-    def test_enforce_true_drift_detected_runs_all_corrective_commands(
-        self, tmp_path
-    ) -> None:
+    def test_mode_on_drift_detected_runs_all_corrective_commands(self) -> None:
         """When status differs from pacing-only config, all corrective commands run."""
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
         drifted_status = "Pace Maker: ACTIVE\nSome Other Line: enabled\n"
-        p1, p2, p3, p4, p5 = self._make_patches(clone_dir, drifted_status)
-        with p1, p2, p3, p4, p5 as mock_cmd:
+        p1, p2, p3, p4 = self._make_patches(drifted_status)
+        with p1, p2, p3, p4 as mock_cmd:
             enforce_pace_maker_config()
             assert mock_cmd.call_count == len(_PACING_ONLY_COMMANDS)
             for cmd in _PACING_ONLY_COMMANDS:
                 mock_cmd.assert_any_call(cmd)
 
-    def test_enforce_true_status_none_does_not_run_corrective_commands(
-        self, tmp_path
-    ) -> None:
+    def test_mode_on_status_none_does_not_run_corrective_commands(self) -> None:
         """When status call returns None (CLI error), no corrective commands run."""
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
-        p1, p2, p3, p4, p5 = self._make_patches(clone_dir, None)  # type: ignore
-        with p1, p2, p3, p4, p5 as mock_cmd:
+        p1, p2, p3, p4 = self._make_patches(None)  # type: ignore
+        with p1, p2, p3, p4 as mock_cmd:
             enforce_pace_maker_config()
             mock_cmd.assert_not_called()
 
 
-class TestEnforcePaceMakerConfigEnforceFalse:
-    """Tests for enforce=False (dormant) enforcement."""
+class TestEnforcePaceMakerConfigModeOff:
+    """Tests for mode='off' (actively disable) enforcement."""
 
-    def _make_patches(self, clone_dir, status_output: str):
+    def _make_patches(self, status_output: str):
         return (
             patch(
-                "code_indexer.server.services.pace_maker_guard._get_clone_path_from_bootstrap",
-                return_value=str(clone_dir),
-            ),
-            patch(
-                "code_indexer.server.services.pace_maker_guard._get_enforce_toggle",
-                return_value=False,
+                "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+                return_value="off",
             ),
             patch(
                 "code_indexer.server.services.pace_maker_guard.shutil.which",
@@ -188,32 +188,26 @@ class TestEnforcePaceMakerConfigEnforceFalse:
             ),
         )
 
-    def test_enforce_false_already_inactive_no_off_command(self, tmp_path) -> None:
+    def test_mode_off_already_inactive_no_off_command(self) -> None:
         """When status shows INACTIVE (no 'Pace Maker: ACTIVE'), no 'off' command runs."""
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
         inactive_status = "Pace Maker: INACTIVE\n5-Hour Limit: DISABLED\n"
-        p1, p2, p3, p4, p5 = self._make_patches(clone_dir, inactive_status)
-        with p1, p2, p3, p4, p5 as mock_cmd:
+        p1, p2, p3, p4 = self._make_patches(inactive_status)
+        with p1, p2, p3, p4 as mock_cmd:
             enforce_pace_maker_config()
             mock_cmd.assert_not_called()
 
-    def test_enforce_false_active_runs_off_command(self, tmp_path) -> None:
+    def test_mode_off_active_runs_off_command(self) -> None:
         """When status shows 'Pace Maker: ACTIVE', runs 'pace-maker off'."""
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
         active_status = "Pace Maker: ACTIVE\n5-Hour Limit: ENABLED\n"
-        p1, p2, p3, p4, p5 = self._make_patches(clone_dir, active_status)
-        with p1, p2, p3, p4, p5 as mock_cmd:
+        p1, p2, p3, p4 = self._make_patches(active_status)
+        with p1, p2, p3, p4 as mock_cmd:
             enforce_pace_maker_config()
             mock_cmd.assert_called_once_with(["pace-maker", "off"])
 
-    def test_enforce_false_status_none_no_command(self, tmp_path) -> None:
+    def test_mode_off_status_none_no_command(self) -> None:
         """When status call returns None, no off command runs."""
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
-        p1, p2, p3, p4, p5 = self._make_patches(clone_dir, None)  # type: ignore
-        with p1, p2, p3, p4, p5 as mock_cmd:
+        p1, p2, p3, p4 = self._make_patches(None)  # type: ignore
+        with p1, p2, p3, p4 as mock_cmd:
             enforce_pace_maker_config()
             mock_cmd.assert_not_called()
 
@@ -328,45 +322,43 @@ class TestRunPaceMakerStatus:
 class TestEnforcePaceMakerConfigNonFatal:
     """Tests that enforce_pace_maker_config() is non-fatal under all failure modes."""
 
-    def test_exception_in_get_clone_path_is_nonfatal(self) -> None:
-        """Exception raised by _get_clone_path_from_bootstrap does not propagate."""
+    def test_exception_in_get_pace_maker_mode_is_nonfatal(self) -> None:
+        """Exception raised by _get_pace_maker_mode does not propagate."""
         with patch(
-            "code_indexer.server.services.pace_maker_guard._get_clone_path_from_bootstrap",
-            side_effect=RuntimeError("disk error"),
+            "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+            side_effect=RuntimeError("db error"),
         ):
             # Must not raise
             enforce_pace_maker_config()
 
-    def test_exception_in_get_enforce_toggle_is_nonfatal(self, tmp_path) -> None:
-        """Exception raised by _get_enforce_toggle does not propagate."""
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
+    def test_timeout_from_status_is_nonfatal_mode_on(self) -> None:
+        """subprocess.TimeoutExpired from _run_pace_maker_status does not propagate (mode=on)."""
+        import subprocess
+
         with (
             patch(
-                "code_indexer.server.services.pace_maker_guard._get_clone_path_from_bootstrap",
-                return_value=str(clone_dir),
+                "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+                return_value="on",
             ),
             patch(
-                "code_indexer.server.services.pace_maker_guard._get_enforce_toggle",
-                side_effect=RuntimeError("db error"),
+                "code_indexer.server.services.pace_maker_guard.shutil.which",
+                return_value="/usr/local/bin/pace-maker",
+            ),
+            patch(
+                "code_indexer.server.services.pace_maker_guard._run_pace_maker_status",
+                side_effect=subprocess.TimeoutExpired(cmd="pace-maker", timeout=5),
             ),
         ):
             enforce_pace_maker_config()
 
-    def test_timeout_from_status_is_nonfatal(self, tmp_path) -> None:
-        """subprocess.TimeoutExpired from _run_pace_maker_status does not propagate."""
+    def test_timeout_from_status_is_nonfatal_mode_off(self) -> None:
+        """subprocess.TimeoutExpired from _run_pace_maker_status does not propagate (mode=off)."""
         import subprocess
 
-        clone_dir = tmp_path / "pace-maker"
-        clone_dir.mkdir()
         with (
             patch(
-                "code_indexer.server.services.pace_maker_guard._get_clone_path_from_bootstrap",
-                return_value=str(clone_dir),
-            ),
-            patch(
-                "code_indexer.server.services.pace_maker_guard._get_enforce_toggle",
-                return_value=True,
+                "code_indexer.server.services.pace_maker_guard._get_pace_maker_mode",
+                return_value="off",
             ),
             patch(
                 "code_indexer.server.services.pace_maker_guard.shutil.which",
