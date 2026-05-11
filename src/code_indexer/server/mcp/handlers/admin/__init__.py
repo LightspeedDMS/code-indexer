@@ -1723,6 +1723,9 @@ def handle_manage_group_members(
     return _remove_member(args, user, **kwargs)  # type: ignore[no-any-return]
 
 
+handle_manage_group_members.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
+
+
 def handle_manage_group_repos(
     args: Dict[str, Any], user: User, **kwargs: Any
 ) -> Dict[str, Any]:
@@ -1771,6 +1774,9 @@ def handle_manage_group_repos(
     if "repos" in inner_args and "repo_names" not in inner_args:
         inner_args["repo_names"] = inner_args.pop("repos")
     return _bulk_remove_repos(inner_args, user, **kwargs)  # type: ignore[no-any-return]
+
+
+handle_manage_group_repos.__mcp_requires_session_key__ = True  # type: ignore[attr-defined]
 
 
 # =============================================================================
