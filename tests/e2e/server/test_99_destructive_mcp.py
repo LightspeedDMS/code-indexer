@@ -20,10 +20,10 @@ Design rules:
 API signature facts (verified from handler source):
   - create_api_key: takes ``description``; returns ``key_id``
   - delete_api_key: takes ``key_id``
-  - create_mcp_credential: takes ``description``; returns ``credential_id``
-  - delete_mcp_credential: takes ``credential_id``
+  - manage_mcp_credential(action='create'): takes ``description``; returns ``credential_id``
+  - manage_mcp_credential(action='delete'): takes ``credential_id``
   - list_api_keys: ``keys`` list with ``id`` and ``description`` per entry
-  - list_mcp_credentials: ``credentials`` list with ``id`` and ``description`` per entry
+  - list_mcp_credentials(scope='self'): ``credentials`` list with ``id`` and ``description``
   - delete_user: NOT in MCP registry; user test creates + verifies only
   - get_maintenance_status: returns ``in_maintenance`` boolean field
 
@@ -309,23 +309,27 @@ def test_zzz_mcp_create_and_delete_mcp_credential(
     test_client: TestClient,
     auth_headers: dict,
 ) -> None:
-    """Create an MCP credential (description=E2E_DESTROY_cred), verify id in list, delete."""
+    """Create an MCP credential via manage_mcp_credential, verify in list, delete."""
     create_resp = call_mcp_tool(
         test_client,
-        "create_mcp_credential",
-        {"description": _DESTROY_MCP_CRED_DESC},
+        "manage_mcp_credential",
+        {"action": "create", "description": _DESTROY_MCP_CRED_DESC},
         auth_headers,
     )
-    _assert_resp(create_resp, label="create_mcp_credential E2E_DESTROY_cred")
+    _assert_resp(create_resp, label="manage_mcp_credential(create) E2E_DESTROY_cred")
     create_payload = _mcp_result(create_resp)
     assert create_payload.get("success"), (
-        f"create_mcp_credential success=false: {create_payload}"
+        f"manage_mcp_credential(create) success=false: {create_payload}"
     )
     credential_id = create_payload.get("credential_id", "")
-    assert credential_id, f"create_mcp_credential empty credential_id: {create_payload}"
+    assert credential_id, (
+        f"manage_mcp_credential(create) empty credential_id: {create_payload}"
+    )
 
-    list_resp = call_mcp_tool(test_client, "list_mcp_credentials", {}, auth_headers)
-    _assert_resp(list_resp, label="list_mcp_credentials after create")
+    list_resp = call_mcp_tool(
+        test_client, "list_mcp_credentials", {"scope": "self"}, auth_headers
+    )
+    _assert_resp(list_resp, label="list_mcp_credentials(scope=self) after create")
     listed_ids = [
         c.get("id", "") for c in _mcp_result(list_resp).get("credentials", [])
     ]
@@ -336,11 +340,11 @@ def test_zzz_mcp_create_and_delete_mcp_credential(
     _assert_resp(
         call_mcp_tool(
             test_client,
-            "delete_mcp_credential",
-            {"credential_id": credential_id},
+            "manage_mcp_credential",
+            {"action": "delete", "credential_id": credential_id},
             auth_headers,
         ),
-        label="delete_mcp_credential E2E_DESTROY_cred",
+        label="manage_mcp_credential(delete) E2E_DESTROY_cred",
         allow_4xx=True,
     )
 
