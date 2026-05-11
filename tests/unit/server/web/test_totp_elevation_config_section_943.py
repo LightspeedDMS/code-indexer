@@ -304,21 +304,11 @@ class TestTotpElevationSectionRenders:
         assert "elevation_idle_timeout_seconds" in totp_elevation_section_html
         assert "elevation_max_age_seconds" in totp_elevation_section_html
 
-    def test_checkbox_for_enforcement_enabled(self, totp_elevation_section_html):
-        """Edit form has a checkbox input for elevation_enforcement_enabled.
-
-        The template renders TWO inputs for this field:
-        1. A hidden fallback input (value="false") so the field is submitted
-           even when the checkbox is unchecked.
-        2. The real checkbox input (type="checkbox", value="true").
-
-        The helper _extract_input_element finds the first match by name,
-        which is the hidden fallback. We verify the checkbox exists in the
-        section HTML directly.
-        """
-        assert 'type="checkbox"' in totp_elevation_section_html or (
-            "type='checkbox'" in totp_elevation_section_html
-        ), "No type='checkbox' found in totp_elevation section"
+    def test_select_for_enforcement_enabled(self, totp_elevation_section_html):
+        """Edit form has a Yes/No select for elevation_enforcement_enabled."""
+        assert "<select" in totp_elevation_section_html, (
+            "No <select> found in totp_elevation section"
+        )
         assert "elevation_enforcement_enabled" in totp_elevation_section_html
 
 
