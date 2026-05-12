@@ -38,13 +38,17 @@ class GitCredentialManager:
     and persists via GitCredentialsSqliteBackend.
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, cluster_secret: Optional[str] = None) -> None:
         self._backend = GitCredentialsSqliteBackend(db_path)
+        self._cluster_secret = cluster_secret
         self._encryption_key = self._derive_encryption_key()
 
     def _derive_encryption_key(self) -> bytes:
-        machine_id = os.uname().nodename.encode("utf-8")
-        salt = hashlib.sha256(machine_id).digest()
+        if self._cluster_secret is not None:
+            salt_input = self._cluster_secret.encode("utf-8")
+        else:
+            salt_input = os.uname().nodename.encode("utf-8")
+        salt = hashlib.sha256(salt_input).digest()
         return hashlib.pbkdf2_hmac(
             "sha256",
             b"cidx-token-encryption-key",
@@ -163,3 +167,50 @@ class GitCredentialManager:
         result = {k: v for k, v in cred.items() if k != "encrypted_token"}
         result["token"] = self._decrypt_token(cred["encrypted_token"])
         return result
+
+
+_VALID_STORAGE_MODES = {"sqlite", "postgres"}
+
+
+def create_git_credential_manager(
+    db_path: str,
+    server_dir: str,
+    storage_mode: str = "sqlite",
+) -> GitCredentialManager:
+    """Factory for GitCredentialManager — ensures consistent encryption key.
+
+    In cluster mode (storage_mode="postgres"), reads .jwt_secret for shared
+    key derivation so all cluster nodes encrypt/decrypt with the same key.
+    If .jwt_secret is absent in postgres mode, logs a warning and falls back
+    to hostname-based key (same graceful-degradation pattern as create_token_manager).
+    In standalone mode (storage_mode="sqlite"), uses hostname (backward compatible).
+
+    Raises:
+        ValueError: If storage_mode is not "sqlite" or "postgres", or if
+                    db_path or server_dir are empty.
+    """
+    from pathlib import Path
+
+    if not db_path:
+        raise ValueError("db_path must be a non-empty string")
+    if not server_dir:
+        raise ValueError("server_dir must be a non-empty string")
+    if storage_mode not in _VALID_STORAGE_MODES:
+        raise ValueError(
+            f"Invalid storage_mode {storage_mode!r}. Must be one of: {_VALID_STORAGE_MODES}"
+        )
+
+    cluster_secret = None
+    if storage_mode == "postgres":
+        jwt_file = Path(server_dir) / ".jwt_secret"
+        if jwt_file.exists():
+            cluster_secret = jwt_file.read_text().strip()
+        else:
+            logger.warning(
+                "create_git_credential_manager: .jwt_secret not found at %s — "
+                "falling back to hostname-based key. Git credentials encrypted in "
+                "standalone mode may not be readable by other cluster nodes.",
+                jwt_file,
+            )
+
+    return GitCredentialManager(db_path, cluster_secret=cluster_secret)

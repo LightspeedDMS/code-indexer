@@ -115,11 +115,17 @@ def _get_credential_manager():
     credential handlers and PAT resolution.
     """
     from ...services.config_service import get_config_service
-    from ...services.git_credential_manager import GitCredentialManager
+    from ...services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
-    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    return GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    db_path = str(server_dir / "data" / "cidx_server.db")
+    storage_mode = config_service.config_manager.load_config().storage_mode
+    return create_git_credential_manager(
+        db_path=db_path,
+        server_dir=str(server_dir),
+        storage_mode=storage_mode,
+    )
 
 
 def _get_pat_credential_for_remote(

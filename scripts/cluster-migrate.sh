@@ -214,6 +214,7 @@ migrate_data_to_postgres() {
         --sqlite-path "$SQLITE_DB"
         --groups-path "$GROUPS_DB"
         --pg-url "$POSTGRES_URL"
+        --server-dir "$CIDX_DATA_DIR"
     )
 
     local oauth_db="${DATA_DIR}/oauth.db"
