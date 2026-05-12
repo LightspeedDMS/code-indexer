@@ -994,7 +994,7 @@ class SyncJobManager:
 
                     # Convert string dates back to datetime objects
                     for field in ["created_at", "started_at", "completed_at"]:
-                        if job_dict.get(field):
+                        if job_dict.get(field) and isinstance(job_dict[field], str):
                             job_dict[field] = datetime.fromisoformat(job_dict[field])
 
                     # Create job object from loaded data

@@ -1611,7 +1611,7 @@ class BackgroundJobManager:
             for job_id, job_dict in stored_jobs.items():
                 # Convert ISO strings back to datetime objects
                 for field in ["created_at", "started_at", "completed_at"]:
-                    if job_dict[field] is not None:
+                    if job_dict[field] is not None and isinstance(job_dict[field], str):
                         job_dict[field] = datetime.fromisoformat(job_dict[field])
 
                 # Convert string status back to enum
@@ -1686,7 +1686,7 @@ class BackgroundJobManager:
         """
         # Convert ISO strings back to datetime objects
         for field_name in ["created_at", "started_at", "completed_at"]:
-            if job_dict.get(field_name) is not None:
+            if job_dict.get(field_name) is not None and isinstance(job_dict[field_name], str):
                 job_dict[field_name] = datetime.fromisoformat(job_dict[field_name])
 
         # Convert string status back to enum
@@ -1823,13 +1823,19 @@ class BackgroundJobManager:
                         if status in ("running", "pending"):
                             created_str = db_job.get("created_at")
                             if created_str:
-                                created_dt = datetime.fromisoformat(created_str)
+                                if isinstance(created_str, str):
+                                    created_dt = datetime.fromisoformat(created_str)
+                                else:
+                                    created_dt = created_str
                                 if created_dt >= cutoff_time:
                                     include_db_job = True
                         elif status in ("completed", "failed"):
                             completed_str = db_job.get("completed_at")
                             if completed_str:
-                                completed_dt = datetime.fromisoformat(completed_str)
+                                if isinstance(completed_str, str):
+                                    completed_dt = datetime.fromisoformat(completed_str)
+                                else:
+                                    completed_dt = completed_str
                                 if completed_dt >= cutoff_time:
                                     include_db_job = True
 
@@ -1859,7 +1865,10 @@ class BackgroundJobManager:
 
             # Parse time for sorting (newest first = reverse, so negate)
             if time_str:
-                dt = datetime.fromisoformat(time_str)
+                if isinstance(time_str, str):
+                    dt = datetime.fromisoformat(time_str)
+                else:
+                    dt = time_str
             else:
                 dt = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -1945,14 +1954,15 @@ class BackgroundJobManager:
             started_at_str = job.get("started_at")
             completed_at_str = job.get("completed_at")
 
-            # Calculate duration_seconds from ISO strings
+            # Calculate duration_seconds from ISO strings or datetime objects
             duration_seconds = None
             if started_at_str and completed_at_str:
                 try:
-                    started_dt = datetime.fromisoformat(started_at_str)
-                    completed_dt = datetime.fromisoformat(completed_at_str)
+                    started_dt = started_at_str if isinstance(started_at_str, datetime) else datetime.fromisoformat(started_at_str)
+                    completed_dt = completed_at_str if isinstance(completed_at_str, datetime) else datetime.fromisoformat(completed_at_str)
                     duration_seconds = int((completed_dt - started_dt).total_seconds())
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    logging.warning(f"Failed to calculate duration_seconds for job: {e}")
                     duration_seconds = None
 
             operation_type = job.get("operation_type") or ""

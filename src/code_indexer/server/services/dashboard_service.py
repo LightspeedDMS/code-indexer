@@ -46,7 +46,10 @@ def _format_time_label(bucket_start: str, period_seconds: int) -> str:
             other periods:           'HH:MM'   fallback
     """
     try:
-        dt = datetime.fromisoformat(bucket_start)
+        if isinstance(bucket_start, datetime):
+            dt = bucket_start
+        else:
+            dt = datetime.fromisoformat(bucket_start)
     except ValueError:
         logger.warning("Invalid bucket_start format, using raw value: %s", bucket_start)
         return bucket_start
@@ -726,7 +729,8 @@ class DashboardService:
         all_stale = True
         for m in metrics.values():
             if m.get("last_sync_time"):
-                last = datetime.fromisoformat(m["last_sync_time"])
+                last_sync_time = m["last_sync_time"]
+                last = last_sync_time if isinstance(last_sync_time, datetime) else datetime.fromisoformat(last_sync_time)
                 if (now - last).total_seconds() < interval_seconds * 2:
                     all_stale = False
                     break

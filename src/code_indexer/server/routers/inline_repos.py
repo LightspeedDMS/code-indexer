@@ -425,9 +425,13 @@ def register_repo_routes(
                 if job_status["started_at"] and job_status["status"] == "running":
                     from datetime import datetime, timezone
 
-                    started = datetime.fromisoformat(
-                        job_status["started_at"].replace("Z", "+00:00")
-                    )
+                    started_at_raw = job_status["started_at"]
+                    if isinstance(started_at_raw, datetime):
+                        started = started_at_raw
+                    else:
+                        started = datetime.fromisoformat(
+                            started_at_raw.replace("Z", "+00:00")
+                        )
                     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
 
                     # Estimate total time based on progress (typical activation: 30-120 seconds)
@@ -1231,9 +1235,12 @@ def register_repo_routes(
                 try:
                     activation_date_str = repo.get("activated_at")
                     if activation_date_str:
-                        activation_date = datetime.fromisoformat(
-                            activation_date_str.replace("Z", "+00:00")
-                        )
+                        if isinstance(activation_date_str, datetime):
+                            activation_date = activation_date_str
+                        else:
+                            activation_date = datetime.fromisoformat(
+                                activation_date_str.replace("Z", "+00:00")
+                            )
                         if activation_date > datetime.now(timezone.utc) - timedelta(
                             days=7
                         ):
@@ -1268,9 +1275,12 @@ def register_repo_routes(
                 try:
                     last_sync_str = repo.get("last_accessed")
                     if last_sync_str:
-                        last_sync = datetime.fromisoformat(
-                            last_sync_str.replace("Z", "+00:00")
-                        )
+                        if isinstance(last_sync_str, datetime):
+                            last_sync = last_sync_str
+                        else:
+                            last_sync = datetime.fromisoformat(
+                                last_sync_str.replace("Z", "+00:00")
+                            )
                         if last_sync > datetime.now(timezone.utc) - timedelta(days=7):
                             sync_status = (
                                 "success"
