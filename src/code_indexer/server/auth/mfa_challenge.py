@@ -184,11 +184,11 @@ class MfaChallengeManager:
         assert self._pool is not None
         cutoff = time.time() - self._ttl
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT * FROM mfa_challenges WHERE token = %s AND created_at > %s",
-                (token, cutoff),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT * FROM mfa_challenges WHERE token = %s AND created_at > %s",
+                    (token, cutoff),
+                ).fetchone()
             if row is None:
                 # Clean up if it existed but expired
                 conn.execute(
@@ -280,11 +280,11 @@ class MfaChallengeManager:
         assert self._pool is not None
         cutoff = time.time() - self._ttl
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT * FROM mfa_challenges WHERE token = %s AND created_at > %s",
-                (token, cutoff),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT * FROM mfa_challenges WHERE token = %s AND created_at > %s",
+                    (token, cutoff),
+                ).fetchone()
             if row is None:
                 # Clean up expired entry if present
                 conn.execute("DELETE FROM mfa_challenges WHERE token = %s", (token,))

@@ -422,6 +422,30 @@ CREATE INDEX IF NOT EXISTS idx_elevated_sessions_username
 """
 
 
+class _EsmPgCursor:
+    """Cursor-like context manager delegating execute/fetchone to _EsmPgConn."""
+
+    def __init__(self, conn: "_EsmPgConn", row_factory) -> None:
+        self._conn = conn
+        self._row_factory = row_factory
+        self._last_result = None
+
+    def execute(self, query: str, params=None) -> "_EsmPgCursor":
+        self._last_result = self._conn.execute(query, params)
+        return self
+
+    def fetchone(self):
+        if self._last_result is None:
+            return None
+        return self._last_result.fetchone()
+
+    def __enter__(self) -> "_EsmPgCursor":
+        return self
+
+    def __exit__(self, *args) -> None:
+        pass
+
+
 class _EsmPgConn:
     """SQLite connection presenting psycopg3-style interface for ESM PG tests."""
 
@@ -430,6 +454,9 @@ class _EsmPgConn:
         self._conn.row_factory = sqlite3.Row
         # Allow production code to set row_factory without side effects
         self.row_factory = None
+
+    def cursor(self, *, row_factory=None) -> _EsmPgCursor:
+        return _EsmPgCursor(self, row_factory)
 
     @staticmethod
     def _translate(query: str) -> str:

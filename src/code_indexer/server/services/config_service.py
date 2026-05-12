@@ -1980,11 +1980,11 @@ class ConfigService:
         from psycopg.rows import dict_row
 
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT version FROM server_config WHERE config_key = %s",
-                ("runtime",),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT version FROM server_config WHERE config_key = %s",
+                    ("runtime",),
+                ).fetchone()
         if row and row["version"] != self._db_config_version:
             self._load_runtime_from_pg()
             # Fire change callbacks so services can react (Bug #586)
@@ -2016,7 +2016,6 @@ class ConfigService:
         runtime_dict = self._extract_runtime_dict(config)
 
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
             conn.execute(
                 "UPDATE server_config SET config_json = %s, "
                 "version = version + 1, updated_at = CURRENT_TIMESTAMP, "
@@ -2024,10 +2023,11 @@ class ConfigService:
                 (json.dumps(runtime_dict), UPDATER_WEB_UI, CONFIG_KEY_RUNTIME),
             )
             conn.commit()
-            row = conn.execute(
-                "SELECT version FROM server_config WHERE config_key = %s",
-                (CONFIG_KEY_RUNTIME,),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT version FROM server_config WHERE config_key = %s",
+                    (CONFIG_KEY_RUNTIME,),
+                ).fetchone()
             if row:
                 self._db_config_version = row["version"]
             else:
@@ -2053,11 +2053,11 @@ class ConfigService:
             conn.commit()
             # Finding 4 fix: SELECT actual version -- INSERT may have been a
             # no-op if another node already seeded, so version could be > 1.
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT version FROM server_config WHERE config_key = %s",
-                (CONFIG_KEY_RUNTIME,),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT version FROM server_config WHERE config_key = %s",
+                    (CONFIG_KEY_RUNTIME,),
+                ).fetchone()
             assert row is not None, (
                 "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
             )
@@ -2078,11 +2078,11 @@ class ConfigService:
         from psycopg.rows import dict_row
 
         with self._pool.connection() as conn:
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "SELECT config_json, version FROM server_config WHERE config_key = %s",
-                (CONFIG_KEY_RUNTIME,),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    "SELECT config_json, version FROM server_config WHERE config_key = %s",
+                    (CONFIG_KEY_RUNTIME,),
+                ).fetchone()
 
         if row is None:
             self._seed_runtime_to_pg()
