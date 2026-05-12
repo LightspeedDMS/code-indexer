@@ -87,6 +87,7 @@ def _make_fake_run_batch(
         worker_threads: int = 2,
         timeout_seconds: int = 120,
         ast_engine: Any = None,
+        on_process_spawned: Any = None,
     ) -> List[Tuple[List[Any], List[Any], Optional[Any]]]:
         return [
             (

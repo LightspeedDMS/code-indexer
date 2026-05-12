@@ -418,8 +418,13 @@ To fetch the full content: `GET /api/cache/{cache_handle}` (paged via `?page=N`)
 }
 ```
 
+## Cancellation
+
+Running xray_explore jobs can be cancelled via `cancel_job(job_id)`. XRay jobs receive real process termination (SIGTERM, then SIGKILL after a 2-second grace period) rather than cooperative flag-only cancellation. The job status transitions to `cancelled`. Multi-repo searches return one job_id per repo -- cancel each individually.
+
 ## Related
 
+- See `cancel_job` to cancel a running xray_explore job with process termination.
 - See `xray_search` for the production search variant (no AST debug overhead).
 - See `xray_dump_ast` for a synchronous single-file AST dump (no Phase 1 driver, no evaluator).
 - See `cidx_fetch_cached_payload` to retrieve large truncated results by `cache_handle`.

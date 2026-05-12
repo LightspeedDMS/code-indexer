@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.19.0 (2026-05-12) — MCP cancel_job with XRay process termination (Story #996)
+
+### Added
+- `cancel_job` MCP tool: cancel running or pending background jobs by job_id. Users can cancel their own jobs; admins can cancel any job.
+- XRay process termination: cancelling xray_search/xray_explore jobs sends SIGTERM to driver processes, escalating to SIGKILL after a 2-second grace period.
+- Race condition handling (AC7): when cancel arrives before process registration, the process is terminated immediately upon registration.
+- `on_process_spawned` callback threading from MCP handlers through XRaySearchEngine and PythonEvaluatorSandbox to BackgroundJobManager for child process tracking.
+- Cancellation documentation added to xray_search and xray_explore tool docs.
+
+### Fixed
+- Cancelled jobs no longer have their status overwritten to "failed" by JobTracker.fail_job(). Three call sites in _execute_job now guard tracker notifications with `not job.cancelled`.
+
 ## v10.18.0 (2026-05-11) — Fix elevation dialog race condition (Bug #998)
 
 ### Fixed

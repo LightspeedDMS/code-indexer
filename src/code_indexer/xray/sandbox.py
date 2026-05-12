@@ -47,7 +47,7 @@ import textwrap
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from code_indexer.xray.xray_node import XRayNode
@@ -843,6 +843,7 @@ class PythonEvaluatorSandbox:
         worker_threads: int = 2,
         timeout_seconds: int = 120,
         ast_engine: Optional[Any] = None,
+        on_process_spawned: Optional[Callable] = None,
     ) -> List[
         Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
     ]:
@@ -902,7 +903,12 @@ class PythonEvaluatorSandbox:
             )
 
         return _run_driver_batch(
-            self, file_specs, evaluator_code, worker_threads, timeout_seconds
+            self,
+            file_specs,
+            evaluator_code,
+            worker_threads,
+            timeout_seconds,
+            on_process_spawned=on_process_spawned,
         )
 
 
@@ -1273,6 +1279,7 @@ def _run_driver_batch(
     evaluator_code: str,
     worker_threads: int,
     timeout_seconds: int,
+    on_process_spawned: Optional[Callable] = None,
 ) -> List[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]]:
     """Spawn ONE driver and collect batch results; convert all failures to per-file errors."""
     ctx = multiprocessing.get_context("spawn")
@@ -1284,6 +1291,8 @@ def _run_driver_batch(
         daemon=False,
     )
     proc.start()
+    if on_process_spawned is not None:
+        on_process_spawned(proc)
     child_conn.close()
     proc.join(timeout=timeout_seconds)
 

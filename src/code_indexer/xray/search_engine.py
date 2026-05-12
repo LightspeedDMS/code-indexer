@@ -172,6 +172,7 @@ class XRaySearchEngine:
         max_files: Optional[int] = None,
         include_ast_debug: bool = False,
         max_debug_nodes: int = 50,
+        on_process_spawned: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """Run two-phase X-Ray search and return the job-result dict.
 
@@ -327,6 +328,7 @@ class XRaySearchEngine:
                 file_specs=file_specs,
                 worker_threads=worker_threads,
                 timeout_seconds=remaining,
+                on_process_spawned=on_process_spawned,
             )
             for file_matches, file_errors, file_meta in batch_results:
                 if _timed_out():

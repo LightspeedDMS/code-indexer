@@ -173,6 +173,8 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "xray_search",
         "xray_explore",
         "xray_dump_ast",
+        # Story #996: cancel background jobs with process termination
+        "cancel_job",
         # Payload cache retrieval handler (added post-v10)
         "cidx_fetch_cached_payload",
     }
