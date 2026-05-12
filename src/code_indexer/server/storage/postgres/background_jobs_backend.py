@@ -53,7 +53,7 @@ _SELECT_COLS = """
     result, error, progress, username, is_admin, cancelled, repo_alias,
     resolution_attempts, claude_actions, failure_reason, extended_error,
     language_resolution_status, progress_info, metadata,
-    executing_node, claimed_at
+    executing_node, claimed_at, current_phase, phase_detail
 """
 
 
@@ -122,6 +122,8 @@ class BackgroundJobsPostgresBackend:
             "metadata": json.loads(row[19]) if len(row) > 19 and row[19] else None,
             "executing_node": row[20] if len(row) > 20 else None,
             "claimed_at": row[21] if len(row) > 21 else None,
+            "current_phase": row[22] if len(row) > 22 else None,
+            "phase_detail": row[23] if len(row) > 23 else None,
         }
 
     # ------------------------------------------------------------------
@@ -152,6 +154,8 @@ class BackgroundJobsPostgresBackend:
         metadata: Optional[Dict[str, Any]] = None,
         executing_node: Optional[str] = None,
         claimed_at: Optional[str] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
     ) -> None:
         """Insert a new background job row.
 
@@ -171,12 +175,14 @@ class BackgroundJobsPostgresBackend:
                             cancelled, repo_alias, resolution_attempts, claude_actions,
                             failure_reason, extended_error, language_resolution_status,
                             progress_info, metadata,
-                            executing_node, claimed_at
+                            executing_node, claimed_at,
+                            current_phase, phase_detail
                         ) VALUES (
                             %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s,
                             %s, %s, %s, %s,
                             %s, %s, %s,
+                            %s, %s,
                             %s, %s,
                             %s, %s
                         )
@@ -218,6 +224,8 @@ class BackgroundJobsPostgresBackend:
                             json.dumps(metadata) if metadata is not None else None,
                             executing_node,
                             claimed_at,
+                            current_phase,
+                            phase_detail,
                         ),
                     )
         except Exception as exc:

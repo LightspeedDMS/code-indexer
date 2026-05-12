@@ -16,7 +16,7 @@ from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 
 # Bug #878 Fix A.3: The outer finally in _execute_job iterates registered
 # DatabaseConnectionManager instances and proactively closes the worker
@@ -100,6 +100,8 @@ class BackgroundJob:
     )
     phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
 
+
+_BG_JOB_FIELDS = {f.name for f in fields(BackgroundJob)}
 
 # Upper bound for DB fetch when performing client-side dedup/sort/pagination.
 # Large enough to cover realistic workloads; avoids unbounded queries.
@@ -1617,8 +1619,8 @@ class BackgroundJobManager:
                 # Convert string status back to enum
                 job_dict["status"] = JobStatus(job_dict["status"])
 
-                # Create job object
-                job = BackgroundJob(**job_dict)
+                # Create job object (filter unknown keys for forward-compat)
+                job = BackgroundJob(**{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS})
                 self.jobs[job_id] = job
 
             logging.info(f"Loaded {len(stored_jobs)} jobs from storage")
@@ -1692,8 +1694,8 @@ class BackgroundJobManager:
         # Convert string status back to enum
         job_dict["status"] = JobStatus(job_dict["status"])
 
-        # Create job object
-        job = BackgroundJob(**job_dict)
+        # Create job object (filter unknown keys for forward-compat)
+        job = BackgroundJob(**{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS})
         self.jobs[job_dict["job_id"]] = job
 
     def _calculate_cutoff(self, time_filter: str) -> datetime:
