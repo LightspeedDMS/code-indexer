@@ -186,12 +186,17 @@ def test_elevate_form_handles_recovery_code(client):
     assert call_kwargs["scope"] == "totp_repair"
 
 
-def test_elevate_form_503_when_kill_switch_off(client):
-    """Kill switch disabled returns 503."""
+def test_elevate_form_redirects_when_kill_switch_off(client):
+    """Kill switch disabled redirects to next URL instead of showing error.
+
+    Bug #998: when elevation is administratively disabled the operation does not
+    need elevation — redirecting to the requested destination unblocks the user.
+    """
     with _ctx(enforcement=False):
         resp = client.post(
             "/auth/elevate-form",
             data={"totp_code": "123456", "next": "/admin/"},
             cookies={"cidx_session": _SESSION_COOKIE},
         )
-    assert resp.status_code == 503
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/admin/"

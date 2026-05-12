@@ -222,7 +222,7 @@ class TestSaveConfig:
         with patch(
             "code_indexer.server.routers.llm_creds.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = mock_config
+            mock_cs.return_value.get_config.return_value = mock_config
             mock_cs.return_value.config_manager = MagicMock()
 
             response = client.post(
@@ -248,7 +248,7 @@ class TestSaveConfig:
             "code_indexer.server.routers.llm_creds.get_config_service"
         ) as mock_cs:
             svc = mock_cs.return_value
-            svc.load_config.return_value = mock_config
+            svc.get_config.return_value = mock_config
             svc.config_manager = MagicMock()
 
             response = client.post(
@@ -282,7 +282,7 @@ class TestSaveConfig:
         with patch(
             "code_indexer.server.routers.llm_creds.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = mock_config
+            mock_cs.return_value.get_config.return_value = mock_config
 
             response = client.post(
                 "/api/llm-creds/save-config",
@@ -311,7 +311,7 @@ class TestSaveConfig:
         with patch(
             "code_indexer.server.routers.llm_creds.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = mock_config
+            mock_cs.return_value.get_config.return_value = mock_config
 
             response = client.post(
                 "/api/llm-creds/save-config",
@@ -349,7 +349,7 @@ class TestSaveConfig:
             ) as mock_build,
         ):
             svc = mock_cs.return_value
-            svc.load_config.return_value = mock_config
+            svc.get_config.return_value = mock_config
             svc.config_manager = MagicMock()
             mock_build.return_value = mock_lifecycle
 
@@ -384,7 +384,7 @@ class TestSaveConfig:
             "code_indexer.server.routers.llm_creds.get_config_service"
         ) as mock_cs:
             svc = mock_cs.return_value
-            svc.load_config.return_value = mock_config
+            svc.get_config.return_value = mock_config
             svc.config_manager = MagicMock()
 
             response = client.post(
@@ -439,7 +439,7 @@ class TestAnthropicKey409Guard:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = mock_config
+            mock_cs.return_value.get_config.return_value = mock_config
 
             response = full_app_client.post(
                 "/api/api-keys/anthropic",
@@ -467,7 +467,7 @@ class TestAnthropicKey409Guard:
                 "code_indexer.server.routers.api_keys.get_api_key_sync_service"
             ) as mock_sync,
         ):
-            mock_cs.return_value.load_config.return_value = mock_config
+            mock_cs.return_value.get_config.return_value = mock_config
             mock_cs.return_value.config_manager = MagicMock()
 
             sync_result = MagicMock()
