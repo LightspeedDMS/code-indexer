@@ -151,7 +151,6 @@ class PayloadCachePostgresBackend:
         Returns:
             Number of rows deleted.
         """
-        now = datetime.now(timezone.utc).isoformat()
         try:
             with self._pool.connection() as conn:
                 result = conn.execute(
@@ -160,8 +159,7 @@ class PayloadCachePostgresBackend:
                     WHERE (
                         EXTRACT(EPOCH FROM (NOW() - created_at::timestamptz))
                     ) > ttl_seconds
-                    """,
-                    (now,),
+                    """
                 )
                 deleted = int(result.rowcount) if result.rowcount else 0
                 conn.commit()
