@@ -16,11 +16,31 @@ Usage:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# psycopg is optional at import time — loaded lazily for CLI use.
+# _reencrypt_tokens uses this module-level reference so tests can patch it.
+psycopg: Optional[Any] = None
+try:
+    import psycopg as psycopg  # type: ignore[no-redef]  # noqa: PLC0415
+except ImportError:
+    logger.warning(
+        "psycopg (v3) not available at import time; "
+        "token re-encryption will raise if attempted."
+    )
+
+# Encryption constants for token re-encryption (must match CITokenManager / GitCredentialManager)
+_REENCRYPT_PBKDF2_ITERATIONS = 100000
+_REENCRYPT_AES_KEY_SIZE = 32
+_REENCRYPT_AES_BLOCK_SIZE = 16
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +211,7 @@ class SqliteToPostgresMigrator:
         oauth_db_path: Optional[str] = None,
         scip_audit_db_path: Optional[str] = None,
         refresh_tokens_db_path: Optional[str] = None,
+        server_dir: Optional[str] = None,
     ) -> None:
         """
         Initialise the migrator.
@@ -202,6 +223,8 @@ class SqliteToPostgresMigrator:
             oauth_db_path: Optional path to oauth.db SQLite file.
             scip_audit_db_path: Optional path to scip_audit.db SQLite file (Story #516).
             refresh_tokens_db_path: Optional path to refresh_tokens.db SQLite file (Story #515).
+            server_dir: Optional path to CIDX server data directory (e.g., ~/.cidx-server).
+                        When provided, token re-encryption is performed after migration.
         """
         self._sqlite_path = sqlite_db_path
         self._groups_path = groups_db_path
@@ -209,6 +232,7 @@ class SqliteToPostgresMigrator:
         self._oauth_path = oauth_db_path
         self._scip_audit_path = scip_audit_db_path
         self._refresh_tokens_path = refresh_tokens_db_path
+        self._server_dir = server_dir
 
     # ------------------------------------------------------------------
     # Public API
@@ -263,6 +287,14 @@ class SqliteToPostgresMigrator:
                     "status": f"error: {exc}",
                 }
                 logger.error(f"Failed to migrate table '{table_name}': {exc}")
+
+        if self._server_dir:
+            try:
+                report["token_reencryption"] = self._reencrypt_tokens()
+            except Exception as exc:
+                # Non-fatal: log and record error so caller sees it without aborting the report
+                logger.error("Token re-encryption failed: %s", exc)
+                report["token_reencryption"] = {"error": str(exc)}
 
         return report
 
@@ -656,6 +688,59 @@ class SqliteToPostgresMigrator:
 
         return psycopg.connect(self._pg_conn_str)
 
+    def _reencrypt_tokens(self) -> Dict[str, int]:
+        """Re-encrypt tokens from hostname key to cluster (.jwt_secret) key.
+
+        Returns dict of table->count, or {} when skipped.
+        """
+        if not self._server_dir:
+            logger.info("No --server-dir provided, skipping token re-encryption")
+            return {}
+        if not isinstance(self._server_dir, (str, os.PathLike)):
+            logger.warning(
+                "Invalid --server-dir type %r, skipping", type(self._server_dir)
+            )
+            return {}
+        server_path = Path(self._server_dir)
+        if not server_path.is_dir():
+            logger.warning(
+                "--server-dir %s is not a directory, skipping token re-encryption",
+                server_path,
+            )
+            return {}
+        jwt_file = server_path / ".jwt_secret"
+        if not jwt_file.exists():
+            logger.info("No .jwt_secret at %s, skipping token re-encryption", jwt_file)
+            return {}
+        old_key = _reencrypt_derive_key(os.uname().nodename)
+        new_key = _reencrypt_derive_key(jwt_file.read_text().strip())
+        if old_key == new_key:
+            logger.info("Encryption keys identical, skipping token re-encryption")
+            return {}
+        _TABLE_CONFIGS = [
+            (
+                "ci_tokens",
+                "SELECT platform, encrypted_token FROM ci_tokens",
+                "UPDATE ci_tokens SET encrypted_token = %s WHERE platform = %s",
+            ),
+            (
+                "user_git_credentials",
+                "SELECT credential_id, encrypted_token FROM user_git_credentials "
+                "WHERE encrypted_token IS NOT NULL",
+                "UPDATE user_git_credentials SET encrypted_token = %s WHERE credential_id = %s",
+            ),
+        ]
+        results: Dict[str, int] = {}
+        with psycopg.connect(self._pg_conn_str) as conn:
+            for table_name, select_sql, update_sql in _TABLE_CONFIGS:
+                count = _reencrypt_table_rows(
+                    conn, select_sql, update_sql, old_key, new_key, table_name
+                )
+                logger.info("Re-encrypted %d %s", count, table_name)
+                results[table_name] = count
+            conn.commit()
+        return results
+
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -678,6 +763,79 @@ def _parse_json_column(value: Any) -> Any:
         except (json.JSONDecodeError, ValueError):
             return value
     return value
+
+
+# ---------------------------------------------------------------------------
+# Token re-encryption helpers (standalone key -> cluster key)
+# ---------------------------------------------------------------------------
+
+
+def _reencrypt_derive_key(salt_input: str) -> bytes:
+    """Derive AES-256 encryption key from a string salt using PBKDF2-HMAC-SHA256."""
+    salt = hashlib.sha256(salt_input.encode("utf-8")).digest()
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        b"cidx-token-encryption-key",
+        salt,
+        _REENCRYPT_PBKDF2_ITERATIONS,
+        dklen=_REENCRYPT_AES_KEY_SIZE,
+    )
+
+
+def _reencrypt_decrypt_token(encrypted_token: str, key: bytes) -> str:
+    """Decrypt a base64-encoded AES-256-CBC token using the given key."""
+    from cryptography.hazmat.backends import default_backend  # noqa: PLC0415
+    from cryptography.hazmat.primitives import padding  # noqa: PLC0415
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: PLC0415
+
+    combined = base64.b64decode(encrypted_token.encode("utf-8"))
+    iv = combined[:_REENCRYPT_AES_BLOCK_SIZE]
+    enc_data = combined[_REENCRYPT_AES_BLOCK_SIZE:]
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(enc_data) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    return (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+
+
+def _reencrypt_encrypt_token(token: str, key: bytes) -> str:
+    """Encrypt a plaintext token with AES-256-CBC and return base64-encoded result."""
+    from cryptography.hazmat.backends import default_backend  # noqa: PLC0415
+    from cryptography.hazmat.primitives import padding  # noqa: PLC0415
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: PLC0415
+
+    iv = os.urandom(_REENCRYPT_AES_BLOCK_SIZE)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(token.encode("utf-8")) + padder.finalize()
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    return base64.b64encode(
+        iv + encryptor.update(padded) + encryptor.finalize()
+    ).decode("utf-8")
+
+
+def _reencrypt_table_rows(
+    conn: Any,
+    select_sql: str,
+    update_sql: str,
+    old_key: bytes,
+    new_key: bytes,
+    label: str,
+) -> int:
+    """Re-encrypt all token rows in a table. Returns count of successfully re-encrypted rows."""
+    rows = conn.execute(select_sql).fetchall()
+    count = 0
+    for row in rows:
+        row_id = row[0]
+        enc_token = row[1]
+        try:
+            plaintext = _reencrypt_decrypt_token(enc_token, old_key)
+            new_enc = _reencrypt_encrypt_token(plaintext, new_key)
+            conn.execute(update_sql, (new_enc, row_id))
+            count += 1
+        except Exception as exc:
+            logger.warning("Failed to re-encrypt %s id=%s: %s", label, row_id, exc)
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +882,12 @@ def _build_arg_parser():  # type: ignore[return]
         help="Path to refresh_tokens.db SQLite file (optional, Story #515).",
     )
     parser.add_argument(
+        "--server-dir",
+        default=None,
+        help="Path to CIDX server data directory (e.g., ~/.cidx-server). "
+        "Required for token re-encryption during cluster migration.",
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         default=False,
@@ -756,6 +920,7 @@ def main() -> None:
         oauth_db_path=getattr(args, "oauth_path", None),
         scip_audit_db_path=getattr(args, "scip_audit_path", None),
         refresh_tokens_db_path=getattr(args, "refresh_tokens_path", None),
+        server_dir=getattr(args, "server_dir", None),
     )
 
     if args.validate_only:

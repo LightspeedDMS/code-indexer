@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.21.0 (2026-05-12) — Cluster-aware token re-encryption and GitCredentialManager cluster support
+
+### Added
+- `GitCredentialManager` now accepts `cluster_secret` parameter for key derivation in cluster mode (same pattern as `CITokenManager`).
+- `create_git_credential_manager()` factory function reads `.jwt_secret` in postgres mode for consistent encryption keys.
+- `migrate_to_postgres.py` gains `--server-dir` flag for automatic token re-encryption during migration: re-encrypts both `ci_tokens` and `user_git_credentials` tables from hostname-derived key to `.jwt_secret`-derived key.
+- `cluster-migrate.sh` passes `--server-dir` to migration tool automatically.
+
+### Fixed
+- Git credential operations now work in cluster mode (previously always used hostname-based key derivation, causing decryption failures after migration).
+- BackgroundJob PG backend schema mismatch: added `current_phase`/`phase_detail` to `save_job()` and filtered unknown keys before `BackgroundJob` construction.
+
 ## v10.20.0 (2026-05-12) — Complete SQLite-to-PostgreSQL migration tool and cluster-migrate.sh fixes
 
 ### Fixed

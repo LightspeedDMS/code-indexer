@@ -80,14 +80,18 @@ def _get_personal_credential_for_host(
         Credential dict with 'token' key, or None if not found
     """
     from ...services.config_service import get_config_service
-    from ...services.git_credential_manager import GitCredentialManager
+    from ...services.git_credential_manager import create_git_credential_manager
 
     try:
         config_service = get_config_service()
-        db_path = str(
-            config_service.config_manager.server_dir / "data" / "cidx_server.db"
+        server_dir = config_service.config_manager.server_dir
+        db_path = str(server_dir / "data" / "cidx_server.db")
+        storage_mode = config_service.config_manager.load_config().storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path,
+            server_dir=str(server_dir),
+            storage_mode=storage_mode,
         )
-        manager = GitCredentialManager(db_path)
         return manager.get_credential_for_host(username, forge_host)
     except Exception as e:
         logger.warning(

@@ -8418,11 +8418,15 @@ def _create_admin_git_credentials_page_response(
 ) -> HTMLResponse:
     """Create admin git credentials page response."""
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
-    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    manager = GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    db_path = str(server_dir / "data" / "cidx_server.db")
+    storage_mode = config_service.config_manager.load_config().storage_mode
+    manager = create_git_credential_manager(
+        db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+    )
     credentials = manager.list_credentials(session.username)
 
     response = templates.TemplateResponse(
@@ -8451,11 +8455,15 @@ def admin_git_credentials_list_partial(request: Request):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
-    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    manager = GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    db_path = str(server_dir / "data" / "cidx_server.db")
+    storage_mode = config_service.config_manager.load_config().storage_mode
+    manager = create_git_credential_manager(
+        db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+    )
     credentials = manager.list_credentials(session.username)
 
     response = templates.TemplateResponse(
@@ -8479,7 +8487,7 @@ async def admin_git_credentials_add(request: Request):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
     from ..clients.forge_client import ForgeAuthenticationError
 
     try:
@@ -8495,10 +8503,12 @@ async def admin_git_credentials_add(request: Request):
             )
 
         config_service = get_config_service()
-        db_path = str(
-            config_service.config_manager.server_dir / "data" / "cidx_server.db"
+        server_dir = config_service.config_manager.server_dir
+        db_path = str(server_dir / "data" / "cidx_server.db")
+        storage_mode = config_service.config_manager.load_config().storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
-        manager = GitCredentialManager(db_path)
 
         result = await manager.configure_credential(
             username=session.username,
@@ -8528,14 +8538,18 @@ def admin_git_credentials_delete(request: Request, credential_id: str):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     try:
         config_service = get_config_service()
         db_path = str(
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
-        manager = GitCredentialManager(db_path)
+        server_dir = config_service.config_manager.server_dir
+        storage_mode = config_service.config_manager.load_config().storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+        )
         manager.delete_credential(session.username, credential_id)
 
         return JSONResponse({"success": True, "message": "Credential deleted"})
@@ -8705,11 +8719,15 @@ def _create_user_git_credentials_page_response(
 ) -> HTMLResponse:
     """Create user git credentials page response."""
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
     db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    manager = GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    storage_mode = config_service.config_manager.load_config().storage_mode
+    manager = create_git_credential_manager(
+        db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+    )
     credentials = manager.list_credentials(session.username)
 
     response = templates.TemplateResponse(
@@ -8738,11 +8756,15 @@ def user_git_credentials_list_partial(request: Request):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     config_service = get_config_service()
     db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
-    manager = GitCredentialManager(db_path)
+    server_dir = config_service.config_manager.server_dir
+    storage_mode = config_service.config_manager.load_config().storage_mode
+    manager = create_git_credential_manager(
+        db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+    )
     credentials = manager.list_credentials(session.username)
 
     response = templates.TemplateResponse(
@@ -8763,7 +8785,7 @@ async def user_git_credentials_add(request: Request):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
     from ..clients.forge_client import ForgeAuthenticationError
 
     try:
@@ -8782,7 +8804,11 @@ async def user_git_credentials_add(request: Request):
         db_path = str(
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
-        manager = GitCredentialManager(db_path)
+        server_dir = config_service.config_manager.server_dir
+        storage_mode = config_service.config_manager.load_config().storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+        )
 
         result = await manager.configure_credential(
             username=session.username,
@@ -8809,14 +8835,18 @@ def user_git_credentials_delete(request: Request, credential_id: str):
         )
 
     from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ..services.git_credential_manager import create_git_credential_manager
 
     try:
         config_service = get_config_service()
         db_path = str(
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
-        manager = GitCredentialManager(db_path)
+        server_dir = config_service.config_manager.server_dir
+        storage_mode = config_service.config_manager.load_config().storage_mode
+        manager = create_git_credential_manager(
+            db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
+        )
         manager.delete_credential(session.username, credential_id)
 
         return JSONResponse({"success": True, "message": "Credential deleted"})
