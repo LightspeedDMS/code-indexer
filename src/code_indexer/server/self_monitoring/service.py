@@ -255,7 +255,9 @@ class SelfMonitoringService:
                     logger.info("No previous scans found, running immediately")
                     return 0.0
                 # Parse and calculate remaining wait (same logic as below)
-                if last_scan_iso.endswith("Z"):
+                if isinstance(last_scan_iso, datetime):
+                    last_scan_time = last_scan_iso
+                elif last_scan_iso.endswith("Z"):
                     last_scan_time = datetime.fromisoformat(
                         last_scan_iso.replace("Z", "+00:00")
                     )
@@ -315,7 +317,9 @@ class SelfMonitoringService:
             # Parse timestamp - handle both naive and timezone-aware formats
             last_scan_iso = row[0]
             # Try parsing as timezone-aware first (with 'Z' or offset)
-            if last_scan_iso.endswith("Z"):
+            if isinstance(last_scan_iso, datetime):
+                last_scan_time = last_scan_iso
+            elif last_scan_iso.endswith("Z"):
                 last_scan_time = datetime.fromisoformat(
                     last_scan_iso.replace("Z", "+00:00")
                 )

@@ -278,7 +278,8 @@ class OAuthManager:
                 raise OAuthError("Invalid authorization code")
             if code_row["used"]:
                 raise OAuthError("Authorization code already used")
-            expires_at_dt = datetime.fromisoformat(code_row["expires_at"])
+            expires_at_raw = code_row["expires_at"]
+            expires_at_dt = expires_at_raw if isinstance(expires_at_raw, datetime) else datetime.fromisoformat(expires_at_raw)
             if datetime.now(timezone.utc) > expires_at_dt:
                 raise OAuthError("Authorization code expired")
 
@@ -337,7 +338,8 @@ class OAuthManager:
         row = cursor.fetchone()
         if not row:
             return None
-        expires_at = datetime.fromisoformat(row["expires_at"])
+        expires_at_raw = row["expires_at"]
+        expires_at = expires_at_raw if isinstance(expires_at_raw, datetime) else datetime.fromisoformat(expires_at_raw)
         if datetime.now(timezone.utc) > expires_at:
             return None
         return {
@@ -361,8 +363,10 @@ class OAuthManager:
         if not row:
             return False
         now = datetime.now(timezone.utc)
-        expires_at = datetime.fromisoformat(row["expires_at"])
-        hard_expires_at = datetime.fromisoformat(row["hard_expires_at"])
+        expires_at_raw = row["expires_at"]
+        expires_at = expires_at_raw if isinstance(expires_at_raw, datetime) else datetime.fromisoformat(expires_at_raw)
+        hard_expires_at_raw = row["hard_expires_at"]
+        hard_expires_at = hard_expires_at_raw if isinstance(hard_expires_at_raw, datetime) else datetime.fromisoformat(hard_expires_at_raw)
         remaining = (expires_at - now).total_seconds() / 3600
         if remaining >= self.EXTENSION_THRESHOLD_HOURS:
             return False

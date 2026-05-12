@@ -88,12 +88,13 @@ class StateManager:
             # Atomic: SELECT + DELETE in one transaction
             from psycopg.rows import dict_row
 
-            conn.row_factory = dict_row
-            row = conn.execute(
-                "DELETE FROM oidc_state_tokens WHERE state_token = %s "
-                "AND expires_at > NOW() RETURNING state_data",
-                (state_token,),
-            ).fetchone()
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "DELETE FROM oidc_state_tokens WHERE state_token = %s "
+                    "AND expires_at > NOW() RETURNING state_data",
+                    (state_token,),
+                )
+                row = cur.fetchone()
             conn.commit()
         if row is None:
             return None
