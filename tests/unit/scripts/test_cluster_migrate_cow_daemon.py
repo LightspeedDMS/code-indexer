@@ -64,6 +64,41 @@ def _run_dry(args: list, cidx_data_dir: str) -> subprocess.CompletedProcess:
     )
 
 
+def _run_dry_combined(args: list, cidx_data_dir: str) -> tuple[int, str]:
+    """Run dry-run script and return (returncode, combined stdout+stderr)."""
+    result = _run_dry(args, cidx_data_dir)
+    return result.returncode, result.stdout + result.stderr
+
+
+def _setup_and_run(tmp_path: Path, args: list, setup_extra=None) -> str:
+    """Create minimal cidx dir, optionally run setup_extra(tmp_path), run dry-run.
+
+    setup_extra: optional callable(tmp_path) invoked after minimal dir creation
+    and before the script, allowing tests to create extra fixtures without
+    bypassing this helper.
+    """
+    _make_minimal_cidx_dir(tmp_path)
+    if setup_extra is not None:
+        setup_extra(tmp_path)
+    rc, combined = _run_dry_combined(args, str(tmp_path))
+    assert rc == 0, f"Script exited non-zero.\ncombined: {combined}"
+    return combined
+
+
+def _assert_contains_all(combined: str, tokens: list[str]) -> None:
+    """Assert every token appears in combined output."""
+    for token in tokens:
+        assert token in combined, f"Expected {token!r} in output.\ncombined: {combined}"
+
+
+def _assert_contains_none(combined: str, tokens: list[str]) -> None:
+    """Assert no token appears in combined output."""
+    for token in tokens:
+        assert token not in combined, (
+            f"Expected {token!r} to be absent from output.\ncombined: {combined}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # CLI flag parsing tests
 # ---------------------------------------------------------------------------
@@ -323,3 +358,82 @@ class TestConfigGenerationLogic:
         assert loaded.cow_daemon.daemon_url == "http://storage:8081"
         assert loaded.cow_daemon.api_key == "roundtrip-key"
         assert loaded.cow_daemon.mount_point == "/mnt/nfs/cidx"
+
+
+# ---------------------------------------------------------------------------
+# Bug fix tests: node_id (Bug 1), optional DB paths (Bug 2),
+# local backend NFS skip (Bug 3)
+# ---------------------------------------------------------------------------
+
+_OPTIONAL_DB_TOKENS = ["oauth", "scip_audit", "refresh_tokens"]
+
+
+def _create_optional_dbs(tmp_path: Path) -> None:
+    """setup_extra: create oauth.db, scip_audit.db, refresh_tokens.db in data dir."""
+    data_dir = tmp_path / "data"
+    for name in ("oauth.db", "scip_audit.db", "refresh_tokens.db"):
+        (data_dir / name).write_text("")
+
+
+@skip_if_no_script
+class TestNodeIdConfig:
+    """Bug 1: cluster.node_id must be set in config.json for leader election."""
+
+    def test_node_id_appears_in_dry_run_output(self, tmp_path: Path):
+        """--node-id test-node-1 causes 'node_id' to appear in dry-run output."""
+        combined = _setup_and_run(tmp_path, ["--node-id", "test-node-1"])
+        assert "node_id" in combined, (
+            f"Expected 'node_id' in dry-run output when --node-id provided.\n"
+            f"combined: {combined}"
+        )
+
+    def test_node_id_flag_accepted_without_error(self, tmp_path: Path):
+        """--node-id is parsed without 'Unknown argument' error."""
+        combined = _setup_and_run(tmp_path, ["--node-id", "staging-abc123"])
+        assert "Unknown argument" not in combined, (
+            f"Script rejected --node-id flag.\ncombined: {combined}"
+        )
+
+    def test_node_id_auto_generated_when_not_provided(self, tmp_path: Path):
+        """Without --node-id, script auto-generates one and 'node_id' appears in dry-run."""
+        combined = _setup_and_run(tmp_path, [])
+        assert "node_id" in combined, (
+            f"Expected auto-generated 'node_id' in dry-run output.\ncombined: {combined}"
+        )
+
+
+@skip_if_no_script
+class TestLocalBackendSkipsNfsCopy:
+    """Bug 3: --clone-backend local must guard the three NFS copy calls in main()."""
+
+    def test_local_backend_skips_nfs_copy(self, tmp_path: Path):
+        """Dry-run with local backend prints a message indicating NFS copy is skipped."""
+        combined = _setup_and_run(tmp_path, ["--clone-backend", "local"])
+        assert (
+            "skipping NFS copy" in combined or "skipping nfs copy" in combined.lower()
+        ), (
+            f"Expected 'skipping NFS copy' message for local backend.\ncombined: {combined}"
+        )
+
+    def test_local_backend_does_not_mention_rsync_to_nfs(self, tmp_path: Path):
+        """Dry-run with local backend does not attempt rsync to root /golden-repos/."""
+        combined = _setup_and_run(tmp_path, ["--clone-backend", "local"])
+        assert "-> /golden-repos/" not in combined, (
+            f"Local backend must not rsync to /golden-repos/ (empty ONTAP_MOUNT).\n"
+            f"combined: {combined}"
+        )
+
+
+@skip_if_no_script
+class TestOptionalDbPaths:
+    """Bug 2: optional DB files must be conditionally passed to the migration tool."""
+
+    def test_optional_dbs_mentioned_in_dry_run_when_present(self, tmp_path: Path):
+        """When oauth.db/scip_audit.db/refresh_tokens.db exist, dry-run names each."""
+        combined = _setup_and_run(tmp_path, [], setup_extra=_create_optional_dbs)
+        _assert_contains_all(combined, _OPTIONAL_DB_TOKENS)
+
+    def test_optional_dbs_not_mentioned_when_absent(self, tmp_path: Path):
+        """When optional DB files are absent, none of their names appear in dry-run output."""
+        combined = _setup_and_run(tmp_path, [])
+        _assert_contains_none(combined, _OPTIONAL_DB_TOKENS)

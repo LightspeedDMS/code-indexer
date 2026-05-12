@@ -820,6 +820,264 @@ class TestPsycopgLazyImport:
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers for new-table tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def new_table_constants():
+    """Import constants needed for new-table assertions."""
+    from code_indexer.server.tools.migrate_to_postgres import (
+        MAIN_DB_TABLES_ORDERED,
+        BOOLEAN_COLUMNS,
+        JSON_COLUMNS,
+    )
+
+    return MAIN_DB_TABLES_ORDERED, BOOLEAN_COLUMNS, JSON_COLUMNS
+
+
+def _migration_024_path() -> str:
+    """Return the absolute path to migration 024_wiki_article_views.sql."""
+    import os
+
+    sql_dir = os.path.normpath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "../../../../src/code_indexer/server/storage/postgres/migrations/sql",
+        )
+    )
+    return os.path.join(sql_dir, "024_wiki_article_views.sql")
+
+
+@pytest.fixture(scope="module")
+def migration_024_sql() -> str:
+    """Read migration 024 SQL once for the entire module; raises if file absent."""
+    with open(_migration_024_path()) as f:
+        return f.read()
+
+
+# ---------------------------------------------------------------------------
+# TestNewTablePresence — parametrized: all 6 missing tables
+# ---------------------------------------------------------------------------
+
+
+class TestNewTablePresence:
+    """Verify all 6 previously-missing tables are listed in MAIN_DB_TABLES_ORDERED."""
+
+    @pytest.mark.parametrize(
+        "table",
+        [
+            "user_mfa",
+            "user_recovery_codes",
+            "activated_repos",
+            "server_config",
+            "dependency_map_run_history",
+            "wiki_article_views",
+        ],
+    )
+    def test_table_in_main_db_tables_ordered(
+        self, table: str, new_table_constants
+    ) -> None:
+        """Each of the 6 new tables must appear in MAIN_DB_TABLES_ORDERED."""
+        main, _, _ = new_table_constants
+        assert table in main, f"'{table}' missing from MAIN_DB_TABLES_ORDERED"
+
+
+# ---------------------------------------------------------------------------
+# TestNewTableColumnMaps — parametrized: BOOLEAN and JSON column registrations
+# ---------------------------------------------------------------------------
+
+
+class TestNewTableColumnMaps:
+    """Verify BOOLEAN_COLUMNS and JSON_COLUMNS entries for the new tables."""
+
+    @pytest.mark.parametrize(
+        "table,column",
+        [
+            ("user_mfa", "mfa_enabled"),
+            ("activated_repos", "is_composite"),
+            ("activated_repos", "wiki_enabled"),
+        ],
+    )
+    def test_boolean_column_registered(
+        self, table: str, column: str, new_table_constants
+    ) -> None:
+        """INTEGER 0/1 columns must be registered in BOOLEAN_COLUMNS."""
+        _, bool_cols, _ = new_table_constants
+        assert table in bool_cols
+        assert column in bool_cols[table]
+
+    @pytest.mark.parametrize(
+        "table,column",
+        [
+            ("server_config", "config_json"),
+            ("activated_repos", "metadata_json"),
+            ("dependency_map_run_history", "phase_timings_json"),
+        ],
+    )
+    def test_json_column_registered(
+        self, table: str, column: str, new_table_constants
+    ) -> None:
+        """JSON text columns must be registered in JSON_COLUMNS."""
+        _, _, json_cols = new_table_constants
+        assert table in json_cols
+        assert column in json_cols[table]
+
+    def test_activated_repos_ssh_key_used_not_boolean(
+        self, new_table_constants
+    ) -> None:
+        """activated_repos.ssh_key_used is TEXT in both SQLite and PG — not boolean."""
+        _, bool_cols, _ = new_table_constants
+        assert "ssh_key_used" not in bool_cols.get("activated_repos", set())
+
+
+# ---------------------------------------------------------------------------
+# TestNewTableOrdering — parametrized: FK dependency ordering
+# ---------------------------------------------------------------------------
+
+
+class TestNewTableOrdering:
+    """Verify new tables appear in correct FK dependency order."""
+
+    @pytest.mark.parametrize(
+        "child,parent",
+        [
+            ("user_mfa", "users"),
+            ("user_recovery_codes", "user_mfa"),
+            ("activated_repos", "golden_repos_metadata"),
+            ("dependency_map_run_history", "dependency_map_tracking"),
+            ("wiki_article_views", "wiki_sidebar_cache"),
+        ],
+    )
+    def test_child_after_parent(
+        self, child: str, parent: str, new_table_constants
+    ) -> None:
+        """Child table must appear after its parent in MAIN_DB_TABLES_ORDERED."""
+        main, _, _ = new_table_constants
+        assert main.index(child) > main.index(parent), (
+            f"'{child}' must come after '{parent}'"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestNewTableRowTransformation — parametrized: _transform_row() behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestNewTableRowTransformation:
+    """Verify _transform_row() correctly converts new-table columns."""
+
+    @pytest.mark.parametrize(
+        "table,row,col,expected",
+        [
+            (
+                "user_mfa",
+                {"user_id": "u", "encrypted_secret": "s", "mfa_enabled": 1},
+                "mfa_enabled",
+                True,
+            ),
+            (
+                "activated_repos",
+                {
+                    "id": 1,
+                    "username": "a",
+                    "user_alias": "r",
+                    "is_composite": 0,
+                    "wiki_enabled": 1,
+                },
+                "is_composite",
+                False,
+            ),
+            (
+                "activated_repos",
+                {
+                    "id": 1,
+                    "username": "a",
+                    "user_alias": "r",
+                    "is_composite": 0,
+                    "wiki_enabled": 1,
+                },
+                "wiki_enabled",
+                True,
+            ),
+        ],
+    )
+    def test_boolean_columns_converted(
+        self, table: str, row: dict, col: str, expected: bool, migrator_class
+    ) -> None:
+        """Integer 0/1 values in BOOLEAN_COLUMNS become Python bools."""
+        m = migrator_class("x.db", "g.db", "pg://x")
+        assert m._transform_row(table, row)[col] is expected
+
+    @pytest.mark.parametrize(
+        "table,row,col,expected_key",
+        [
+            (
+                "server_config",
+                {"config_key": "runtime", "config_json": '{"k": "v"}', "version": 1},
+                "config_json",
+                "k",
+            ),
+            (
+                "dependency_map_run_history",
+                {"run_id": 1, "phase_timings_json": '{"pass1": 1.5}'},
+                "phase_timings_json",
+                "pass1",
+            ),
+            (
+                "activated_repos",
+                {
+                    "id": 1,
+                    "username": "a",
+                    "user_alias": "r",
+                    "is_composite": 0,
+                    "wiki_enabled": 0,
+                    "metadata_json": '{"foo": "bar"}',
+                },
+                "metadata_json",
+                "foo",
+            ),
+        ],
+    )
+    def test_json_columns_parsed(
+        self, table: str, row: dict, col: str, expected_key: str, migrator_class
+    ) -> None:
+        """JSON string values in JSON_COLUMNS become parsed dicts."""
+        m = migrator_class("x.db", "g.db", "pg://x")
+        parsed = _unwrap_json(m._transform_row(table, row)[col])
+        assert isinstance(parsed, dict)
+        assert expected_key in parsed
+
+
+# ---------------------------------------------------------------------------
+# TestWikiArticleViewsMigration024 — SQL migration file checks (shared fixture)
+# ---------------------------------------------------------------------------
+
+
+class TestWikiArticleViewsMigration024:
+    """Verify migration 024 SQL file exists and has correct content.
+
+    All three tests depend on `migration_024_sql` so a missing file causes
+    all three to fail with FileNotFoundError — no test calls the path helper
+    directly.
+    """
+
+    def test_file_is_readable(self, migration_024_sql: str) -> None:
+        """Fixture succeeds only if the file exists and is non-empty."""
+        assert len(migration_024_sql) > 0
+
+    def test_creates_table_if_not_exists(self, migration_024_sql: str) -> None:
+        """SQL must use CREATE TABLE IF NOT EXISTS wiki_article_views."""
+        assert "CREATE TABLE IF NOT EXISTS wiki_article_views" in migration_024_sql
+
+    def test_defines_composite_primary_key(self, migration_024_sql: str) -> None:
+        """SQL must define PRIMARY KEY on repo_alias and article_path."""
+        assert "PRIMARY KEY" in migration_024_sql
+        assert "repo_alias" in migration_024_sql
+        assert "article_path" in migration_024_sql
+
+
+# ---------------------------------------------------------------------------
 # TestParseJsonColumn (unit tests for the free function)
 # ---------------------------------------------------------------------------
 
