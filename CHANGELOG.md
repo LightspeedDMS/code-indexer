@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.18.0 (2026-05-11) — Fix elevation dialog race condition (Bug #998)
+
+### Fixed
+- ConfigService.load_config() thread-safety race: bootstrap defaults (elevation_enforcement_enabled=False) were transiently visible to concurrent get_config() callers before DB merge completed. Now uses atomic base_config parameter threading so self._config is only published after the full merge.
+- load_config() default-creation path no longer overwrites existing SQLite/PG runtime values with bootstrap defaults when config.json is missing.
+- Elevation endpoints (elevate-ajax, elevate-form) return success instead of 503 when kill switch is OFF, preventing users from being trapped in the TOTP modal during transient config states.
+- Request handlers in api_keys.py (11 calls) and llm_creds.py (1 call) changed from load_config() to get_config() to eliminate unnecessary full reloads on every HTTP request.
+
+### Added
+- Concurrency test suite for load_config() atomicity (7 tests covering SQLite merge window, base_config parameter threading, PG passthrough, and fallback paths).
+
 ## v10.17.0 (2026-05-11) — Three-way pace-maker toggle and config screen crash fix
 
 ### Changed

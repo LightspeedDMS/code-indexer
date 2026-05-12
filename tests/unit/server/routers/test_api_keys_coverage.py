@@ -128,7 +128,7 @@ class TestSaveVoyageaiKey:
                 "code_indexer.server.routers.api_keys.get_api_key_sync_service"
             ) as mock_sync,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_cs.return_value.config_manager = MagicMock()
 
             sync_result = MagicMock()
@@ -157,7 +157,7 @@ class TestSaveVoyageaiKey:
                 "code_indexer.server.routers.api_keys.get_api_key_sync_service"
             ) as mock_sync,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_cs.return_value.config_manager = MagicMock()
 
             sync_result = MagicMock()
@@ -193,7 +193,7 @@ class TestSaveVoyageaiKey:
                 "code_indexer.server.routers.api_keys.get_api_key_sync_service"
             ) as mock_sync,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             sync_result = MagicMock()
             sync_result.success = False
@@ -381,7 +381,7 @@ class TestTestConfiguredAnthropicKey:
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
             patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_tester.return_value.test_anthropic_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -400,7 +400,7 @@ class TestTestConfiguredAnthropicKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.post("/api/api-keys/anthropic/test-configured")
 
@@ -440,7 +440,7 @@ class TestTestConfiguredVoyageaiKey:
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
             patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_tester.return_value.test_voyageai_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -459,7 +459,7 @@ class TestTestConfiguredVoyageaiKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.post("/api/api-keys/voyageai/test-configured")
 
@@ -483,7 +483,7 @@ class TestTestConfiguredVoyageaiKey:
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
             patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_tester.return_value.test_voyageai_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -518,7 +518,7 @@ class TestGetApiKeysStatus:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.get("/api/api-keys/status")
 
@@ -534,7 +534,7 @@ class TestGetApiKeysStatus:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.get("/api/api-keys/status")
 
@@ -550,7 +550,7 @@ class TestGetApiKeysStatus:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.get("/api/api-keys/status")
 
@@ -566,7 +566,7 @@ class TestGetApiKeysStatus:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.get("/api/api-keys/status")
 
@@ -587,7 +587,7 @@ class TestGetApiKeysStatus:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.get("/api/api-keys/status")
 
@@ -615,7 +615,7 @@ class TestDeleteVoyageaiKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_cs.return_value.config_manager = MagicMock()
 
             response = client.delete("/api/api-keys/voyageai")
@@ -633,7 +633,7 @@ class TestDeleteVoyageaiKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.delete("/api/api-keys/voyageai")
 
@@ -651,7 +651,7 @@ class TestDeleteVoyageaiKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.delete("/api/api-keys/voyageai")
 
@@ -673,7 +673,7 @@ class TestDeleteVoyageaiKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_cs.return_value.config_manager = MagicMock()
 
             response = client.delete("/api/api-keys/voyageai")
@@ -703,7 +703,7 @@ class TestSaveCohereKey:
                 "code_indexer.server.routers.api_keys.get_api_key_sync_service"
             ) as mock_sync,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             sync_result = MagicMock()
             sync_result.success = True
@@ -731,7 +731,7 @@ class TestSaveCohereKey:
                 "code_indexer.server.routers.api_keys.get_api_key_sync_service"
             ) as mock_sync,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             sync_result = MagicMock()
             sync_result.success = True
@@ -766,7 +766,7 @@ class TestSaveCohereKey:
                 "code_indexer.server.routers.api_keys.get_api_key_sync_service"
             ) as mock_sync,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             sync_result = MagicMock()
             sync_result.success = False
@@ -790,7 +790,7 @@ class TestSaveCohereKey:
                 "code_indexer.server.routers.api_keys.get_api_key_sync_service"
             ) as mock_sync,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             sync_result = MagicMock()
             sync_result.success = True
@@ -908,7 +908,7 @@ class TestTestConfiguredCohereKey:
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
             patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_tester.return_value.test_cohere_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -927,7 +927,7 @@ class TestTestConfiguredCohereKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.post("/api/api-keys/cohere/test-configured")
 
@@ -951,7 +951,7 @@ class TestTestConfiguredCohereKey:
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
             patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
             mock_tester.return_value.test_cohere_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -984,7 +984,7 @@ class TestDeleteCohereKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.delete("/api/api-keys/cohere")
 
@@ -1001,7 +1001,7 @@ class TestDeleteCohereKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.delete("/api/api-keys/cohere")
 
@@ -1018,7 +1018,7 @@ class TestDeleteCohereKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.delete("/api/api-keys/cohere")
 
@@ -1038,7 +1038,7 @@ class TestDeleteCohereKey:
                 "code_indexer.server.routers.api_keys._clear_from_claude_config"
             ) as mock_clear_claude,
         ):
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             client.delete("/api/api-keys/cohere")
 
@@ -1056,7 +1056,7 @@ class TestDeleteCohereKey:
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
-            mock_cs.return_value.load_config.return_value = cfg
+            mock_cs.return_value.get_config.return_value = cfg
 
             response = client.delete("/api/api-keys/cohere")
 

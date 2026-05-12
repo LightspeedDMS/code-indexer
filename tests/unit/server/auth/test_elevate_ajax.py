@@ -167,14 +167,19 @@ def test_no_code_provided_returns_400(client):
     assert resp.json()["success"] is False
 
 
-def test_kill_switch_off_returns_503(client):
-    """Elevation enforcement disabled → 503 {"success": false}."""
+def test_kill_switch_off_returns_200_success(client):
+    """Elevation enforcement disabled → 200 {"success": true}.
+
+    Bug #998: when elevation is administratively disabled, the operation does not
+    need elevation — treating it as success unblocks the user from the modal.
+    The kill switch means 'do not enforce elevation', so the caller proceeds.
+    """
     esm = _fake_esm()
     with _ajax_ctx(enforcement=False, esm=esm):
         resp = _post_ajax(client, totp_code="123456", cookie=_SESSION_JTI)
 
-    assert resp.status_code == 503
-    assert resp.json()["success"] is False
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
     esm.create.assert_not_called()
 
 

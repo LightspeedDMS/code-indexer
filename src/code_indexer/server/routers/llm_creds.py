@@ -185,7 +185,7 @@ def save_config(
 
     # Load and update config
     config_svc = get_config_service()
-    config = config_svc.load_config()
+    config = config_svc.get_config()
     prev_mode = config.claude_integration_config.claude_auth_mode
 
     config.claude_integration_config.claude_auth_mode = mode

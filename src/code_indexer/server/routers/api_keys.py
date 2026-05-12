@@ -324,7 +324,7 @@ def save_anthropic_key(
     - os.environ["ANTHROPIC_API_KEY"]
     """
     # 409 guard: block manual key save when subscription mode is active
-    _cfg = get_config_service().load_config()
+    _cfg = get_config_service().get_config()
     assert _cfg.claude_integration_config is not None
     if _cfg.claude_integration_config.claude_auth_mode == "subscription":
         raise HTTPException(
@@ -349,7 +349,7 @@ def save_anthropic_key(
 
     # Persist to server config
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
     config.claude_integration_config.anthropic_api_key = request.api_key
     config_service.save_config(config)
@@ -398,7 +398,7 @@ def save_voyageai_key(
 
     # Persist to server config
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
     config.claude_integration_config.voyageai_api_key = request.api_key
     config_service.save_config(config)
@@ -477,7 +477,7 @@ async def test_configured_anthropic_key(
     Tests the key stored in server config without requiring a new key input.
     """
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
 
     api_key = config.claude_integration_config.anthropic_api_key
@@ -511,7 +511,7 @@ async def test_configured_voyageai_key(
     Tests the key stored in server config without requiring a new key input.
     """
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
 
     api_key = config.claude_integration_config.voyageai_api_key
@@ -545,7 +545,7 @@ def get_api_keys_status(
     Returns whether each provider has a key configured.
     """
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
 
     return ApiKeysStatusResponse(
@@ -593,7 +593,7 @@ def save_cohere_key(
 
     # Persist to server config
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
     config.claude_integration_config.cohere_api_key = request.api_key
     config_service.save_config(config)
@@ -644,7 +644,7 @@ async def test_configured_cohere_key(
     Tests the key stored in server config without requiring a new key input.
     """
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
 
     api_key = config.claude_integration_config.cohere_api_key
@@ -678,7 +678,7 @@ def clear_cohere_key(
 ) -> ClearApiKeyResponse:
     """Clear the Cohere API key from config and matching synced locations."""
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
     key_to_clear = config.claude_integration_config.cohere_api_key
 
@@ -718,7 +718,7 @@ def clear_anthropic_key(
 ) -> ClearApiKeyResponse:
     """Clear the Anthropic API key from config and matching synced locations."""
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
     key_to_clear = config.claude_integration_config.anthropic_api_key
 
@@ -764,7 +764,7 @@ def clear_voyageai_key(
 ) -> ClearApiKeyResponse:
     """Clear the VoyageAI API key from config and matching synced locations."""
     config_service = get_config_service()
-    config = config_service.load_config()
+    config = config_service.get_config()
     assert config.claude_integration_config is not None
     key_to_clear = config.claude_integration_config.voyageai_api_key
 

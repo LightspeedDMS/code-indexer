@@ -259,12 +259,7 @@ def elevate_form(
     if result == _ElevResult.SUCCESS:
         return RedirectResponse(url=safe_next, status_code=_HTTP_SEE_OTHER)
     if result == _ElevResult.KILL_SWITCH_OFF:
-        return _elev_error(
-            request,
-            safe_next,
-            "Step-up elevation is currently disabled.",
-            _HTTP_SERVICE_UNAVAILABLE,
-        )
+        return RedirectResponse(url=safe_next, status_code=_HTTP_SEE_OTHER)
     if result == _ElevResult.NO_CODE:
         return _elev_error(request, safe_next, "Provide a code.", _HTTP_BAD_REQUEST)
     if result == _ElevResult.NO_MFA:
@@ -293,10 +288,7 @@ def elevate_ajax(
     if result == _ElevResult.SUCCESS:
         return JSONResponse({"success": True})
     if result == _ElevResult.KILL_SWITCH_OFF:
-        return JSONResponse(
-            {"success": False, "error": "Step-up elevation is currently disabled."},
-            status_code=_HTTP_SERVICE_UNAVAILABLE,
-        )
+        return JSONResponse({"success": True})
     if result == _ElevResult.NO_CODE:
         return JSONResponse(
             {"success": False, "error": "Provide a code."},

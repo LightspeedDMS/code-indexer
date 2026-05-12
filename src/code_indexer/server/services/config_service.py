@@ -223,19 +223,23 @@ class ConfigService:
         config = self.config_manager.load_config()
         if config is None:
             config = self.config_manager.create_default_config()
-            self.save_config(config)
+            self.config_manager.save_config(config)
 
-        self._config = config
-
-        # If runtime DB is available, merge runtime from DB on top of
-        # the bootstrap-only file config. This prevents any caller of
-        # load_config() from overwriting the merged config with defaults.
+        # If runtime DB is available, merge runtime from DB on top of the
+        # bootstrap config.  Pass bootstrap config as base_config so that
+        # self._config is NOT published until after the full merge completes
+        # (Bug #998: prevents concurrent get_config() from seeing transient
+        # bootstrap defaults during the merge window).
         if self._pool is not None:
-            self._load_runtime_from_pg()  # Merges internally
+            self._load_runtime_from_pg(base_config=config)
         elif self._sqlite_db_path:
             runtime = self._load_runtime_from_sqlite()
             if runtime:
-                self._merge_runtime_config(runtime)
+                self._merge_runtime_config(runtime, base_config=config)
+            else:
+                self._config = config
+        else:
+            self._config = config
 
         return self._config
 
@@ -2063,8 +2067,13 @@ class ConfigService:
             len(runtime_dict),
         )
 
-    def _load_runtime_from_pg(self) -> None:
-        """Load runtime config from PostgreSQL and merge with bootstrap."""
+    def _load_runtime_from_pg(self, base_config: Optional[ServerConfig] = None) -> None:
+        """Load runtime config from PostgreSQL and merge with bootstrap.
+
+        Args:
+            base_config: If provided, used as the merge base so self._config
+                is not published until after the merge completes (Bug #998).
+        """
         assert self._pool is not None
         from psycopg.rows import dict_row
 
@@ -2077,6 +2086,8 @@ class ConfigService:
 
         if row is None:
             self._seed_runtime_to_pg()
+            if base_config is not None:
+                self._config = base_config
             return
 
         config_json = row["config_json"]
@@ -2084,7 +2095,7 @@ class ConfigService:
             json.loads(config_json) if isinstance(config_json, str) else config_json
         )
         self._db_config_version = int(row["version"])
-        self._merge_runtime_config(runtime_dict)
+        self._merge_runtime_config(runtime_dict, base_config=base_config)
 
     def _strip_config_file_to_bootstrap(self) -> None:
         """Strip config.json to bootstrap-only keys, backing up original."""
@@ -2162,14 +2173,23 @@ class ConfigService:
         result: dict = json.loads(row[0])
         return result
 
-    def _merge_runtime_config(self, runtime_dict: dict) -> None:
+    def _merge_runtime_config(
+        self, runtime_dict: dict, base_config: Optional[ServerConfig] = None
+    ) -> None:
         """Merge runtime dict into current config (runtime fields only).
 
         Reconstructs a full ServerConfig from a merged dict to correctly
         deserialize nested dataclass fields (Finding 1 fix).  Uses atomic
         reference swap for thread safety (Finding 3 fix).
+
+        Args:
+            runtime_dict: Runtime key/value pairs to merge on top of base.
+            base_config: If provided, used as the merge base instead of
+                calling get_config().  Pass this during load_config() so that
+                self._config is not published until after the merge completes
+                (Bug #998 atomicity fix).
         """
-        config = self.get_config()
+        config = base_config if base_config is not None else self.get_config()
         full_dict = asdict(config)
         # Overwrite runtime fields only
         for k, v in runtime_dict.items():
