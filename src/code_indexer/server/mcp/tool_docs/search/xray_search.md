@@ -737,8 +737,13 @@ Find every `prepareStatement(...)` call that is NOT inside a try-with-resources 
 
 The evaluator iterates `match_positions` (every Phase 1 hit), finds the enclosing `method_invocation` for each offset, and filters out invocations that have a `try_with_resources_statement` ancestor — surfacing only unsafe statements. The `risk` field is an open per-match key the server preserves intact.
 
+## Cancellation
+
+Running xray_search jobs can be cancelled via `cancel_job(job_id)`. XRay jobs receive real process termination (SIGTERM, then SIGKILL after a 2-second grace period) rather than cooperative flag-only cancellation. The job status transitions to `cancelled`. Multi-repo searches return one job_id per repo -- cancel each individually.
+
 ## Related
 
+- See `cancel_job` to cancel a running xray_search job with process termination.
 - See `xray_explore` for verbose AST debug output to help craft evaluator code.
 - `xray_explore` runs the same two-phase pipeline but adds an `ast_debug` field to every match, showing the complete tree-sitter AST node structure. Use it before writing your `evaluator_code`.
 - See `cidx_fetch_cached_payload` to retrieve large truncated results by `cache_handle`.

@@ -7,6 +7,7 @@ Provides persistence, user isolation, job management, and comprehensive tracking
 
 import json
 import logging
+import multiprocessing
 import queue
 import threading
 import uuid
@@ -147,6 +148,9 @@ class BackgroundJobManager:
         self._job_queue: queue.PriorityQueue = queue.PriorityQueue()
         # Story #26: Queue for pending jobs waiting for a slot
         self._pending_job_queue: queue.Queue = queue.Queue()
+        # Story #996: Child process tracking for xray_search/xray_explore termination
+        self._child_processes: Dict[str, List] = {}
+        self._child_processes_lock = threading.Lock()
 
         # Persistence settings
         self.storage_path = storage_path
@@ -568,6 +572,72 @@ class BackgroundJobManager:
                 "offset": offset,
             }
 
+    # ------------------------------------------------------------------
+    # Story #996: Child process lifecycle management
+    # ------------------------------------------------------------------
+
+    # Grace period after SIGTERM before escalating to SIGKILL (AC6).
+    _SIGTERM_GRACE_SECONDS: float = 2.0
+    # Maximum time to wait for SIGKILL acknowledgement before moving on.
+    _SIGKILL_JOIN_SECONDS: float = 1.0
+
+    def register_child_process(
+        self, job_id: str, process: "multiprocessing.Process"
+    ) -> None:
+        """Register a child process for a job so it can be terminated on cancel.
+
+        If the job is already marked cancelled (race condition AC7), terminates
+        the newly registered process immediately.
+
+        Args:
+            job_id: The job that owns this process.
+            process: A multiprocessing.Process instance to track.
+        """
+        with self._child_processes_lock:
+            if job_id not in self._child_processes:
+                self._child_processes[job_id] = []
+            self._child_processes[job_id].append(process)
+
+        # AC7: race condition — cancel arrived before process was registered
+        with self._lock:
+            job = self.jobs.get(job_id)
+            already_cancelled = job is not None and job.cancelled
+        if already_cancelled:
+            self._terminate_child_processes(job_id)
+
+    def unregister_child_processes(self, job_id: str) -> None:
+        """Remove all tracked child processes for a job after it completes.
+
+        Args:
+            job_id: The job whose processes should be cleared.
+        """
+        with self._child_processes_lock:
+            self._child_processes.pop(job_id, None)
+
+    def _terminate_child_processes(self, job_id: str) -> None:
+        """Send SIGTERM then SIGKILL (after grace period) to all child processes.
+
+        Implements the AC6 two-phase termination: SIGTERM first, then
+        escalate to SIGKILL for processes that survive the grace period.
+
+        Args:
+            job_id: The job whose child processes should be terminated.
+        """
+        with self._child_processes_lock:
+            processes = list(self._child_processes.get(job_id, []))
+
+        # Phase 1: SIGTERM all alive processes
+        for proc in processes:
+            if proc.is_alive():
+                proc.terminate()
+
+        # Phase 2: wait grace period then SIGKILL survivors
+        for proc in processes:
+            proc.join(timeout=self._SIGTERM_GRACE_SECONDS)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=self._SIGKILL_JOIN_SECONDS)
+
     def cancel_job(
         self, job_id: str, username: str, is_admin: bool = False
     ) -> Dict[str, Any]:
@@ -595,12 +665,15 @@ class BackgroundJobManager:
             if not is_admin and job.username != username:
                 return {"success": False, "message": "Job not found or not authorized"}
 
+            was_running = False
             with self._lock:
                 if job.status not in [JobStatus.PENDING, JobStatus.RUNNING]:
                     return {
                         "success": False,
                         "message": f"Cannot cancel job in {job.status.value} status",
                     }
+
+                was_running = job.status == JobStatus.RUNNING
 
                 # Mark job as cancelled
                 job.cancelled = True
@@ -614,6 +687,9 @@ class BackgroundJobManager:
 
             # Story #267 Component 3-4: Persist outside lock
             self._persist_jobs(job_id=job_id)
+            # Story #996: Terminate driver processes for running xray jobs
+            if was_running:
+                self._terminate_child_processes(job_id)
             logging.info(f"Job {job_id} cancelled by user {username}")
             return {"success": True, "message": "Job cancelled successfully"}
 
@@ -852,16 +928,11 @@ class BackgroundJobManager:
                                 if isinstance(job.result, dict)
                                 else None,
                             )
-                        else:
-                            # FAILED or CANCELLED — record as failed with reason
+                        elif job.status == JobStatus.FAILED:
                             error_msg = (
-                                "cancelled"
-                                if job.status == JobStatus.CANCELLED
-                                else (
-                                    job.result.get("error", "job failed")
-                                    if isinstance(job.result, dict)
-                                    else "job failed"
-                                )
+                                job.result.get("error", "job failed")
+                                if isinstance(job.result, dict)
+                                else "job failed"
                             )
                             self._job_tracker.fail_job(job_id, error=error_msg)
                     except Exception:
@@ -900,36 +971,42 @@ class BackgroundJobManager:
                     job.progress = 0
                 # Story #267 Component 3-4: Persist outside lock
                 self._persist_jobs(job_id=job_id)
-                # Story #311 AC10: Notify tracker of cancellation via fail_job
-                if self._job_tracker is not None:
-                    try:
-                        self._job_tracker.fail_job(job_id, error=f"cancelled: {e}")
-                    except Exception:
-                        logging.warning(
-                            f"JobTracker.fail_job(cancelled) failed for {job_id}",
-                            exc_info=True,
-                        )
+                # Tracker notification skipped for InterruptedError (always
+                # cancellation) — fail_job would overwrite status to "failed".
                 # Story #267 Component 8: Remove from memory after persist (SQLite only)
                 if self._sqlite_backend:
                     with self._lock:
                         self.jobs.pop(job_id, None)
             except Exception as e:
-                # Job failed
                 error_msg = str(e)
-                logging.error(f"Background job {job_id} failed: {error_msg}")
 
                 with self._lock:
                     job = self.jobs[job_id]
-                    job.status = JobStatus.FAILED
-                    job.completed_at = datetime.now(timezone.utc)
-                    job.error = error_msg
-                    job.progress = 0
+                    if job.cancelled:
+                        job.status = JobStatus.CANCELLED
+                        job.completed_at = job.completed_at or datetime.now(
+                            timezone.utc
+                        )
+                        job.error = "cancelled"
+                        logging.info(
+                            f"Background job {job_id} exception after cancel: {error_msg}"
+                        )
+                    else:
+                        job.status = JobStatus.FAILED
+                        job.completed_at = datetime.now(timezone.utc)
+                        job.error = error_msg
+                        job.progress = 0
+                        logging.error(f"Background job {job_id} failed: {error_msg}")
                 # Story #267 Component 3-4: Persist outside lock
                 self._persist_jobs(job_id=job_id)
-                # Story #311 AC3: Notify tracker of failure
-                if self._job_tracker is not None:
+                # Story #311 AC3: Notify tracker of failure (skip for
+                # cancelled jobs — fail_job overwrites status to "failed").
+                if self._job_tracker is not None and not job.cancelled:
                     try:
-                        self._job_tracker.fail_job(job_id, error=error_msg)
+                        self._job_tracker.fail_job(
+                            job_id,
+                            error=error_msg,
+                        )
                     except Exception:
                         logging.warning(
                             f"JobTracker.fail_job failed for {job_id}",

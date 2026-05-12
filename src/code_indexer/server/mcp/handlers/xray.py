@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
-from code_indexer.server.auth.user_manager import User
+from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
@@ -329,9 +329,13 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             single_repo_path = Path(single_path_str)
             timeout_capture = effective_timeout_multi
 
-            def _make_job_fn(rp: Path, t: int):  # type: ignore[no-untyped-def]
+            def _make_job_fn(rp: Path, t: int, jid_holder: list):  # type: ignore[no-untyped-def]
                 def _job(progress_callback):  # type: ignore[no-untyped-def]
                     from code_indexer.xray.search_engine import XRaySearchEngine as _E
+
+                    def _on_spawned(proc):  # type: ignore[no-untyped-def]
+                        if jid_holder:
+                            bjm_multi.register_child_process(jid_holder[0], proc)
 
                     result = _E().run(
                         repo_path=rp,
@@ -348,17 +352,22 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                         timeout_seconds=t,
                         progress_callback=progress_callback,
                         max_files=max_results,
+                        on_process_spawned=_on_spawned,
                     )
+                    if jid_holder:
+                        bjm_multi.unregister_child_processes(jid_holder[0])
                     return _truncate_xray_result(result)
 
                 return _job
 
+            _jid_holder: list = []
             jid: str = bjm_multi.submit_job(
                 operation_type="xray_search",
-                func=_make_job_fn(single_repo_path, timeout_capture),
+                func=_make_job_fn(single_repo_path, timeout_capture, _jid_holder),
                 submitter_username=user.username,
                 repo_alias=single_alias,
             )
+            _jid_holder.append(jid)
             job_ids.append(jid)
 
         return _mcp_response({"job_ids": job_ids, "errors": errors})
@@ -414,8 +423,15 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     repo_path = Path(repo_path_str)
 
+    bjm = _get_background_job_manager()
+    _jid: list = []
+
     def job_fn(progress_callback):  # type: ignore[no-untyped-def]
         from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
+
+        def _on_spawned(proc):  # type: ignore[no-untyped-def]
+            if _jid:
+                bjm.register_child_process(_jid[0], proc)
 
         result = _Engine().run(
             repo_path=repo_path,
@@ -432,16 +448,19 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             timeout_seconds=effective_timeout,
             progress_callback=progress_callback,
             max_files=max_results,
+            on_process_spawned=_on_spawned,
         )
+        if _jid:
+            bjm.unregister_child_processes(_jid[0])
         return _truncate_xray_result(result)
 
-    bjm = _get_background_job_manager()
     job_id: str = bjm.submit_job(
         operation_type="xray_search",
         func=job_fn,
         submitter_username=user.username,
         repo_alias=repo_alias_parsed,
     )
+    _jid.append(job_id)
 
     if await_seconds > 0:
         inline = _await_job_result(bjm, job_id, user.username, await_seconds)
@@ -472,6 +491,8 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
     effective_timeout: int,
     max_results: "Optional[int]",
     max_debug_nodes: int,
+    job_id_holder: "Optional[list]" = None,
+    bjm: "Optional[Any]" = None,
 ):
     """Return a job function closure for xray_explore.
 
@@ -482,7 +503,11 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
     def job_fn(progress_callback):  # type: ignore[no-untyped-def]
         from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
 
-        return _Engine().run(
+        def _on_spawned(proc):  # type: ignore[no-untyped-def]
+            if bjm is not None and job_id_holder:
+                bjm.register_child_process(job_id_holder[0], proc)
+
+        result = _Engine().run(
             repo_path=repo_path,
             driver_regex=driver_regex,
             evaluator_code=evaluator_code,
@@ -499,7 +524,11 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
             max_files=max_results,
             include_ast_debug=True,
             max_debug_nodes=max_debug_nodes,
+            on_process_spawned=_on_spawned,
         )
+        if bjm is not None and job_id_holder:
+            bjm.unregister_child_processes(job_id_holder[0])
+        return result
 
     return job_fn
 
@@ -542,6 +571,7 @@ def _submit_xray_explore_omni(  # type: ignore[no-untyped-def]
             )
             continue
 
+        _jid_holder: list = []
         jid: str = bjm.submit_job(
             operation_type="xray_explore",
             func=_make_xray_explore_job_fn(
@@ -559,10 +589,13 @@ def _submit_xray_explore_omni(  # type: ignore[no-untyped-def]
                 effective_timeout=effective_timeout,
                 max_results=max_results,
                 max_debug_nodes=max_debug_nodes,
+                job_id_holder=_jid_holder,
+                bjm=bjm,
             ),
             submitter_username=user.username,
             repo_alias=single_alias,
         )
+        _jid_holder.append(jid)
         job_ids.append(jid)
 
     return {"job_ids": job_ids, "errors": errors}
@@ -813,12 +846,19 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     bjm = _get_background_job_manager()
+    _jid_explore: list = []
     job_id: str = bjm.submit_job(
         operation_type="xray_explore",
-        func=_make_xray_explore_job_fn(repo_path=Path(repo_path_str), **explore_kwargs),
+        func=_make_xray_explore_job_fn(
+            repo_path=Path(repo_path_str),
+            job_id_holder=_jid_explore,
+            bjm=bjm,
+            **explore_kwargs,
+        ),
         submitter_username=user.username,
         repo_alias=repo_alias_parsed,
     )
+    _jid_explore.append(job_id)
 
     if await_seconds > 0:
         inline = _await_job_result(bjm, job_id, user.username, await_seconds)
@@ -1107,9 +1147,29 @@ def _truncate_xray_result(result: Dict[str, Any]) -> Dict[str, Any]:
     return truncated_result
 
 
+def handle_cancel_job(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """MCP handler for the cancel_job tool.
+
+    Cancels a running or pending background job. For xray_search/xray_explore
+    jobs with registered child processes, sends SIGTERM then SIGKILL.
+    """
+    if user is None or not user.has_permission("query_repos"):
+        return _mcp_response({"error": "auth_required"})
+
+    job_id = params.get("job_id")
+    if not job_id:
+        return _mcp_response({"success": False, "message": "job_id is required"})
+
+    bjm = _get_background_job_manager()
+    is_admin = hasattr(user, "role") and user.role == UserRole.ADMIN
+    result = bjm.cancel_job(job_id, user.username, is_admin)
+    return _mcp_response(result)
+
+
 def _register(registry: Dict[str, Any]) -> None:
     """Register xray handlers in the HANDLER_REGISTRY."""
     registry["xray_search"] = handle_xray_search
     registry["xray_explore"] = handle_xray_explore
     registry["xray_dump_ast"] = handle_xray_dump_ast
     registry["cidx_fetch_cached_payload"] = handle_cidx_fetch_cached_payload
+    registry["cancel_job"] = handle_cancel_job
