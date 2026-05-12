@@ -166,6 +166,13 @@ COLUMN_RENAMES: Dict[str, Dict[str, str]] = {
     "wiki_cache": {"metadata_json": "metadata"},
 }
 
+NULL_DEFAULT_COLUMNS: Dict[str, Dict[str, Any]] = {
+    "dependency_map_run_history": {
+        "pass1_duration_s": 0.0,
+        "pass2_duration_s": 0.0,
+    },
+}
+
 
 class SqliteToPostgresMigrator:
     """
@@ -453,7 +460,8 @@ class SqliteToPostgresMigrator:
             dest_col = renames.get(col, col)
 
             if value is None:
-                result[dest_col] = None
+                null_defaults = NULL_DEFAULT_COLUMNS.get(table_name, {})
+                result[dest_col] = null_defaults.get(col, None)
                 continue
 
             if col in json_cols:
