@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.20.0 (2026-05-12) — Complete SQLite-to-PostgreSQL migration tool and cluster-migrate.sh fixes
+
+### Fixed
+- Migration tool now handles 6 additional tables with real data: user_mfa, user_recovery_codes, activated_repos, server_config, dependency_map_run_history, wiki_article_views. Previously, TOTP secrets and recovery codes would be lost during solo-to-cluster conversion.
+- cluster-migrate.sh now sets cluster.node_id in config (required for leader election).
+- cluster-migrate.sh data migration step now passes optional database paths (oauth.db, scip_audit.db, refresh_tokens.db) when those files exist.
+- cluster-migrate.sh local clone backend no longer runs NFS copy steps with an empty mount path.
+
+### Added
+- `--node-id` CLI argument for cluster-migrate.sh (auto-generated from hostname if omitted).
+- PostgreSQL migration 024: wiki_article_views table (was inline-only in PG backend, missing before data migration runs).
+- BOOLEAN_COLUMNS entries for user_mfa.mfa_enabled and activated_repos.is_composite/wiki_enabled.
+- JSON_COLUMNS entries for server_config.config_json, activated_repos.metadata_json, dependency_map_run_history.phase_timings_json.
+
 ## v10.19.0 (2026-05-12) — MCP cancel_job with XRay process termination (Story #996)
 
 ### Added

@@ -29,14 +29,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 MAIN_DB_TABLES_ORDERED: List[str] = [
     "users",
+    "user_mfa",
+    "user_recovery_codes",
     "user_api_keys",
     "user_mcp_credentials",
     "user_oidc_identities",
     "invalidated_sessions",
     "password_change_timestamps",
     "repo_categories",
+    "server_config",
     "global_repos",
     "golden_repos_metadata",
+    "activated_repos",
     "background_jobs",
     "sync_jobs",
     "ci_tokens",
@@ -44,6 +48,7 @@ MAIN_DB_TABLES_ORDERED: List[str] = [
     "ssh_key_hosts",
     "description_refresh_tracking",
     "dependency_map_tracking",
+    "dependency_map_run_history",
     "self_monitoring_scans",
     "self_monitoring_issues",
     "research_sessions",
@@ -51,6 +56,7 @@ MAIN_DB_TABLES_ORDERED: List[str] = [
     "diagnostic_results",
     "wiki_cache",
     "wiki_sidebar_cache",
+    "wiki_article_views",
     "user_git_credentials",
 ]
 
@@ -109,6 +115,9 @@ JSON_COLUMNS: Dict[str, set] = {
     "dependency_map_tracking": {"commit_hashes"},
     "diagnostic_results": {"results_json"},
     "wiki_sidebar_cache": {"sidebar_json"},
+    "server_config": {"config_json"},
+    "activated_repos": {"metadata_json"},
+    "dependency_map_run_history": {"phase_timings_json"},
 }
 
 # ---------------------------------------------------------------------------
@@ -137,6 +146,8 @@ BOOLEAN_COLUMNS: Dict[str, set] = {
     "users": {"is_admin", "is_sso"},
     "token_families": {"is_revoked"},
     "refresh_tokens": {"is_used"},
+    "user_mfa": {"mfa_enabled"},
+    "activated_repos": {"is_composite", "wiki_enabled"},
 }
 
 # ---------------------------------------------------------------------------
