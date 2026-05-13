@@ -32,6 +32,10 @@ def _make_mock_pool(select_row=None):
     mock_conn.execute.return_value = mock_cursor
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__ = MagicMock(return_value=False)
+    # cursor(row_factory=...) used as context manager must delegate execute()
+    # to mock_conn.execute so that side_effect tricks in tests still work.
+    mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
     mock_pool.connection.return_value = mock_conn
     return mock_pool, mock_conn
 
@@ -88,6 +92,10 @@ class TestCheckConfigUpdate:
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
+        # cursor(row_factory=...) used as context manager must return mock_conn
+        # so that cur.execute() routes through mock_conn.execute() side_effect.
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         mock_pool.connection.return_value = mock_conn
 
         # check_config_update SELECT returns version 2
@@ -168,6 +176,10 @@ class TestSeedRuntimeToPg:
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
+        # cursor(row_factory=...) used as context manager must return mock_conn
+        # so that cur.execute() routes through mock_conn.execute() side_effect.
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
         mock_pool.connection.return_value = mock_conn
 
         # Finding 4 fix: _seed_runtime_to_pg now does INSERT then SELECT.

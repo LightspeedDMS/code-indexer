@@ -32,6 +32,42 @@ from code_indexer.server.auth.login_rate_limiter import LoginRateLimiter
 # ---------------------------------------------------------------------------
 
 
+class _PgStyleSqliteCursorCtx:
+    """Context manager wrapping a SQLite cursor for psycopg3-style cursor() usage."""
+
+    def __init__(self, sqlite_conn):
+        self._conn = sqlite_conn
+        self._result = None
+
+    @staticmethod
+    def _translate_query(query):
+        return query.replace("%s", "?")
+
+    def execute(self, query, params=None):
+        translated = self._translate_query(query)
+        if params:
+            self._result = self._conn.execute(translated, params)
+        else:
+            self._result = self._conn.execute(translated)
+        return self
+
+    def fetchone(self):
+        if self._result is None:
+            return None
+        return self._result.fetchone()
+
+    def fetchall(self):
+        if self._result is None:
+            return []
+        return self._result.fetchall()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
 class _PgStyleSqliteConn:
     """SQLite connection presenting psycopg-style interface.
 
@@ -52,6 +88,10 @@ class _PgStyleSqliteConn:
         if params:
             return self._conn.execute(translated, params)
         return self._conn.execute(translated)
+
+    def cursor(self, **kwargs):
+        """Return a cursor context manager, ignoring row_factory kwarg."""
+        return _PgStyleSqliteCursorCtx(self._conn)
 
     def commit(self):
         self._conn.commit()
