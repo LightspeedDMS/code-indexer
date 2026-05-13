@@ -26,6 +26,13 @@ from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
 
 
+def _dict_row_factory() -> Any:
+    """Return psycopg v3 dict_row row factory, loaded lazily."""
+    from psycopg.rows import dict_row
+
+    return dict_row
+
+
 class ActivatedRepoError(Exception):
     """Base exception for activated repository operations."""
 
@@ -236,10 +243,11 @@ class ActivatedRepoManager:
         """Load metadata from PostgreSQL (cluster mode)."""
         assert self._pool is not None
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM activated_repos WHERE username = %s AND user_alias = %s",
-                (username, user_alias),
-            ).fetchone()
+            with conn.cursor(row_factory=_dict_row_factory()) as cur:
+                row = cur.execute(
+                    "SELECT * FROM activated_repos WHERE username = %s AND user_alias = %s",
+                    (username, user_alias),
+                ).fetchone()
         if row is None:
             return None
         return self._pg_row_to_metadata(row)
@@ -348,19 +356,21 @@ class ActivatedRepoManager:
         """List activated repos for a user from PostgreSQL (cluster mode)."""
         assert self._pool is not None
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM activated_repos WHERE username = %s ORDER BY user_alias",
-                (username,),
-            ).fetchall()
+            with conn.cursor(row_factory=_dict_row_factory()) as cur:
+                rows = cur.execute(
+                    "SELECT * FROM activated_repos WHERE username = %s ORDER BY user_alias",
+                    (username,),
+                ).fetchall()
         return [self._pg_row_to_metadata(r) for r in rows]
 
     def _list_all_repos_pg(self) -> List[dict]:
         """List all activated repos from PostgreSQL (cluster mode)."""
         assert self._pool is not None
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM activated_repos ORDER BY username, user_alias"
-            ).fetchall()
+            with conn.cursor(row_factory=_dict_row_factory()) as cur:
+                rows = cur.execute(
+                    "SELECT * FROM activated_repos ORDER BY username, user_alias"
+                ).fetchall()
         return [self._pg_row_to_metadata(r) for r in rows]
 
     def activate_repository(

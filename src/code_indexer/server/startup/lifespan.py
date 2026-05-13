@@ -2092,6 +2092,52 @@ def make_lifespan(
                     _config_svc.set_connection_pool(_cluster_pool)
                     _config_svc.start_config_reload(interval_seconds=30)
 
+                    # Bug #998: Late-initialize OIDC on cluster secondary nodes.
+                    # OIDC startup (line ~1649) runs before ConfigService has PG pool,
+                    # so secondary nodes that lack OIDC in bootstrap config.json
+                    # skip initialization. Now that PG config is available, retry.
+                    if _oidc_routes.oidc_manager is None:
+                        _config_svc.load_config()  # Force reload from PG
+                        _late_config = _config_svc.get_config()
+                        if (
+                            _late_config
+                            and hasattr(_late_config, "oidc_provider_config")
+                            and _late_config.oidc_provider_config
+                            and _late_config.oidc_provider_config.enabled
+                        ):
+                            from code_indexer.server.auth.oidc.oidc_manager import (
+                                OIDCManager,
+                            )
+                            from code_indexer.server.auth.oidc.state_manager import (
+                                StateManager,
+                            )
+
+                            _late_state_mgr = StateManager()
+                            _late_oidc_mgr = OIDCManager(
+                                config=_late_config.oidc_provider_config,
+                                user_manager=user_manager,
+                                jwt_manager=jwt_manager,
+                            )
+                            await _late_oidc_mgr.initialize()
+
+                            _oidc_routes.oidc_manager = _late_oidc_mgr
+                            _oidc_routes.state_manager = _late_state_mgr
+                            _oidc_routes.server_config = _late_config
+
+                            _late_state_mgr.set_connection_pool(_cluster_pool)
+
+                            if (
+                                hasattr(app.state, "group_manager")
+                                and app.state.group_manager
+                            ):
+                                _late_oidc_mgr.group_manager = app.state.group_manager
+
+                            logger.info(
+                                "OIDC late-initialized from PG config "
+                                "(cluster node had no OIDC in bootstrap config)",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+
                     # Bug #587: Wire cluster pool for activated repos
                     if (
                         golden_repo_manager is not None

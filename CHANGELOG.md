@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.23.0 (2026-05-12) — Cluster OIDC late-init and activated repos PG dict_row fix
+
+### Fixed
+- OIDC/SSO not initialized on cluster secondary nodes: ConfigService gets PG pool after OIDC startup, so secondary nodes without OIDC in bootstrap config.json skipped initialization. Added late-initialization block after ConfigService gets PG pool that retries OIDC setup from PG config.
+- P0 query regression in cluster mode ("tuple indices must be integers or slices, not str"): `activated_repo_manager.py` PG SELECT queries used `conn.execute()` without `row_factory=dict_row`, returning tuples instead of dicts. All search, repo listing, and cascade deletion operations failed. Added `_dict_row_factory()` helper and `conn.cursor(row_factory=...)` to all three PG SELECT methods, following the pattern from `groups_backend.py` and `audit_log_backend.py`.
+
 ## v10.22.0 (2026-05-12) — Unified token encryption key with salt file and shared crypto module (Story #999)
 
 ### Added
