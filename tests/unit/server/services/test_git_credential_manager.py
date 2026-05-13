@@ -227,3 +227,133 @@ class TestCreateGitCredentialManagerFactory:
             create_git_credential_manager(
                 db_path="", server_dir=str(server_dir), storage_mode="sqlite"
             )
+
+
+# ---------------------------------------------------------------------------
+# Test constants — obviously synthetic, not real credentials
+# ---------------------------------------------------------------------------
+
+_TEST_SALT = "test-salt-not-a-real-secret"
+_TEST_TOKEN_PLAINTEXT = "not-a-real-token-test-only-0001"
+
+
+# ---------------------------------------------------------------------------
+# Shared helper for DB reads
+# ---------------------------------------------------------------------------
+
+
+def _read_stored_enc(db_path: str, cred_id: str) -> str:
+    """Return the encrypted_token stored in DB for credential_id."""
+    import sqlite3 as _sq3
+
+    with _sq3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT encrypted_token FROM user_git_credentials WHERE credential_id = ?",
+            (cred_id,),
+        ).fetchone()
+    # Explicit str() cast satisfies mypy no-any-return for sqlite3 column values.
+    return str(row[0])
+
+
+# ---------------------------------------------------------------------------
+# Tests: Lazy re-encryption on fallback hit
+# ---------------------------------------------------------------------------
+
+
+class TestLazyReencryption:
+    """Tests verifying that a fallback-key decrypt triggers re-encryption in the DB."""
+
+    @pytest.fixture
+    def reencrypt_db(self, tmp_path):
+        """DB path with user_git_credentials table."""
+        return _make_db(tmp_path)
+
+    @pytest.fixture
+    def canonical_server_dir(self, tmp_path):
+        """Server dir with .encryption_key_salt set to _TEST_SALT."""
+        sd = tmp_path / ".cidx-server"
+        sd.mkdir()
+        (sd / ".encryption_key_salt").write_text(_TEST_SALT)
+        return sd
+
+    @pytest.fixture
+    def seeded_credential(self, reencrypt_db, canonical_server_dir):
+        """Insert a credential encrypted with the hostname (old) key.
+
+        Returns (db_path, canonical_mgr, cred_id, username, original_enc).
+        """
+        cred_id = "test-cred-seed-001"
+        username = "testuser-reencrypt"
+        hostname_mgr = GitCredentialManager(reencrypt_db)  # hostname key = old
+        original_enc = hostname_mgr._encrypt_token(_TEST_TOKEN_PLAINTEXT)
+        _insert_raw_credential(reencrypt_db, cred_id, username, original_enc)
+        canonical_mgr = GitCredentialManager(
+            reencrypt_db, server_dir=str(canonical_server_dir)
+        )
+        return reencrypt_db, canonical_mgr, cred_id, username, original_enc
+
+    def test_fallback_hit_get_credential_reencrypts_and_second_call_canonical(
+        self, seeded_credential, caplog
+    ):
+        """get_credential_for_host: fallback decrypt -> re-encrypts -> second call no fallback warning."""
+        import logging
+
+        db_path, canonical_mgr, cred_id, username, original_enc = seeded_credential
+
+        # First call: triggers fallback and re-encryption
+        result = canonical_mgr.get_credential_for_host(username, _FORGE_HOST)
+        assert result is not None
+        assert result["token"] == _TEST_TOKEN_PLAINTEXT
+
+        new_enc = _read_stored_enc(db_path, cred_id)
+        assert new_enc != original_enc
+        assert (
+            canonical_mgr._do_decrypt(new_enc, canonical_mgr._encryption_key)
+            == _TEST_TOKEN_PLAINTEXT
+        )
+
+        # Second call: must not trigger fallback warning
+        caplog.clear()
+        with caplog.at_level(
+            logging.WARNING,
+            logger="code_indexer.server.services.git_credential_manager",
+        ):
+            result2 = canonical_mgr.get_credential_for_host(username, _FORGE_HOST)
+        assert result2 is not None
+        assert result2["token"] == _TEST_TOKEN_PLAINTEXT
+        fallback_warnings = [
+            r for r in caplog.records if "fallback" in r.message.lower()
+        ]
+        assert fallback_warnings == [], "Second call must not trigger fallback warning"
+
+    def test_fallback_hit_list_credentials_reencrypts(self, seeded_credential):
+        """list_credentials: fallback decrypt -> re-encrypts with canonical key in DB."""
+        db_path, canonical_mgr, cred_id, username, original_enc = seeded_credential
+
+        results = canonical_mgr.list_credentials(username)
+
+        assert len(results) == 1
+        assert results[0]["token_suffix"] == _TEST_TOKEN_PLAINTEXT[-4:]
+
+        new_enc = _read_stored_enc(db_path, cred_id)
+        assert new_enc != original_enc
+        assert (
+            canonical_mgr._do_decrypt(new_enc, canonical_mgr._encryption_key)
+            == _TEST_TOKEN_PLAINTEXT
+        )
+
+    def test_no_reencryption_when_canonical_key_succeeds(
+        self, reencrypt_db, canonical_server_dir
+    ):
+        """When canonical key decrypts successfully, DB token is unchanged."""
+        mgr = GitCredentialManager(reencrypt_db, server_dir=str(canonical_server_dir))
+        cred_id = "test-cred-no-reencrypt"
+        username = "testuser-nodelta"
+        enc = mgr._encrypt_token(_TEST_TOKEN_PLAINTEXT)
+        _insert_raw_credential(reencrypt_db, cred_id, username, enc)
+
+        result = mgr.get_credential_for_host(username, _FORGE_HOST)
+
+        assert result is not None
+        assert result["token"] == _TEST_TOKEN_PLAINTEXT
+        assert _read_stored_enc(reencrypt_db, cred_id) == enc  # unchanged

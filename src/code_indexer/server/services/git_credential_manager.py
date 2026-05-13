@@ -7,27 +7,24 @@ Manages per-user git forge credentials with AES-256-CBC encryption.
 Validates tokens against the forge API before storing.
 """
 
-import base64
-import hashlib
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from code_indexer.server.clients.forge_client import get_forge_client
+from code_indexer.server.storage.protocols import GitCredentialsBackend
 from code_indexer.server.storage.sqlite_backends import GitCredentialsSqliteBackend
+from .token_encryption import (
+    derive_key_from_salt as _derive_key_from_salt_fn,
+    derive_encryption_key as _derive_encryption_key_fn,
+    encrypt_token as _encrypt_token_fn,
+    decrypt_single as _decrypt_single_fn,
+    decrypt_with_fallback as _decrypt_with_fallback_fn,
+)
 
 logger = logging.getLogger(__name__)
-
-# Encryption constants
-PBKDF2_ITERATIONS = 100000
-AES_KEY_SIZE = 32  # 256 bits
-AES_BLOCK_SIZE = 16  # 128 bits
 
 
 class GitCredentialManager:
@@ -35,55 +32,83 @@ class GitCredentialManager:
     Service for managing git forge credentials per user.
 
     Validates tokens against the forge API, encrypts them with AES-256-CBC,
-    and persists via GitCredentialsSqliteBackend.
+    and persists via a GitCredentialsBackend (SQLite by default, PG in cluster mode).
     """
 
-    def __init__(self, db_path: str, cluster_secret: Optional[str] = None) -> None:
-        self._backend = GitCredentialsSqliteBackend(db_path)
+    def __init__(
+        self,
+        db_path: str,
+        cluster_secret: Optional[str] = None,
+        server_dir: Optional[str] = None,
+        backend: Optional[GitCredentialsBackend] = None,
+    ) -> None:
+        """Initialize the credential manager.
+
+        Args:
+            db_path: Path to SQLite database file.
+            cluster_secret: Shared secret for encryption key derivation in
+                            cluster mode (backward compat, Bug #533).
+            server_dir: Path to server directory for reading .encryption_key_salt
+                        (Story #999). If provided but not an existing directory,
+                        a WARNING is logged and server_dir is ignored.
+            backend: Optional pre-constructed storage backend satisfying
+                     GitCredentialsBackend protocol (e.g. GitCredentialsPostgresBackend).
+                     When provided, used instead of creating GitCredentialsSqliteBackend(db_path).
+        """
+        self._backend: GitCredentialsBackend = (
+            backend if backend is not None else GitCredentialsSqliteBackend(db_path)
+        )
         self._cluster_secret = cluster_secret
+        self._server_dir_for_salt: Optional[Path] = None
+        if server_dir is not None:
+            candidate = Path(server_dir)
+            if candidate.is_dir():
+                self._server_dir_for_salt = candidate
+            else:
+                logger.warning(
+                    "GitCredentialManager: server_dir %s is not a directory — "
+                    "ignoring for salt-based key derivation",
+                    server_dir,
+                )
         self._encryption_key = self._derive_encryption_key()
 
     def _derive_encryption_key(self) -> bytes:
-        if self._cluster_secret is not None:
-            salt_input = self._cluster_secret.encode("utf-8")
-        else:
-            salt_input = os.uname().nodename.encode("utf-8")
-        salt = hashlib.sha256(salt_input).digest()
-        return hashlib.pbkdf2_hmac(
-            "sha256",
-            b"cidx-token-encryption-key",
-            salt,
-            PBKDF2_ITERATIONS,
-            dklen=AES_KEY_SIZE,
+        """Derive AES-256 key using token_encryption priority chain (Story #999)."""
+        return _derive_encryption_key_fn(
+            server_dir_for_salt=self._server_dir_for_salt,
+            cluster_secret=self._cluster_secret,
         )
+
+    @staticmethod
+    def _derive_key_from_salt(salt_input: str) -> bytes:
+        """Derive AES-256 key from a salt string — delegates to token_encryption."""
+        return _derive_key_from_salt_fn(salt_input)
 
     def _encrypt_token(self, plaintext: str) -> str:
-        iv = os.urandom(AES_BLOCK_SIZE)
-        padder = padding.PKCS7(128).padder()
-        padded_data = padder.update(plaintext.encode("utf-8")) + padder.finalize()
-        cipher = Cipher(
-            algorithms.AES(self._encryption_key),
-            modes.CBC(iv),
-            backend=default_backend(),
-        )
-        encryptor = cipher.encryptor()
-        encrypted_data = encryptor.update(padded_data) + encryptor.finalize()
-        return base64.b64encode(iv + encrypted_data).decode("utf-8")
+        """Encrypt plaintext using AES-256-CBC — delegates to token_encryption."""
+        return _encrypt_token_fn(plaintext, self._encryption_key)
 
-    def _decrypt_token(self, encrypted: str) -> str:
-        combined = base64.b64decode(encrypted.encode("utf-8"))
-        iv = combined[:AES_BLOCK_SIZE]
-        encrypted_data = combined[AES_BLOCK_SIZE:]
-        cipher = Cipher(
-            algorithms.AES(self._encryption_key),
-            modes.CBC(iv),
-            backend=default_backend(),
+    @staticmethod
+    def _do_decrypt(encrypted: str, key: bytes) -> str:
+        """Decrypt with explicit key — delegates to token_encryption."""
+        return _decrypt_single_fn(encrypted, key)
+
+    def _decrypt_token(self, encrypted: str) -> Tuple[str, bool]:
+        """Decrypt token with canonical key, falling back to hostname key (Story #999).
+
+        Returns:
+            Tuple of (plaintext: str, used_fallback: bool). Callers must re-encrypt
+            the token when used_fallback is True (Story #999 lazy re-encryption).
+
+        Raises:
+            ValueError: If both canonical and hostname-fallback keys fail.
+            binascii.Error: If the input is not valid base64.
+        """
+        return _decrypt_with_fallback_fn(
+            encrypted,
+            canonical_key=self._encryption_key,
+            context_label="GitCredentialManager",
         )
-        decryptor = cipher.decryptor()
-        padded_data = decryptor.update(encrypted_data) + decryptor.finalize()
-        unpadder = padding.PKCS7(128).unpadder()
-        data = unpadder.update(padded_data) + unpadder.finalize()
-        return str(data.decode("utf-8"))
 
     async def configure_credential(
         self,
@@ -133,10 +158,13 @@ class GitCredentialManager:
         for cred in raw:
             entry = {k: v for k, v in cred.items() if k != "encrypted_token"}
             try:
-                plaintext = self._decrypt_token(cred["encrypted_token"])
+                plaintext, used_fallback = self._decrypt_token(cred["encrypted_token"])
                 entry["token_suffix"] = (
                     plaintext[-4:] if len(plaintext) >= 4 else plaintext
                 )
+                if used_fallback:
+                    new_enc = self._encrypt_token(plaintext)
+                    self._backend.update_encrypted_token(cred["credential_id"], new_enc)
             except Exception:
                 logger.warning(
                     "Failed to decrypt token for credential %s (user=%s) — possible key derivation mismatch",
@@ -165,7 +193,11 @@ class GitCredentialManager:
         if cred is None:
             return None
         result = {k: v for k, v in cred.items() if k != "encrypted_token"}
-        result["token"] = self._decrypt_token(cred["encrypted_token"])
+        plaintext, used_fallback = self._decrypt_token(cred["encrypted_token"])
+        result["token"] = plaintext
+        if used_fallback:
+            new_enc = self._encrypt_token(plaintext)
+            self._backend.update_encrypted_token(cred["credential_id"], new_enc)
         return result
 
 
@@ -179,18 +211,14 @@ def create_git_credential_manager(
 ) -> GitCredentialManager:
     """Factory for GitCredentialManager — ensures consistent encryption key.
 
-    In cluster mode (storage_mode="postgres"), reads .jwt_secret for shared
-    key derivation so all cluster nodes encrypt/decrypt with the same key.
-    If .jwt_secret is absent in postgres mode, logs a warning and falls back
-    to hostname-based key (same graceful-degradation pattern as create_token_manager).
-    In standalone mode (storage_mode="sqlite"), uses hostname (backward compatible).
+    Story #999: Calls ensure_encryption_key_salt() to seed .encryption_key_salt
+    from .jwt_secret (in postgres mode) or hostname (in sqlite mode), then passes
+    server_dir to GitCredentialManager so it reads the salt file for key derivation.
 
     Raises:
         ValueError: If storage_mode is not "sqlite" or "postgres", or if
                     db_path or server_dir are empty.
     """
-    from pathlib import Path
-
     if not db_path:
         raise ValueError("db_path must be a non-empty string")
     if not server_dir:
@@ -200,17 +228,22 @@ def create_git_credential_manager(
             f"Invalid storage_mode {storage_mode!r}. Must be one of: {_VALID_STORAGE_MODES}"
         )
 
-    cluster_secret = None
-    if storage_mode == "postgres":
-        jwt_file = Path(server_dir) / ".jwt_secret"
-        if jwt_file.exists():
-            cluster_secret = jwt_file.read_text().strip()
-        else:
-            logger.warning(
-                "create_git_credential_manager: .jwt_secret not found at %s — "
-                "falling back to hostname-based key. Git credentials encrypted in "
-                "standalone mode may not be readable by other cluster nodes.",
-                jwt_file,
-            )
+    from code_indexer.server.services.encryption_key_salt import (
+        ensure_encryption_key_salt,
+    )
 
-    return GitCredentialManager(db_path, cluster_secret=cluster_secret)
+    ensure_encryption_key_salt(Path(server_dir), storage_mode)
+
+    backend: Optional[GitCredentialsBackend] = None
+    if storage_mode == "postgres":
+        from code_indexer.server.services.config_service import get_config_service
+        from code_indexer.server.storage.postgres.connection_pool import ConnectionPool
+        from code_indexer.server.storage.postgres.git_credentials_backend import (
+            GitCredentialsPostgresBackend,
+        )
+
+        config = get_config_service().config_manager.load_config()
+        pool = ConnectionPool(config.postgres_dsn, name="git-credentials")
+        backend = GitCredentialsPostgresBackend(pool)
+
+    return GitCredentialManager(db_path, server_dir=server_dir, backend=backend)

@@ -7,20 +7,22 @@ Tokens are stored in ~/.cidx-server/ci_tokens.json with 0600 permissions.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 
-import base64
-import hashlib
 import json
 import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, Optional, Tuple, cast
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import padding
 from code_indexer.server.logging_utils import format_error_log
+from .token_encryption import (
+    derive_key_from_salt as _derive_key_from_salt_fn,
+    derive_encryption_key as _derive_encryption_key_fn,
+    encrypt_token as _encrypt_token_fn,
+    decrypt_single as _decrypt_single_fn,
+    decrypt_with_fallback as _decrypt_with_fallback_fn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +32,6 @@ GITHUB_TOKEN_PATTERN = re.compile(
 )
 # GitLab tokens can have periods in newer versioned formats (e.g., glpat-xxx.01.yyy)
 GITLAB_TOKEN_PATTERN = re.compile(r"^glpat-[A-Za-z0-9_.-]{20,}$")
-
-# Encryption constants
-PBKDF2_ITERATIONS = 100000
-AES_KEY_SIZE = 32  # 256 bits
-AES_BLOCK_SIZE = 16  # 128 bits
 
 
 class TokenValidationError(Exception):
@@ -81,6 +78,7 @@ class CITokenManager:
         db_path: Optional[str] = None,
         storage_backend: Optional[Any] = None,
         cluster_secret: Optional[str] = None,
+        server_dir: Optional[str] = None,
     ):
         """
         Initialize the token manager.
@@ -98,9 +96,15 @@ class CITokenManager:
                             cluster mode (Bug #533). When provided, all nodes
                             derive the same key so tokens are readable
                             cluster-wide. When None, uses hostname (standalone).
+            server_dir: Optional path to server directory for reading
+                        .encryption_key_salt (Story #999). When provided,
+                        overrides cluster_secret for key derivation.
         """
         self._sqlite_backend: Optional[Any] = None
         self._cluster_secret = cluster_secret
+        self._server_dir_for_salt: Optional[Path] = (
+            Path(server_dir) if server_dir else None
+        )
 
         if server_dir_path:
             self.server_dir = Path(server_dir_path)
@@ -128,94 +132,42 @@ class CITokenManager:
             self.token_file = self.server_dir / "ci_tokens.json"
 
     def _derive_encryption_key(self) -> bytes:
-        """
-        Derive encryption key using PBKDF2.
-
-        Uses a machine-specific salt for key derivation.
-
-        Returns:
-            32-byte AES-256 key
-        """
-        # Bug #533: In cluster mode, use shared secret so all nodes derive
-        # the same key. In standalone mode, use hostname (backward compatible).
-        if self._cluster_secret is not None:
-            salt_input = self._cluster_secret.encode("utf-8")
-        else:
-            salt_input = os.uname().nodename.encode("utf-8")
-        salt = hashlib.sha256(salt_input).digest()
-
-        # Derive key using PBKDF2
-        key = hashlib.pbkdf2_hmac(
-            "sha256",
-            b"cidx-token-encryption-key",
-            salt,
-            PBKDF2_ITERATIONS,
-            dklen=AES_KEY_SIZE,
+        """Derive encryption key using token_encryption priority chain (Story #999)."""
+        return _derive_encryption_key_fn(
+            server_dir_for_salt=self._server_dir_for_salt,
+            cluster_secret=self._cluster_secret,
         )
-        return key
+
+    @staticmethod
+    def _derive_key_from_salt(salt_input: str) -> bytes:
+        """Derive AES-256 key from a salt string — delegates to token_encryption."""
+        return _derive_key_from_salt_fn(salt_input)
 
     def _encrypt_token(self, token: str) -> str:
-        """
-        Encrypt token using AES-256-CBC.
+        """Encrypt token using AES-256-CBC — delegates to token_encryption."""
+        return _encrypt_token_fn(token, self._encryption_key)
 
-        Args:
-            token: Plaintext token to encrypt
+    @staticmethod
+    def _do_decrypt(encrypted_token: str, key: bytes) -> str:
+        """Decrypt with explicit key — delegates to token_encryption."""
+        return _decrypt_single_fn(encrypted_token, key)
 
-        Returns:
-            Base64-encoded encrypted token
-        """
-        # Generate random IV
-        iv = os.urandom(AES_BLOCK_SIZE)
-
-        # Pad the token to AES block size
-        padder = padding.PKCS7(128).padder()
-        padded_data = padder.update(token.encode("utf-8")) + padder.finalize()
-
-        # Encrypt using AES-256-CBC
-        cipher = Cipher(
-            algorithms.AES(self._encryption_key),
-            modes.CBC(iv),
-            backend=default_backend(),
-        )
-        encryptor = cipher.encryptor()
-        encrypted_data = encryptor.update(padded_data) + encryptor.finalize()
-
-        # Combine IV and encrypted data, encode as base64
-        combined = iv + encrypted_data
-        return base64.b64encode(combined).decode("utf-8")
-
-    def _decrypt_token(self, encrypted_token: str) -> str:
-        """
-        Decrypt token using AES-256-CBC.
-
-        Args:
-            encrypted_token: Base64-encoded encrypted token
+    def _decrypt_token(self, encrypted_token: str) -> Tuple[str, bool]:
+        """Decrypt token with canonical key, falling back to hostname key (Story #999).
 
         Returns:
-            Plaintext token
+            Tuple of (plaintext: str, used_fallback: bool). Callers must re-encrypt
+            the token when used_fallback is True (Story #999 lazy re-encryption).
+
+        Raises:
+            ValueError: If both canonical and hostname-fallback keys fail.
+            binascii.Error: If the input is not valid base64.
         """
-        # Decode from base64
-        combined = base64.b64decode(encrypted_token.encode("utf-8"))
-
-        # Extract IV and encrypted data
-        iv = combined[:AES_BLOCK_SIZE]
-        encrypted_data = combined[AES_BLOCK_SIZE:]
-
-        # Decrypt using AES-256-CBC
-        cipher = Cipher(
-            algorithms.AES(self._encryption_key),
-            modes.CBC(iv),
-            backend=default_backend(),
+        return _decrypt_with_fallback_fn(
+            encrypted_token,
+            canonical_key=self._encryption_key,
+            context_label="CITokenManager",
         )
-        decryptor = cipher.decryptor()
-        padded_data = decryptor.update(encrypted_data) + decryptor.finalize()
-
-        # Unpad the data
-        unpadder = padding.PKCS7(128).unpadder()
-        data = unpadder.update(padded_data) + unpadder.finalize()
-
-        result: str = data.decode("utf-8")
-        return result
 
     def _validate_token_format(self, platform: str, token: str) -> None:
         """
@@ -328,7 +280,9 @@ class CITokenManager:
                 return None
             # Decrypt token with graceful error handling (Issue #716 Bug 3)
             try:
-                decrypted_token = self._decrypt_token(token_row["encrypted_token"])
+                decrypted_token, used_fallback = self._decrypt_token(
+                    token_row["encrypted_token"]
+                )
             except Exception as e:
                 logger.warning(
                     format_error_log(
@@ -339,6 +293,9 @@ class CITokenManager:
                     )
                 )
                 return None
+            if used_fallback:
+                new_enc = self._encrypt_token(decrypted_token)
+                self._sqlite_backend.update_encrypted_token(platform, new_enc)
             return TokenData(
                 platform=platform,
                 token=decrypted_token,
@@ -355,7 +312,9 @@ class CITokenManager:
 
             # Decrypt token with graceful error handling (Issue #716 Bug 3)
             try:
-                decrypted_token = self._decrypt_token(token_data["token"])
+                decrypted_token, used_fallback = self._decrypt_token(
+                    token_data["token"]
+                )
             except Exception as e:
                 logger.warning(
                     format_error_log(
@@ -369,6 +328,12 @@ class CITokenManager:
                 self._save_tokens(tokens)
                 return None
 
+            if used_fallback:
+                logger.warning(
+                    "CITokenManager (JSON path): %s token decrypted via fallback — "
+                    "re-encryption not possible without SQLite backend (Story #999)",
+                    platform,
+                )
             return TokenData(
                 platform=platform,
                 token=decrypted_token,
@@ -460,6 +425,10 @@ def create_token_manager(
     All code paths that need a CITokenManager MUST use this factory to avoid
     encryption key mismatch bugs (Bug #639).
 
+    Story #999: Calls ensure_encryption_key_salt() to seed .encryption_key_salt
+    from .jwt_secret (in postgres mode) or hostname (in sqlite mode), then passes
+    server_dir to CITokenManager so it reads the salt file for key derivation.
+
     Args:
         server_dir: Path to server directory (e.g., ~/.cidx-server)
         db_path: Path to SQLite database file
@@ -474,16 +443,16 @@ def create_token_manager(
             f"Invalid storage_mode {storage_mode!r}. Must be one of: {_VALID_STORAGE_MODES}"
         )
 
-    cluster_secret = None
-    if storage_mode == "postgres":
-        jwt_file = Path(server_dir) / ".jwt_secret"
-        if jwt_file.exists():
-            cluster_secret = jwt_file.read_text().strip()
+    from code_indexer.server.services.encryption_key_salt import (
+        ensure_encryption_key_salt,
+    )
+
+    ensure_encryption_key_salt(Path(server_dir), storage_mode)
 
     return CITokenManager(
         server_dir_path=server_dir,
         use_sqlite=True,
         db_path=db_path,
         storage_backend=storage_backend,
-        cluster_secret=cluster_secret,
+        server_dir=server_dir,
     )

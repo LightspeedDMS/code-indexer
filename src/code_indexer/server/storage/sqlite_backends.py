@@ -1121,6 +1121,52 @@ class CITokensSqliteBackend:
             }
         return result
 
+    def update_encrypted_token(self, platform: str, new_encrypted_token: str) -> None:
+        """Update the encrypted_token for a platform in-place (lazy re-encryption).
+
+        Used by CITokenManager when a fallback key decryption succeeds so the token
+        is re-encrypted with the canonical key for future reads (Story #999).
+
+        When no matching row is found for platform, logs a WARNING and returns without
+        raising (caller can continue safely; the token was likely already deleted).
+
+        Args:
+            platform: Platform key (e.g. "github", "gitlab"). Must be non-empty.
+            new_encrypted_token: New base64-encoded ciphertext. Must be non-empty.
+
+        Raises:
+            ValueError: If platform or new_encrypted_token are None or empty.
+        """
+        if not platform:
+            raise ValueError("platform must be a non-empty string")
+        if not new_encrypted_token:
+            raise ValueError("new_encrypted_token must be a non-empty string")
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE ci_tokens SET encrypted_token = ? WHERE platform = ?",
+                (new_encrypted_token, platform),
+            )
+            return cursor.rowcount
+
+        rows_updated: int = self._conn_manager.execute_atomic(operation)
+        if rows_updated == 1:
+            logger.debug(
+                "Re-encrypted CI token for platform %s with canonical key", platform
+            )
+        elif rows_updated == 0:
+            logger.warning(
+                "update_encrypted_token: no ci_tokens row found for platform %r — "
+                "re-encryption skipped",
+                platform,
+            )
+        else:
+            logger.warning(
+                "update_encrypted_token: unexpected rowcount %d for platform %r",
+                rows_updated,
+                platform,
+            )
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
@@ -2901,6 +2947,54 @@ class GitCredentialsSqliteBackend:
         if deleted:
             logger.debug(f"Deleted git credential {credential_id} for user={username}")
         return deleted
+
+    def update_encrypted_token(
+        self, credential_id: str, new_encrypted_token: str
+    ) -> None:
+        """Update the encrypted_token for a credential in-place (lazy re-encryption).
+
+        Used by GitCredentialManager when a fallback key decryption succeeds so the
+        token is re-encrypted with the canonical key for all future reads (Story #999).
+
+        When no matching row is found, logs a WARNING and returns without raising
+        (the credential may have been deleted concurrently; caller can continue safely).
+
+        Args:
+            credential_id: Primary key of the credential row. Must be non-empty.
+            new_encrypted_token: New base64-encoded ciphertext. Must be non-empty.
+
+        Raises:
+            ValueError: If credential_id or new_encrypted_token are None or empty.
+        """
+        if not credential_id:
+            raise ValueError("credential_id must be a non-empty string")
+        if not new_encrypted_token:
+            raise ValueError("new_encrypted_token must be a non-empty string")
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE user_git_credentials SET encrypted_token = ? WHERE credential_id = ?",
+                (new_encrypted_token, credential_id),
+            )
+            return cursor.rowcount
+
+        rows_updated: int = self._conn_manager.execute_atomic(operation)
+        if rows_updated == 1:
+            logger.debug(
+                "Re-encrypted git credential %s with canonical key", credential_id
+            )
+        elif rows_updated == 0:
+            logger.warning(
+                "update_encrypted_token: no user_git_credentials row found for "
+                "credential_id %r — re-encryption skipped",
+                credential_id,
+            )
+        else:
+            logger.warning(
+                "update_encrypted_token: unexpected rowcount %d for credential_id %r",
+                rows_updated,
+                credential_id,
+            )
 
     def get_credential_for_host(
         self, username: str, forge_host: str

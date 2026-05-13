@@ -137,6 +137,14 @@ def make_lifespan(
         # Story #680: Store latency_tracker in app.state for dashboard route access.
         app.state.latency_tracker = latency_tracker
 
+        # Story #999: Seed .encryption_key_salt before any manager construction.
+        # Propagates on failure so startup aborts — managers require this file.
+        from code_indexer.server.services.encryption_key_salt import (
+            ensure_encryption_key_salt,
+        )
+
+        ensure_encryption_key_salt(Path(server_data_dir), storage_mode)
+
         # Startup: Initialize SQLite log handler FIRST (to capture all startup logs)
         logger.info(
             "Server startup: Initializing SQLite log handler",

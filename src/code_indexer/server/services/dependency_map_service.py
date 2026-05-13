@@ -1824,7 +1824,11 @@ class DependencyMapService:
                 next_run_str = tracking.get("next_run")
 
                 if next_run_str:
-                    next_run = next_run_str if isinstance(next_run_str, datetime) else datetime.fromisoformat(next_run_str)
+                    next_run = (
+                        next_run_str
+                        if isinstance(next_run_str, datetime)
+                        else datetime.fromisoformat(next_run_str)
+                    )
                     now = datetime.now(timezone.utc)
 
                     if now >= next_run:
@@ -1846,7 +1850,11 @@ class DependencyMapService:
                         now = datetime.now(timezone.utc)
 
                         if refinement_next:
-                            ref_next_dt = refinement_next if isinstance(refinement_next, datetime) else datetime.fromisoformat(refinement_next)
+                            ref_next_dt = (
+                                refinement_next
+                                if isinstance(refinement_next, datetime)
+                                else datetime.fromisoformat(refinement_next)
+                            )
                             if now >= ref_next_dt:
                                 # Bug #931: duplicate update_tracking(refinement_next_run=...)
                                 # removed here. run_refinement_cycle (called via

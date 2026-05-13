@@ -730,7 +730,11 @@ class DashboardService:
         for m in metrics.values():
             if m.get("last_sync_time"):
                 last_sync_time = m["last_sync_time"]
-                last = last_sync_time if isinstance(last_sync_time, datetime) else datetime.fromisoformat(last_sync_time)
+                last = (
+                    last_sync_time
+                    if isinstance(last_sync_time, datetime)
+                    else datetime.fromisoformat(last_sync_time)
+                )
                 if (now - last).total_seconds() < interval_seconds * 2:
                     all_stale = False
                     break

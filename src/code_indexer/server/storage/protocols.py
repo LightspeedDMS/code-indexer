@@ -302,6 +302,10 @@ class CITokensBackend(Protocol):
 
     def list_tokens(self) -> Dict[str, Dict[str, Any]]: ...
 
+    def update_encrypted_token(
+        self, platform: str, new_encrypted_token: str
+    ) -> None: ...
+
     def close(self) -> None: ...
 
 
@@ -485,6 +489,10 @@ class GitCredentialsBackend(Protocol):
     def get_credential_for_host(
         self, username: str, forge_host: str
     ) -> Optional[Dict[str, Any]]: ...
+
+    def update_encrypted_token(
+        self, credential_id: str, new_encrypted_token: str
+    ) -> None: ...
 
     def close(self) -> None: ...
 
