@@ -1827,12 +1827,20 @@ def make_lifespan(
             # Start background sync if pull is enabled
             config = config_service.get_config()
             if config.langfuse_config and config.langfuse_config.pull_enabled:
-                langfuse_sync_service.start()  # type: ignore[name-defined]
-                logger.info(
-                    f"Langfuse Trace Sync Service started (interval={config.langfuse_config.pull_sync_interval_seconds}s, "
-                    f"projects={len(config.langfuse_config.pull_projects)})",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                if storage_mode == "postgres":
+                    logger.info(
+                        "Langfuse sync deferred to leader election in cluster mode "
+                        f"(interval={config.langfuse_config.pull_sync_interval_seconds}s, "
+                        f"projects={len(config.langfuse_config.pull_projects)})",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    langfuse_sync_service.start()  # type: ignore[name-defined]
+                    logger.info(
+                        f"Langfuse Trace Sync Service started (interval={config.langfuse_config.pull_sync_interval_seconds}s, "
+                        f"projects={len(config.langfuse_config.pull_projects)})",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
             else:
                 logger.info(
                     "Langfuse pull sync disabled, service initialized but not started",
@@ -2295,6 +2303,20 @@ def make_lifespan(
                         _dist_worker.start()
                         if self_monitoring_service is not None:
                             self_monitoring_service.start()
+                        # langfuse_sync_service is defined in an outer conditional import
+                        # try-block; type: ignore[name-defined] matches the established
+                        # pattern used at the definition site and call sites above.
+                        if langfuse_sync_service is not None:  # type: ignore[name-defined]
+                            _lf_cfg = config_service.get_config()
+                            if (
+                                _lf_cfg.langfuse_config
+                                and _lf_cfg.langfuse_config.pull_enabled
+                            ):
+                                langfuse_sync_service.start()  # type: ignore[name-defined]
+                                logger.info(
+                                    "Langfuse sync started on leader node",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
 
                     def _on_lose_leadership():
                         logger.info(
@@ -2321,6 +2343,21 @@ def make_lifespan(
                             except Exception as e:
                                 logger.warning(
                                     f"Bug #580: Failed to stop self-monitoring service: {e}",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                        # langfuse_sync_service is defined in an outer conditional import
+                        # try-block; type: ignore[name-defined] matches the established
+                        # pattern used at the definition site and call sites above.
+                        if langfuse_sync_service is not None:  # type: ignore[name-defined]
+                            try:
+                                langfuse_sync_service.stop()  # type: ignore[name-defined]
+                                logger.info(
+                                    "Langfuse sync stopped on leadership loss",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to stop Langfuse sync on leadership loss: {e}",
                                     extra={"correlation_id": get_correlation_id()},
                                 )
 
