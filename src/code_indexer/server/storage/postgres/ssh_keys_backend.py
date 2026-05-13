@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .pg_utils import sanitize_row
 
 logger = logging.getLogger(__name__)
 
@@ -83,20 +84,22 @@ class SSHKeysPostgresBackend:
             if row is None:
                 return None
             hosts = self._get_hosts_for_key(conn, name)
-        return {
-            "name": row[0],
-            "fingerprint": row[1],
-            "key_type": row[2],
-            "private_path": row[3],
-            "public_path": row[4],
-            "public_key": row[5],
-            "email": row[6],
-            "description": row[7],
-            "created_at": row[8],
-            "imported_at": row[9],
-            "is_imported": bool(row[10]),
-            "hosts": hosts,
-        }
+        return sanitize_row(
+            {
+                "name": row[0],
+                "fingerprint": row[1],
+                "key_type": row[2],
+                "private_path": row[3],
+                "public_path": row[4],
+                "public_key": row[5],
+                "email": row[6],
+                "description": row[7],
+                "created_at": row[8],
+                "imported_at": row[9],
+                "is_imported": bool(row[10]),
+                "hosts": hosts,
+            }
+        )
 
     def _get_hosts_for_key(self, conn: Any, key_name: str) -> List[str]:
         """Get hosts assigned to a key from junction table."""
@@ -146,20 +149,22 @@ class SSHKeysPostgresBackend:
                 key_name = row[0]
                 hosts = self._get_hosts_for_key(conn, key_name)
                 result.append(
-                    {
-                        "name": key_name,
-                        "fingerprint": row[1],
-                        "key_type": row[2],
-                        "private_path": row[3],
-                        "public_path": row[4],
-                        "public_key": row[5],
-                        "email": row[6],
-                        "description": row[7],
-                        "created_at": row[8],
-                        "imported_at": row[9],
-                        "is_imported": bool(row[10]),
-                        "hosts": hosts,
-                    }
+                    sanitize_row(
+                        {
+                            "name": key_name,
+                            "fingerprint": row[1],
+                            "key_type": row[2],
+                            "private_path": row[3],
+                            "public_path": row[4],
+                            "public_key": row[5],
+                            "email": row[6],
+                            "description": row[7],
+                            "created_at": row[8],
+                            "imported_at": row[9],
+                            "is_imported": bool(row[10]),
+                            "hosts": hosts,
+                        }
+                    )
                 )
         return result
 

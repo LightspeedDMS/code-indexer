@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.29.0 (2026-05-13) — PG datetime serialization across all backends
+
+### Fixed
+- All PostgreSQL backend methods now wrap returned dicts with `sanitize_row()` to convert TIMESTAMPTZ datetime objects to ISO strings, preventing `TypeError: Object of type datetime is not JSON serializable` in cluster mode.
+- Affected backends: users, git_credentials, ssh_keys, research_sessions, sync_jobs, oauth, description_refresh_tracking (7 files, ~50 datetime fields).
+
+## v10.28.0 (2026-05-13) — Elevation dialog race condition fix
+
+### Fixed
+- Elevation dialog race condition in `ConfigService.load_config()` (Bug #998): when config hot-reload toggled `elevation_enforcement_enabled` between the `require_elevation` check and the `elevate-ajax` endpoint call, users got trapped in the modal with "Step-up elevation is currently disabled" error.
+- MCP consolidated dispatcher session key markers.
+
+## v10.27.0 (2026-05-13) — Three-way pace-maker toggle
+
+### Added
+- Three-way pace-maker mode toggle (disabled/on/off) with Web UI config screen support.
+- Config screen crash fix for pace-maker settings.
+
 ## v10.26.0 (2026-05-13) — Langfuse sync cluster-aware leader election
 
 ### Fixed
