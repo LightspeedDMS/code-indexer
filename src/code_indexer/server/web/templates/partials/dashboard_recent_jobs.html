@@ -11,7 +11,7 @@
             <a href="/admin/jobs?job_id={{ job.job_id }}">{{ job.repo_name }}</a>
         </td>
         <td>{{ job.job_type }}</td>
-        <td>{{ job.completion_time[:19] if job.completion_time else 'N/A' }}</td>
+        <td>{{ (job.completion_time|string)[:19] if job.completion_time else 'N/A' }}</td>
         <td>
             {% if job.status == 'completed_partial' %}
             <span class="job-status status-completed_partial">Partial</span>

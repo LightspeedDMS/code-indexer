@@ -33,7 +33,7 @@
                     <span class="no-indexes">Loading...</span>
                 </span>
             </td>
-            <td>{{ repo.activated_at[:10] if repo.activated_at else 'N/A' }}</td>
+            <td>{{ (repo.activated_at|string)[:10] if repo.activated_at else 'N/A' }}</td>
             <td>{{ repo.file_count if repo.file_count is defined else 'N/A' }}</td>
             <td class="status-cell">
                 {% if repo.status == 'syncing' %}

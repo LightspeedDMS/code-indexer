@@ -81,7 +81,7 @@
                 <span class="metric-label">Last Run</span>
                 <span class="metric-value" style="white-space: nowrap;">
                     {% if job_status.last_run %}
-                        {{ job_status.last_run[:16] | replace("T", " ") }}
+                        {{ (job_status.last_run|string)[:16] | replace("T", " ") }}
                     {% else %}
                         Never
                     {% endif %}
@@ -91,7 +91,7 @@
                 <span class="metric-label">Next Run</span>
                 <span class="metric-value" style="white-space: nowrap;">
                     {% if job_status.next_run %}
-                        {{ job_status.next_run[:16] | replace("T", " ") }}
+                        {{ (job_status.next_run|string)[:16] | replace("T", " ") }}
                     {% else %}
                         Not scheduled
                     {% endif %}
@@ -207,7 +207,7 @@
                 {% for run in job_status.run_history %}
                 <tr>
                     <td style="white-space: nowrap;">
-                        {% if run.timestamp %}{{ run.timestamp[:16] | replace("T", " ") }}{% else %}—{% endif %}
+                        {% if run.timestamp %}{{ (run.timestamp|string)[:16] | replace("T", " ") }}{% else %}—{% endif %}
                     </td>
                     <td>
                         {% if run.run_type %}
