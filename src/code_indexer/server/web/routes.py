@@ -17,8 +17,11 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 from urllib.parse import quote, urlparse
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from fastapi import (
@@ -1442,19 +1445,50 @@ def users_list_partial(request: Request):
 # ==============================================================================
 
 
+def _safe_ts_slice(val: Optional[Union[str, "datetime"]], end: int) -> Optional[str]:
+    """Safely slice a timestamp that may be str or datetime (PG vs SQLite compat).
+
+    PG returns native datetime objects for timestamp columns; SQLite returns strings.
+
+    Args:
+        val: Timestamp value — str, datetime, or None.
+        end: Number of characters to keep (must be >= 0).
+
+    Returns:
+        Sliced string, or None when val is None.
+    """
+    if end < 0:
+        raise ValueError(f"_safe_ts_slice: end must be >= 0, got {end!r}")
+    if val is None:
+        return None
+    from datetime import datetime
+
+    if isinstance(val, datetime):
+        return val.isoformat()[:end]
+    return str(val)[:end]
+
+
 def _format_datetime_display(
-    iso_string: Optional[str], fmt: str = "%Y-%m-%d %H:%M"
+    iso_string: Optional[Union[str, "datetime"]], fmt: str = "%Y-%m-%d %H:%M"
 ) -> str:
-    """Format ISO datetime string for display."""
+    """Format ISO datetime string or datetime object for display.
+
+    Accepts both str (SQLite) and datetime (PG native type).
+    """
     if not iso_string:
         return "N/A"
     try:
         from datetime import datetime
 
+        if isinstance(iso_string, datetime):
+            return iso_string.strftime(fmt)
         dt = datetime.fromisoformat(iso_string.replace("Z", "+00:00"))
         return dt.strftime(fmt)
-    except (ValueError, AttributeError):
-        return iso_string
+    except (ValueError, AttributeError) as exc:
+        logger.debug(
+            "_format_datetime_display: could not parse %r — %s", iso_string, exc
+        )
+        return str(iso_string)
 
 
 def _get_group_manager():
@@ -2496,7 +2530,9 @@ def _resolve_alias_metadata(
                     if index_path and ".versioned" in index_path:
                         version = Path(index_path).name
                     raw_refresh = alias_data.get("last_refresh", "")
-                    last_refresh = raw_refresh[:19] if raw_refresh else None
+                    last_refresh = (
+                        _safe_ts_slice(raw_refresh, 19) if raw_refresh else None
+                    )
                 except Exception as e:
                     logger.warning(
                         format_error_log(
@@ -2638,9 +2674,7 @@ def _get_golden_repos_list(backend_registry=None):
         for repo in repos:
             if "status" not in repo:
                 repo["status"] = "ready"
-            repo["last_indexed"] = (
-                repo["created_at"][:10] if repo.get("created_at") else None
-            )
+            repo["last_indexed"] = _safe_ts_slice(repo.get("created_at"), 10)
             alias = repo.get("alias", "")
             g_alias, g_queryable, version, last_refresh, index_path = (
                 _resolve_alias_metadata(alias, global_repos, aliases_dir)
@@ -3498,7 +3532,7 @@ def _get_single_repo_enriched(alias: str, backend_registry=None) -> Optional[dic
         global_repos = {}
     if "status" not in repo:
         repo["status"] = "ready"
-    repo["last_indexed"] = repo["created_at"][:10] if repo.get("created_at") else None
+    repo["last_indexed"] = _safe_ts_slice(repo.get("created_at"), 10)
     g_alias, g_queryable, version, last_refresh, index_path = _resolve_alias_metadata(
         alias, global_repos, aliases_dir
     )

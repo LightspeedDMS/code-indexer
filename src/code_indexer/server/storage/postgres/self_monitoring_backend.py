@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
 
@@ -213,6 +213,46 @@ class SelfMonitoringPostgresBackend:
                 ),
             )
             conn.commit()
+
+    def list_scans(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return scan history records, most recent first.
+
+        Args:
+            limit: Maximum number of records to return (must be > 0).
+
+        Returns:
+            List of dicts with keys: scan_id, started_at, completed_at, status,
+            log_id_start, log_id_end, issues_created, error_message.
+        """
+        if limit <= 0:
+            raise ValueError(f"list_scans: limit must be > 0, got {limit!r}")
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT scan_id, started_at, completed_at, status, "
+                "log_id_start, log_id_end, issues_created, error_message "
+                "FROM self_monitoring_scans "
+                "ORDER BY started_at DESC LIMIT %s",
+                (limit,),
+            ).fetchall()
+        cols = [
+            "scan_id",
+            "started_at",
+            "completed_at",
+            "status",
+            "log_id_start",
+            "log_id_end",
+            "issues_created",
+            "error_message",
+        ]
+        return [dict(zip(cols, row)) for row in rows]
+
+    def get_running_scan_count(self) -> int:
+        """Return count of scans where completed_at IS NULL (currently running)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM self_monitoring_scans WHERE completed_at IS NULL"
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def close(self) -> None:
         """No-op: pool lifecycle is managed externally."""
