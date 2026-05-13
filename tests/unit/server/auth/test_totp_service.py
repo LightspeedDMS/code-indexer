@@ -224,7 +224,8 @@ class _PgStyleSqliteConn:
     def commit(self):
         self._conn.commit()
 
-    def cursor(self):
+    def cursor(self, **kwargs):
+        """Return a cursor context manager, ignoring row_factory and other kwargs."""
         return _PgStyleSqliteCursor(self._conn)
 
     def close(self):
@@ -244,6 +245,7 @@ class _PgStyleSqliteCursor:
             self._result = self._conn.execute(translated, params)
         else:
             self._result = self._conn.execute(translated)
+        return self
 
     def fetchone(self):
         if self._result is None:

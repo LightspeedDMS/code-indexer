@@ -148,10 +148,10 @@ class _PgBackend:
         idle_cutoff = now - self._idle_timeout
         abs_cutoff = now - self._max_age
         with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    _PG_TOUCH, (now, session_key, idle_cutoff, abs_cutoff)
-                ).fetchone()
+            conn.row_factory = dict_row
+            row = conn.execute(
+                _PG_TOUCH, (now, session_key, idle_cutoff, abs_cutoff)
+            ).fetchone()
             conn.commit()
         return _row_to_elevated_session(row) if row else None
 
@@ -162,11 +162,11 @@ class _PgBackend:
         idle_cutoff = now - self._idle_timeout
         abs_cutoff = now - self._max_age
         with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    _PG_TOUCH_FOR_USER,
-                    (now, session_key, username, idle_cutoff, abs_cutoff),
-                ).fetchone()
+            conn.row_factory = dict_row
+            row = conn.execute(
+                _PG_TOUCH_FOR_USER,
+                (now, session_key, username, idle_cutoff, abs_cutoff),
+            ).fetchone()
             conn.commit()
         return _row_to_elevated_session(row) if row else None
 
