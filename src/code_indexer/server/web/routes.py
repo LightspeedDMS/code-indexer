@@ -82,17 +82,33 @@ RESTART_REQUIRED_FIELDS = [
 
 
 def _get_token_manager() -> CITokenManager:
-    """Create CITokenManager using shared factory (Bug #639)."""
+    """Create CITokenManager using shared factory (Bug #639, Finding 2 — Story #999)."""
     from ..services.config_service import get_config_service
     from ..services.ci_token_manager import create_token_manager
 
     config_service = get_config_service()
+    config = config_service.get_config()
     server_dir = config_service.config_manager.server_dir
     db_path = server_dir / "data" / "cidx_server.db"
+    storage_mode = config.storage_mode
+
+    storage_backend = None
+    if storage_mode == "postgres":
+        if not config.postgres_dsn:
+            raise ValueError(
+                "_get_token_manager: storage_mode is 'postgres' but postgres_dsn is not configured"
+            )
+        from ..storage.postgres.connection_pool import ConnectionPool
+        from ..storage.postgres.ci_tokens_backend import CITokensPostgresBackend
+
+        pool = ConnectionPool(config.postgres_dsn, name="ci-tokens")
+        storage_backend = CITokensPostgresBackend(pool)
 
     return create_token_manager(
         server_dir=str(server_dir),
         db_path=str(db_path),
+        storage_backend=storage_backend,
+        storage_mode=storage_mode,
     )
 
 

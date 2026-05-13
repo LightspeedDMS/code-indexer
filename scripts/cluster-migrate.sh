@@ -180,6 +180,36 @@ backup_databases() {
 }
 
 # ---------------------------------------------------------------------------
+# Story #999: Seed .encryption_key_salt from .jwt_secret
+# ---------------------------------------------------------------------------
+
+seed_encryption_key_salt() {
+    log_step "Seeding .encryption_key_salt from .jwt_secret (Story #999)"
+
+    local salt_file="${CIDX_DATA_DIR}/.encryption_key_salt"
+    local jwt_file="${CIDX_DATA_DIR}/.jwt_secret"
+
+    if [ -f "$salt_file" ]; then
+        log_info ".encryption_key_salt already exists — skipping seed."
+        return 0
+    fi
+
+    if [ ! -f "$jwt_file" ]; then
+        log_warn ".jwt_secret not found at $jwt_file — .encryption_key_salt will be seeded from hostname at first startup."
+        return 0
+    fi
+
+    if $DRY_RUN; then
+        log_dry "Would copy $jwt_file -> $salt_file"
+        return 0
+    fi
+
+    tr -d '\n' < "$jwt_file" > "$salt_file"
+    chmod 600 "$salt_file"
+    log_info "Created $salt_file from $jwt_file (stripped, mode 0600)"
+}
+
+# ---------------------------------------------------------------------------
 # PostgreSQL schema migrations
 # ---------------------------------------------------------------------------
 
@@ -571,6 +601,7 @@ main() {
     validate_prerequisites
     stop_server
     backup_databases
+    seed_encryption_key_salt
     run_schema_migrations
     migrate_data_to_postgres
     if [[ "${CLONE_BACKEND}" != "local" ]]; then

@@ -708,12 +708,22 @@ class SqliteToPostgresMigrator:
                 server_path,
             )
             return {}
+        # Story #999: prefer .encryption_key_salt (set by ensure_encryption_key_salt);
+        # fall back to .jwt_secret for backward compat with pre-#999 installations.
+        salt_file = server_path / ".encryption_key_salt"
         jwt_file = server_path / ".jwt_secret"
-        if not jwt_file.exists():
-            logger.info("No .jwt_secret at %s, skipping token re-encryption", jwt_file)
+        if salt_file.exists():
+            new_salt = salt_file.read_text()
+        elif jwt_file.exists():
+            new_salt = jwt_file.read_text().strip()
+        else:
+            logger.info(
+                "No .encryption_key_salt or .jwt_secret at %s, skipping token re-encryption",
+                server_path,
+            )
             return {}
         old_key = _reencrypt_derive_key(os.uname().nodename)
-        new_key = _reencrypt_derive_key(jwt_file.read_text().strip())
+        new_key = _reencrypt_derive_key(new_salt)
         if old_key == new_key:
             logger.info("Encryption keys identical, skipping token re-encryption")
             return {}

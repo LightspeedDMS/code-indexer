@@ -52,6 +52,60 @@ class TestTokenManagerFactoryFunction:
                 expected_db_path = str(tmp_path / "data" / "cidx_server.db")
                 assert call_kwargs["db_path"] == expected_db_path
 
+    def test_token_manager_postgres_mode_passes_pg_backend(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Given _get_token_manager() factory function
+        When storage_mode is "postgres"
+        Then create_token_manager receives a CITokensPostgresBackend as storage_backend
+        (Finding 2 — Story #999).
+        """
+        from code_indexer.server.storage.postgres.ci_tokens_backend import (
+            CITokensPostgresBackend,
+        )
+
+        mock_config = Mock()
+        mock_config.storage_mode = "postgres"
+        mock_config.postgres_dsn = "postgresql://localhost/test"
+
+        mock_config_manager = Mock()
+        mock_config_manager.server_dir = tmp_path
+
+        mock_config_service = Mock()
+        mock_config_service.config_manager = mock_config_manager
+        mock_config_service.get_config.return_value = mock_config
+
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=mock_config_service,
+        ):
+            with patch(
+                "code_indexer.server.web.routes.get_config_service",
+                return_value=mock_config_service,
+            ):
+                with patch(
+                    "code_indexer.server.services.ci_token_manager.create_token_manager"
+                ) as mock_factory:
+                    mock_factory.return_value = Mock()
+
+                    with patch(
+                        "code_indexer.server.storage.postgres.connection_pool.ConnectionPool"
+                    ) as mock_pool_cls:
+                        mock_pool_cls.return_value = Mock()
+
+                        from code_indexer.server.web.routes import _get_token_manager
+
+                        _get_token_manager()
+
+                        mock_factory.assert_called_once()
+                        call_kwargs = mock_factory.call_args[1]
+                        assert "storage_backend" in call_kwargs
+                        assert isinstance(
+                            call_kwargs["storage_backend"], CITokensPostgresBackend
+                        )
+                        assert call_kwargs.get("storage_mode") == "postgres"
+
 
 class TestTokenAuthenticatorSqliteUsage:
     """Tests for TokenAuthenticator.resolve_token() in git_state_manager.py (Issue #2)."""

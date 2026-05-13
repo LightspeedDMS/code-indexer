@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.22.0 (2026-05-12) — Unified token encryption key with salt file and shared crypto module (Story #999)
+
+### Added
+- `token_encryption.py`: shared AES-256-CBC encryption module eliminating duplication between CITokenManager and GitCredentialManager. Three-priority key derivation chain: salt file > cluster_secret > hostname.
+- `encryption_key_salt.py`: auto-seeds `.encryption_key_salt` from `.jwt_secret` (postgres mode) or hostname (sqlite mode) with 0600 permissions.
+- Try-decrypt fallback: canonical key first, hostname-derived key on PKCS7 failure (exactly 2 attempts). Lazy re-encryption when fallback succeeds.
+- `update_encrypted_token` added to `CITokensBackend` protocol, SQLite backend, and PG backend for lazy re-encryption persistence.
+- `GitCredentialsPostgresBackend` gains `update_encrypted_token` for cluster-mode lazy re-encryption.
+- PG backend wiring for CI tokens in web routes (`_get_token_manager()` detects storage_mode).
+- `cluster-migrate.sh` seeds `.encryption_key_salt` from `.jwt_secret` with trailing newline stripped.
+- Lifespan calls `ensure_encryption_key_salt()` on startup for consistent key derivation.
+- 67 new/updated unit tests covering encryption primitives, salt management, factory integration, and lazy re-encryption.
+
+### Changed
+- CITokenManager and GitCredentialManager delegate all crypto operations to `token_encryption` module via relative imports (fixes mypy resolution with `--explicit-package-bases`).
+- `create_token_manager()` and `create_git_credential_manager()` factories call `ensure_encryption_key_salt()` before construction.
+
 ## v10.21.0 (2026-05-12) — Cluster-aware token re-encryption and GitCredentialManager cluster support
 
 ### Added

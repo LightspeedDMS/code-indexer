@@ -150,6 +150,54 @@ class GitCredentialsPostgresBackend:
             "last_used_at": row[10],
         }
 
+    def update_encrypted_token(
+        self, credential_id: str, new_encrypted_token: str
+    ) -> None:
+        """Update the encrypted_token for a credential in-place (lazy re-encryption).
+
+        Used by GitCredentialManager when a fallback key decryption succeeds so the
+        token is re-encrypted with the canonical key for all future reads (Story #999).
+
+        When no matching row is found, logs a WARNING and returns without raising
+        (the credential may have been deleted concurrently; caller can continue safely).
+
+        Args:
+            credential_id: Primary key of the credential row. Must be non-empty.
+            new_encrypted_token: New base64-encoded ciphertext. Must be non-empty.
+
+        Raises:
+            ValueError: If credential_id or new_encrypted_token are None or empty.
+        """
+        if not credential_id:
+            raise ValueError("credential_id must be a non-empty string")
+        if not new_encrypted_token:
+            raise ValueError("new_encrypted_token must be a non-empty string")
+
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "UPDATE user_git_credentials SET encrypted_token = %s WHERE credential_id = %s",
+                (new_encrypted_token, credential_id),
+            )
+            rows_updated: int = cursor.rowcount
+            conn.commit()
+
+        if rows_updated == 1:
+            logger.debug(
+                "Re-encrypted git credential %s with canonical key", credential_id
+            )
+        elif rows_updated == 0:
+            logger.warning(
+                "update_encrypted_token: no user_git_credentials row found for "
+                "credential_id %r — re-encryption skipped",
+                credential_id,
+            )
+        else:
+            logger.warning(
+                "update_encrypted_token: unexpected rowcount %d for credential_id %r",
+                rows_updated,
+                credential_id,
+            )
+
     def close(self) -> None:
         """Close the connection pool."""
         self._pool.close()

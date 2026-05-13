@@ -1620,7 +1620,9 @@ class BackgroundJobManager:
                 job_dict["status"] = JobStatus(job_dict["status"])
 
                 # Create job object (filter unknown keys for forward-compat)
-                job = BackgroundJob(**{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS})
+                job = BackgroundJob(
+                    **{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS}
+                )
                 self.jobs[job_id] = job
 
             logging.info(f"Loaded {len(stored_jobs)} jobs from storage")
@@ -1688,14 +1690,18 @@ class BackgroundJobManager:
         """
         # Convert ISO strings back to datetime objects
         for field_name in ["created_at", "started_at", "completed_at"]:
-            if job_dict.get(field_name) is not None and isinstance(job_dict[field_name], str):
+            if job_dict.get(field_name) is not None and isinstance(
+                job_dict[field_name], str
+            ):
                 job_dict[field_name] = datetime.fromisoformat(job_dict[field_name])
 
         # Convert string status back to enum
         job_dict["status"] = JobStatus(job_dict["status"])
 
         # Create job object (filter unknown keys for forward-compat)
-        job = BackgroundJob(**{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS})
+        job = BackgroundJob(
+            **{k: v for k, v in job_dict.items() if k in _BG_JOB_FIELDS}
+        )
         self.jobs[job_dict["job_id"]] = job
 
     def _calculate_cutoff(self, time_filter: str) -> datetime:
@@ -1960,11 +1966,21 @@ class BackgroundJobManager:
             duration_seconds = None
             if started_at_str and completed_at_str:
                 try:
-                    started_dt = started_at_str if isinstance(started_at_str, datetime) else datetime.fromisoformat(started_at_str)
-                    completed_dt = completed_at_str if isinstance(completed_at_str, datetime) else datetime.fromisoformat(completed_at_str)
+                    started_dt = (
+                        started_at_str
+                        if isinstance(started_at_str, datetime)
+                        else datetime.fromisoformat(started_at_str)
+                    )
+                    completed_dt = (
+                        completed_at_str
+                        if isinstance(completed_at_str, datetime)
+                        else datetime.fromisoformat(completed_at_str)
+                    )
                     duration_seconds = int((completed_dt - started_dt).total_seconds())
                 except (ValueError, TypeError) as e:
-                    logging.warning(f"Failed to calculate duration_seconds for job: {e}")
+                    logging.warning(
+                        f"Failed to calculate duration_seconds for job: {e}"
+                    )
                     duration_seconds = None
 
             operation_type = job.get("operation_type") or ""

@@ -90,8 +90,9 @@ class TestCITokenManagerEncryption:
         assert re.match(r"^[A-Za-z0-9+/=]+$", encrypted)
 
         # And should decrypt back to original
-        decrypted = token_manager._decrypt_token(encrypted)
+        decrypted, used_fallback = token_manager._decrypt_token(encrypted)
         assert decrypted == token
+        assert used_fallback is False
 
     def test_decrypt_round_trip(self, token_manager):
         """Test encryption/decryption round trip (AC14)."""
@@ -100,7 +101,7 @@ class TestCITokenManagerEncryption:
 
         # When encrypting then decrypting
         encrypted = token_manager._encrypt_token(original_token)
-        decrypted = token_manager._decrypt_token(encrypted)
+        decrypted, _ = token_manager._decrypt_token(encrypted)
 
         # Then we get back the original token
         assert decrypted == original_token
