@@ -13,7 +13,7 @@
         <tr>
             <td>{{ key.name or '(unnamed)' }}</td>
             <td><code>{{ key.key_prefix }}...</code></td>
-            <td>{{ key.created_at[:10] }}</td>
+            <td>{{ (key.created_at|string)[:10] }}</td>
             <td>
                 <button class="outline secondary" onclick="deleteKey('{{ key.key_id }}', '{{ key.name or '' }}')">
                     Delete

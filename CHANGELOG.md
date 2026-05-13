@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.25.0 (2026-05-13) — Comprehensive template PG datetime slicing fixes
+
+### Fixed
+- Git Credentials page 500 in cluster mode: `created_at[:10]` slicing on PG datetime object (added `|string` filter).
+- API Keys page: `created_at[:10]` datetime slicing (added `|string` filter).
+- Repos list page: `activated_at[:10]` datetime slicing (added `|string` filter).
+- Jobs list page: `started_at[:19]` and `created_at[:19]` datetime slicing (added `|string` filter).
+- Dashboard recent jobs: `completion_time[:19]` datetime slicing (added `|string` filter).
+- Dashboard stats: `completion_time[:19]` datetime slicing (added `|string` filter).
+- Audit logs list: `timestamp[:19]` datetime slicing (added `|string` filter).
+- Dependency map job status: `last_run[:16]`, `next_run[:16]`, and `run.timestamp[:16]` datetime slicing (added `|string` filter).
+- Dashboard Langfuse: `last_sync_time[:19]` datetime slicing (added `|string` filter).
+
 ## v10.24.0 (2026-05-13) — PG type compatibility fixes for cluster web UI
 
 ### Fixed
