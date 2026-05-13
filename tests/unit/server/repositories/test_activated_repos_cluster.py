@@ -26,6 +26,13 @@ class _SqliteCursor:
         self._conn = conn
         self._cursor = conn.cursor()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._cursor.close()
+        return False
+
     def execute(self, sql: str, params=None):
         """Execute SQL, converting %s placeholders to ? for SQLite."""
         sql = sql.replace("%s", "?")
@@ -57,6 +64,10 @@ class _SqliteConnection:
 
     def execute(self, sql: str, params=None):
         return _SqliteCursor(self._conn).execute(sql, params)
+
+    def cursor(self, row_factory=None):
+        """Return a _SqliteCursor; row_factory ignored (already returns dicts)."""
+        return _SqliteCursor(self._conn)
 
     def commit(self):
         self._conn.commit()
