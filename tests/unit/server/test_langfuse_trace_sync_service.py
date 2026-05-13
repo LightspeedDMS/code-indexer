@@ -334,22 +334,131 @@ class TestSyncState:
             assert result == {}
 
     def test_state_file_path_format(self):
-        """State file path should follow naming convention."""
+        """State file path should follow naming convention under shared NFS path."""
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
 
             path = service._get_state_file_path("my-project")
 
-            assert path == Path(tmpdir) / "langfuse_sync_state_my-project.json"
+            assert (
+                path
+                == Path(tmpdir)
+                / "golden-repos"
+                / ".langfuse_state"
+                / "langfuse_sync_state_my-project.json"
+            )
 
     def test_state_file_path_sanitization(self):
-        """State file name should sanitize project name."""
+        """State file name should sanitize project name under shared NFS path."""
         with tempfile.TemporaryDirectory() as tmpdir:
             service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
 
             path = service._get_state_file_path("My Project!")
 
-            assert path == Path(tmpdir) / "langfuse_sync_state_My_Project_.json"
+            assert (
+                path
+                == Path(tmpdir)
+                / "golden-repos"
+                / ".langfuse_state"
+                / "langfuse_sync_state_My_Project_.json"
+            )
+
+    def test_state_file_path_uses_shared_golden_repos_dir(self):
+        """State file must live under golden-repos/.langfuse_state/ for NFS cluster sharing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+
+            path = service._get_state_file_path("my-project")
+
+            expected = (
+                Path(tmpdir)
+                / "golden-repos"
+                / ".langfuse_state"
+                / "langfuse_sync_state_my-project.json"
+            )
+            assert path == expected, (
+                f"State file must be under golden-repos/.langfuse_state/ for cluster NFS sharing.\n"
+                f"Got: {path}\nExpected: {expected}"
+            )
+
+    def test_get_metrics_reads_from_new_shared_path(self):
+        """get_metrics must read state files from golden-repos/.langfuse_state/."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+
+            # Write a state file in the new shared location
+            shared_dir = Path(tmpdir) / "golden-repos" / ".langfuse_state"
+            shared_dir.mkdir(parents=True, exist_ok=True)
+            state_data = {
+                "metrics": {
+                    "traces_checked": 10,
+                    "traces_written_new": 3,
+                    "traces_written_updated": 1,
+                    "traces_unchanged": 6,
+                    "errors_count": 0,
+                    "last_sync_time": "2024-01-01T00:00:00+00:00",
+                    "last_sync_duration_ms": 500,
+                }
+            }
+            state_file = shared_dir / "langfuse_sync_state_ClusterProject.json"
+            state_file.write_text(json.dumps(state_data), encoding="utf-8")
+
+            result = service.get_metrics()
+
+            assert "ClusterProject" in result, (
+                f"get_metrics must read from golden-repos/.langfuse_state/. Keys found: {list(result.keys())}"
+            )
+
+    def test_load_sync_state_migrates_legacy_file_to_new_path(self):
+        """_load_sync_state must migrate a legacy state file from data_dir root to the new shared path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+
+            # Create legacy state file in old location (data_dir root)
+            legacy_state = {
+                "last_sync_timestamp": "2024-01-01T00:00:00+00:00",
+                "trace_hashes": {
+                    "t1": {
+                        "content_hash": "abc",
+                        "updated_at": "2024-01-01T00:00:00+00:00",
+                    }
+                },
+            }
+            legacy_path = Path(tmpdir) / "langfuse_sync_state_legacy-project.json"
+            legacy_path.write_text(json.dumps(legacy_state), encoding="utf-8")
+
+            # Load should transparently migrate
+            loaded = service._load_sync_state("legacy-project")
+
+            assert loaded == legacy_state, "Migration must preserve state content"
+            assert not legacy_path.exists(), (
+                "Legacy path must be removed after migration"
+            )
+            new_path = service._get_state_file_path("legacy-project")
+            assert new_path.exists(), (
+                "State must exist at new shared path after migration"
+            )
+
+    def test_load_sync_state_migration_failure_returns_empty(self):
+        """If legacy migration fails (e.g. cross-filesystem), log warning and return empty dict."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = LangfuseTraceSyncService(lambda: _mock_config(), tmpdir)
+
+            legacy_path = Path(tmpdir) / "langfuse_sync_state_fail-project.json"
+            legacy_path.write_text(json.dumps({"key": "value"}), encoding="utf-8")
+
+            from unittest.mock import patch
+
+            with patch("shutil.move", side_effect=OSError("cross-device link")):
+                with patch(
+                    "code_indexer.server.services.langfuse_trace_sync_service.logger"
+                ) as mock_logger:
+                    loaded = service._load_sync_state("fail-project")
+
+            assert loaded == {}, "Must return empty dict when migration fails"
+            assert legacy_path.exists(), "Legacy file must remain when migration fails"
+            mock_logger.warning.assert_called_once()
+            assert "cross-device link" in str(mock_logger.warning.call_args)
 
 
 class TestWriteTrace:
