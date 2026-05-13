@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.24.0 (2026-05-13) — PG type compatibility fixes for cluster web UI
+
+### Fixed
+- MFA cross-user setup flow: guard returns HTML errors instead of JSON for web UI pages, skips confirm_overwrite for show mode (read-only QR display), totp_code input has required attribute.
+- Research Assistant 500 in cluster mode: `relative_time()` Jinja filter handles PG native datetime objects (was calling `.endswith("Z")` on datetime).
+- MCP Credentials page 500 in cluster mode: template slicing on PG datetime objects (added `|string` filter).
+- Timestamp slicing in golden repo and repo list pages: added `_safe_ts_slice()` helper that handles both str and datetime.
+- Self-monitoring PG backend: added missing `list_scans()` and `get_running_scan_count()` methods required by protocol.
+- `_format_datetime_display()` now accepts both str and datetime objects from PG.
+
 ## v10.23.0 (2026-05-12) — Cluster OIDC late-init and activated repos PG dict_row fix
 
 ### Fixed
