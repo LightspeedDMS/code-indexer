@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
+from .pg_utils import sanitize_row
 
 logger = logging.getLogger(__name__)
 
@@ -85,25 +86,27 @@ class SyncJobsPostgresBackend:
     @staticmethod
     def _row_to_dict(row) -> Dict[str, Any]:
         """Convert a psycopg row (sequence) to a sync job dictionary."""
-        return {
-            "job_id": row[0],
-            "username": row[1],
-            "user_alias": row[2],
-            "job_type": row[3],
-            "status": row[4],
-            "created_at": row[5],
-            "started_at": row[6],
-            "completed_at": row[7],
-            "repository_url": row[8],
-            "progress": row[9],
-            "error_message": row[10],
-            "phases": json.loads(row[11]) if row[11] else None,
-            "phase_weights": json.loads(row[12]) if row[12] else None,
-            "current_phase": row[13],
-            "progress_history": json.loads(row[14]) if row[14] else None,
-            "recovery_checkpoint": json.loads(row[15]) if row[15] else None,
-            "analytics_data": json.loads(row[16]) if row[16] else None,
-        }
+        return sanitize_row(
+            {
+                "job_id": row[0],
+                "username": row[1],
+                "user_alias": row[2],
+                "job_type": row[3],
+                "status": row[4],
+                "created_at": row[5],
+                "started_at": row[6],
+                "completed_at": row[7],
+                "repository_url": row[8],
+                "progress": row[9],
+                "error_message": row[10],
+                "phases": json.loads(row[11]) if row[11] else None,
+                "phase_weights": json.loads(row[12]) if row[12] else None,
+                "current_phase": row[13],
+                "progress_history": json.loads(row[14]) if row[14] else None,
+                "recovery_checkpoint": json.loads(row[15]) if row[15] else None,
+                "analytics_data": json.loads(row[16]) if row[16] else None,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Protocol methods

@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .pg_utils import sanitize_row
 
 logger = logging.getLogger(__name__)
 
@@ -91,19 +92,21 @@ class GitCredentialsPostgresBackend:
             )
             rows = cursor.fetchall()
         return [
-            {
-                "credential_id": row[0],
-                "username": row[1],
-                "forge_type": row[2],
-                "forge_host": row[3],
-                "encrypted_token": row[4],
-                "git_user_name": row[5],
-                "git_user_email": row[6],
-                "forge_username": row[7],
-                "name": row[8],
-                "created_at": row[9],
-                "last_used_at": row[10],
-            }
+            sanitize_row(
+                {
+                    "credential_id": row[0],
+                    "username": row[1],
+                    "forge_type": row[2],
+                    "forge_host": row[3],
+                    "encrypted_token": row[4],
+                    "git_user_name": row[5],
+                    "git_user_email": row[6],
+                    "forge_username": row[7],
+                    "name": row[8],
+                    "created_at": row[9],
+                    "last_used_at": row[10],
+                }
+            )
             for row in rows
         ]
 
@@ -136,19 +139,21 @@ class GitCredentialsPostgresBackend:
             row = cursor.fetchone()
         if row is None:
             return None
-        return {
-            "credential_id": row[0],
-            "username": row[1],
-            "forge_type": row[2],
-            "forge_host": row[3],
-            "encrypted_token": row[4],
-            "git_user_name": row[5],
-            "git_user_email": row[6],
-            "forge_username": row[7],
-            "name": row[8],
-            "created_at": row[9],
-            "last_used_at": row[10],
-        }
+        return sanitize_row(
+            {
+                "credential_id": row[0],
+                "username": row[1],
+                "forge_type": row[2],
+                "forge_host": row[3],
+                "encrypted_token": row[4],
+                "git_user_name": row[5],
+                "git_user_email": row[6],
+                "forge_username": row[7],
+                "name": row[8],
+                "created_at": row[9],
+                "last_used_at": row[10],
+            }
+        )
 
     def update_encrypted_token(
         self, credential_id: str, new_encrypted_token: str

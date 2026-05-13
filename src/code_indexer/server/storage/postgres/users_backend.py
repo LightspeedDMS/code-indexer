@@ -351,15 +351,17 @@ class UsersPostgresBackend:
             ).fetchall()
 
         return [
-            {
-                "username": r[0],
-                "credential_id": r[1],
-                "client_id": r[2],
-                "client_id_prefix": r[3],
-                "name": r[4],
-                "created_at": r[5],
-                "last_used_at": r[6],
-            }
+            sanitize_row(
+                {
+                    "username": r[0],
+                    "credential_id": r[1],
+                    "client_id": r[2],
+                    "client_id_prefix": r[3],
+                    "name": r[4],
+                    "created_at": r[5],
+                    "last_used_at": r[6],
+                }
+            )
             for r in rows
         ]
 
@@ -377,16 +379,18 @@ class UsersPostgresBackend:
             ).fetchall()
 
         return [
-            {
-                "credential_id": r[0],
-                "client_id": r[1],
-                "client_id_prefix": r[2],
-                "name": r[3],
-                "created_at": r[4],
-                "last_used_at": r[5],
-                "owner": "admin (system)",
-                "is_system": True,
-            }
+            sanitize_row(
+                {
+                    "credential_id": r[0],
+                    "client_id": r[1],
+                    "client_id_prefix": r[2],
+                    "name": r[3],
+                    "created_at": r[4],
+                    "last_used_at": r[5],
+                    "owner": "admin (system)",
+                    "is_system": True,
+                }
+            )
             for r in rows
         ]
 
@@ -414,15 +418,17 @@ class UsersPostgresBackend:
             return None
 
         username = row[0]
-        credential = {
-            "credential_id": row[1],
-            "client_id": row[2],
-            "client_secret_hash": row[3],
-            "client_id_prefix": row[4],
-            "name": row[5],
-            "created_at": row[6],
-            "last_used_at": row[7],
-        }
+        credential = sanitize_row(
+            {
+                "credential_id": row[1],
+                "client_id": row[2],
+                "client_secret_hash": row[3],
+                "client_id_prefix": row[4],
+                "name": row[5],
+                "created_at": row[6],
+                "last_used_at": row[7],
+            }
+        )
         return (username, credential)
 
     # ------------------------------------------------------------------
