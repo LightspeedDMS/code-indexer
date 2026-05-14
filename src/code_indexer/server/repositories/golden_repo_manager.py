@@ -3079,33 +3079,40 @@ class GoldenRepoManager:
 
                         global_alias_temporal = f"{alias}-global"
                         try:
-                            from code_indexer.global_repos.global_registry import (
-                                GlobalRegistry,
-                            )
-                            from pathlib import Path as PathLib
-
-                            data_dir = PathLib(self.data_dir)
-                            golden_repos_dir = data_dir / "golden-repos"
-                            sqlite_db_path = str(data_dir / "cidx_server.db")
-
-                            registry = GlobalRegistry(
-                                str(golden_repos_dir),
-                                use_sqlite=True,
-                                db_path=sqlite_db_path,
-                            )
-                            if (
-                                registry._sqlite_backend is not None
-                                and registry._sqlite_backend.update_enable_temporal(
-                                    global_alias_temporal, True
-                                )
-                            ):
+                            _grb = getattr(self, "_global_repos_backend", None)
+                            if _grb is not None:
+                                _grb.update_enable_temporal(global_alias_temporal, True)
                                 logging.info(
-                                    f"Updated enable_temporal=True for repo {global_alias_temporal} in global_repos"
+                                    f"Updated enable_temporal=True for repo {global_alias_temporal} in global_repos (PG)"
                                 )
                             else:
-                                logging.warning(
-                                    f"Failed to update enable_temporal for {global_alias_temporal} in global_repos"
+                                from code_indexer.global_repos.global_registry import (
+                                    GlobalRegistry,
                                 )
+                                from pathlib import Path as PathLib
+
+                                data_dir = PathLib(self.data_dir)
+                                golden_repos_dir = data_dir / "golden-repos"
+                                sqlite_db_path = str(data_dir / "cidx_server.db")
+
+                                registry = GlobalRegistry(
+                                    str(golden_repos_dir),
+                                    use_sqlite=True,
+                                    db_path=sqlite_db_path,
+                                )
+                                if (
+                                    registry._sqlite_backend is not None
+                                    and registry._sqlite_backend.update_enable_temporal(
+                                        global_alias_temporal, True
+                                    )
+                                ):
+                                    logging.info(
+                                        f"Updated enable_temporal=True for repo {global_alias_temporal} in global_repos"
+                                    )
+                                else:
+                                    logging.warning(
+                                        f"Failed to update enable_temporal for {global_alias_temporal} in global_repos"
+                                    )
                         except Exception as e:
                             logging.error(
                                 f"Error updating global_repos table for {global_alias_temporal}: {e}"

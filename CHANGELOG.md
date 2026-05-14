@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.30.0 (2026-05-14) — Cluster-mode bypass fixes and PG state sharing
+
+### Fixed
+- GlobalRepoOperations (shared_operations.py) now detects postgres mode and delegates to BackendRegistry.global_repos instead of always creating a SQLite-backed GlobalRegistry.
+- registry_factory.py returns PostgresGlobalRegistryAdapter wrapping the shared PG backend in cluster mode, ensuring all nodes read/write to the same global repos store.
+- repos.py _set_enable_temporal_flag now checks storage_mode and updates enable_temporal via BackendRegistry.global_repos in postgres mode instead of creating a throwaway SQLite GlobalRegistry.
+- golden_repo_manager.py enable_temporal updates route through BackendRegistry in postgres mode.
+- alias_manager.py write-mode markers now use PG table instead of filesystem in cluster mode.
+- Langfuse trace sync fromisoformat compatibility fix for Python 3.9.
+
+### Added
+- TokenBucketManager PG cluster support: cross-node rate limiting via token_bucket_state table with atomic consume/refund operations.
+- LlmLeaseStateManager PG cluster support: encrypted lease state stored in cluster_secrets table, encryption key derived from shared JWT secret via PBKDF2.
+- PostgreSQL migration 024_token_bucket_state.sql for cluster rate limiting.
+- LLM Creds Client: NestJS response envelope unwrapping (metadata/payload format).
+- lifespan wiring for rate_limiter.set_connection_pool() and LlmLeaseStateManager.set_connection_pool() in cluster mode.
+
 ## v10.29.0 (2026-05-13) — PG datetime serialization across all backends
 
 ### Fixed

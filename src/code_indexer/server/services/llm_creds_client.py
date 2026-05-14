@@ -115,6 +115,18 @@ class LlmCredsClient:
                 status_code=response.status_code,
             )
         if not response.is_success:
+            # Try NestJS envelope error format: extract errors[0].errorMessage
+            try:
+                body = response.json()
+                if isinstance(body.get("errors"), list) and body["errors"]:
+                    first_error = body["errors"][0]
+                    if isinstance(first_error, dict) and "errorMessage" in first_error:
+                        raise LlmCredsProviderError(
+                            first_error["errorMessage"],
+                            status_code=response.status_code,
+                        )
+            except (ValueError, KeyError, IndexError):
+                pass  # Fall through to generic HTTP status error
             raise LlmCredsProviderError(
                 f"Provider returned HTTP {response.status_code}",
                 status_code=response.status_code,
@@ -190,6 +202,16 @@ class LlmCredsClient:
                 f"Provider returned invalid JSON: {exc}",
                 status_code=response.status_code,
             ) from exc
+
+        # Detect NestJS envelope format and unwrap payload
+        if "payload" in data and "metadata" in data:
+            payload = data["payload"]
+            if payload is None or not isinstance(payload, dict):
+                raise LlmCredsProviderError(
+                    "checkout response envelope has null/invalid payload",
+                    status_code=response.status_code,
+                )
+            data = payload
 
         try:
             return CheckoutResponse(

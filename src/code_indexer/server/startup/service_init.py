@@ -397,6 +397,8 @@ def initialize_services() -> Dict[str, Any]:
             _backend_registry.golden_repo_metadata if _backend_registry else None
         ),
     )
+    if _backend_registry is not None:
+        golden_repo_manager._global_repos_backend = _backend_registry.global_repos
     # Story #311: Instantiate JobTracker before BackgroundJobManager (Epic #261 Story 1B)
     from code_indexer.server.services.job_tracker import JobTracker as _JobTracker
 

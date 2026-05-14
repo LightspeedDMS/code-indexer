@@ -527,11 +527,12 @@ class LangfuseTraceSyncService:
             elif isinstance(h, dict) and h.get("updated_at"):
                 # Not seen, but check if still within age window
                 try:
-                    trace_time = datetime.fromisoformat(h["updated_at"])
+                    ts = h["updated_at"].replace("Z", "+00:00")
+                    trace_time = datetime.fromisoformat(ts)
                     if trace_time >= max_age:
                         # Still within age window - keep
                         pruned_hashes[tid] = h
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, AttributeError):
                     # Malformed timestamp - discard
                     pass
 
