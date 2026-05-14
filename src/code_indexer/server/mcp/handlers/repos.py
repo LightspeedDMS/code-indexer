@@ -1603,28 +1603,55 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
 
     global_alias = f"{repo_alias}-global"
     try:
-        from pathlib import Path as _Path
-
-        data_dir = _Path(grm.data_dir)
-        golden_repos_dir = data_dir / "golden-repos"
-        sqlite_db_path = str(data_dir / "cidx_server.db")
-        registry = GlobalRegistry(
-            str(golden_repos_dir),
-            use_sqlite=True,
-            db_path=sqlite_db_path,
+        _app_state = getattr(_utils.app_module.app, "state", None)
+        _storage_mode = (
+            getattr(_app_state, "storage_mode", None) if _app_state else None
         )
-        if (
-            registry._sqlite_backend is not None
-            and registry._sqlite_backend.update_enable_temporal(global_alias, True)
-        ):
-            logger.info("Set enable_temporal=True for %s in global_repos", global_alias)
+
+        if _storage_mode == "postgres":
+            _br = getattr(_app_state, "backend_registry", None)
+            if _br is not None:
+                if _br.global_repos.update_enable_temporal(global_alias, True):
+                    logger.info(
+                        "Set enable_temporal=True for %s in global_repos (PG)",
+                        global_alias,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to set enable_temporal=True for %s in global_repos (PG)",
+                        global_alias,
+                    )
+            else:
+                logger.error(
+                    "backend_registry unavailable for enable_temporal on %s",
+                    global_alias,
+                )
         else:
-            logger.warning(
-                "Failed to set enable_temporal=True for %s in global_repos",
-                global_alias,
+            from pathlib import Path as _Path
+
+            data_dir = _Path(grm.data_dir)
+            golden_repos_dir = data_dir / "golden-repos"
+            sqlite_db_path = str(data_dir / "cidx_server.db")
+            registry = GlobalRegistry(
+                str(golden_repos_dir),
+                use_sqlite=True,
+                db_path=sqlite_db_path,
             )
+            if (
+                registry._sqlite_backend is not None
+                and registry._sqlite_backend.update_enable_temporal(global_alias, True)
+            ):
+                logger.info(
+                    "Set enable_temporal=True for %s in global_repos", global_alias
+                )
+            else:
+                logger.warning(
+                    "Failed to set enable_temporal=True for %s in global_repos",
+                    global_alias,
+                )
     except Exception as exc:
         logger.error("Error updating global_repos table for %s: %s", global_alias, exc)
+        raise
 
 
 def _resolve_versioned_to_base_clone(repo_path: str, repo_alias: str) -> tuple:

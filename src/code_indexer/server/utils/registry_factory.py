@@ -4,43 +4,74 @@ Factory for creating properly configured GlobalRegistry instances.
 Story #713: This factory ensures all server code uses SQLite backend
 for GlobalRegistry, eliminating the storage mismatch between
 GoldenRepoManager (SQLite) and GlobalRegistry (JSON).
+
+Cluster fix: When running in postgres mode, get_server_global_registry()
+wraps the shared BackendRegistry.global_repos backend so all nodes read
+and write to the same shared store.
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from code_indexer.global_repos.global_registry import GlobalRegistry
+
+
+class PostgresGlobalRegistryAdapter:
+    """
+    Thin adapter that exposes the GlobalRegistry interface over a
+    GlobalReposPostgresBackend (or any backend implementing the same protocol).
+
+    Used in cluster (postgres) mode so that registry_factory callers get the
+    same API regardless of storage backend.
+    """
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    def list_global_repos(self) -> List[Dict[str, Any]]:
+        """Return list of repo dicts, mirroring GlobalRegistry.list_global_repos()."""
+        repos_dict: Dict[str, Dict[str, Any]] = self._backend.list_repos()
+        return list(repos_dict.values())
+
+    def get_global_repo(self, alias_name: str) -> Optional[Dict[str, Any]]:
+        """Return a single repo dict by alias, mirroring GlobalRegistry.get_global_repo()."""
+        return self._backend.get_repo(alias_name)
+
+    def update_enable_temporal(self, alias_name: str, enable_temporal: bool) -> None:
+        """Delegate to backend's update_enable_temporal()."""
+        self._backend.update_enable_temporal(alias_name, enable_temporal)
 
 
 def get_server_global_registry(
     golden_repos_dir: str,
     server_data_dir: Optional[str] = None,
-) -> GlobalRegistry:
+    backend: Optional[Any] = None,
+) -> Any:
     """
-    Create a GlobalRegistry instance configured for server mode (SQLite backend).
+    Create a GlobalRegistry instance configured for server mode.
 
-    This factory function should be used by ALL server code (MCP handlers,
-    REST routes, services) to ensure consistent SQLite storage backend.
+    In SQLite / standalone mode (backend=None), returns a GlobalRegistry
+    backed by SQLite (existing behaviour, unchanged).
+
+    In postgres / cluster mode (backend provided), returns a
+    PostgresGlobalRegistryAdapter wrapping the shared backend so all
+    cluster nodes read and write to the same store.
 
     Args:
         golden_repos_dir: Path to golden repos directory
         server_data_dir: Path to server data directory (for db_path).
                         If None, derives from golden_repos_dir parent.
+                        Ignored when backend is provided.
+        backend: Optional GlobalReposBackend (postgres mode).  When
+                 supplied the returned adapter delegates all calls to it.
 
     Returns:
-        GlobalRegistry configured with SQLite backend
-
-    Example:
-        # Typical usage in handlers.py:
-        golden_repos_dir = _get_golden_repos_dir()
-        registry = get_server_global_registry(golden_repos_dir)
-
-        # With explicit server_data_dir:
-        registry = get_server_global_registry(
-            golden_repos_dir=golden_repos_dir,
-            server_data_dir=server_data_dir
-        )
+        PostgresGlobalRegistryAdapter (postgres mode) or
+        GlobalRegistry (sqlite mode)
     """
+    if backend is not None:
+        return PostgresGlobalRegistryAdapter(backend)
+
     golden_repos_path = Path(golden_repos_dir)
 
     if server_data_dir is None:

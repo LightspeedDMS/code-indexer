@@ -11,7 +11,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,12 @@ class AliasManager:
 
     Each alias is a JSON file containing metadata that points to
     the actual index directory for a golden repository.
+
+    Dual-mode write-mode redirection (Task #21):
+      - Standalone: reads .write_mode/{alias}.json from the local filesystem.
+      - Cluster: reads write_mode_markers table via WriteModePgBackend.
+        The filesystem .write_mode/ directory is NOT shared across nodes, so
+        it is never consulted when a PG backend is active.
     """
 
     def __init__(self, aliases_dir: str):
@@ -34,6 +40,99 @@ class AliasManager:
         """
         self.aliases_dir = Path(aliases_dir)
         self.aliases_dir.mkdir(parents=True, exist_ok=True)
+        # Optional PG backend for cluster-visible write-mode markers (Task #21).
+        # Type Optional[Any]: psycopg is an optional dependency — a concrete type
+        # would force its import at module load time, breaking standalone (CLI) mode.
+        self._write_mode_backend: Optional[Any] = None
+
+    def set_write_mode_backend(self, backend: Any) -> None:
+        """Wire a PostgreSQL write-mode backend for cluster mode.
+
+        When set, read_alias() exclusively uses the PG backend to check
+        write-mode markers — the local filesystem .write_mode/ directory
+        is not consulted (it is not NFS-shared across cluster nodes).
+
+        Args:
+            backend: WriteModePgBackend instance (or compatible interface).
+                     Type is Any — psycopg is an optional dependency, so a
+                     concrete type annotation would force its import at module
+                     load time, breaking standalone (CLI) mode.
+        """
+        self._write_mode_backend = backend
+        logger.info("AliasManager: using PostgreSQL write-mode backend (cluster mode)")
+
+    def _read_write_mode_source_path(self, alias_without_global: str) -> Optional[str]:
+        """Return the live source path for alias if write-mode is active, else None.
+
+        Dual-mode implementation:
+          - Cluster mode (PG backend set): queries write_mode_markers table.
+            The filesystem .write_mode/ directory is NOT consulted because it
+            is not NFS-shared and would give stale/empty results on other nodes.
+          - Standalone mode (no PG backend): reads the local filesystem marker.
+
+        Args:
+            alias_without_global: Repository alias without the -global suffix.
+
+        Returns:
+            source_path string if write-mode is active with a valid source,
+            None otherwise (write-mode inactive, no marker, or missing source_path).
+        """
+        if self._write_mode_backend is not None:
+            # Cluster mode: PG is the single source of truth for write-mode markers.
+            # Filesystem .write_mode/ is intentionally NOT checked here because it
+            # is local to each node and invisible to siblings in the cluster.
+            try:
+                marker = self._write_mode_backend.get_marker(alias_without_global)
+                if marker is None:
+                    return None
+                # marker.get() returns object; cast to Optional[str] is safe because
+                # source_path is always written as str by files.py (or None/absent).
+                source_path: Optional[str] = marker.get("source_path")  # type: ignore[assignment]
+                if source_path:
+                    return source_path
+                # Marker present but source_path absent — write session not yet
+                # redirected; fall through to normal alias resolution.
+                logger.warning(
+                    "PG write-mode marker for %s has no source_path; "
+                    "falling back to normal alias resolution",
+                    alias_without_global,
+                )
+                return None
+            except Exception as e:
+                logger.warning(
+                    "Failed to read PG write-mode marker for %s: %s; "
+                    "falling back to normal alias resolution",
+                    alias_without_global,
+                    e,
+                )
+                return None
+        else:
+            # Standalone mode: read the local filesystem marker.
+            golden_repos_dir = self.aliases_dir.parent
+            write_mode_marker = (
+                golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
+            )
+            if not write_mode_marker.exists():
+                return None
+            try:
+                marker_data = json.loads(write_mode_marker.read_text())
+                fs_source_path: Optional[str] = marker_data.get("source_path")
+                if fs_source_path:
+                    return fs_source_path
+                logger.warning(
+                    "Write-mode marker for %s has no source_path; "
+                    "falling back to normal alias resolution",
+                    alias_without_global,
+                )
+                return None
+            except (json.JSONDecodeError, IOError, OSError) as e:
+                logger.warning(
+                    "Corrupt write-mode marker for %s: %s; "
+                    "falling back to normal alias resolution",
+                    alias_without_global,
+                    e,
+                )
+                return None
 
     def create_alias(
         self, alias_name: str, target_path: str, repo_name: Optional[str] = None
@@ -86,13 +185,11 @@ class AliasManager:
         """
         Read the target path from an alias.
 
-        Write-mode redirection (Story #231):
-        If the alias ends with '-global' and a write-mode marker file exists at
-        golden_repos_dir/.write_mode/{alias_without_global}.json with a valid
-        'source_path' field, that source_path is returned instead of the
-        versioned snapshot path.  This allows reads during an active write
-        session to see the live source directory.  If the marker is corrupt or
-        lacks 'source_path', normal resolution proceeds.
+        Write-mode redirection (Story #231, Task #21):
+        If the alias ends with '-global', check for an active write session
+        via _read_write_mode_source_path(). When found, the live source path
+        is returned instead of the versioned snapshot path, allowing reads
+        during an active write session to see the in-progress changes.
 
         Args:
             alias_name: Name of the alias
@@ -100,33 +197,18 @@ class AliasManager:
         Returns:
             Target path or None if alias doesn't exist
         """
-        # Story #231: Check write-mode marker for -global aliases before normal resolution
+        # Task #21 / Story #231: Check write-mode for -global aliases
         if alias_name.endswith("-global"):
             alias_without_global = alias_name[: -len("-global")]
-            golden_repos_dir = self.aliases_dir.parent
-            write_mode_marker = (
-                golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
-            )
-            if write_mode_marker.exists():
-                try:
-                    marker_data = json.loads(write_mode_marker.read_text())
-                    source_path: Optional[str] = marker_data.get("source_path")
-                    if source_path:
-                        logger.debug(
-                            f"Write-mode active for {alias_name}: "
-                            f"redirecting reads to source {source_path}"
-                        )
-                        return source_path
-                    # source_path missing — fall through to normal resolution
-                    logger.warning(
-                        f"Write-mode marker for {alias_name} has no source_path, "
-                        "falling back to normal alias resolution"
-                    )
-                except (json.JSONDecodeError, IOError, OSError) as e:
-                    logger.warning(
-                        f"Corrupt write-mode marker for {alias_name}: {e}, "
-                        "falling back to normal alias resolution"
-                    )
+            source_path = self._read_write_mode_source_path(alias_without_global)
+            if source_path:
+                logger.debug(
+                    f"Write-mode active for {alias_name}: "
+                    f"redirecting reads to source {source_path}"
+                )
+                return source_path
+            # source_path is None — no active write session; fall through to
+            # normal alias file resolution below.
 
         alias_file = self.aliases_dir / f"{alias_name}.json"
 

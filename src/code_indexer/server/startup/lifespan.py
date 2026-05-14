@@ -2061,6 +2061,13 @@ def make_lifespan(
                     elevated_session_manager.set_connection_pool(_cluster_pool)
                     _login_rate_limiter_singleton.set_connection_pool(_cluster_pool)
 
+                    # Task #26: Wire cluster pool for token-bucket rate limiter
+                    from code_indexer.server.auth.token_bucket import (
+                        rate_limiter as _token_bucket_rate_limiter,
+                    )
+
+                    _token_bucket_rate_limiter.set_connection_pool(_cluster_pool)
+
                     # Bug #573: Wire cluster pools for password change
                     # and refresh token rate limiters
                     from code_indexer.server.auth.rate_limiter import (

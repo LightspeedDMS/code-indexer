@@ -46,8 +46,31 @@ class GlobalRepoOperations:
         # Ensure directory structure exists
         self.golden_repos_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize GlobalRegistry for accessing repo data (Story #713 - SQLite backend)
-        self.registry = get_server_global_registry(str(self.golden_repos_dir))
+        # In postgres/cluster mode, delegate to the shared PG backend so all
+        # nodes read and write to the same store.
+        backend = None
+        try:
+            from code_indexer.server import app as app_module
+
+            _app_state = getattr(app_module.app, "state", None)
+            if _app_state and getattr(_app_state, "storage_mode", None) == "postgres":
+                _br = getattr(_app_state, "backend_registry", None)
+                if _br is not None:
+                    backend = _br.global_repos
+                else:
+                    logger.warning(
+                        "GlobalRepoOperations: storage_mode=postgres but "
+                        "backend_registry not set; falling back to SQLite"
+                    )
+        except ImportError:
+            logger.debug(
+                "GlobalRepoOperations: server app module not available; "
+                "using SQLite backend"
+            )
+
+        self.registry = get_server_global_registry(
+            str(self.golden_repos_dir), backend=backend
+        )
 
     def list_repos(self, filters: Optional[Dict] = None) -> List[Dict[str, Any]]:
         """

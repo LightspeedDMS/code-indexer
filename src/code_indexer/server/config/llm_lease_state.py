@@ -15,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
@@ -29,6 +29,8 @@ AES_KEY_SIZE = 32  # 256 bits
 AES_BLOCK_SIZE = 16  # 128 bits
 
 _STATE_FILENAME = "llm_lease_state.json"
+# Deterministic salt for cluster mode encryption key derivation
+_CLUSTER_KEY_SALT = hashlib.sha256(b"cidx-llm-lease-cluster-salt").digest()
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +115,57 @@ class LlmLeaseStateManager:
 
         self._state_file = self._server_dir / state_filename
         self._encryption_key = self._derive_encryption_key()
+        self._pool: Optional[Any] = None
+        self._cluster_encryption_key: Optional[bytes] = None
+
+    # ------------------------------------------------------------------
+    # Cluster pool wiring
+    # ------------------------------------------------------------------
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Set PostgreSQL connection pool for cluster mode.
+
+        When set, save_state/load_state/clear_state use the cluster_secrets
+        PG table instead of a local encrypted file, enabling cross-node
+        lease state sharing. The encryption key is derived from the shared
+        JWT secret in cluster_secrets so all nodes decrypt identically.
+
+        Raises:
+            RuntimeError: If the jwt_secret row is absent from cluster_secrets.
+        """
+        self._pool = pool
+        self._cluster_encryption_key = self._derive_cluster_encryption_key(pool)
+        logger.info(
+            "LlmLeaseStateManager: using PostgreSQL connection pool (cluster mode)"
+        )
+
+    def _derive_cluster_encryption_key(self, pool: Any) -> bytes:
+        """Derive a deterministic AES-256 key from the shared JWT secret in cluster_secrets.
+
+        Reads the 'jwt_secret' row and applies PBKDF2 with _CLUSTER_KEY_SALT so
+        all cluster nodes sharing the same pool derive the same key.
+
+        Raises:
+            RuntimeError: If 'jwt_secret' row does not exist in cluster_secrets.
+        """
+        with pool.connection() as conn:
+            row = conn.execute(
+                "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
+                ("jwt_secret",),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "cluster_secrets table has no 'jwt_secret' row; "
+                "cannot derive cluster encryption key for LlmLeaseStateManager"
+            )
+        jwt_secret_bytes = row[0].encode("utf-8")
+        return hashlib.pbkdf2_hmac(
+            "sha256",
+            jwt_secret_bytes,
+            _CLUSTER_KEY_SALT,
+            PBKDF2_ITERATIONS,
+            dklen=AES_KEY_SIZE,
+        )
 
     # ------------------------------------------------------------------
     # Encryption helpers (same algorithm as delegation_config.py)
@@ -130,14 +183,22 @@ class LlmLeaseStateManager:
             dklen=AES_KEY_SIZE,
         )
 
+    @property
+    def _active_encryption_key(self) -> bytes:
+        """Return the cluster key when PG pool is set, else the node-local key."""
+        if self._cluster_encryption_key is not None:
+            return self._cluster_encryption_key
+        return self._encryption_key
+
     def _encrypt(self, plaintext: str) -> str:
         """Encrypt a string with AES-256-CBC. Returns base64-encoded ciphertext."""
+        key = self._active_encryption_key
         iv = os.urandom(AES_BLOCK_SIZE)
         padder = padding.PKCS7(AES_BLOCK_SIZE * 8).padder()
         padded = padder.update(plaintext.encode("utf-8")) + padder.finalize()
 
         cipher = Cipher(
-            algorithms.AES(self._encryption_key),
+            algorithms.AES(key),
             modes.CBC(iv),
             backend=default_backend(),
         )
@@ -148,6 +209,7 @@ class LlmLeaseStateManager:
 
     def _decrypt(self, encrypted: str) -> str:
         """Decrypt a base64-encoded AES-256-CBC ciphertext. Returns plaintext."""
+        key = self._active_encryption_key
         combined = base64.b64decode(encrypted.encode("utf-8"))
         if len(combined) < AES_BLOCK_SIZE + 1:
             raise ValueError("Encrypted data too short to be valid")
@@ -156,7 +218,7 @@ class LlmLeaseStateManager:
         ciphertext = combined[AES_BLOCK_SIZE:]
 
         cipher = Cipher(
-            algorithms.AES(self._encryption_key),
+            algorithms.AES(key),
             modes.CBC(iv),
             backend=default_backend(),
         )
@@ -168,21 +230,13 @@ class LlmLeaseStateManager:
         return str(plaintext_bytes.decode("utf-8"))
 
     # ------------------------------------------------------------------
-    # Public API
+    # Shared serialization helpers
     # ------------------------------------------------------------------
 
-    def save_state(self, state: LlmLeaseState) -> None:
-        """
-        Encrypt and persist the lease state to disk.
+    _PG_KEY_NAME = "llm_lease_state"
 
-        Creates the parent directory if it does not exist.  Sets ``0o600``
-        permissions on the state file after writing.
-
-        Args:
-            state: The :class:`LlmLeaseState` to persist.
-        """
-        self._server_dir.mkdir(parents=True, exist_ok=True)
-
+    def _serialize_state(self, state: LlmLeaseState) -> str:
+        """Serialize and encrypt a LlmLeaseState to a base64 blob."""
         plaintext = json.dumps(
             {
                 "lease_id": state.lease_id,
@@ -190,9 +244,69 @@ class LlmLeaseStateManager:
                 "credential_type": state.credential_type,
             }
         )
-        encrypted_blob = self._encrypt(plaintext)
+        return self._encrypt(plaintext)
 
-        # Wrap in a JSON envelope so the file is clearly identifiable
+    def _deserialize_blob(self, encrypted_blob: str) -> LlmLeaseState:
+        """Decrypt and deserialize a base64 blob to a LlmLeaseState."""
+        plaintext = self._decrypt(encrypted_blob)
+        data = json.loads(plaintext)
+        return LlmLeaseState(
+            lease_id=data["lease_id"],
+            credential_id=data["credential_id"],
+            credential_type=data.get("credential_type", "oauth"),
+        )
+
+    # ------------------------------------------------------------------
+    # PostgreSQL cluster methods
+    # ------------------------------------------------------------------
+
+    def _pg_save_state(self, state: LlmLeaseState) -> None:
+        encrypted_blob = self._serialize_state(state)
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO cluster_secrets (key_name, key_value) "
+                "VALUES (%s, %s) "
+                "ON CONFLICT (key_name) DO UPDATE SET key_value = EXCLUDED.key_value, "
+                "updated_at = CURRENT_TIMESTAMP",
+                (self._PG_KEY_NAME, encrypted_blob),
+            )
+            conn.commit()
+        logger.debug("Saved LLM lease state to cluster_secrets (PG)")
+
+    def _pg_load_state(self) -> Optional[LlmLeaseState]:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
+                (self._PG_KEY_NAME,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._deserialize_blob(row[0])
+
+    def _pg_clear_state(self) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM cluster_secrets WHERE key_name = %s",
+                (self._PG_KEY_NAME,),
+            )
+            conn.commit()
+        logger.debug("Cleared LLM lease state from cluster_secrets (PG)")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def save_state(self, state: LlmLeaseState) -> None:
+        """Encrypt and persist the lease state.
+
+        Routes to PG in cluster mode, file in standalone mode.
+        """
+        if self._pool is not None:
+            self._pg_save_state(state)
+            return
+
+        self._server_dir.mkdir(parents=True, exist_ok=True)
+        encrypted_blob = self._serialize_state(state)
         envelope = json.dumps({"encrypted_state": encrypted_blob})
 
         with open(self._state_file, "w") as fh:
@@ -202,39 +316,30 @@ class LlmLeaseStateManager:
         logger.debug("Saved LLM lease state to %s", self._state_file)
 
     def load_state(self) -> Optional[LlmLeaseState]:
-        """
-        Load and decrypt the lease state from disk.
+        """Load and decrypt the lease state.
 
-        Returns:
-            The persisted :class:`LlmLeaseState`, or ``None`` if no state
-            file exists.
-
-        Raises:
-            Exception: Re-raises decryption or JSON errors so callers can
-                       decide how to handle corruption.
+        Routes to PG in cluster mode, file in standalone mode.
         """
+        if self._pool is not None:
+            return self._pg_load_state()
+
         if not self._state_file.exists():
             return None
 
         with open(self._state_file, "r") as fh:
             envelope = json.load(fh)
 
-        encrypted_blob = envelope["encrypted_state"]
-        plaintext = self._decrypt(encrypted_blob)
-        data = json.loads(plaintext)
-
-        return LlmLeaseState(
-            lease_id=data["lease_id"],
-            credential_id=data["credential_id"],
-            credential_type=data.get("credential_type", "oauth"),
-        )
+        return self._deserialize_blob(envelope["encrypted_state"])
 
     def clear_state(self) -> None:
-        """
-        Delete the state file if it exists.
+        """Delete the persisted lease state.
 
-        Does nothing if the file is already absent.
+        Routes to PG in cluster mode, file in standalone mode.
         """
+        if self._pool is not None:
+            self._pg_clear_state()
+            return
+
         if self._state_file.exists():
             self._state_file.unlink()
             logger.debug("Cleared LLM lease state from %s", self._state_file)
