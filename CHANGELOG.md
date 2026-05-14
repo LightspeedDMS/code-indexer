@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.32.0 (2026-05-14) — Fix GlobalRepoOperations startup warning in cluster mode
+
+### Fixed
+- GlobalRepoOperations no longer eagerly resolves backend_registry at construction time during server startup. Registry resolution is deferred to a lazy property accessed at request time, eliminating the spurious "storage_mode=postgres but backend_registry not set; falling back to SQLite" WARNING that fired on every cluster node restart.
+- Added thread-safe double-checked locking on the registry property to prevent duplicate registry construction under concurrent first-access requests.
+
 ## v10.31.0 (2026-05-14) — Fix PG token bucket LEAST() scalar function
 
 ### Fixed
