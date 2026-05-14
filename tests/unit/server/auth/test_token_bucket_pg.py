@@ -39,6 +39,7 @@ class FakeConnection:
     def execute(self, sql: str, params=None):
         sql = sql.replace("%s", "?")
         sql = sql.replace("EXCLUDED.", "excluded.")
+        sql = sql.replace("LEAST(", "MIN(")
         if params is not None:
             return FakeCursor(self._conn.execute(sql, params))
         return FakeCursor(self._conn.execute(sql))

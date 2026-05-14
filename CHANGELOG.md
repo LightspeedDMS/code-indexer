@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.31.0 (2026-05-14) — Fix PG token bucket LEAST() scalar function
+
+### Fixed
+- TokenBucketManager._pg_refund() used SQL MIN() as scalar function which only works in SQLite; PostgreSQL requires LEAST() for two-argument scalar minimum. This crashed every login attempt on the staging cluster with `psycopg.errors.UndefinedFunction`.
+
 ## v10.30.0 (2026-05-14) — Cluster-mode bypass fixes and PG state sharing
 
 ### Fixed

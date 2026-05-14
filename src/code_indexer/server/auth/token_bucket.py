@@ -150,7 +150,7 @@ class TokenBucketManager:
             self._pg_ensure_row(conn, username, now)
             conn.execute(
                 "UPDATE token_bucket_state "
-                "SET tokens = MIN(%s, tokens + %s), last_access = %s "
+                "SET tokens = LEAST(%s, tokens + %s), last_access = %s "
                 "WHERE username = %s",
                 (float(self.capacity), _TOKEN_COST, now, username),
             )
