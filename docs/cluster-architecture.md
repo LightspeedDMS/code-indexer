@@ -325,6 +325,8 @@ Current migrations:
 - `002_groups_access_schema.sql`: Replaces the groups tables from migration 001 with the full GroupAccessManager schema (groups, user_group_membership, repo_group_access, audit_logs with admin_id/action_type/target_type/target_id columns)
 - `003_node_metrics.sql`: Creates the `node_metrics` table used by `NodeMetricsWriterService`
 
+Note: As of v10.34.0, there are 25 migrations (001-025). Only the first 3 are shown here. See `src/code_indexer/server/storage/postgres/migrations/sql/` for the complete list.
+
 ### node_metrics Table
 
 ```sql

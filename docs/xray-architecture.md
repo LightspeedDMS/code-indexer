@@ -42,7 +42,7 @@ This document captures the X-Ray search engine architecture and MCP handler shim
   - `context_lines` in `[0, 10]`.
   - `max_results` >= 1 when provided.
   - `timeout_seconds` in `[10, 600]`.
-  - `await_seconds` in `[0.0, 10.0]` (lowered from 30 in v10.3.2 to keep server-side polling within the FastAPI threadpool capacity cap).
+  - `await_seconds` in `[0.0, 120.0]` (maximum defined by `_AWAIT_SECONDS_MAX`). Values above 30.0 cause a warning to be logged, as long polls consume FastAPI threadpool capacity.
 - **Repository alias resolution — omni-aware (string OR list)**:
   - `repository_alias` accepts a single string, a list of strings, or a JSON-encoded string array (e.g. `'["repo-a", "repo-b"]'`). The handler parses the JSON-encoded form via `_parse_json_string_array`.
   - Single-repo path: returns `{"job_id": "<uuid>"}`.
@@ -69,4 +69,4 @@ The `PythonEvaluatorSandbox.ALLOWED_NODES` whitelist was extended in v10.4.0 to 
 - **Group D — structured exception handling**: `Try` (try/except/finally blocks), `ExceptHandler` (except clauses, bare and typed), `Raise`. Common exception types are present in `SAFE_BUILTIN_NAMES` for `except` clauses: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`.
 - **Group E — arithmetic binary ops**: `BinOp` plus `operator` abstract base (covers Add, Sub, Mult, Div, Mod, etc.).
 
-Still banned at validation time (rejected before any subprocess is spawned): `def`, `async def`, `class`, `lambda`, `import`, `from ... import`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`. Plus dunder Attribute and Subscript access (`__class__`, `__globals__`, `__import__`, etc. — see `DUNDER_ATTR_BLOCKLIST` in `sandbox.py`).
+Still banned at validation time (rejected before any subprocess is spawned): `class`, `async def`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`. Plus dunder Attribute and Subscript access (`__class__`, `__globals__`, `__import__`, etc. — see `DUNDER_ATTR_BLOCKLIST` in `sandbox.py`).

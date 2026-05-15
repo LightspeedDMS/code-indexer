@@ -685,4 +685,4 @@ sqlite3 ~/.cidx-server/oauth.db "SELECT * FROM oidc_identity_links;"
 
 For CIDX-specific issues:
 - Check server logs in `~/.cidx-server/logs/`
-- Report issues on GitHub: https://github.com/anthropics/code-indexer/issues
+- Report issues on the project repository issue tracker

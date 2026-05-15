@@ -2,7 +2,7 @@
 
 ## Historical Context
 
-This is a historical migration guide for upgrading from v7.x to v8.x. The current stable version is v8.13.0, which has evolved significantly since the initial v8.0.0 release. The core migration steps remain accurate for transitioning from v7.x to any v8.x version.
+This is a historical migration guide for upgrading from v7.x to v8.x. At the time this guide was written, the current stable version was v8.13.0. The project has since evolved significantly — the current version is 10.34.0. The core migration steps remain accurate for transitioning from v7.x to any v8.x version.
 
 ## Overview
 
@@ -72,7 +72,7 @@ Verify the new version:
 
 ```bash
 cidx --version
-# Should show: 8.13.0 or higher (current stable: v8.13.0)
+# Should show: 8.13.0 or higher (current stable at time of this guide: v8.13.0)
 ```
 
 ### Step 3: Update Configuration
@@ -472,7 +472,7 @@ No, v8.x is a major breaking release. You must fully migrate all projects and ca
 Use this checklist to track your migration progress:
 
 - [ ] Backup existing index data
-- [ ] Upgrade to code-indexer v8.13.0 (or latest v8.x)
+- [ ] Upgrade to code-indexer v8.13.0 (or latest v8.x at the time of this guide)
 - [ ] Remove legacy configuration fields (qdrant_config, ollama_config, containers_config)
 - [ ] Set up VoyageAI API key if migrating from Ollama
 - [ ] Stop and remove any Qdrant containers

@@ -33,7 +33,7 @@ CIDX server provides:
 
 ```bash
 # Install code-indexer
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
 
 # Verify installation
 cidx --version
@@ -47,7 +47,7 @@ python3 -m venv cidx-venv
 source cidx-venv/bin/activate
 
 # Install code-indexer
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.2.1
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
 
 # Verify installation
 cidx --version
@@ -78,6 +78,8 @@ CIDX_LOG_FILE=/var/log/cidx-server/server.log
 ### Configuration File
 
 Alternative to environment variables, create `~/.cidx-server/config.json`:
+
+Note: config.json uses flat bootstrap keys, not nested objects. The structure below is simplified for readability. The actual flat-key schema is defined in CLAUDE.md under "Config Bootstrap vs Runtime (Story #578)". Only bootstrap keys belong in config.json (host, port, server_dir, log_level, storage_mode, postgres_dsn, ontap, cluster.node_id). All runtime settings belong in the database via the Web UI Config Screen.
 
 ```json
 {
@@ -132,7 +134,7 @@ Configure how long HNSW indexes remain in cache via the Web UI Configuration Scr
 ```json
 {
   "cache": {
-    "hnsw_index_ttl_seconds": 600
+    "ttl_minutes": 10.0
   }
 }
 ```
@@ -479,7 +481,7 @@ curl http://localhost:8000/health
 # Expected response
 {
   "status": "healthy",
-  "version": "8.13.0",
+  "version": "10.34.0",
   "cache": {
     "enabled": true,
     "active_entries": 12

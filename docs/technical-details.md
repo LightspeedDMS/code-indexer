@@ -530,5 +530,4 @@ FTS queries use Tantivy index for efficient text search:
 
 - **[Architecture](architecture.md)** - System design and architecture decisions
 - **[Algorithms](algorithms.md)** - Detailed algorithm descriptions
-- **[Server Mode](server-mode.md)** - Multi-user server setup and API reference
-- **[Development Guide](development.md)** - Contributor guidelines
+- **[Server Deployment](server-deployment.md)** - Multi-user server setup and API reference

@@ -151,12 +151,13 @@ PYTHONPATH=src python3 -m code_indexer.server.storage.postgres.migrations.runner
   --connection-string "postgresql://cidx:your-strong-password@db-host:5432/cidx_server"
 ```
 
-Expected output:
+Expected output (example — the count increases with new versions; as of v10.34.0 there are 25 migrations):
 ```
 INFO Applied migration: 001_initial_schema.sql
 INFO Applied migration: 002_groups_access_schema.sql
 INFO Applied migration: 003_node_metrics.sql
-Applied 3 migration(s).
+...
+Applied 25 migration(s).
 ```
 
 Check migration status at any time:

@@ -1,8 +1,3 @@
-FACT-CHECKED
-
-Last Fact-Check: 2025-12-31
-Verified Against: CIDX source code (src/code_indexer/)
-
 # Configuration Guide
 
 Complete reference for configuring CIDX.
@@ -450,7 +445,7 @@ Customize which languages to index by editing `file_extensions`:
 ```json
 {
   "file_extensions": [
-    ".py"              // Python only
+    "py"              // Python only
   ]
 }
 ```
@@ -576,8 +571,8 @@ cidx index
    ```json
    {
      "file_extensions": [
-       ".py", ".js", ".ts",
-       ".jsx", ".tsx"  // Add React extensions
+       "py", "js", "ts",
+       "jsx", "tsx"  // Add React extensions
      ]
    }
    ```

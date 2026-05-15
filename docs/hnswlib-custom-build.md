@@ -45,10 +45,10 @@ The custom `setup.py` automatically:
 To verify the custom build is installed correctly:
 
 ```python
-from code_indexer.utils.hnswlib_verification import verify_custom_hnswlib
+from code_indexer.services.hnsw_health_service import HnswHealthService
 
 try:
-    verify_custom_hnswlib()
+    HnswHealthService().check_integrity()
     print("Custom hnswlib build verified successfully!")
 except (ImportError, AttributeError) as e:
     print(f"Verification failed: {e}")
@@ -173,14 +173,9 @@ results = index.knn_query(query_vector, k=10)
 
 ### Testing
 
-Unit tests for the verification utility:
+Unit tests for the HNSW health service:
 ```bash
-pytest tests/unit/utils/test_hnswlib_verification.py -v
-```
-
-Integration tests for submodule build:
-```bash
-pytest tests/integration/test_hnswlib_submodule_build.py -v
+pytest tests/unit/services/test_hnsw_health_service.py -v
 ```
 
 ## CI/CD Considerations
@@ -236,8 +231,8 @@ If upgrading from a version that used PyPI hnswlib:
 
 4. Verify custom build:
    ```python
-   from code_indexer.utils.hnswlib_verification import verify_custom_hnswlib
-   verify_custom_hnswlib()
+   from code_indexer.services.hnsw_health_service import HnswHealthService
+   HnswHealthService().check_integrity()
    ```
 
 ## References

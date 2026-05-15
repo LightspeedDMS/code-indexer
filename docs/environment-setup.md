@@ -34,7 +34,6 @@ Environment variables are automatically loaded in the following scenarios:
 
 ### For Scripts
 - `full-automation.sh` sources `.env` files automatically
-- `ci-github.sh` sources `.env` files automatically
 - Other shell scripts should add this near the top:
   ```bash
   # Source .env files if they exist

@@ -17,14 +17,17 @@ This document captures the X-Ray sandbox security boundary invariants extracted 
 - Group C — statement-level control flow (lifted in v10.4.0): `If, For, While, Break, Continue, Pass`. Iteration is bounded by `HARD_TIMEOUT_SECONDS` — infinite loops surface as `EvaluatorTimeout`, not validation rejection.
 - Group D — structured exception handling (lifted in v10.4.0): `Try, ExceptHandler, Raise`.
 - Group E — arithmetic binary operations (lifted in v10.4.0): `BinOp` plus the `operator` abstract base (concrete subclasses Add, Sub, Mult, Div, Mod, etc. via isinstance).
+- Group F — imports (lifted in Story #993): `Import`, `ImportFrom`, `alias`. Only stdlib modules in `STDLIB_WHITELIST` (re, collections, itertools, functools) are permitted; importing anything outside the whitelist is rejected at validation time.
+- Group G — function definitions and lambdas (lifted in Story #993): `FunctionDef`, `Lambda`, `arguments`, `arg`. Allows evaluators to define helper functions and use lambda expressions.
 
 **STRIPPED_BUILTINS**: `getattr, setattr, delattr, __import__, eval, exec, open, compile`. Note: `hasattr` is intentionally in `SAFE_BUILTIN_NAMES`, not stripped — it has no escalation power beyond what the dunder blocklist already prevents.
 
-**SAFE_BUILTIN_NAMES** (27 total in v10.4.0):
+**SAFE_BUILTIN_NAMES** (34 total):
 - 18 originals: `len, str, int, bool, list, tuple, dict, min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr`.
 - 9 exception types added in v10.4.0 for `except` clauses in Group D try/except blocks: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`. These are read-only references; none grant escalation power beyond what the dunder blocklist enforces.
+- 7 additional builtins added in Story #993: `isinstance, type, set, frozenset, float, repr, print`.
 
-**Still banned at validation time** (rejected before any subprocess is spawned): `def`, `async def`, `class`, `lambda`, `import`, `from ... import`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`. Plus dunder Attribute and Subscript access (see `DUNDER_ATTR_BLOCKLIST` below).
+**Still banned at validation time** (rejected before any subprocess is spawned): `class`, `async def`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`. Plus dunder Attribute and Subscript access (see `DUNDER_ATTR_BLOCKLIST` below).
 
 **Timeout policy**: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), `SIGKILL_GRACE_SECONDS=1.0` (SIGKILL if still alive). Pipe data is read BEFORE `is_alive()` check — under heavy concurrency `waitpid()` races can cause `is_alive()=True` after the child has sent valid data; pipe data takes precedence.
 
@@ -43,6 +46,4 @@ This document captures the X-Ray sandbox security boundary invariants extracted 
 - Any `ast.Attribute` node whose `.attr` is in the blocklist → `validation_failed`.
 - Any `ast.Subscript` node whose slice is a string `Constant` starting with `__` → `validation_failed`.
 - Verified by canary tests in `tests/unit/xray/test_sandbox_dunder_escapes.py` that confirm `validation_failed` + no-subprocess + no-side-effect for each escape pattern including the confirmed exploit: `node.__class__.__init__.__globals__['__builtins__']['open']('/tmp/...','w')`.
-- `type()` is intentionally absent from `SAFE_BUILTIN_NAMES` — `type(x)` raises `NameError` in the subprocess (Layer 2).
-
-**Files**: `src/code_indexer/xray/sandbox.py`. Tests: `tests/unit/xray/test_sandbox*.py` (8 files, 112+ tests).
+**Files**: `src/code_indexer/xray/sandbox.py`. Tests: `tests/unit/xray/test_sandbox*.py` (18 files, 303+ tests).
