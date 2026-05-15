@@ -48,6 +48,35 @@ logger = logging.getLogger(__name__)
 _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
 
 
+def has_files_with_extensions(
+    repo_path: str, extensions: set, exclude_dirs: set
+) -> bool:
+    """Return True as soon as a file with a matching extension is found (short-circuit).
+
+    Walks the directory tree rooted at repo_path. Directories listed in exclude_dirs
+    or whose names start with '.' are pruned and never descended into.
+
+    Args:
+        repo_path: Root directory to scan.
+        extensions: Set of bare extension names to match (without leading dots, e.g. 'py').
+        exclude_dirs: Set of directory names to skip (e.g. {'.git', 'node_modules'}).
+
+    Returns:
+        True if any file with a matching extension is found, False otherwise.
+    """
+    if not extensions:
+        return False
+    for dirpath, dirnames, filenames in os.walk(repo_path, topdown=True):
+        dirnames[:] = [
+            d for d in dirnames if d not in exclude_dirs and not d.startswith(".")
+        ]
+        for filename in filenames:
+            ext = os.path.splitext(filename)[1].lstrip(".")
+            if ext in extensions:
+                return True
+    return False
+
+
 def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
     """Read max_commits from temporal_meta.json when temporal_options is NULL.
 
@@ -1107,6 +1136,9 @@ class RefreshScheduler:
                         f"Reconciled registry with filesystem at START for {alias_name}: {detected_indexes}"
                     )
                     sync_failure: Optional[str] = None
+                    # Initialized here so _check_extension_drift can set it before
+                    # any early-return exit in the local/git branching below.
+                    force_reconcile = False
 
                     if is_local_repo:
                         # C3: For local repos, source_path is the LIVE directory (where writers put files),
@@ -1237,14 +1269,18 @@ class RefreshScheduler:
                             )
 
                             if not has_changes:
-                                logger.info(
-                                    f"No changes detected for local repo {alias_name}, skipping refresh"
+                                force_reconcile = self._check_extension_drift(
+                                    source_path, alias_name
                                 )
-                                return {
-                                    "success": True,
-                                    "alias": alias_name,
-                                    "message": "No changes detected",
-                                }
+                                if not force_reconcile:
+                                    logger.info(
+                                        f"No changes detected for local repo {alias_name}, skipping refresh"
+                                    )
+                                    return {
+                                        "success": True,
+                                        "alias": alias_name,
+                                        "message": "No changes detected",
+                                    }
 
                             logger.info(
                                 f"Changes detected in local repo {alias_name}, creating new index"
@@ -1440,19 +1476,29 @@ class RefreshScheduler:
                                     self._reset_fetch_failures(alias_name)
 
                                     if not has_changes:
-                                        logger.info(
-                                            f"No changes detected for {alias_name}, skipping refresh"
+                                        # Check drift before early return: config may have
+                                        # changed even when the repo has no new commits.
+                                        # source_path is set here (same as line 1491) so
+                                        # _check_extension_drift can scan the right directory.
+                                        source_path = master_path
+                                        force_reconcile = self._check_extension_drift(
+                                            source_path, alias_name
                                         )
-                                        return {
-                                            "success": True,
-                                            "alias": alias_name,
-                                            "message": "No changes detected",
-                                        }
-
-                                    logger.info(
-                                        f"Pulling latest changes for {alias_name} into master: {master_path}"
-                                    )
-                                    updater.update()
+                                        if not force_reconcile:
+                                            logger.info(
+                                                f"No changes detected for {alias_name}, skipping refresh"
+                                            )
+                                            return {
+                                                "success": True,
+                                                "alias": alias_name,
+                                                "message": "No changes detected",
+                                            }
+                                        # Drift detected — skip git pull but proceed to indexing.
+                                    else:
+                                        logger.info(
+                                            f"Pulling latest changes for {alias_name} into master: {master_path}"
+                                        )
+                                        updater.update()
                                 except GitFetchError as e:
                                     self._handle_fetch_error(
                                         alias_name, repo_url, master_path, e
@@ -1461,15 +1507,14 @@ class RefreshScheduler:
 
                             source_path = master_path
 
-                    # Story #223 AC7: Sync file extensions from server config before indexing
-                    try:
-                        config_service = get_config_service()
-                        config_service.sync_repo_extensions_if_drifted(source_path)
-                    except Exception as e:
-                        logger.warning(
-                            "Could not sync extensions before index for %s: %s",
-                            alias_name,
-                            e,
+                    # Story #223 AC7 / Story #1001: Sync file extensions from server config
+                    # before indexing.  _check_extension_drift() may have already been called
+                    # in the no-changes early-return path above (to detect drift before skipping).
+                    # Guard here avoids a second call (sync_repo_extensions_if_drifted is one-shot:
+                    # it writes config on the first call and returns None on subsequent calls).
+                    if not force_reconcile:
+                        force_reconcile = self._check_extension_drift(
+                            source_path, alias_name
                         )
 
                     # Index source first, then create versioned snapshot (Story #229)
@@ -1478,6 +1523,7 @@ class RefreshScheduler:
                         alias_name=alias_name,
                         source_path=source_path,
                         progress_callback=progress_callback,
+                        force_reconcile=force_reconcile,
                     )
                     new_index_path = self._create_snapshot(
                         alias_name=alias_name, source_path=source_path
@@ -1587,7 +1633,11 @@ class RefreshScheduler:
                     self._job_tracker.complete_job(_tracker_job_id)
 
     def _index_source(
-        self, alias_name: str, source_path: str, progress_callback=None
+        self,
+        alias_name: str,
+        source_path: str,
+        progress_callback=None,
+        force_reconcile: bool = False,
     ) -> None:
         """
         Index the golden repo source in place (Story #229: index-source-first).
@@ -1604,6 +1654,9 @@ class RefreshScheduler:
         Args:
             alias_name: Global alias name (e.g., "my-repo-global")
             source_path: Path to the golden repo source directory
+            force_reconcile: When True, forces --reconcile regardless of metadata status.
+                Story #1001: set by _execute_refresh() when extension drift is detected
+                and matching files exist in the repo.
 
         Raises:
             RuntimeError: If any indexing step fails or times out
@@ -1612,7 +1665,8 @@ class RefreshScheduler:
         # Bug #467: No timeout — let indexing run to completion.
         # Check if previous indexing was interrupted — use --reconcile to recover.
         # --reconcile compares content IDs against existing vectors, skips unchanged
-        # files. Only used when needed (interrupted state), otherwise normal incremental.
+        # files. Only used when needed (interrupted state or extension drift), otherwise
+        # normal incremental.
         needs_reconcile = False
         metadata_path = Path(source_path) / ".code-indexer" / "metadata.json"
         if metadata_path.exists():
@@ -1628,8 +1682,15 @@ class RefreshScheduler:
                         f"Previous indexing interrupted (status={meta_status}), "
                         f"using --reconcile for crash recovery on {alias_name}"
                     )
-            except Exception:
-                pass  # If metadata unreadable, proceed with normal indexing
+            except Exception as _meta_err:
+                logger.warning(
+                    "Could not read metadata.json for %s, proceeding without --reconcile: %s",
+                    alias_name,
+                    _meta_err,
+                )
+
+        # Story #1001: OR with force_reconcile from extension-drift detection.
+        needs_reconcile = needs_reconcile or force_reconcile
 
         if needs_reconcile:
             index_command = ["cidx", "index", "--fts", "--reconcile", "--progress-json"]
@@ -2165,6 +2226,59 @@ class RefreshScheduler:
             f"vs latest_version={latest_timestamp} -> changes={has_changes}"
         )
         return has_changes
+
+    def _check_extension_drift(self, source_path: str, alias_name: str) -> bool:
+        """Check for extension drift and return True if --reconcile is needed.
+
+        Calls sync_repo_extensions_if_drifted() on the config service.  If drift
+        is detected AND matching files exist in source_path, returns True so the
+        caller can trigger a reconcile index run.
+
+        This helper is intentionally one-shot safe: sync_repo_extensions_if_drifted()
+        writes the updated config on the first call and returns None on subsequent
+        calls within the same refresh cycle, so calling this helper both before
+        an early-return and again at the shared drift-check site is harmless.
+
+        Args:
+            source_path: Absolute path to the live repo directory.
+            alias_name: Global alias name used only for logging.
+
+        Returns:
+            True if drift detected and matching files found, False otherwise.
+        """
+        try:
+            config_service = get_config_service()
+            drift = config_service.sync_repo_extensions_if_drifted(source_path)
+            if drift is not None and (drift.added or drift.removed):
+                drifted_exts = drift.added | drift.removed
+                _exclude = {
+                    ".git",
+                    "node_modules",
+                    "__pycache__",
+                    ".code-indexer",
+                    ".versioned",
+                }
+                if has_files_with_extensions(source_path, drifted_exts, _exclude):
+                    logger.info(
+                        "Extension drift detected (%d added, %d removed) "
+                        "and matching files found for %s -- triggering reconcile",
+                        len(drift.added),
+                        len(drift.removed),
+                        alias_name,
+                    )
+                    return True
+                logger.info(
+                    "Extension drift detected for %s but no matching files "
+                    "found -- using normal incremental index",
+                    alias_name,
+                )
+        except Exception as e:
+            logger.warning(
+                "Could not sync extensions before index for %s: %s",
+                alias_name,
+                e,
+            )
+        return False
 
     def _detect_existing_indexes(self, repo_path: Path) -> Dict[str, bool]:
         """
