@@ -105,7 +105,7 @@ After every E2E test, query the server log store for ERROR/WARNING entries. Use 
 ### Lint and CI
 
 ```bash
-./lint.sh                         # ruff, black, mypy
+./lint.sh                         # ruff check, ruff format check, mypy
 git push && gh run list --limit 5
 gh run view <run-id> --log-failed
 ruff check --fix src/ tests/
@@ -137,7 +137,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 
 ### X-Ray Sandbox Security Boundary (Epic #968 / Story #970)
 
-Three defense layers: AST whitelist (Layer 1) + stripped builtins (Layer 2) + multiprocessing isolation (Layer 3). Dunder-access block via 24-name `DUNDER_ATTR_BLOCKLIST`. Timeout: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), +1.0s SIGKILL grace. Pipe read BEFORE `is_alive()`. NO `signal.alarm` (FastAPI worker threads).
+Three defense layers: AST whitelist (Layer 1) + stripped builtins (Layer 2) + multiprocessing isolation (Layer 3). Dunder-access block via 39-name `DUNDER_ATTR_BLOCKLIST`. Timeout: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), +1.0s SIGKILL grace. Pipe read BEFORE `is_alive()`. NO `signal.alarm` (FastAPI worker threads).
 
 -> Full reference: `docs/xray-sandbox.md`
 
@@ -171,7 +171,7 @@ Two-phase pipeline: Phase 1 regex walk -> Phase 2 sandboxed evaluator over `XRay
 - Three error codes exactly: `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401).
 - Kill switch returns HTTP **503 NOT 403**.
 - Recovery codes (10, bcrypt-hashed) grant narrow `scope=totp_repair` only -- never full-scope.
-- TOTP replay prevention via atomic CAS on `last_used_otp_timestamp`.
+- TOTP replay prevention via atomic CAS on `last_used_otp_counter`.
 
 -> Full reference: `docs/totp-elevation.md`
 
@@ -250,7 +250,7 @@ Sync runs BEFORE indexing in refresh path. All git ops on mutable base path only
 | **CLI** | FilesystemVectorStore (`.code-indexer/index/`) | Single dev, local |
 | **Daemon** | Same + in-memory cache, Unix socket at `.code-indexer/daemon.sock` | ~5ms cached vs ~1s disk |
 
-Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-3), 1536 (voyage-3-large).
+Container-free, instant setup. Git-aware: blob hashes (clean) / text content (dirty). VoyageAI dims: 1024 (voyage-code-3), 1536 (voyage-large-2).
 
 **Server mode**: separate deployment. Cluster (`storage_mode: postgres`) shares PostgreSQL. See `docs/server-deployment.md`, `docs/cluster-architecture.md`.
 
@@ -284,7 +284,7 @@ cidx watch / watch-stop / stop         # Daemon controls
 
 ## Embedding Provider (VoyageAI)
 
-Only provider in v8.0+. Tokenizer: `embedded_voyage_tokenizer.py` (NOT voyageai library). 120k tokens/batch limit, automatic batching. Models: voyage-3 (1024 dims, default), voyage-3-large (1536 dims).
+Primary provider. Cohere also supported since v9.8. Tokenizer: `embedded_voyage_tokenizer.py` (NOT voyageai library). 120k tokens/batch limit, automatic batching. Models: voyage-code-3 (1024 dims, default), voyage-large-2 (1536 dims).
 
 ---
 

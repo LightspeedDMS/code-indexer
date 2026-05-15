@@ -432,7 +432,7 @@ CIDX can index and semantically search entire git commit history:
 
 **Initialize Handshake** (CRITICAL for Claude Code connection):
 - Method: `initialize` - MUST be first client-server interaction
-- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "9.22.0" } }`
+- Server Response: `{ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "Neo", "version": "__version__" } }` (dynamic value from `src/code_indexer/__init__.py`; currently `10.34.0`)
 - Required for OAuth flow completion - Claude Code calls `initialize` after authentication
 
 **Version Notes**:
@@ -478,6 +478,8 @@ Key components:
 - Distributed job reconciliation that reclaims abandoned jobs from crashed nodes (`src/code_indexer/server/services/job_reconciliation_service.py`)
 - Per-node system metrics collection written to `node_metrics` PostgreSQL table (`src/code_indexer/server/services/node_metrics_writer_service.py`)
 - PostgreSQL schema managed by numbered migration files in `src/code_indexer/server/storage/postgres/migrations/sql/`
+
+Note: As of v10.34.0, there are 25 migrations (001-025). See `src/code_indexer/server/storage/postgres/migrations/sql/` for the complete list.
 
 For full details see [Cluster Architecture Guide](cluster-architecture.md).
 For setup and operations see [Cluster Setup Guide](cluster-setup.md).

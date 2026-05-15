@@ -137,6 +137,8 @@ All endpoints are under `/api/admin/maintenance/`.
 
 **Authentication Required**: All maintenance endpoints require admin authentication. Include a valid Bearer token in the Authorization header:
 
+Note: `POST /enter` and `POST /exit` endpoints are additionally restricted to localhost callers via `require_localhost`. Requests from non-loopback addresses will be rejected regardless of authentication.
+
 ```bash
 curl -X POST http://localhost:8000/api/admin/maintenance/enter \
   -H "Authorization: Bearer YOUR_ADMIN_TOKEN"

@@ -47,8 +47,8 @@ All keys live in the `memory_retrieval_config` object in the server runtime conf
 |-----|------|---------|-------------|
 | `memory_retrieval_enabled` | bool | `false` | Master on/off switch. Set to `true` to activate the pipeline. |
 | `memory_retrieval_limit` | int | `5` | Maximum number of memory candidates passed to HNSW retrieval. |
-| `memory_voyage_min_score` | float | `0.75` | Minimum HNSW similarity score for a memory candidate to survive the first filter. |
-| `memory_cohere_min_score` | float | `0.5` | Minimum Cohere rerank score for a candidate to survive the second filter (only applied when the reranker is active). |
+| `memory_voyage_min_score` | float | `0.5` | Minimum HNSW similarity score for a memory candidate to survive the first filter. |
+| `memory_cohere_min_score` | float | `0.4` | Minimum Cohere rerank score for a candidate to survive the second filter (only applied when the reranker is active). |
 | `memory_reranker_enabled` | bool | `false` | Whether to apply the Cohere reranker to memory candidates. |
 
 ---

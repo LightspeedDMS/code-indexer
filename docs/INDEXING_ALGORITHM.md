@@ -216,7 +216,7 @@ vector_store.upsert_batch(collection_name, points)
 ## Performance Optimizations
 
 ### 1. Token-Aware Batching
-- **Problem**: VoyageAI API has 120,000 token limit per request
+- **Problem**: VoyageAI API has 120,000 token limit per batch request for voyage-code-3
 - **Solution**: Dynamic batching with 90% safety margin (108,000 tokens)
 - **Implementation**: Accumulate chunks until approaching limit, then submit batch
 
@@ -285,8 +285,7 @@ The system maintains visibility of all files being processed simultaneously:
 
 ### Chunking Configuration
 - **Model-aware sizing**: 
-  - voyage-code-3: 4096 tokens
-  - nomic-embed-text: 2048 tokens
+  - voyage-code-3: 4096 tokens (chunk size; model context is 32,000 tokens)
 - **Overlap**: Configurable overlap between chunks
 - **Line boundaries**: Respect code structure
 

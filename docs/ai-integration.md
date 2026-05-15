@@ -1,14 +1,3 @@
-FACT-CHECKED
-
-**Verification Date**: 2025-12-31
-**Accuracy**: 92% (23/25 major claims verified)
-**Corrections Made**: 2 critical corrections (OAuth version, MCP tool count)
-**Confidence**: HIGH - All claims verified against source code
-
-See: docs/ai-integration-fact-check.md for detailed verification report
-
----
-
 # AI Platform Integration
 
 Complete guide to integrating CIDX with AI assistants for semantic code search in conversations.
@@ -235,7 +224,7 @@ See [CIDX MCP Bridge](../README.md#cidx-mcp-bridge-for-claude-desktop) for compl
 
 See: [Delegation Functions Guide](delegation-functions.md) for complete documentation.
 
-Total: **131 MCP tools** available
+Total: **148 MCP tools** available
 
 ### Permissions
 

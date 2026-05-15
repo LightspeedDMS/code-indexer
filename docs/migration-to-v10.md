@@ -81,9 +81,7 @@ firing duplicate jobs across nodes.
 New MCP tools: `create_memory`, `edit_memory`, `delete_memory`, `search_code` (now
 includes a `relevant_memories` field when search_mode is semantic or hybrid).
 
-**Operator configuration**: `memory_retrieval_enabled` defaults to `true`. Kill
-switch effective immediately (no restart). VoyageAI is required for memory
-retrieval - Cohere reranker optional.
+**Operator configuration**: `memory_retrieval_enabled` defaults to `false`. Operators must explicitly enable it via the Web UI Config Screen. Kill switch effective immediately (no restart). VoyageAI is required for memory retrieval - Cohere reranker optional.
 
 ### TOTP Step-Up Elevation (Epic #922)
 

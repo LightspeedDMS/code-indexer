@@ -241,7 +241,7 @@ source_provider: cohere       # Result from Cohere
 
 ## Query Parameters
 
-CIDX supports **23 query parameters** across CLI, REST API, and MCP interfaces.
+CIDX supports **28 query parameters** (23 CLI + 5 API-only) across CLI, REST API, and MCP interfaces.
 
 ### Core Parameters
 
@@ -249,7 +249,7 @@ CIDX supports **23 query parameters** across CLI, REST API, and MCP interfaces.
 |-----------|----------|------|---------|-------------|
 | **query** | QUERY (positional) | string | required | Search query text |
 | **limit** | --limit N | int | 10 | Maximum results (1-100) |
-| **min_score** | --min-score N | float | 0.5 | Minimum similarity score (0.0-1.0) |
+| **min_score** | --min-score N | float | None | Minimum similarity score (0.0-1.0) |
 
 **Examples**:
 ```bash
@@ -804,9 +804,7 @@ cidx query "anything" --time-range-all --quiet
 
 ## Fact-Check Summary
 
-**Status**: FACT-CHECKED (2025-01-20)
-
-**Verification Scope**: All technical claims, parameter specifications, performance metrics, and code examples validated against CIDX implementation v10.0.0.
+**Verification Scope**: All technical claims, parameter specifications, performance metrics, and code examples validated against CIDX implementation.
 
 ### Corrections Made
 
@@ -949,8 +947,6 @@ cidx query "anything" --time-range-all --quiet
 - **Corrections Applied**: 1 factual error corrected (temporal index file path)
 
 **Fact-checker**: Claude Opus 4.5 (fact-checking agent)
-**Verification Date**: 2025-01-20
-**Version Reference**: v10.0.0
 
 ---
 

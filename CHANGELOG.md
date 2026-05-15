@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.34.0 (2026-05-15) — Comprehensive Documentation Overhaul
+
+### Fixed
+- 75+ verified factual corrections across 30 documentation files
+- README.md: install tags updated to current version, Cohere dimensions 2048->1536, VoyageAI model names corrected to canonical (voyage-code-3, voyage-large-2), server start command fixed, dep_map timeout default 600->1800
+- CLAUDE.md: DUNDER_ATTR_BLOCKLIST count 24->39, TOTP field name corrected, lint.sh description fixed, Cohere provider acknowledged
+- xray-sandbox.md: Story #993 changes reflected (SAFE_BUILTINS 27->34, Groups F+G added, banned list corrected, test count 112->303)
+- server-deployment.md: flat-key config warning added, TTL key name corrected, stale versions updated
+- query-guide.md: parameter count corrected to 28, min_score default fixed to None
+- memory-retrieval-operator-guide.md: wrong defaults fixed (voyage 0.75->0.5, cohere 0.5->0.4)
+- migration-to-v10.md: memory_retrieval_enabled default corrected to false
+- Stale migration counts (3->25), phantom module/test paths, dead links, and stale fact-check headers cleaned across 20+ files
+- docs/CHANGELOG.md replaced with redirect to root CHANGELOG (was 180+ versions behind)
+
+### Changed
+- Memory index reorganized by category (Safety, Quality, Workflow, Architecture, References)
+- Removed 2 transient project memories (completed bug package, time-bound staging mission)
+- Added 5 previously unindexed timeless memory files to MEMORY.md
+
 ## v10.33.0 (2026-05-15) — Auto-Reconcile on Extension Drift
 
 ### Added

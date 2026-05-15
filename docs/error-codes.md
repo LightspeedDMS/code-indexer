@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CIDX server uses a centralized error code system for consistent, traceable logging. Each error code uniquely identifies a specific error condition, enabling accurate issue tracking, deduplication, and actionable monitoring. The system is production-ready with 93.7% deployment coverage across the codebase.
+The CIDX server uses a centralized error code system for consistent, traceable logging. Each error code uniquely identifies a specific error condition, enabling accurate issue tracking, deduplication, and actionable monitoring. The system is production-ready with 93.7% deployment coverage across the codebase (point-in-time figure recorded at the time of writing; actual coverage may differ).
 
 ## Format Specification
 
@@ -35,6 +35,7 @@ Examples:
 | SVC | Services | Service operations |
 | WEB | Web | Web routes and HTTP handlers |
 | APP | Application | Application lifecycle |
+| MONITOR | Monitoring | Health monitoring and observability |
 
 ## Usage
 
@@ -161,7 +162,6 @@ Run tests to ensure the migration doesn't break functionality:
 ```bash
 pytest tests/unit/server/test_error_codes.py -v
 pytest tests/unit/server/test_logging_utils.py -v
-pytest tests/e2e/test_error_code_logging.py -v
 ```
 
 ## Production Deployment Status
