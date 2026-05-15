@@ -152,8 +152,29 @@ def _collect_io_metrics_with_state(state: Dict[str, Any]) -> Dict[str, float]:
     return result
 
 
-def _collect_volume_info() -> List[Dict[str, Any]]:
-    """Collect disk partition usage for each mounted volume."""
+def _build_volume_entry(
+    mount_point: str, device: str, fstype: str, usage: Any
+) -> Dict[str, Any]:
+    """Build a volume info dict from partition attributes and psutil disk usage."""
+    return {
+        "mount_point": mount_point,
+        "device": device,
+        "fstype": fstype,
+        "total_gb": round(usage.total / (1024**3), 1),
+        "used_gb": round(usage.used / (1024**3), 1),
+        "free_gb": round(usage.free / (1024**3), 1),
+        "used_percent": usage.percent,
+    }
+
+
+def _collect_volume_info(nfs_validator: Any = None) -> List[Dict[str, Any]]:
+    """Collect disk partition usage for each mounted volume.
+
+    Args:
+        nfs_validator: Optional NfsMountValidator instance. When provided and
+            mounted, appends an NFS golden repo volume entry (if not already
+            present from the normal partition scan).
+    """
     import psutil
 
     volumes: List[Dict[str, Any]] = []
@@ -162,15 +183,9 @@ def _collect_volume_info() -> List[Dict[str, Any]]:
             try:
                 usage = psutil.disk_usage(part.mountpoint)
                 volumes.append(
-                    {
-                        "mount_point": part.mountpoint,
-                        "device": part.device,
-                        "fstype": part.fstype,
-                        "total_gb": round(usage.total / (1024**3), 1),
-                        "used_gb": round(usage.used / (1024**3), 1),
-                        "free_gb": round(usage.free / (1024**3), 1),
-                        "used_percent": usage.percent,
-                    }
+                    _build_volume_entry(
+                        part.mountpoint, part.device, part.fstype, usage
+                    )
                 )
             except Exception as exc:
                 logger.debug(
@@ -179,10 +194,48 @@ def _collect_volume_info() -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.debug("Could not enumerate disk partitions: %s", exc)
 
+    # Include NFS golden repo volume when validator is available and mounted.
+    # Skip if the mount point was already captured by the normal partition scan.
+    if nfs_validator is not None:
+        try:
+            if nfs_validator.is_mounted():
+                nfs_mount_path = nfs_validator.get_mount_path()
+                # Guard against double-appending if the NFS validator is called
+                # more than once for the same mount; the OS partition scan uses
+                # the raw device name so it never produces a "Golden Repos (NFS)"
+                # entry — checking the label avoids suppressing the validator
+                # entry when the OS scan happens to cover the same mountpoint.
+                already_labeled = any(
+                    v.get("device") == "Golden Repos (NFS)" for v in volumes
+                )
+                if not already_labeled:
+                    usage = psutil.disk_usage(nfs_mount_path)
+                    nfs_fstype = "nfs"
+                    try:
+                        for partition in psutil.disk_partitions(all=True):
+                            if partition.mountpoint == nfs_mount_path:
+                                nfs_fstype = partition.fstype
+                                break
+                    except Exception as exc:
+                        logger.debug(
+                            "Could not inspect NFS partition type for %s: %s",
+                            nfs_mount_path,
+                            exc,
+                        )
+                    volumes.append(
+                        _build_volume_entry(
+                            nfs_mount_path, "Golden Repos (NFS)", nfs_fstype, usage
+                        )
+                    )
+        except (PermissionError, OSError) as e:
+            logger.debug("Cannot access NFS golden repo volume: %s", e)
+
     return volumes
 
 
-def _collect_metrics(node_id: str, node_ip: str, io_state: Dict[str, Any]) -> dict:
+def _collect_metrics(
+    node_id: str, node_ip: str, io_state: Dict[str, Any], nfs_validator: Any = None
+) -> dict:
     """Collect all system metrics for this node using psutil.
 
     Args:
@@ -190,6 +243,7 @@ def _collect_metrics(node_id: str, node_ip: str, io_state: Dict[str, Any]) -> di
         node_ip: IP address string for this node.
         io_state: Mutable dict persisted between calls for I/O rate calculation.
                   Pass the same dict on every call for the same service instance.
+        nfs_validator: Optional NfsMountValidator instance for NFS volume inclusion.
     """
     import psutil
 
@@ -201,7 +255,7 @@ def _collect_metrics(node_id: str, node_ip: str, io_state: Dict[str, Any]) -> di
 
     memory = _collect_memory_metrics()
     io = _collect_io_metrics_with_state(io_state)
-    volumes = _collect_volume_info()
+    volumes = _collect_volume_info(nfs_validator=nfs_validator)
 
     return {
         "node_id": node_id,
@@ -232,12 +286,19 @@ class NodeMetricsWriterService:
         node_id: Optional[str] = None,
         write_interval: int = _DEFAULT_WRITE_INTERVAL,
         retention_seconds: int = _DEFAULT_RETENTION_SECONDS,
+        # nfs_validator typed as Any to avoid circular import; callers pass
+        # NfsMountValidator instances or None (Story #1002).
+        nfs_validator: Any = None,
     ) -> None:
         self._backend = backend
         self._node_id: str = node_id if node_id is not None else socket.gethostname()
         self._node_ip: str = _get_local_ip()
         self._write_interval = write_interval
         self._retention_seconds = retention_seconds
+        # nfs_validator typed as Any to avoid a circular import with the
+        # storage.shared.nfs_validator module; callers pass NfsMountValidator
+        # instances or None.
+        self._nfs_validator = nfs_validator
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         # Persistent state for I/O rate calculation across write cycles
@@ -259,7 +320,10 @@ class NodeMetricsWriterService:
         try:
             with self._io_state_lock:
                 snapshot = _collect_metrics(
-                    self._node_id, self._node_ip, self._io_state
+                    self._node_id,
+                    self._node_ip,
+                    self._io_state,
+                    nfs_validator=self._nfs_validator,
                 )
             self._backend.write_snapshot(snapshot)
         except Exception:
