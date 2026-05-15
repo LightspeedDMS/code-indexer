@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.35.0 (2026-05-15) — NFS Golden Repo Volume Monitoring
+
+### Added
+- NFS golden repo volume appears on dashboard alongside local disk volumes in cluster mode (Story #1002)
+- Device label "Golden Repos (NFS)" with accurate metrics from psutil.disk_usage() and correct fstype (nfs/nfs4)
+- NFS volume correctly absent in standalone mode or when mount is down
+- Graceful OSError handling when NFS mount becomes stale or inaccessible
+- Both dashboard paths covered: standalone health endpoint (_get_mounted_volumes) and cluster node_metrics carousel (_collect_volume_info)
+- NfsMountValidator.get_mount_path() method for external consumers
+- NFS mount auto-detection in lifespan via psutil.disk_partitions(all=True) with longest-match selection
+
 ## v10.34.0 (2026-05-15) — Comprehensive Documentation Overhaul
 
 ### Fixed

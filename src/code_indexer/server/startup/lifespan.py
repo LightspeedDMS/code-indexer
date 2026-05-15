@@ -2287,6 +2287,56 @@ def make_lifespan(
                         postgres_dsn=_pg_dsn,
                     )
 
+                    # Story #1002: Detect NFS mount for golden repo volume monitoring.
+                    # Typed as Any because NfsMountValidator is imported conditionally
+                    # inside the try block — the type is unavailable at declaration
+                    # time without a forward reference that would complicate the import.
+                    # On any detection failure the value stays None, which disables NFS
+                    # volume reporting gracefully (non-fatal degradation by design).
+                    _nfs_validator_for_health: Any = None
+                    try:
+                        import psutil as _nfs_psutil
+
+                        _gr_resolved = Path(golden_repos_dir).resolve()
+                        # Find the most specific (longest mountpoint) NFS partition
+                        # that contains the golden repos directory. Use
+                        # Path.is_relative_to() for boundary-safe containment so
+                        # /mnt/repos-backup is not matched by mountpoint /mnt/repos.
+                        _best_nfs_part = None
+                        _best_nfs_len = 0
+                        for _nfs_part in _nfs_psutil.disk_partitions(all=True):
+                            if _nfs_part.fstype not in ("nfs", "nfs4"):
+                                continue
+                            if not _gr_resolved.is_relative_to(
+                                Path(_nfs_part.mountpoint)
+                            ):
+                                continue
+                            if len(_nfs_part.mountpoint) > _best_nfs_len:
+                                _best_nfs_part = _nfs_part
+                                _best_nfs_len = len(_nfs_part.mountpoint)
+                        if _best_nfs_part is not None:
+                            from code_indexer.server.storage.shared.nfs_validator import (
+                                NfsMountValidator,
+                            )
+
+                            _nfs_validator_for_health = NfsMountValidator(
+                                _best_nfs_part.mountpoint
+                            )
+                            logger.info(
+                                "Story #1002: NFS golden repo volume detected at %s"
+                                " (fstype=%s)",
+                                _best_nfs_part.mountpoint,
+                                _best_nfs_part.fstype,
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                    except Exception as _nfs_err:
+                        # Detection failure is non-fatal: NFS volume reporting is
+                        # disabled for this startup, local volumes still visible.
+                        logger.debug(
+                            "Could not detect NFS mount for golden repos: %s", _nfs_err
+                        )
+                    app.state.nfs_validator = _nfs_validator_for_health
+
                     # Story #527: Initialize HealthCheckService singleton with
                     # postgres mode so _check_database_health uses PG connectivity.
                     from code_indexer.server.services.health_service import (
@@ -2296,6 +2346,7 @@ def make_lifespan(
                     get_health_service(
                         storage_mode="postgres",
                         postgres_dsn=_pg_dsn,
+                        nfs_validator=_nfs_validator_for_health,
                     )
 
                     # Bug #580: Gate housekeeping services behind leader election.
@@ -2428,6 +2479,7 @@ def make_lifespan(
             _node_metrics_writer = NodeMetricsWriterService(
                 backend=_nm_backend,
                 node_id=_nm_node_id,
+                nfs_validator=getattr(app.state, "nfs_validator", None),
             )
             _node_metrics_writer.start()
             app.state.node_metrics_writer = _node_metrics_writer

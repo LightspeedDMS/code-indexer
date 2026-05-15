@@ -94,6 +94,10 @@ class NfsMountValidator:
         """Quick check: mount point exists and is a mountpoint."""
         return self._mount_point.exists() and os.path.ismount(str(self._mount_point))
 
+    def get_mount_path(self) -> str:
+        """Return the configured mount point path."""
+        return str(self._mount_point)
+
     def check_path_accessible(self, path: str, timeout: float = 5.0) -> bool:
         """Check if a specific path under the mount is accessible.
 
