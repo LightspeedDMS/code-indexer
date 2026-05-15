@@ -10,10 +10,11 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import json
 import logging
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, Set, runtime_checkable
 
+from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 from ..utils.config_manager import (
     CidxMetaBackupConfig,
     LifecycleAnalysisConfig,
@@ -21,9 +22,20 @@ from ..utils.config_manager import (
     ServerConfig,
     ServerConfigManager,
 )
-from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ExtensionDrift:
+    """Describes which file extensions were added or removed relative to server config.
+
+    Returned by sync_repo_extensions_if_drifted() when drift is detected.
+    Both sets contain bare extension names without leading dots (e.g. 'py', 'jsonl').
+    """
+
+    added: Set[str] = field(default_factory=set)
+    removed: Set[str] = field(default_factory=set)
 
 
 def _activated_reaper_settings(config: ServerConfig) -> Dict[str, Any]:
@@ -241,6 +253,7 @@ class ConfigService:
         else:
             self._config = config
 
+        assert self._config is not None  # All branches above set self._config
         return self._config
 
     def get_config(self) -> ServerConfig:
@@ -1938,37 +1951,55 @@ class ConfigService:
         except Exception as e:
             logger.warning("Could not seed extensions for %s: %s", repo_path, e)
 
-    def sync_repo_extensions_if_drifted(self, repo_path: str) -> None:
+    def sync_repo_extensions_if_drifted(
+        self, repo_path: str
+    ) -> Optional[ExtensionDrift]:
         """
         Sync repo config if extensions drifted from server config (Story #223 - AC7).
 
         Called before refresh indexing. No-op if already in sync or config missing.
+        Returns ExtensionDrift describing which extensions were added/removed when drift
+        is detected, or None when already in sync or when repo config is absent/unreadable.
 
         Args:
             repo_path: Filesystem path to the repository
+
+        Returns:
+            ExtensionDrift with added/removed sets if drift was detected, None otherwise.
         """
         config = self.get_config()
         if config.indexing_config is None:
-            return
+            return None
         server_exts = config.indexing_config.indexable_extensions
-        cli_exts_sorted = sorted([ext.lstrip(".") for ext in server_exts])
+        server_exts_bare: Set[str] = {ext.lstrip(".") for ext in server_exts}
+        cli_exts_sorted = sorted(server_exts_bare)
 
         cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
         if not cidx_config_path.exists():
-            return
+            return None
 
         try:
             with open(cidx_config_path, "r") as f:
                 repo_config = json.load(f)
-            current_exts = sorted(repo_config.get("file_extensions", []))
-            if current_exts == cli_exts_sorted:
-                return  # Already in sync, do not rewrite
+            current_exts_bare: Set[str] = set(repo_config.get("file_extensions", []))
+            current_exts_sorted = sorted(current_exts_bare)
+            if current_exts_sorted == cli_exts_sorted:
+                return None  # Already in sync, do not rewrite
+            added = server_exts_bare - current_exts_bare
+            removed = current_exts_bare - server_exts_bare
             repo_config["file_extensions"] = [ext.lstrip(".") for ext in server_exts]
             with open(cidx_config_path, "w") as f:
                 json.dump(repo_config, f, indent=2)
-            logger.info("Synced drifted file_extensions for %s", repo_path)
+            logger.info(
+                "Synced drifted file_extensions for %s (%d added, %d removed)",
+                repo_path,
+                len(added),
+                len(removed),
+            )
+            return ExtensionDrift(added=added, removed=removed)
         except Exception as e:
             logger.warning("Could not sync extensions for %s: %s", repo_path, e)
+            return None
 
     def check_config_update(self) -> bool:
         """Check if config version changed in PG (called periodically).

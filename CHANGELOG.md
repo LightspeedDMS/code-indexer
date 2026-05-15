@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.33.0 (2026-05-15) — Auto-Reconcile on Extension Drift
+
+### Added
+- Extension drift detection in refresh scheduler: when server-side file extension config changes (additions or removals), the next refresh automatically triggers `--reconcile` to re-scan the full repository, even if there are no git or local file changes.
+- `ExtensionDrift` dataclass in ConfigService captures added/removed extensions from `sync_repo_extensions_if_drifted()`.
+- `has_files_with_extensions()` short-circuit file scanner with directory pruning for efficient drift-triggered file existence checks.
+- `_check_extension_drift()` helper in RefreshScheduler, called before both git and local repo early-return paths to ensure drift is never skipped.
+- Crash recovery (interrupted metadata) OR-logic with drift detection: either condition alone triggers `--reconcile`.
+
+### Fixed
+- Extension drift check was unreachable during normal scheduled refreshes when no git/local changes were detected (early return bypassed the drift block). Drift detection now runs before both early-return exits.
+
 ## v10.32.0 (2026-05-14) — Fix GlobalRepoOperations startup warning in cluster mode
 
 ### Fixed
