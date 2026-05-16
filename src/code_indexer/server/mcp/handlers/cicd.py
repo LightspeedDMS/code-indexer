@@ -86,7 +86,12 @@ def _get_personal_credential_for_host(
         config_service = get_config_service()
         server_dir = config_service.config_manager.server_dir
         db_path = str(server_dir / "data" / "cidx_server.db")
-        storage_mode = config_service.config_manager.load_config().storage_mode
+        server_config = config_service.config_manager.load_config()
+        if server_config is None:
+            raise RuntimeError(
+                "Server config unavailable; cannot create git credential manager"
+            )
+        storage_mode = server_config.storage_mode
         manager = create_git_credential_manager(
             db_path=db_path,
             server_dir=str(server_dir),

@@ -11,7 +11,7 @@ and write to the same shared store.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
@@ -35,7 +35,9 @@ class PostgresGlobalRegistryAdapter:
 
     def get_global_repo(self, alias_name: str) -> Optional[Dict[str, Any]]:
         """Return a single repo dict by alias, mirroring GlobalRegistry.get_global_repo()."""
-        return self._backend.get_repo(alias_name)
+        # _backend is typed Any (supports multiple backend protocols); get_repo() is
+        # documented to return Optional[Dict[str, Any]] for all backend implementations.
+        return cast(Optional[Dict[str, Any]], self._backend.get_repo(alias_name))
 
     def update_enable_temporal(self, alias_name: str, enable_temporal: bool) -> None:
         """Delegate to backend's update_enable_temporal()."""

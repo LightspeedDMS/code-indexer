@@ -8473,7 +8473,12 @@ def _create_admin_git_credentials_page_response(
     config_service = get_config_service()
     server_dir = config_service.config_manager.server_dir
     db_path = str(server_dir / "data" / "cidx_server.db")
-    storage_mode = config_service.config_manager.load_config().storage_mode
+    _cfg = config_service.config_manager.load_config()
+    if _cfg is None:
+        raise RuntimeError(
+            "Server config unavailable; cannot create git credential manager"
+        )
+    storage_mode = _cfg.storage_mode
     manager = create_git_credential_manager(
         db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
     )
@@ -8510,7 +8515,12 @@ def admin_git_credentials_list_partial(request: Request):
     config_service = get_config_service()
     server_dir = config_service.config_manager.server_dir
     db_path = str(server_dir / "data" / "cidx_server.db")
-    storage_mode = config_service.config_manager.load_config().storage_mode
+    _cfg = config_service.config_manager.load_config()
+    if _cfg is None:
+        raise RuntimeError(
+            "Server config unavailable; cannot create git credential manager"
+        )
+    storage_mode = _cfg.storage_mode
     manager = create_git_credential_manager(
         db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
     )
@@ -8555,7 +8565,13 @@ async def admin_git_credentials_add(request: Request):
         config_service = get_config_service()
         server_dir = config_service.config_manager.server_dir
         db_path = str(server_dir / "data" / "cidx_server.db")
-        storage_mode = config_service.config_manager.load_config().storage_mode
+        # cast: load_config() is Optional[ServerConfig] but is always non-None when
+        # the server is running; a raise here would be swallowed by except Exception.
+        from code_indexer.server.config.server_config import ServerConfig as _SC
+
+        storage_mode = cast(
+            _SC, config_service.config_manager.load_config()
+        ).storage_mode
         manager = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
@@ -8596,7 +8612,11 @@ def admin_git_credentials_delete(request: Request, credential_id: str):
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
         server_dir = config_service.config_manager.server_dir
-        storage_mode = config_service.config_manager.load_config().storage_mode
+        # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
+        # flag .storage_mode access — config is always present when server is running.
+        storage_mode = cast(
+            Any, config_service.config_manager.load_config()
+        ).storage_mode
         manager = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
@@ -8774,7 +8794,12 @@ def _create_user_git_credentials_page_response(
     config_service = get_config_service()
     db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
     server_dir = config_service.config_manager.server_dir
-    storage_mode = config_service.config_manager.load_config().storage_mode
+    _cfg = config_service.config_manager.load_config()
+    if _cfg is None:
+        raise RuntimeError(
+            "Server config unavailable; cannot create git credential manager"
+        )
+    storage_mode = _cfg.storage_mode
     manager = create_git_credential_manager(
         db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
     )
@@ -8811,7 +8836,12 @@ def user_git_credentials_list_partial(request: Request):
     config_service = get_config_service()
     db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
     server_dir = config_service.config_manager.server_dir
-    storage_mode = config_service.config_manager.load_config().storage_mode
+    _cfg = config_service.config_manager.load_config()
+    if _cfg is None:
+        raise RuntimeError(
+            "Server config unavailable; cannot create git credential manager"
+        )
+    storage_mode = _cfg.storage_mode
     manager = create_git_credential_manager(
         db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
     )
@@ -8855,7 +8885,11 @@ async def user_git_credentials_add(request: Request):
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
         server_dir = config_service.config_manager.server_dir
-        storage_mode = config_service.config_manager.load_config().storage_mode
+        # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
+        # flag .storage_mode access — config is always present when server is running.
+        storage_mode = cast(
+            Any, config_service.config_manager.load_config()
+        ).storage_mode
         manager = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )
@@ -8893,7 +8927,11 @@ def user_git_credentials_delete(request: Request, credential_id: str):
             config_service.config_manager.server_dir / "data" / "cidx_server.db"
         )
         server_dir = config_service.config_manager.server_dir
-        storage_mode = config_service.config_manager.load_config().storage_mode
+        # load_config() returns Optional[ServerConfig]; cast to Any so mypy does not
+        # flag .storage_mode access — config is always present when server is running.
+        storage_mode = cast(
+            Any, config_service.config_manager.load_config()
+        ).storage_mode
         manager = create_git_credential_manager(
             db_path=db_path, server_dir=str(server_dir), storage_mode=storage_mode
         )

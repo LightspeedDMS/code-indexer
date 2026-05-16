@@ -262,6 +262,9 @@ class LlmLeaseStateManager:
 
     def _pg_save_state(self, state: LlmLeaseState) -> None:
         encrypted_blob = self._serialize_state(state)
+        assert self._pool is not None, (
+            "_pg_save_state called before set_connection_pool()"
+        )
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO cluster_secrets (key_name, key_value) "
@@ -274,6 +277,9 @@ class LlmLeaseStateManager:
         logger.debug("Saved LLM lease state to cluster_secrets (PG)")
 
     def _pg_load_state(self) -> Optional[LlmLeaseState]:
+        assert self._pool is not None, (
+            "_pg_load_state called before set_connection_pool()"
+        )
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
@@ -284,6 +290,9 @@ class LlmLeaseStateManager:
         return self._deserialize_blob(row[0])
 
     def _pg_clear_state(self) -> None:
+        assert self._pool is not None, (
+            "_pg_clear_state called before set_connection_pool()"
+        )
         with self._pool.connection() as conn:
             conn.execute(
                 "DELETE FROM cluster_secrets WHERE key_name = %s",

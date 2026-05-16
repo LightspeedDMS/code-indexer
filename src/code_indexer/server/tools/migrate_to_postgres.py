@@ -742,6 +742,7 @@ class SqliteToPostgresMigrator:
             ),
         ]
         results: Dict[str, int] = {}
+        assert psycopg is not None, "psycopg must be available at this call site"
         with psycopg.connect(self._pg_conn_str) as conn:
             for table_name, select_sql, update_sql in _TABLE_CONFIGS:
                 count = _reencrypt_table_rows(

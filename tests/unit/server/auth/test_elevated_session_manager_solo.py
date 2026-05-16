@@ -5,6 +5,7 @@ Also covers cluster-mode wiring: set_connection_pool(), data-dir path, PG backen
 
 import sqlite3
 import time
+from typing import Optional
 
 import pytest
 
@@ -428,7 +429,7 @@ class _EsmPgCursor:
     def __init__(self, conn: "_EsmPgConn", row_factory) -> None:
         self._conn = conn
         self._row_factory = row_factory
-        self._last_result = None
+        self._last_result: Optional[sqlite3.Cursor] = None
 
     def execute(self, query: str, params=None) -> "_EsmPgCursor":
         self._last_result = self._conn.execute(query, params)

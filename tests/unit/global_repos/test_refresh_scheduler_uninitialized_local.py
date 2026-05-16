@@ -299,7 +299,9 @@ class TestInitializedLocalRepoProceedsNormally:
 
         index_source_calls = []
 
-        def capture_index_source(alias_name, source_path, progress_callback=None, force_reconcile=False):
+        def capture_index_source(
+            alias_name, source_path, progress_callback=None, force_reconcile=False
+        ):
             index_source_calls.append((alias_name, source_path))
             raise RuntimeError("Stop after capture")  # Prevent full execution
 

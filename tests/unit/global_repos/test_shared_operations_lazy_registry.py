@@ -61,6 +61,7 @@ def test_no_warning_when_backend_registry_not_yet_set(tmp_path, caplog):
     mock_registry = MagicMock()
 
     import code_indexer.global_repos.shared_operations as mod
+
     importlib.reload(mod)
 
     with patch.dict("sys.modules", {"code_indexer.server.app": fake_app_module}):
@@ -97,6 +98,7 @@ def test_lazy_registry_resolves_postgres_backend_at_access_time(tmp_path):
     fake_app_module = SimpleNamespace(app=fake_app)
 
     import code_indexer.global_repos.shared_operations as mod
+
     importlib.reload(mod)
 
     mock_factory = MagicMock(name="get_server_global_registry")
@@ -153,6 +155,7 @@ def test_two_phase_resolution(tmp_path):
     fake_app_module = SimpleNamespace(app=fake_app)
 
     import code_indexer.global_repos.shared_operations as mod
+
     importlib.reload(mod)
 
     mock_factory = MagicMock(name="get_server_global_registry")
@@ -206,13 +209,12 @@ def test_registry_caches_on_first_access_with_backend(tmp_path):
 
     mock_backend = MagicMock()
     mock_backend.global_repos = MagicMock(name="pg_global_repos_backend")
-    fake_state = _make_app_state(
-        storage_mode="postgres", backend_registry=mock_backend
-    )
+    fake_state = _make_app_state(storage_mode="postgres", backend_registry=mock_backend)
     fake_app = _make_app(fake_state)
     fake_app_module = SimpleNamespace(app=fake_app)
 
     import code_indexer.global_repos.shared_operations as mod
+
     importlib.reload(mod)
 
     mock_factory = MagicMock(name="get_server_global_registry")
@@ -249,6 +251,7 @@ def test_registry_falls_back_to_sqlite_when_no_app_module(tmp_path, caplog):
     mock_sqlite_registry = MagicMock(name="sqlite_registry")
 
     import code_indexer.global_repos.shared_operations as mod
+
     importlib.reload(mod)
 
     # Setting a sys.modules entry to None causes "import X" to raise ImportError.
