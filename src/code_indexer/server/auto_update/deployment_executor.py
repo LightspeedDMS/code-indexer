@@ -68,11 +68,25 @@ CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS = 180  # How long to wait for npm global insta
 # Story #845: Codex CLI install timeout constants
 CODEX_CLI_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
 CODEX_VERSION_PROBE_TIMEOUT_SECONDS = 10  # Quick binary probe after install
+# Claude CLI install constants (same pattern as CODEX_CLI_INSTALL_TIMEOUT_SECONDS above)
+CLAUDE_INSTALL_URL = "https://claude.ai/install.sh"
+CLAUDE_INSTALL_TIMEOUT_SECONDS = (
+    300  # curl + sh pipeline; generous budget matches Codex
+)
+
 # Story #997: Pace-maker install/update constants
 PACE_MAKER_REPO_URL = "https://github.com/LightspeedDMS/claude-pace-maker.git"
 PACE_MAKER_GIT_TIMEOUT = 60
 PACE_MAKER_INSTALL_TIMEOUT = 120
 PACE_MAKER_CMD_TIMEOUT = 10
+
+# Step 15: FHS-mandated standard system PATH components for Linux (POSIX).
+# These directories are identical across all supported distributions (RHEL, Ubuntu, Debian).
+# Mirrors the convention used for /usr/bin/systemctl elsewhere in this file.
+SYSTEMD_DEFAULT_PATH_SUFFIX = "/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
+
+# Maximum bytes of subprocess stderr captured in warning log messages.
+MAX_ERROR_SNIPPET_LENGTH = 200
 
 
 class DeploymentExecutor:
@@ -2914,6 +2928,41 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 13: Initial Claude CLI installer (non-fatal).
+        # Step 11 updates an existing install via npm; this step installs
+        # from scratch via the official installer when claude is not on PATH.
+        if not self._ensure_claude_cli_installed():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-164",
+                    "Claude CLI install skipped or failed - "
+                    "research assistant feature may be unavailable",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 14: Cluster mode only - set up NFS symlinks for Claude home and research data (non-fatal)
+        if not self._ensure_nfs_research_symlinks():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-165",
+                    "NFS research symlink setup failed - "
+                    "research sessions may not be accessible across cluster nodes",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Step 15: Ensure ~/.local/bin is in PATH in the systemd service unit (non-fatal)
+        if not self._ensure_systemd_claude_path():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-171",
+                    "systemd PATH update failed - "
+                    "Claude CLI may not be found when invoked via systemd service",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         logger.info(
             "Deployment execution completed successfully",
             extra={"correlation_id": get_correlation_id()},
@@ -3288,4 +3337,366 @@ class DeploymentExecutor:
         if not self._run_codex_npm_install():
             return False
         self._probe_codex_version()
+        return True
+
+    def _ensure_claude_cli_installed(self) -> bool:
+        """Idempotently install Claude CLI if not already present on PATH.
+
+        Checks shutil.which("claude") first — if found, skips installation.
+        Otherwise runs the official installer via curl + sh pipeline.
+
+        Non-fatal: failures return False with a WARNING; deployment continues.
+
+        Returns:
+            True if claude was already installed or installation succeeded.
+            False if the installer returned nonzero, timed out, or raised.
+        """
+        if shutil.which("claude") is not None:
+            logger.info(
+                "Claude CLI already installed, skipping install",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        logger.info(
+            "Claude CLI not found on PATH, running installer",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            result = subprocess.run(
+                ["sh", "-c", f"curl -fsSL {CLAUDE_INSTALL_URL} | sh"],
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_INSTALL_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-160",
+                        f"Claude CLI installer failed (rc={result.returncode}): "
+                        f"{result.stderr[:200]}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+            logger.info(
+                "Claude CLI installed successfully",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-161",
+                    f"Claude CLI installer timed out after {CLAUDE_INSTALL_TIMEOUT_SECONDS}s",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-162",
+                    f"Claude CLI install failed with exception: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
+    def _validate_nfs_mount_point(mount_point: str) -> Path:
+        """Validate and return the NFS mount point as an absolute Path.
+
+        Raises:
+            ValueError: If mount_point is empty or not an absolute path.
+        """
+        if not mount_point:
+            raise ValueError("mount_point is empty")
+        p = Path(mount_point)
+        if not p.is_absolute():
+            raise ValueError(f"mount_point must be absolute, got: {mount_point!r}")
+        return p
+
+    def _ensure_single_nfs_symlink(self, local_path: Path, nfs_target: Path) -> None:
+        """Idempotently create one NFS symlink for a research data directory.
+
+        If local_path is already a correct symlink, skips. If it is a regular
+        directory, migrates contents to nfs_target (skipping collisions) then
+        removes the dir. Finally creates the symlink.
+        """
+        if local_path.is_symlink():
+            if local_path.readlink() == nfs_target:
+                logger.debug(
+                    f"NFS symlink already correct: {local_path} -> {nfs_target}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return
+            local_path.unlink()
+
+        nfs_target.mkdir(parents=True, exist_ok=True)
+
+        if local_path.exists() and local_path.is_dir():
+            for item in local_path.iterdir():
+                if item.is_symlink():
+                    item.unlink()
+                    continue
+                dest = nfs_target / item.name
+                if not dest.exists():
+                    shutil.move(str(item), str(dest))
+            try:
+                shutil.rmtree(str(local_path))
+            except OSError as exc:
+                logger.warning(
+                    f"Could not fully remove {local_path} after migration: {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.symlink_to(nfs_target)
+        logger.info(
+            f"Created NFS research symlink: {local_path} -> {nfs_target}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    def _consolidate_old_claude_projects(self, nfs_base: Path) -> None:
+        """Migrate data from old .claude-projects/ NFS layout to .claude/projects/.
+
+        Previous Step 14 stored projects at {nfs_base}/.claude-projects/.
+        New layout stores everything under {nfs_base}/.claude/.
+        This moves data from old location to new, preserving existing data.
+        Files that already exist at the destination are skipped (no overwrite).
+        The old directory is removed after migration; if items remain due to
+        collisions the rmdir fails and a debug log is emitted for manual cleanup.
+        """
+        old_projects = nfs_base / ".claude-projects"
+        new_projects = nfs_base / ".claude" / "projects"
+
+        if not old_projects.exists() or not old_projects.is_dir():
+            return
+
+        new_projects.mkdir(parents=True, exist_ok=True)
+        for item in old_projects.iterdir():
+            dest = new_projects / item.name
+            if not dest.exists():
+                shutil.move(str(item), str(dest))
+
+        try:
+            old_projects.rmdir()
+        except OSError as exc:
+            logger.debug(
+                f"Old .claude-projects/ not empty after migration (collision items remain); "
+                f"leaving for manual cleanup: {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        logger.info(
+            f"Consolidated old .claude-projects/ into {new_projects}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    def _ensure_nfs_research_symlinks(self) -> bool:
+        """Idempotently set up NFS symlinks for research session data in cluster mode.
+
+        Only runs when storage_mode == 'postgres' AND ontap.mount_point is a
+        valid absolute path.
+
+        Creates two symlinks so any cluster node shares Claude state and research data:
+          ~/.claude/              -> {mount_point}/.claude/
+          ~/.cidx-server/research/ -> {mount_point}/.cidx-research/
+
+        Non-fatal: any exception returns False with a WARNING.
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+
+            if not config or getattr(config, "storage_mode", "") != "postgres":
+                logger.debug(
+                    "NFS research symlinks: not in cluster mode, skipping",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            ontap = getattr(config, "ontap", None)
+            if not ontap:
+                logger.debug(
+                    "NFS research symlinks: no ontap config, skipping",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            try:
+                nfs_base = self._validate_nfs_mount_point(
+                    getattr(ontap, "mount_point", "")
+                )
+            except ValueError:
+                logger.debug(
+                    "NFS research symlinks: mount_point not set or invalid, skipping",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            home = Path.home()
+
+            # Consolidate old .claude-projects/ layout if present
+            self._consolidate_old_claude_projects(nfs_base)
+
+            for local_path, nfs_target in [
+                (home / ".claude", nfs_base / ".claude"),
+                (home / ".cidx-server" / "research", nfs_base / ".cidx-research"),
+            ]:
+                self._ensure_single_nfs_symlink(local_path, nfs_target)
+
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-163",
+                    f"NFS research symlink setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    @staticmethod
+    def _build_updated_service_content(content: str, local_bin: str) -> str:
+        """Return updated systemd service content with local_bin prepended to PATH.
+
+        Scans for an Environment="PATH=..." line:
+          - Already has local_bin as an exact segment: returns content unchanged.
+          - Has PATH line but missing local_bin: replaces that line in-place,
+            preserving the original line's indentation and line ending.
+          - No PATH line: appends a full default PATH line at end.
+
+        Raises TypeError if either argument is not a str.
+        Raises ValueError if local_bin is empty.
+        """
+        if not isinstance(content, str) or not isinstance(local_bin, str):
+            raise TypeError("content and local_bin must be str")
+        if not local_bin:
+            raise ValueError("local_bin must not be empty")
+
+        lines = content.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith('Environment="PATH='):
+                continue
+            path_value = stripped[len('Environment="PATH=') : -1]
+            if local_bin in path_value.split(":"):
+                return content
+            # Preserve original leading whitespace and trailing line ending
+            indent = line[: len(line) - len(line.lstrip())]
+            ending = line[len(line.rstrip("\r\n")) :]
+            lines[i] = f'{indent}Environment="PATH={local_bin}:{path_value}"{ending}'
+            return "".join(lines)
+
+        if not content.endswith("\n"):
+            content += "\n"
+        return (
+            content + f'Environment="PATH={local_bin}:{SYSTEMD_DEFAULT_PATH_SUFFIX}"\n'
+        )
+
+    def _write_service_file_via_sudo(self, service_file: Path, content: str) -> bool:
+        """Write content to a systemd service file via sudo tee. Returns True on success."""
+        try:
+            result = subprocess.run(
+                ["sudo", "tee", str(service_file)],
+                input=content,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-169",
+                    f"sudo tee could not be invoked for {service_file}: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        if result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-169",
+                    f"sudo tee failed writing {service_file}: "
+                    f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        return True
+
+    def _reload_systemd_daemon(self) -> bool:
+        """Run sudo systemctl daemon-reload. Returns True on success."""
+        try:
+            result = subprocess.run(
+                ["sudo", "systemctl", "daemon-reload"],
+                capture_output=True,
+                text=True,
+            )
+        except OSError as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-170",
+                    f"systemctl daemon-reload could not be invoked: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        if result.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-170",
+                    f"systemctl daemon-reload failed: "
+                    f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        return True
+
+    def _ensure_systemd_claude_path(self) -> bool:
+        """Ensure the cidx-server systemd service unit has ~/.local/bin in PATH.
+
+        Non-fatal: returns False with WARNING when the service file is missing
+        or any subprocess call fails.
+        """
+        service_file = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+        if not service_file.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-168",
+                    f"Systemd service file not found: {service_file}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        local_bin = str(Path.home() / ".local" / "bin")
+        original = service_file.read_text()
+        updated = self._build_updated_service_content(original, local_bin)
+
+        if updated == original:
+            logger.debug(
+                f"PATH already contains {local_bin} in {service_file}, skipping",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if not self._write_service_file_via_sudo(service_file, updated):
+            return False
+
+        if not self._reload_systemd_daemon():
+            return False
+
+        logger.info(
+            f"Updated PATH in {service_file} to include {local_bin}",
+            extra={"correlation_id": get_correlation_id()},
+        )
         return True

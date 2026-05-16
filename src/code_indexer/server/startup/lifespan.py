@@ -2153,6 +2153,63 @@ def make_lifespan(
                                 extra={"correlation_id": get_correlation_id()},
                             )
 
+                    # Bug #998 variant: Late-initialize LLM lease lifecycle
+                    # on cluster secondary nodes.  Early init (line ~687) runs
+                    # before ConfigService has PG pool, so secondary nodes
+                    # that lack subscription mode in local SQLite skip it.
+                    if llm_lifecycle_service is None:
+                        try:
+                            _config_svc.load_config()
+                            _late_llm_config = _config_svc.get_config()
+                            _late_claude_config = (
+                                _late_llm_config.claude_integration_config
+                                if _late_llm_config
+                                else None
+                            )
+                            if (
+                                _late_claude_config
+                                and _late_claude_config.claude_auth_mode
+                                == "subscription"
+                                and _late_claude_config.llm_creds_provider_url
+                                and _late_claude_config.llm_creds_provider_api_key
+                            ):
+                                from code_indexer.server.services.llm_creds_client import (
+                                    LlmCredsClient,
+                                )
+                                from code_indexer.server.config.llm_lease_state import (
+                                    LlmLeaseStateManager,
+                                )
+                                from code_indexer.server.services.claude_credentials_file_manager import (
+                                    ClaudeCredentialsFileManager,
+                                )
+                                from code_indexer.server.services.llm_lease_lifecycle import (
+                                    LlmLeaseLifecycleService,
+                                )
+
+                                _late_llm_client = LlmCredsClient(
+                                    provider_url=_late_claude_config.llm_creds_provider_url,
+                                    api_key=_late_claude_config.llm_creds_provider_api_key,
+                                )
+                                llm_lifecycle_service = LlmLeaseLifecycleService(
+                                    client=_late_llm_client,
+                                    state_manager=LlmLeaseStateManager(),
+                                    credentials_manager=ClaudeCredentialsFileManager(),
+                                )
+                                llm_lifecycle_service.start(
+                                    consumer_id=_late_claude_config.llm_creds_provider_consumer_id
+                                )
+                                app.state.llm_lifecycle_service = llm_lifecycle_service
+                                logger.info(
+                                    "LLM lease lifecycle late-initialized from PG config "
+                                    "(cluster node had no subscription mode in local config)",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+                        except Exception as _late_llm_exc:
+                            logger.warning(
+                                "LLM lease lifecycle late-init failed (non-fatal): %s",
+                                _late_llm_exc,
+                            )
+
                     # Bug #587: Wire cluster pool for activated repos
                     if (
                         golden_repo_manager is not None

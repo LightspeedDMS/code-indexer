@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.36.0 (2026-05-16) — NFS Symlink Sharing for Claude CLI Sessions
+
+### Added
+- Auto-updater Step 13: Claude CLI install verification with npm-based installation fallback
+- Auto-updater Step 14: NFS symlink creation for entire ~/.claude/ directory, enabling shared Claude CLI sessions across all cluster nodes via single NFS mount
+- Auto-updater Step 15: systemd PATH configuration ensuring Claude CLI binary is accessible to cidx-server service
+- Migration tool --nfs-mount parameter: converts local Claude state directories to shared NFS storage with consolidation of old per-project claude directories
+- LLM lease lifecycle late-init in lifespan: secondary cluster nodes that boot before scheduler assigns subscriptions now properly initialize LLM services on first config sync
+
+### Changed
+- Removed old Step 15 credential-sync methods (superseded by full ~/.claude/ symlink approach)
+- DeploymentExecutor step count increased from 12 to 15
+
 ## v10.35.0 (2026-05-15) — NFS Golden Repo Volume Monitoring
 
 ### Added

@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -751,6 +752,150 @@ class SqliteToPostgresMigrator:
             conn.commit()
         return results
 
+    @staticmethod
+    def _validate_nfs_mount(nfs_mount: str) -> Optional[str]:
+        """Validate nfs_mount argument. Returns error string or None if valid."""
+        if not nfs_mount or not isinstance(nfs_mount, str):
+            return f"NFS mount must be a non-empty string, got: {nfs_mount!r}"
+        if not Path(nfs_mount).is_absolute():
+            return f"NFS mount must be absolute path, got: {nfs_mount}"
+        if not Path(nfs_mount).exists():
+            return f"NFS mount point does not exist: {nfs_mount}"
+        return None
+
+    @staticmethod
+    def _consolidate_old_claude_projects_nfs(
+        nfs_base: Path,
+    ) -> Optional[Dict[str, Any]]:
+        """Move old {nfs_base}/.claude-projects/ into {nfs_base}/.claude/projects/.
+
+        Files that already exist at the destination are skipped (no overwrite).
+        Attempts rmdir() after migration; if items remain due to collisions, logs
+        a warning and reports partial status so skipped items survive for manual cleanup.
+
+        Returns a consolidation report dict if the old dir existed, else None.
+        """
+        old_projects = nfs_base / ".claude-projects"
+        if not old_projects.exists() or not old_projects.is_dir():
+            return None
+
+        new_projects = nfs_base / ".claude" / "projects"
+        new_projects.mkdir(parents=True, exist_ok=True)
+        moved_count = 0
+        for item in old_projects.iterdir():
+            dest = new_projects / item.name
+            if not dest.exists():
+                shutil.move(str(item), str(dest))
+                moved_count += 1
+
+        status = "ok"
+        try:
+            old_projects.rmdir()
+        except OSError as exc:
+            status = "partial"
+            logger.warning(
+                "Old .claude-projects/ not empty after migration (collision items "
+                "remain); leaving for manual cleanup: %s",
+                exc,
+            )
+
+        logger.info("Consolidated %d items from old .claude-projects/", moved_count)
+        return {"status": status, "items_moved": moved_count}
+
+    def migrate_nfs(
+        self,
+        nfs_mount: str,
+        home_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        """Migrate local Claude home and research directories to NFS shared storage.
+
+        Sets up symlinks so all cluster nodes share Claude state:
+          ~/.claude/               -> {nfs_mount}/.claude/
+          ~/.cidx-server/research/ -> {nfs_mount}/.cidx-research/
+
+        Handles migration from old .claude-projects/ layout. Idempotent.
+
+        Args:
+            nfs_mount: Absolute path to the NFS mount point.
+            home_path: Override for the home directory. Defaults to Path.home().
+                       Intended for testing; production callers omit this.
+
+        Returns:
+            A migration report dict with keys per directory.
+        """
+        report: Dict[str, Any] = {}
+
+        error = self._validate_nfs_mount(nfs_mount)
+        if error:
+            report["error"] = error
+            return report
+
+        nfs_base = Path(nfs_mount)
+        home = home_path if home_path is not None else Path.home()
+
+        consolidation = self._consolidate_old_claude_projects_nfs(nfs_base)
+        if consolidation is not None:
+            report["claude_projects_consolidation"] = consolidation
+
+        report["claude_home"] = self._migrate_dir_to_nfs(
+            home / ".claude", nfs_base / ".claude"
+        )
+        report["research"] = self._migrate_dir_to_nfs(
+            home / ".cidx-server" / "research", nfs_base / ".cidx-research"
+        )
+        return report
+
+    @staticmethod
+    def _migrate_dir_to_nfs(local_path: Path, nfs_target: Path) -> Dict[str, Any]:
+        """Migrate a single directory to NFS and create symlink.
+
+        If local_path is already a correct symlink to nfs_target, returns early.
+        Moves non-symlink contents to nfs_target (skipping collisions).
+        Attempts rmdir() after migration; if items remain due to collisions or
+        permission errors, logs a warning but continues to create the symlink.
+
+        Returns dict with migration status and items_moved count.
+        """
+        result: Dict[str, Any] = {
+            "local": str(local_path),
+            "nfs_target": str(nfs_target),
+            "status": "ok",
+            "items_moved": 0,
+        }
+
+        if local_path.is_symlink():
+            if local_path.readlink() == nfs_target:
+                result["status"] = "already_symlinked"
+                return result
+            local_path.unlink()
+
+        nfs_target.mkdir(parents=True, exist_ok=True)
+
+        if local_path.exists() and local_path.is_dir():
+            for item in local_path.iterdir():
+                if item.is_symlink():
+                    item.unlink()
+                    continue
+                dest = nfs_target / item.name
+                if not dest.exists():
+                    shutil.move(str(item), str(dest))
+                    result["items_moved"] += 1
+            try:
+                local_path.rmdir()
+            except OSError as exc:
+                logger.warning(
+                    "Source directory %s not empty after NFS migration "
+                    "(collision items remain); leaving for manual cleanup: %s",
+                    local_path,
+                    exc,
+                )
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.symlink_to(nfs_target)
+        logger.info("Created NFS symlink: %s -> %s", local_path, nfs_target)
+
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -908,6 +1053,13 @@ def _build_arg_parser():  # type: ignore[return]
         default=None,
         help="Migrate only this table (optional).",
     )
+    parser.add_argument(
+        "--nfs-mount",
+        default=None,
+        help="NFS mount point for cluster shared storage (e.g. /mnt/cow-storage). "
+        "When provided, migrates ~/.claude/ and ~/.cidx-server/research/ to NFS "
+        "with symlinks for cluster-wide sharing.",
+    )
     return parser
 
 
@@ -959,6 +1111,26 @@ def main() -> None:
         print("WARNING: Row counts do not match. Review errors above.")
         sys.exit(1)
     print("Migration complete. All row counts match.")
+
+    # NFS migration (optional, for cluster setup)
+    nfs_mount = getattr(args, "nfs_mount", None)
+    if nfs_mount:
+        print("\nRunning NFS migration...")
+        nfs_report = migrator.migrate_nfs(nfs_mount)
+        _print_nfs_report(nfs_report)
+
+
+def _print_nfs_report(report: Dict[str, Any]) -> None:
+    """Print a human-readable NFS migration report to stdout."""
+    if "error" in report:
+        print(f"\nNFS migration error: {report['error']}")
+        return
+    print("\nNFS migration report:")
+    for key, info in report.items():
+        if isinstance(info, dict) and "status" in info:
+            status = info["status"]
+            moved = info.get("items_moved", "n/a")
+            print(f"  {key}: {status} (items moved: {moved})")
 
 
 def _print_migration_report(report: Dict[str, Any]) -> None:
