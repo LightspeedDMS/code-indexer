@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -87,7 +87,8 @@ def _get_inner(body: dict[str, Any]) -> dict[str, Any]:
         return {}
     text = content[0].get("text", "")
     try:
-        return json.loads(text)
+        # json.loads returns Any; MCP handler always returns a JSON object here.
+        return cast(dict[str, Any], json.loads(text))
     except (json.JSONDecodeError, TypeError):
         return {"_raw": text}
 

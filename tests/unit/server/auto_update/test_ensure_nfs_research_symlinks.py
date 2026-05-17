@@ -110,8 +110,8 @@ def _run_symlinks(
             ):
                 if move_side_effect is not None:
                     with patch("shutil.move", side_effect=move_side_effect):
-                        return executor._ensure_nfs_research_symlinks()
-                return executor._ensure_nfs_research_symlinks()
+                        return bool(executor._ensure_nfs_research_symlinks())
+                return bool(executor._ensure_nfs_research_symlinks())
 
 
 # ---------------------------------------------------------------------------

@@ -25,9 +25,9 @@ class TestMultiSearchLimitsConfigDataclass:
     # ==========================================================================
 
     def test_default_multi_search_max_workers(self):
-        """AC1: Default multi_search_max_workers should be 2 (per resource audit)."""
+        """AC1: Default multi_search_max_workers should be 8 (Story #1009 thread pool optimization)."""
         config = MultiSearchLimitsConfig()
-        assert config.multi_search_max_workers == 2
+        assert config.multi_search_max_workers == 8
 
     def test_default_multi_search_timeout_seconds(self):
         """AC1: Default multi_search_timeout_seconds should be 30."""
@@ -35,9 +35,9 @@ class TestMultiSearchLimitsConfigDataclass:
         assert config.multi_search_timeout_seconds == 30
 
     def test_default_scip_multi_max_workers(self):
-        """AC1: Default scip_multi_max_workers should be 2 (per resource audit)."""
+        """AC1: Default scip_multi_max_workers should be 8 (Story #1009 thread pool optimization)."""
         config = MultiSearchLimitsConfig()
-        assert config.scip_multi_max_workers == 2
+        assert config.scip_multi_max_workers == 8
 
     def test_default_scip_multi_timeout_seconds(self):
         """AC1: Default scip_multi_timeout_seconds should be 30."""
@@ -83,9 +83,9 @@ class TestServerConfigMultiSearchIntegration:
     def test_server_config_multi_search_limits_defaults(self):
         """ServerConfig should have default MultiSearchLimitsConfig values."""
         config = ServerConfig(server_dir="/tmp/test")
-        assert config.multi_search_limits_config.multi_search_max_workers == 2
+        assert config.multi_search_limits_config.multi_search_max_workers == 8
         assert config.multi_search_limits_config.multi_search_timeout_seconds == 30
-        assert config.multi_search_limits_config.scip_multi_max_workers == 2
+        assert config.multi_search_limits_config.scip_multi_max_workers == 8
         assert config.multi_search_limits_config.scip_multi_timeout_seconds == 30
 
 
@@ -102,7 +102,7 @@ class TestServerConfigManagerMultiSearchPersistence:
         config = config_manager.create_default_config()
 
         assert config.multi_search_limits_config is not None
-        assert config.multi_search_limits_config.multi_search_max_workers == 2
+        assert config.multi_search_limits_config.multi_search_max_workers == 8
 
     def test_custom_multi_search_config_saves_to_file(self, tmp_path):
         """Custom multi_search settings should persist when saved to config file."""
@@ -182,7 +182,7 @@ class TestServerConfigManagerMultiSearchPersistence:
 
         # Should have default values from __post_init__
         assert config.multi_search_limits_config is not None
-        assert config.multi_search_limits_config.multi_search_max_workers == 2
+        assert config.multi_search_limits_config.multi_search_max_workers == 8
         assert config.multi_search_limits_config.multi_search_timeout_seconds == 30
 
     def test_config_roundtrip_preserves_multi_search_settings(self, tmp_path):

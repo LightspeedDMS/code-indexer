@@ -112,7 +112,7 @@ def _run_without_file(executor):
 def _tee_payload(mock_run) -> str:
     """Return the stdin string passed to the first subprocess.run (sudo tee) call."""
     first_call = mock_run.call_args_list[0]
-    return first_call.kwargs.get("input", "")
+    return str(first_call.kwargs.get("input", ""))
 
 
 # ---------------------------------------------------------------------------

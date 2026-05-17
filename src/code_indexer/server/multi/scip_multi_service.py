@@ -73,7 +73,7 @@ class SCIPMultiService:
 
     def __init__(
         self,
-        max_workers: int = 2,
+        max_workers: int = 8,
         query_timeout_seconds: int = 30,
         reference_limit: int = DEFAULT_REFERENCE_LIMIT,
         dependency_depth: int = DEFAULT_DEPENDENCY_DEPTH,

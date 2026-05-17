@@ -337,7 +337,9 @@ class TestExecuteRefreshLocalRepoSourcePath:
 
         captured_source_paths = []
 
-        def capture_index_source(alias_name, source_path, progress_callback=None, force_reconcile=False):
+        def capture_index_source(
+            alias_name, source_path, progress_callback=None, force_reconcile=False
+        ):
             # Capture the source_path then stop — _create_snapshot never runs
             captured_source_paths.append(source_path)
             raise RuntimeError("Stop after capture")

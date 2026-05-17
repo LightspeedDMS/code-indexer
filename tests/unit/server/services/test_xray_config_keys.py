@@ -37,7 +37,7 @@ class TestXRayConfigDefaults:
         from code_indexer.server.utils.config_manager import XRayConfig
 
         cfg = XRayConfig()
-        assert cfg.xray_worker_threads == 2
+        assert cfg.xray_worker_threads == 4
 
     def test_can_override_defaults(self):
         """XRayConfig accepts custom values."""
@@ -127,7 +127,7 @@ class TestServerConfigXRayField:
         assert config.xray_config is not None
         assert isinstance(config.xray_config, XRayConfig)
         assert config.xray_config.xray_timeout_seconds == 120
-        assert config.xray_config.xray_worker_threads == 2
+        assert config.xray_config.xray_worker_threads == 4
 
     def test_dict_to_server_config_deserializes_xray(self, tmp_path):
         """_dict_to_server_config converts xray_config dict to XRayConfig dataclass."""
@@ -195,7 +195,7 @@ class TestXRayConfigServicePersistence:
         xray = config_service.get_all_settings()["xray"]
 
         assert xray["xray_timeout_seconds"] == 120
-        assert xray["xray_worker_threads"] == 2
+        assert xray["xray_worker_threads"] == 4
 
     def test_update_xray_timeout_seconds_persists(self, tmp_path):
         """update_setting('xray', 'xray_timeout_seconds', 60) persists to config."""

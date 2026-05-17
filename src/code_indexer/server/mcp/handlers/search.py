@@ -331,7 +331,7 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     )
 
     config = MultiSearchConfig.from_config(get_config_service())
-    service = MultiSearchService(config)
+    service = MultiSearchService.get_instance(config)
     try:
         response = service.search(request)
     except Exception as e:

@@ -47,6 +47,10 @@ _SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
 # a golden alias, causing false "Access denied" for the rightful owner.
 _OWNER_ENFORCED_TOOLS: frozenset = frozenset({"deactivate_repository"})
 
+# Timeout in seconds for sync tool handlers executed via run_in_executor.
+# Bug #1008: git_blame on repos with deep history can block indefinitely.
+HANDLER_TIMEOUT_SECONDS = 60
+
 from code_indexer.server.services.api_metrics_service import (  # noqa: E402
     api_metrics_service,
 )
@@ -214,7 +218,16 @@ async def _invoke_handler(
     else:
         loop = asyncio.get_running_loop()
         bound = functools.partial(handler, arguments, user, **extra_kwargs)
-        return await loop.run_in_executor(None, bound)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, bound),
+                timeout=HANDLER_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": f"Tool execution timed out after {HANDLER_TIMEOUT_SECONDS} seconds",
+            }
 
 
 def _validate_acting_users(value: Any) -> None:

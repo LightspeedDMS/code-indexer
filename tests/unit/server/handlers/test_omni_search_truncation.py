@@ -113,7 +113,7 @@ class TestOmniSearchAppliesTruncation:
                 errors=None,
             )
             mock_service.search = Mock(return_value=mock_response)
-            mock_service_class.return_value = mock_service
+            mock_service_class.get_instance.return_value = mock_service
 
             params = {
                 "repository_alias": ["repo-alpha-global", "repo-beta-global"],
@@ -171,7 +171,7 @@ class TestOmniSearchAppliesTruncation:
                 errors=None,
             )
             mock_service.search = Mock(return_value=mock_response)
-            mock_service_class.return_value = mock_service
+            mock_service_class.get_instance.return_value = mock_service
 
             params = {
                 "repository_alias": ["repo-alpha-global"],

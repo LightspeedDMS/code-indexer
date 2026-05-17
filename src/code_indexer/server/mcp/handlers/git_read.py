@@ -699,15 +699,140 @@ def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response({"success": False, "error": str(e)})
 
 
+# Bug #1008: line count above which blame output is cached and preview-truncated
+BLAME_TRUNCATION_LINE_THRESHOLD = 200
+
+# Canonical zero-value truncation metadata — shared between small-response and fallback paths
+_BLAME_TRUNC_ZERO: dict = {
+    "cache_handle": None,
+    "truncated": False,
+    "total_tokens": 0,
+    "preview_tokens": 0,
+    "total_pages": 0,
+    "has_more": False,
+}
+
+
+def _validate_git_blame_line_args(start_line: Any, end_line: Any) -> Optional[str]:
+    """Validate handler-level start_line/end_line inputs.
+
+    Returns an error string describing the first violation found, or None if valid.
+    Provides fast MCP error responses before the service layer is invoked.
+    """
+    if start_line is not None:
+        if not isinstance(start_line, int):
+            return f"start_line must be an integer, got {type(start_line).__name__}"
+        if start_line < 1:
+            return f"start_line must be >= 1, got {start_line}"
+    if end_line is not None:
+        if not isinstance(end_line, int):
+            return f"end_line must be an integer, got {type(end_line).__name__}"
+        if end_line < 1:
+            return f"end_line must be >= 1, got {end_line}"
+    if start_line is not None and end_line is not None and end_line < start_line:
+        return f"end_line ({end_line}) must be >= start_line ({start_line})"
+    return None
+
+
+def _serialize_blame_lines(blame_lines: list) -> List[dict]:
+    """Convert blame dataclass lines to JSON-serializable dicts."""
+    return [
+        {
+            "line_number": bl.line_number,
+            "commit_hash": bl.commit_hash,
+            "short_hash": bl.short_hash,
+            "author_name": bl.author_name,
+            "author_email": bl.author_email,
+            "author_date": bl.author_date,
+            "original_line_number": bl.original_line_number,
+            "content": bl.content,
+        }
+        for bl in blame_lines
+    ]
+
+
+def _apply_blame_truncation(
+    lines: List[dict], payload_cache: Any, content_limits: Any
+) -> tuple:
+    """Run PayloadCache + TruncationHelper on blame lines, returning (preview_lines, meta).
+
+    When payload_cache or content_limits is unavailable, logs a warning and gracefully
+    returns (full_lines, _BLAME_TRUNC_ZERO). This fallback is intentional: truncation
+    infrastructure may not be configured in all deployments, and failing hard would
+    break all blame responses on those deployments.
+    """
+    if payload_cache is None or content_limits is None:
+        logger.warning(
+            "Blame truncation infrastructure unavailable "
+            "(payload_cache=%s content_limits=%s); returning full response",
+            payload_cache is None,
+            content_limits is None,
+        )
+        return lines, _BLAME_TRUNC_ZERO.copy()
+
+    blame_json = json_module.dumps({"lines": lines})
+    from code_indexer.server.cache.truncation_helper import TruncationHelper
+
+    tr = TruncationHelper(payload_cache, content_limits).truncate_and_cache(
+        content=blame_json,
+        content_type="blame",
+    )
+    preview_lines = (
+        json_module.loads(tr.preview).get("lines", lines) if tr.truncated else lines
+    )
+    return preview_lines, {
+        "cache_handle": tr.cache_handle,
+        "truncated": tr.truncated,
+        "total_tokens": tr.original_tokens,
+        "preview_tokens": tr.preview_tokens,
+        "total_pages": tr.total_pages,
+        "has_more": tr.has_more,
+    }
+
+
+def _build_git_blame_response(
+    result: Any, lines: List[dict], total_lines: int, handler_utils: Any
+) -> dict:
+    """Build the success response dict for git_blame, applying truncation when needed.
+
+    When total_lines exceeds BLAME_TRUNCATION_LINE_THRESHOLD, fetches payload_cache
+    from app.state (may be None — _apply_blame_truncation logs a warning and falls
+    back to the full response in that deployment-specific case) and runs TruncationHelper.
+    """
+    if total_lines > BLAME_TRUNCATION_LINE_THRESHOLD:
+        payload_cache = getattr(
+            handler_utils.app_module.app.state, "payload_cache", None
+        )
+        content_limits = get_config_service().get_config().content_limits_config
+        response_lines, trunc_meta = _apply_blame_truncation(
+            lines, payload_cache, content_limits
+        )
+    else:
+        response_lines, trunc_meta = lines, _BLAME_TRUNC_ZERO.copy()
+
+    return {
+        "success": True,
+        "path": result.path,
+        "revision": result.revision,
+        "lines": response_lines,
+        "unique_commits": result.unique_commits,
+        "total_lines": total_lines,
+        **trunc_meta,
+    }
+
+
 def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_blame tool - get line-by-line blame annotations."""
-    leg = _get_legacy()
-    _resolve_git_repo_path = leg._resolve_git_repo_path
+    """Handler for git_blame tool - get line-by-line blame annotations.
+
+    Bug #1008: Handles BlameErrorResult (timeout) and truncates large responses.
+    """
+    from code_indexer.server.mcp.handlers import _utils as _handler_utils
 
     repository_alias = args.get("repository_alias")
     path = args.get("path")
+    start_line = args.get("start_line")
+    end_line = args.get("end_line")
 
-    # Validate required parameters
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
@@ -716,49 +841,36 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: path"}
         )
+    line_err = _validate_git_blame_line_args(start_line, end_line)
+    if line_err:
+        return _mcp_response({"success": False, "error": line_err})
 
     try:
-        # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        repo_path, error_msg = _get_legacy()._resolve_git_repo_path(
+            repository_alias, user.username
+        )
         if error_msg is not None:
             return _mcp_response({"success": False, "error": error_msg})
-        assert repo_path is not None  # narrowed by error_msg check above
+        assert repo_path is not None
 
-        # Create service and execute query
-        from code_indexer.global_repos.git_operations import GitOperationsService
+        from code_indexer.global_repos.git_operations import (
+            BlameErrorResult,
+            GitOperationsService,
+        )
 
-        service = GitOperationsService(Path(repo_path))
-        result = service.get_blame(
+        result = GitOperationsService(Path(repo_path)).get_blame(
             path=path,
             revision=args.get("revision"),
-            start_line=args.get("start_line"),
-            end_line=args.get("end_line"),
+            start_line=start_line,
+            end_line=end_line,
         )
 
-        # Convert dataclasses to dicts for JSON serialization
-        lines = [
-            {
-                "line_number": line.line_number,
-                "commit_hash": line.commit_hash,
-                "short_hash": line.short_hash,
-                "author_name": line.author_name,
-                "author_email": line.author_email,
-                "author_date": line.author_date,
-                "original_line_number": line.original_line_number,
-                "content": line.content,
-            }
-            for line in result.lines
-        ]
+        if isinstance(result, BlameErrorResult):
+            return _mcp_response({"success": False, "error": result.error})
 
-        return _mcp_response(
-            {
-                "success": True,
-                "path": result.path,
-                "revision": result.revision,
-                "lines": lines,
-                "unique_commits": result.unique_commits,
-            }
-        )
+        lines = _serialize_blame_lines(result.lines)
+        payload = _build_git_blame_response(result, lines, len(lines), _handler_utils)
+        return _mcp_response(payload)
 
     except ValueError as e:
         return _mcp_response({"success": False, "error": str(e)})

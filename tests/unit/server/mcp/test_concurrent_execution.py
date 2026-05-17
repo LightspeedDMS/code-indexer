@@ -80,6 +80,7 @@ def mock_omni_search_dependencies(search_side_effect=None):
                 mock_instance.search = Mock(return_value=default_response)
 
             mock_class = Mock(return_value=mock_instance)
+            mock_class.get_instance = Mock(return_value=mock_instance)
 
             mss_module.MultiSearchService = mock_class
             try:

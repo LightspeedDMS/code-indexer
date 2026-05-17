@@ -15,10 +15,11 @@ Implements:
 import logging
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from .multi_search_config import MultiSearchConfig
 from .multi_result_aggregator import MultiResultAggregator
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 # Constants for timeout recommendations
 MAX_RECOMMENDED_REPOS = 10
 RECOMMENDED_MIN_SCORE = 0.7
+
+# Story #1009: module-level singleton state so the ThreadPoolExecutor is
+# reused across MCP handler invocations instead of being torn down each call.
+_singleton_instance: Optional["MultiSearchService"] = None
+_singleton_lock: threading.Lock = threading.Lock()
 
 
 def _get_golden_repos_dir() -> str:
@@ -63,6 +69,33 @@ class MultiSearchService:
 
     Timeout: 30s default for all queries (configurable)
     """
+
+    @classmethod
+    def get_instance(cls, config: MultiSearchConfig) -> "MultiSearchService":
+        """Return the module-level singleton, creating it on first call (Story #1009).
+
+        Thread-safe via double-checked locking. Reuses the internal
+        ThreadPoolExecutor across MCP handler invocations.
+        """
+        global _singleton_instance
+        if _singleton_instance is None:
+            with _singleton_lock:
+                if _singleton_instance is None:
+                    _singleton_instance = cls(config)
+        return _singleton_instance
+
+    @classmethod
+    def _reset_singleton(cls) -> None:
+        """Reset the module-level singleton. For test isolation only.
+
+        Shuts down the executor before clearing the reference so threads
+        are released cleanly before the singleton is dropped.
+        """
+        global _singleton_instance
+        with _singleton_lock:
+            if _singleton_instance is not None:
+                _singleton_instance.thread_executor.shutdown(wait=False)
+            _singleton_instance = None
 
     def __init__(self, config: MultiSearchConfig):
         """
