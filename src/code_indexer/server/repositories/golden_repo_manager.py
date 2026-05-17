@@ -1213,7 +1213,7 @@ class GoldenRepoManager:
             # Clone full repository with complete history for semantic search.
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
-            cmd = ["git", "clone"]
+            cmd = ["git", "-c", "core.fsync=none", "clone"]
             if branch:
                 cmd.extend(["--branch", branch])
             cmd.extend([repo_url, clone_path])
@@ -2293,7 +2293,7 @@ class GoldenRepoManager:
     ) -> None:
         """Fetch remote and validate that target_branch exists (AC3)."""
         subprocess.run(
-            ["git", "fetch", "origin"],
+            ["git", "-c", "core.fsync=none", "fetch", "origin"],
             cwd=base_clone_path,
             capture_output=True,
             text=True,
@@ -2332,7 +2332,7 @@ class GoldenRepoManager:
             env=build_non_interactive_git_env(),
         )
         subprocess.run(
-            ["git", "pull", "origin", target_branch],
+            ["git", "-c", "core.fsync=none", "pull", "origin", target_branch],
             cwd=base_clone_path,
             capture_output=True,
             text=True,

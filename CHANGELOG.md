@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.39.0 (2026-05-17) — NFS Golden Repo Compatibility
+
+### Fixed
+- Git clone/fetch/pull operations on NFS-backed golden-repos storage now pass `-c core.fsync=none` to avoid fatal fsync I/O errors on NFS v4 mounts with Git 2.47+ (Bug #1010)
+
 ## v10.38.0 (2026-05-17) — Database and Config Stability Fixes
 
 ### Fixed
