@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.37.0 (2026-05-17) — Health Watchdog, Blame Hardening, and Thread Pool Optimization
+
+### Added
+- Health watchdog for cidx-server auto-restart via systemd timer with consecutive failure tracking and cooldown enforcement (Story #1007)
+- Git blame subprocess timeout (30s) with BlameErrorResult dataclass for graceful timeout handling (Bug #1008)
+- PayloadCache + TruncationHelper for blame response payload size management (Bug #1008)
+- MCP protocol handler timeout (60s) via asyncio.wait_for on run_in_executor calls (Bug #1008)
+- Configurable MCP dispatch thread pool (mcp_dispatch_pool_size, default 128) as asyncio default executor (Story #1009)
+- MultiSearchService singleton pattern to prevent redundant thread pool creation (Story #1009)
+
+### Fixed
+- Langfuse auto_span_logger _summarize_output now handles "lines" key from blame responses (Bug #1008)
+
+### Changed
+- Multi-search subsidiary pool defaults increased: multi_search_max_workers 2->8, scip_multi_max_workers 2->8, subprocess_max_workers 2->8 (Story #1009)
+- X-Ray worker threads default increased from 2 to 4 (Story #1009)
+
+### Removed
+- OmniSearchService dead code (213 lines) — functionality fully replaced by omni fan-out in search handlers (Story #1009)
+
 ## v10.36.0 (2026-05-16) — NFS Symlink Sharing for Claude CLI Sessions
 
 ### Added
