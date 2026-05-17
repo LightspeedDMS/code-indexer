@@ -88,21 +88,18 @@ class AutoSpanLogger:
         if not isinstance(output, dict):
             return output
 
-        if "results" not in output:
-            return output
+        for source_key, count_key, tmpl in (
+            ("results", "result_count", "{n} results returned"),
+            ("lines", "line_count", "{n} blame lines returned"),
+        ):
+            if source_key in output and isinstance(output[source_key], list):
+                summarized = output.copy()
+                summarized[count_key] = len(output[source_key])
+                summarized["summary"] = tmpl.format(n=len(output[source_key]))
+                del summarized[source_key]
+                return summarized
 
-        results = output["results"]
-        if not isinstance(results, list):
-            return output
-
-        # Replace results list with summary
-        summarized = output.copy()
-        result_count = len(results)
-        summarized["result_count"] = result_count
-        summarized["summary"] = f"{result_count} results returned"
-        del summarized["results"]
-
-        return summarized
+        return output
 
     async def intercept_tool_call(
         self,
