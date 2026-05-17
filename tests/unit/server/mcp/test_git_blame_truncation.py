@@ -95,9 +95,7 @@ def _blame_handler_context(
         patch(
             "code_indexer.server.mcp.handlers.git_read.get_config_service"
         ) as mock_cfg,
-        patch(
-            "code_indexer.server.mcp.handlers._utils.app_module"
-        ) as mock_app_mod,
+        patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_mod,
         patch(
             "code_indexer.server.cache.truncation_helper.TruncationHelper"
         ) as mock_th_cls,

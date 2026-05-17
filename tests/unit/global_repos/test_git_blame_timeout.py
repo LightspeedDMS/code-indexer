@@ -49,7 +49,9 @@ class TestGetBlameTimeout:
 
         assert isinstance(result, BlameErrorResult)
         assert result.success is False
-        assert result.error == f"Git blame timed out after {BLAME_TIMEOUT_SECONDS} seconds"
+        assert (
+            result.error == f"Git blame timed out after {BLAME_TIMEOUT_SECONDS} seconds"
+        )
 
     def test_get_blame_passes_timeout_to_run_git_command(self, git_service):
         """get_blame() must pass timeout=BLAME_TIMEOUT_SECONDS to run_git_command.

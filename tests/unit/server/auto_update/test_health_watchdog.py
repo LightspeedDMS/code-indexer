@@ -135,7 +135,7 @@ def _write_state(
 
 
 def _read_state(tmp_path: Path) -> dict:
-    return json.loads((tmp_path / STATE_FILE_NAME).read_text())
+    return json.loads((tmp_path / STATE_FILE_NAME).read_text())  # type: ignore[no-any-return]
 
 
 def _ok_response() -> MagicMock:
@@ -168,11 +168,11 @@ def _run_check(tmp_path: Path, wdog: HealthWatchdog, *, healthy: bool) -> MagicM
 
 
 def _failures(tmp_path: Path) -> int:
-    return _read_state(tmp_path)[_STATE_KEY_FAILURES]
+    return _read_state(tmp_path)[_STATE_KEY_FAILURES]  # type: ignore[no-any-return]
 
 
 def _last_ts(tmp_path: Path) -> Optional[str]:
-    return _read_state(tmp_path)[_STATE_KEY_LAST_TS]
+    return _read_state(tmp_path)[_STATE_KEY_LAST_TS]  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------

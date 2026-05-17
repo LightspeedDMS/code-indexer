@@ -39,6 +39,7 @@ class TestProtocolTimeout:
         When asyncio.wait_for raises asyncio.TimeoutError, _invoke_handler must
         catch it and return the exact timeout error response.
         """
+
         def slow_handler(arguments, user):
             # In production this would block for minutes on deep repos
             return {"ok": True}
@@ -69,6 +70,7 @@ class TestProtocolTimeout:
 
         Regression test: the wait_for wrapper must not break the normal execution path.
         """
+
         def fast_handler(arguments, user):
             return {"ok": True, "value": 42}
 

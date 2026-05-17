@@ -8,7 +8,6 @@ Fix 4: Add "lines" key handling analogous to the existing "results" key handling
 
 from unittest.mock import MagicMock
 
-import pytest
 
 from code_indexer.server.services.auto_span_logger import AutoSpanLogger
 
