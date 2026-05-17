@@ -1,5 +1,7 @@
 """Lifespan context manager for CIDX server startup and shutdown."""
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import anyio.to_thread
@@ -212,6 +214,27 @@ def make_lifespan(
                 f"Threadpool sized to {_threadpool_size} tokens (anyio default 40)",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+        # Story #1009: Set asyncio loop default executor so all sync MCP handlers
+        # dispatched via loop.run_in_executor(None, ...) share a pool large enough
+        # to absorb ~50 concurrent Claude MCP tool calls without saturating.
+        # Follows the same bootstrap fallback pattern as server_threadpool_size above.
+        _DEFAULT_MCP_POOL_SIZE: int = 128
+        _mcp_pool_size = (
+            getattr(startup_config, "mcp_dispatch_pool_size", _DEFAULT_MCP_POOL_SIZE)
+            if startup_config is not None
+            else _DEFAULT_MCP_POOL_SIZE
+        )
+        if _mcp_pool_size <= 0:
+            raise ValueError(
+                f"mcp_dispatch_pool_size must be > 0, got {_mcp_pool_size}"
+            )
+        _mcp_executor = ThreadPoolExecutor(max_workers=_mcp_pool_size)
+        asyncio.get_running_loop().set_default_executor(_mcp_executor)
+        logger.info(
+            f"MCP dispatch pool sized to {_mcp_pool_size} threads (Story #1009)",
+            extra={"correlation_id": get_correlation_id()},
+        )
 
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
         logger.info(
@@ -2584,6 +2607,9 @@ def make_lifespan(
             )
 
         yield  # Server is now running
+
+        # Story #1009: Shut down the MCP dispatch pool on server shutdown.
+        _mcp_executor.shutdown(wait=False)
 
         # Prevent test pollution across repeated TestClient/lifespan cycles:
         # the FastAPI lifespan instantiates a real TOTPService and stores it in

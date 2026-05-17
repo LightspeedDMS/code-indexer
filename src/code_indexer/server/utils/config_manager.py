@@ -26,6 +26,10 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
     }
 )
 
+# Story #1009 - bounds for mcp_dispatch_pool_size bootstrap config key (range 1-1024)
+_MCP_DISPATCH_POOL_MIN: int = 1
+_MCP_DISPATCH_POOL_MAX: int = 1024
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -621,14 +625,14 @@ class MultiSearchLimitsConfig:
     """
 
     # MultiSearchService settings
-    # Default 2 workers per resource audit (was 10)
-    multi_search_max_workers: int = 2
+    # Default 8 workers (Story #1009: enlarged from 2 for burst concurrency)
+    multi_search_max_workers: int = 8
     # Default 30 seconds timeout
     multi_search_timeout_seconds: int = 30
 
     # SCIPMultiService settings
-    # Default 2 workers per resource audit (was 10)
-    scip_multi_max_workers: int = 2
+    # Default 8 workers (Story #1009: enlarged from 2 for burst concurrency)
+    scip_multi_max_workers: int = 8
     # Default 30 seconds timeout
     scip_multi_timeout_seconds: int = 30
 
@@ -672,10 +676,10 @@ class BackgroundJobsConfig:
     # Jobs exceeding this limit stay in PENDING until a slot is available
     max_concurrent_background_jobs: int = 5
 
-    # Story #27: Maximum concurrent workers for SubprocessExecutor (default: 2)
+    # Story #27: Maximum concurrent workers for SubprocessExecutor
     # Controls parallelism of subprocess-based operations like regex search
-    # Default 2 per resource audit recommendation (was hardcoded to 1)
-    subprocess_max_workers: int = 2
+    # Default 8 (Story #1009: enlarged from 2 for burst concurrency)
+    subprocess_max_workers: int = 8
 
 
 @dataclass
@@ -740,7 +744,8 @@ class XRayConfig:
     xray_timeout_seconds: int = 120
 
     # ThreadPoolExecutor worker count for Phase 2 AST evaluation (range 1..8)
-    xray_worker_threads: int = 2
+    # Default 4 (Story #1009: enlarged from 2 for burst concurrency)
+    xray_worker_threads: int = 4
 
 
 @dataclass
@@ -1145,6 +1150,13 @@ class ServerConfig:
     # Default 256 (anyio default is 40). Bumped to absorb concurrent long-polls
     # without starving other endpoints. Set to 0 or negative to leave at anyio default.
     server_threadpool_size: int = 256
+
+    # Story #1009 - MCP thread pool optimization for burst concurrency (bootstrap-only).
+    # Sets the asyncio loop default ThreadPoolExecutor size so all sync MCP handlers
+    # dispatched via loop.run_in_executor(None, ...) share a pool large enough to
+    # absorb ~50 concurrent Claude MCP tool calls without saturating the executor.
+    # Range: 1-1024. Default 128.
+    mcp_dispatch_pool_size: int = 128
 
     # Story #908 / Epic #907 - Graph-channel anomaly repair (bootstrap-only, never DB).
     # Default True so fresh installs automatically run Phase 3.7 SELF_LOOP repair.
@@ -1979,6 +1991,17 @@ class ServerConfigManager:
         Raises:
             ValueError: If any configuration value is invalid
         """
+        # Validate mcp_dispatch_pool_size (Story #1009)
+        if not (
+            _MCP_DISPATCH_POOL_MIN
+            <= config.mcp_dispatch_pool_size
+            <= _MCP_DISPATCH_POOL_MAX
+        ):
+            raise ValueError(
+                f"mcp_dispatch_pool_size must be between {_MCP_DISPATCH_POOL_MIN} "
+                f"and {_MCP_DISPATCH_POOL_MAX}, got {config.mcp_dispatch_pool_size}"
+            )
+
         # Validate port range
         if not (1 <= config.port <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {config.port}")
