@@ -186,6 +186,7 @@ class BackgroundJobsPostgresBackend:
                             %s, %s,
                             %s, %s
                         )
+                        ON CONFLICT (job_id) DO NOTHING
                         """,
                         (
                             job_id,

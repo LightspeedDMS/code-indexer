@@ -1875,6 +1875,12 @@ class ServerConfigManager:
                 **config_dict["password_expiry_config"]
             )
 
+        # Bug #1006: Migrate legacy enforce_pace_maker_pacing_only -> pace_maker_mode
+        if "enforce_pace_maker_pacing_only" in config_dict:
+            old_enforce = config_dict.pop("enforce_pace_maker_pacing_only")
+            if "pace_maker_mode" not in config_dict:
+                config_dict["pace_maker_mode"] = "on" if old_enforce else "disabled"
+
         # Remove obsolete reindexing_config field (deleted in previous commit)
         config_dict.pop("reindexing_config", None)
 

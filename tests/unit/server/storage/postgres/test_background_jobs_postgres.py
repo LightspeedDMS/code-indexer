@@ -171,6 +171,48 @@ class TestSaveJob:
         _, params = cur.execute.call_args[0]
         assert params[6] is None
 
+    def test_save_job_duplicate_job_id_does_not_raise(self):
+        """
+        Given a job_id that was already inserted
+        When save_job() is called again with the same job_id
+        Then no exception is raised (ON CONFLICT (job_id) DO NOTHING).
+
+        Bug #1005: BackgroundJobManager._persist_jobs() writes the row first,
+        then JobTracker.register_job() calls save_job() again with the same
+        job_id. The second INSERT must be silently ignored.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool()
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        backend.save_job(
+            job_id="dup-job-1",
+            operation_type="index",
+            status="pending",
+            created_at="2026-01-01T00:00:00+00:00",
+            username="alice",
+            progress=0,
+        )
+
+        # Second call with the same job_id must not raise.
+        backend.save_job(
+            job_id="dup-job-1",
+            operation_type="index",
+            status="pending",
+            created_at="2026-01-01T00:00:00+00:00",
+            username="alice",
+            progress=0,
+        )
+
+        # Both calls must have used ON CONFLICT (job_id) DO NOTHING.
+        assert cur.execute.call_count == 2
+        for call in cur.execute.call_args_list:
+            sql = call[0][0]
+            assert "ON CONFLICT (job_id) DO NOTHING" in sql
+
 
 # ---------------------------------------------------------------------------
 # get_job
