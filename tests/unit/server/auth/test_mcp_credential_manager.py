@@ -430,6 +430,30 @@ class TestGetCredentialByClientId:
         assert found2[0] == "otheruser"
 
 
+class TestVerifyCredentialLastUsedFailure:
+    """Test MCPCredentialManager.verify_credential() resilience when last_used update fails."""
+
+    def test_verify_credential_succeeds_when_last_used_update_fails(
+        self, mcp_manager, user_manager, monkeypatch
+    ):
+        """Bug #1004: Auth must succeed even when update_mcp_credential_last_used raises."""
+        result = mcp_manager.generate_credential("testuser")
+        client_id = result["client_id"]
+        client_secret = result["client_secret"]
+
+        monkeypatch.setattr(
+            user_manager,
+            "update_mcp_credential_last_used",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("SQLite database is locked")
+            ),
+        )
+
+        verified_user = mcp_manager.verify_credential(client_id, client_secret)
+
+        assert verified_user == "testuser"
+
+
 class TestErrorPathCoverage:
     """Test error paths for complete code coverage."""
 
