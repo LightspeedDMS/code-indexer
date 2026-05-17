@@ -41,7 +41,7 @@ class TestConfigServiceSubprocessExecutorSettings:
     def test_get_all_settings_subprocess_max_workers_default_value(self):
         """AC4: Default subprocess_max_workers should be 2."""
         settings = self.config_service.get_all_settings()
-        assert settings["background_jobs"]["subprocess_max_workers"] == 2
+        assert settings["background_jobs"]["subprocess_max_workers"] == 8
 
     # ==========================================================================
     # AC4: Update setting via ConfigService

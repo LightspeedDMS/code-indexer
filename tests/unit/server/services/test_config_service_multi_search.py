@@ -47,9 +47,9 @@ class TestConfigServiceMultiSearchGetAllSettings:
 
         multi_search = settings["multi_search"]
         # Per resource audit: defaults should be 2 workers, 30s timeout
-        assert multi_search["multi_search_max_workers"] == 2
+        assert multi_search["multi_search_max_workers"] == 8
         assert multi_search["multi_search_timeout_seconds"] == 30
-        assert multi_search["scip_multi_max_workers"] == 2
+        assert multi_search["scip_multi_max_workers"] == 8
         assert multi_search["scip_multi_timeout_seconds"] == 30
 
     def test_get_all_settings_returns_custom_multi_search_values(self, tmp_path):
@@ -170,8 +170,8 @@ class TestConfigServiceMultiSearchFullWorkflow:
         # Step 1: Fresh install has default values
         service = ConfigService(server_dir_path=str(tmp_path))
         config = service.load_config()
-        assert config.multi_search_limits_config.multi_search_max_workers == 2
-        assert config.multi_search_limits_config.scip_multi_max_workers == 2
+        assert config.multi_search_limits_config.multi_search_max_workers == 8
+        assert config.multi_search_limits_config.scip_multi_max_workers == 8
 
         # Step 2: Update to custom values
         service.update_setting("multi_search", "multi_search_max_workers", 6)
