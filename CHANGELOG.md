@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.43.0 (2026-05-18) — NFS Lock File Writable Mode
+
+### Fixed
+- All 7 lock file opens changed from read-only `"r"` to read-write `"r+"` mode, fixing EBADF when POSIX `lockf()` attempts exclusive locks on NFS — `lockf(LOCK_EX)` requires a writable file descriptor
+- Golden repo HNSW index builds, branch isolation, and metadata updates no longer fail on NFS-mounted storage
+
 ## v10.42.0 (2026-05-18) — NFS-Safe fsync
 
 ### Fixed

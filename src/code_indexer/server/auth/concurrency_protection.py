@@ -227,7 +227,7 @@ class PasswordChangeConcurrencyProtection:
             return False
 
         try:
-            with open(lock_file_path, "r") as lock_file:
+            with open(lock_file_path, "r+") as lock_file:
                 _used_lockf = nfs_safe_flock(
                     lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
                 )

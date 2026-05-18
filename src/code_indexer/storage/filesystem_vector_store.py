@@ -3359,7 +3359,7 @@ class FilesystemVectorStore:
         lock_file = collection_path / ".metadata.lock"
         lock_file.touch(exist_ok=True)
 
-        with open(lock_file, "r") as lock_f:
+        with open(lock_file, "r+") as lock_f:
             # Acquire exclusive lock (blocks if daemon is writing) — NFS-safe
             _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
 

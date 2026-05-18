@@ -164,6 +164,39 @@ class TestNfsSafeFlockIntegration:
             nfs_safe_funlock(f.fileno(), used_lockf)
 
 
+class TestNfsSafeFlockNfsCompatibility:
+    """Tests documenting the POSIX lockf(LOCK_EX) writable-fd requirement.
+
+    On NFS, flock() raises EBADF and nfs_safe_flock() falls back to lockf().
+    POSIX lockf(LOCK_EX) requires the fd to be open for writing.
+    Opening with "r" (read-only) causes lockf to raise EBADF too, breaking
+    the NFS fallback. The fix is to open lock files with "r+" instead.
+    """
+
+    def test_lockf_requires_writable_fd_for_exclusive_lock(self, tmp_path):
+        """lockf(LOCK_EX) succeeds on a real file opened with 'r+' (read-write)."""
+        lock_file = tmp_path / "test.lock"
+        lock_file.touch()
+
+        with open(lock_file, "r+") as f:
+            # Should not raise — "r+" gives write permission lockf needs
+            fcntl.lockf(f.fileno(), fcntl.LOCK_EX)
+            fcntl.lockf(f.fileno(), fcntl.LOCK_UN)
+
+    def test_readonly_fd_fails_lockf_exclusive(self, tmp_path):
+        """lockf(LOCK_EX) raises OSError on a real file opened with 'r' (read-only).
+
+        This test documents the root cause bug: opening lock files with "r"
+        means the NFS lockf fallback also fails, leaving callers with no lock.
+        """
+        lock_file = tmp_path / "test.lock"
+        lock_file.touch()
+
+        with open(lock_file, "r") as f:
+            with pytest.raises(OSError):
+                fcntl.lockf(f.fileno(), fcntl.LOCK_EX)
+
+
 class TestNfsSafeFsync:
     """Tests for nfs_safe_fsync()."""
 
