@@ -4,6 +4,7 @@ Stores vectors in filesystem with path-as-vector quantization and git-aware chun
 Following Story 2 requirements.
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -3318,8 +3319,11 @@ class FilesystemVectorStore:
         Note:
             Thread-safe: Uses file locking to prevent race conditions with daemon indexing
         """
-        import fcntl
         import json
+
+        from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+
+        # fcntl imported at module level for lock flag constants
 
         # Calculate unique file count from vectors
         unique_files = set()
@@ -3356,8 +3360,8 @@ class FilesystemVectorStore:
         lock_file.touch(exist_ok=True)
 
         with open(lock_file, "r") as lock_f:
-            # Acquire exclusive lock (blocks if daemon is writing)
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            # Acquire exclusive lock (blocks if daemon is writing) — NFS-safe
+            _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
 
             try:
                 # Read current metadata
@@ -3377,7 +3381,7 @@ class FilesystemVectorStore:
 
             finally:
                 # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                nfs_safe_funlock(lock_f.fileno(), _used_lockf)
 
         return unique_file_count
 

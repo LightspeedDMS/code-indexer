@@ -6,18 +6,22 @@ re-authentication fallback, and comprehensive security features.
 
 import json
 import fcntl
+import logging
 import secrets
 import threading
 import time
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import jwt as jose_jwt
 
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 from .credential_manager import ProjectCredentialManager
 from .exceptions import RemoteConfigurationError
+
+logger = logging.getLogger(__name__)
 
 
 class TokenStorageError(RemoteConfigurationError):
@@ -150,6 +154,8 @@ class PersistentTokenManager:
         # Thread-safe caching
         self._cache_lock = threading.RLock()
         self._cached_token: Optional[StoredToken] = None
+        # Maps file descriptor -> used_lockf flag for NFS-safe lock/unlock pairing
+        self._fd_lockf_map: Dict[int, bool] = {}
         self._cache_timestamp: float = 0
 
         # Ensure directory exists with proper permissions
@@ -307,7 +313,10 @@ class PersistentTokenManager:
 
         while True:
             try:
-                fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _used_lockf = nfs_safe_flock(
+                    file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                )
+                self._fd_lockf_map[file_handle.fileno()] = _used_lockf
                 return  # Lock acquired successfully
             except BlockingIOError:
                 # Lock not available, check timeout
@@ -328,10 +337,12 @@ class PersistentTokenManager:
             file_handle: Open file handle
         """
         try:
-            fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            # Ignore unlock errors - lock will be released when file closes
-            pass
+            fd = file_handle.fileno()
+            _used_lockf = self._fd_lockf_map.pop(fd, False)
+            nfs_safe_funlock(fd, _used_lockf)
+        except OSError as e:
+            # Lock will be released when the file handle closes; log for diagnostics
+            logger.debug("Unlock failed for token file (non-fatal): %s", e)
 
     def store_token(self, stored_token: StoredToken) -> None:
         """Store JWT token with secure file operations and validation.

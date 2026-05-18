@@ -14,6 +14,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+
 logger = logging.getLogger(__name__)
 
 # Named constants for vector dimensions to avoid magic numbers.
@@ -98,8 +100,11 @@ def _run_locked_migration(
 
     index_path.mkdir(parents=True, exist_ok=True)
     lock_file = open(lock_path, "w")
+    _used_lockf = False
+    _lock_acquired = False
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        _used_lockf = nfs_safe_flock(lock_file.fileno(), fcntl.LOCK_EX)
+        _lock_acquired = True
 
         post_lock = _handle_post_lock_recheck(
             legacy_dir, target_dir, target_name, sentinel_migrating, sentinel_migrated
@@ -140,7 +145,8 @@ def _run_locked_migration(
         logger.error("Temporal migration failed: %s. Original data preserved.", e)
         return MigrationResult.ERROR
     finally:
-        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        if _lock_acquired:
+            nfs_safe_funlock(lock_file.fileno(), _used_lockf)
         lock_file.close()
 
 

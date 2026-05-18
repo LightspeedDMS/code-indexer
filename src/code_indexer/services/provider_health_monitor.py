@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+
 import numpy as np
 
 if TYPE_CHECKING:
@@ -130,11 +132,11 @@ class ProviderHealthMonitor:
             return
         try:
             with open(path, "r", encoding="utf-8") as fh:
-                fcntl.flock(fh, fcntl.LOCK_SH)
+                _used_lockf = nfs_safe_flock(fh.fileno(), fcntl.LOCK_SH)
                 try:
                     raw = fh.read()
                 finally:
-                    fcntl.flock(fh, fcntl.LOCK_UN)
+                    nfs_safe_funlock(fh.fileno(), _used_lockf)
             state: object = json.loads(raw)
             if not isinstance(state, dict):
                 logger.warning(
@@ -226,7 +228,7 @@ class ProviderHealthMonitor:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(lock_path, "a", encoding="utf-8") as lock_fh:
-                fcntl.flock(lock_fh, fcntl.LOCK_EX)
+                _used_lockf = nfs_safe_flock(lock_fh.fileno(), fcntl.LOCK_EX)
                 try:
                     existing = self._read_persisted_state(path)
                     merged = self._build_merged_state(existing)
@@ -241,7 +243,7 @@ class ProviderHealthMonitor:
                     os.replace(tmp_name, str(path))
                     tmp_name = None
                 finally:
-                    fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                    nfs_safe_funlock(lock_fh.fileno(), _used_lockf)
         except OSError as exc:
             logger.warning("Persistence file %s: write error — %s", path, exc)
         finally:

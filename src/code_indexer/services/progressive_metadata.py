@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 
+from code_indexer.utils.file_locking import nfs_safe_flock
+
 
 class ProgressiveMetadata:
     """Manages progressive metadata for resumable indexing."""
@@ -341,7 +343,7 @@ class ProgressiveMetadata:
 
             with open(self.metadata_path, "r+") as f:
                 # Acquire exclusive lock
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                nfs_safe_flock(f.fileno(), fcntl.LOCK_EX)
 
                 # Read current metadata
                 f.seek(0)
@@ -378,7 +380,7 @@ class ProgressiveMetadata:
 
                 with open(self.metadata_path, "r") as f:
                     # Try to acquire shared lock (non-blocking)
-                    fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    nfs_safe_flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
                     data = json.load(f)
                     branch = data.get("current_branch", fallback)
                     return str(branch) if branch is not None else fallback
