@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, cast
 
+from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class GlobalRegistry:
                 with os.fdopen(tmp_fd, "w") as f:
                     json.dump(self._registry_data, f, indent=2)
                     f.flush()
-                    os.fsync(f.fileno())
+                    nfs_safe_fsync(f.fileno())
 
                 # Atomic rename
                 os.replace(tmp_path, str(self.registry_file))

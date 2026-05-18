@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from code_indexer.utils.file_locking import nfs_safe_fsync
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,7 @@ class AliasManager:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(alias_data, f, indent=2)
                 f.flush()
-                os.fsync(f.fileno())
+                nfs_safe_fsync(f.fileno())
 
             # Atomic rename
             os.replace(tmp_path, str(alias_file))
@@ -282,7 +283,7 @@ class AliasManager:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(alias_data, f, indent=2)
                 f.flush()
-                os.fsync(f.fileno())
+                nfs_safe_fsync(f.fileno())
 
             os.replace(tmp_path, str(alias_file))
             logger.debug(f"Updated refresh timestamp for alias: {alias_name}")
@@ -342,7 +343,7 @@ class AliasManager:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(alias_data, f, indent=2)
                 f.flush()
-                os.fsync(f.fileno())
+                nfs_safe_fsync(f.fileno())
 
             # Atomic rename
             os.replace(tmp_path, str(alias_file))

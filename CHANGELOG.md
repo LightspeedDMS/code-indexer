@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.42.0 (2026-05-18) — NFS-Safe fsync
+
+### Fixed
+- All 12 `os.fsync()` call sites across 8 files now use NFS-safe wrapper that suppresses EBADF on directory file descriptors, fixing golden repo HNSW index finalization failure on NFS mounts
+- Golden repo indexing no longer fails with `[Errno 9] Bad file descriptor` during ID index save and directory fsync operations on NFS-backed storage
+
+### Added
+- `nfs_safe_fsync()` utility in `file_locking.py` — wraps `os.fsync()` with EBADF tolerance for NFS close-to-open consistency semantics
+
 ## v10.41.0 (2026-05-18) — NFS-Safe File Locking
 
 ### Fixed

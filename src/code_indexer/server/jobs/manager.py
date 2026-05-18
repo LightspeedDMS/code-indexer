@@ -22,7 +22,11 @@ from typing import Dict, List, Optional, Any, cast
 from urllib.parse import urlparse
 import re
 
-from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+from code_indexer.utils.file_locking import (
+    nfs_safe_flock,
+    nfs_safe_funlock,
+    nfs_safe_fsync,
+)
 
 # System resource monitoring
 try:
@@ -894,7 +898,7 @@ class SyncJobManager:
                 with open(temp_file, "w") as f:
                     json.dump(complete_data, f, indent=2)
                     f.flush()  # Ensure data is written
-                    os.fsync(f.fileno())  # Force write to disk
+                    nfs_safe_fsync(f.fileno())  # Force write to disk, NFS-safe
                     logging.debug(
                         f"Wrote {len(serializable_jobs)} jobs to temp file with checksum: {cast(Dict[str, Any], metadata['_metadata'])['checksum'][:8]}..."
                     )

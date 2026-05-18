@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Dict
 import threading
 
+from code_indexer.utils.file_locking import nfs_safe_fsync
+
 logger = logging.getLogger(__name__)
 
 _MAX_INDEX_ENTRIES = 10_000_000
@@ -178,13 +180,13 @@ class IDIndexManager:
                     f.write(path_bytes)
 
                 f.flush()
-                os.fsync(f.fileno())
+                nfs_safe_fsync(f.fileno())
 
             os.replace(temp_file, index_file)
 
             dir_fd = os.open(str(collection_path), os.O_RDONLY)
             try:
-                os.fsync(dir_fd)
+                nfs_safe_fsync(dir_fd)
             finally:
                 os.close(dir_fd)
 
