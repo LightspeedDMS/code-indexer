@@ -22,6 +22,7 @@ queries to continue reading the old index without blocking.
 """
 
 import contextlib
+import errno
 import fcntl
 import logging
 import os
@@ -64,8 +65,11 @@ class BackgroundIndexRebuilder:
     def acquire_lock(self) -> Generator[None, None, None]:
         """Acquire exclusive lock for rebuild operations.
 
-        Uses fcntl.flock() for cross-process coordination. Blocks if another
-        process/thread holds the lock.
+        Tries flock() first (works on local filesystems, provides both
+        cross-process and cross-thread blocking). Falls back to lockf()
+        (POSIX record locks) when flock() fails with EBADF — which happens
+        on NFS mounts with local_lock=none. lockf() provides cross-process
+        blocking via the NLM protocol.
 
         Yields:
             None (context manager for 'with' statement)
@@ -73,16 +77,28 @@ class BackgroundIndexRebuilder:
         Note:
             Lock is automatically released when context exits.
         """
-        with open(self.lock_file, "r") as lock_f:
+        with open(self.lock_file, "r+") as lock_f:
+            lock_acquired = False
+            use_lockf = False
             try:
-                # Acquire exclusive lock (blocks if another process holds it)
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+                try:
+                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+                except OSError as e:
+                    if e.errno == errno.EBADF:
+                        fcntl.lockf(lock_f.fileno(), fcntl.LOCK_EX)
+                        use_lockf = True
+                    else:
+                        raise
+                lock_acquired = True
                 logger.debug(f"Acquired rebuild lock: {self.lock_file}")
                 yield
             finally:
-                # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
-                logger.debug(f"Released rebuild lock: {self.lock_file}")
+                if lock_acquired:
+                    if use_lockf:
+                        fcntl.lockf(lock_f.fileno(), fcntl.LOCK_UN)
+                    else:
+                        fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                    logger.debug(f"Released rebuild lock: {self.lock_file}")
 
     def atomic_swap(self, temp_file: Path, target_file: Path) -> None:
         """Atomically swap temp file to target file.

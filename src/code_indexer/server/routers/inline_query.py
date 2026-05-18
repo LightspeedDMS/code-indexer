@@ -219,7 +219,9 @@ def register_query_routes(
 
                 if search_mode_actual in ["fts", "hybrid"] and fts_available:
                     # Execute FTS search
-                    from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+                    from code_indexer.services.tantivy_index_manager import (
+                        TantivyIndexManager,
+                    )
                     from ..services.api_metrics_service import api_metrics_service
 
                     # Track FTS search at service layer (Story #4 AC2)

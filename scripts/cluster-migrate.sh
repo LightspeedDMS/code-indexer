@@ -37,6 +37,7 @@ CLONE_BACKEND="ontap"
 DAEMON_URL=""
 DAEMON_API_KEY=""
 NODE_ID=""
+IS_STORAGE_NODE=false
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -61,6 +62,7 @@ Storage backend (choose one):
 
 Optional:
   --cidx-data-dir PATH        CIDX server data directory (default: ~/.cidx-server)
+  --is-storage-node           This node hosts shared storage locally (skip NFS self-mount)
   --dry-run                   Print what would be done without making changes
   --rollback                  Restore from backups created by a previous migration run
   --python PATH               Path to python3 binary (default: python3)
@@ -84,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --daemon-url)      DAEMON_URL="$2";      shift 2 ;;
         --daemon-api-key)  DAEMON_API_KEY="$2";  shift 2 ;;
         --node-id)         NODE_ID="$2";         shift 2 ;;
+        --is-storage-node) IS_STORAGE_NODE=true; shift   ;;
         -h|--help)         usage ;;
         *) echo "Unknown argument: $1" >&2; usage ;;
     esac

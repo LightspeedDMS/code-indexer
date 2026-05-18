@@ -277,11 +277,13 @@ class DependencyMapDashboardService:
     def _get_stored_hashes(self) -> Dict[str, str]:
         """Parse commit_hashes JSON from tracking backend, returning empty dict on error."""
         tracking = self._tracking_backend.get_tracking()
-        commit_hashes_json = tracking.get("commit_hashes")
-        if not commit_hashes_json:
+        commit_hashes_raw = tracking.get("commit_hashes")
+        if not commit_hashes_raw:
             return {}
+        if isinstance(commit_hashes_raw, dict):
+            return cast(Dict[str, str], commit_hashes_raw)
         try:
-            return cast(Dict[str, str], json.loads(commit_hashes_json))
+            return cast(Dict[str, str], json.loads(commit_hashes_raw))
         except (json.JSONDecodeError, TypeError):
             logger.warning(
                 "dependency_map_dashboard: failed to parse commit_hashes JSON"

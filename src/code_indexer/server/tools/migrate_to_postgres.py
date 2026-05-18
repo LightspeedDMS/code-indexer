@@ -194,6 +194,10 @@ NULL_DEFAULT_COLUMNS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+UPSERT_OVERWRITE_TABLES: Dict[str, str] = {
+    "server_config": "config_key",
+}
+
 
 class SqliteToPostgresMigrator:
     """
@@ -615,7 +619,11 @@ class SqliteToPostgresMigrator:
         skip_fk_errors: bool = False,
     ) -> int:
         """
-        Insert rows into a PostgreSQL table using ON CONFLICT DO NOTHING.
+        Insert rows into a PostgreSQL table.
+
+        Uses ON CONFLICT DO NOTHING for most tables. For tables listed in
+        UPSERT_OVERWRITE_TABLES, uses ON CONFLICT DO UPDATE SET to ensure
+        migrated SQLite data overwrites pre-seeded defaults.
 
         Args:
             pg_conn: Active psycopg v3 connection.
@@ -633,11 +641,22 @@ class SqliteToPostgresMigrator:
         columns = list(rows[0].keys())
         col_list = ", ".join(columns)
         placeholders = ", ".join(f"%({col})s" for col in columns)
-        sql = (
-            f"INSERT INTO {table_name} ({col_list}) "  # noqa: S608
-            f"VALUES ({placeholders}) "
-            f"ON CONFLICT DO NOTHING"
-        )
+
+        pk_col = UPSERT_OVERWRITE_TABLES.get(table_name)
+        if pk_col:
+            update_cols = [c for c in columns if c != pk_col]
+            set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+            sql = (
+                f"INSERT INTO {table_name} ({col_list}) "  # noqa: S608
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT ({pk_col}) DO UPDATE SET {set_clause}"
+            )
+        else:
+            sql = (
+                f"INSERT INTO {table_name} ({col_list}) "  # noqa: S608
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT DO NOTHING"
+            )
 
         total_inserted = 0
         skipped = 0

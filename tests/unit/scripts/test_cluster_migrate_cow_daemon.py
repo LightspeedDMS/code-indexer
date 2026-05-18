@@ -437,3 +437,79 @@ class TestOptionalDbPaths:
         """When optional DB files are absent, none of their names appear in dry-run output."""
         combined = _setup_and_run(tmp_path, [])
         _assert_contains_none(combined, _OPTIONAL_DB_TOKENS)
+
+
+# ---------------------------------------------------------------------------
+# Storage node flag tests (NFS self-mount prevention)
+# ---------------------------------------------------------------------------
+
+
+@skip_if_no_script
+class TestIsStorageNodeFlag:
+    """--is-storage-node flag: storage server node uses local path, never NFS self-mount."""
+
+    def test_is_storage_node_flag_accepted(self, tmp_path: Path):
+        """--is-storage-node is parsed without 'Unknown argument' error."""
+        _make_minimal_cidx_dir(tmp_path)
+        result = _run_dry(
+            ["--is-storage-node", "--nfs-mount", "/mnt/cow-storage"],
+            cidx_data_dir=str(tmp_path),
+        )
+        assert "Unknown argument" not in result.stderr, (
+            f"Script rejected --is-storage-node flag.\nstderr: {result.stderr}"
+        )
+        assert result.returncode == 0, (
+            f"Script exited non-zero.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    def test_storage_node_dry_run_mentions_local_path(self, tmp_path: Path):
+        """Dry-run with --is-storage-node prints 'Storage node' and 'local path' message."""
+        combined = _setup_and_run(
+            tmp_path, ["--is-storage-node", "--nfs-mount", "/mnt/cow-storage"]
+        )
+        assert "Storage node" in combined, (
+            f"Expected 'Storage node' in dry-run output when --is-storage-node provided.\n"
+            f"combined: {combined}"
+        )
+        assert "local path" in combined, (
+            f"Expected 'local path' in dry-run output when --is-storage-node provided.\n"
+            f"combined: {combined}"
+        )
+
+    def test_storage_node_dry_run_no_nfs_validation(self, tmp_path: Path):
+        """Dry-run with --is-storage-node does NOT print 'Would validate NFS mount'."""
+        combined = _setup_and_run(
+            tmp_path, ["--is-storage-node", "--nfs-mount", "/mnt/cow-storage"]
+        )
+        assert "Would validate NFS mount" not in combined, (
+            f"Storage node must not trigger NFS mount validation message.\n"
+            f"combined: {combined}"
+        )
+
+    def test_non_storage_node_dry_run_mentions_nfs(self, tmp_path: Path):
+        """Without --is-storage-node, dry-run output contains 'Would validate NFS mount'."""
+        combined = _setup_and_run(tmp_path, ["--nfs-mount", "/mnt/nfs"])
+        assert "Would validate NFS mount" in combined, (
+            f"Expected NFS mount validation message for non-storage-node.\n"
+            f"combined: {combined}"
+        )
+
+    def test_storage_node_with_cow_daemon_backend(self, tmp_path: Path):
+        """--is-storage-node combined with --clone-backend cow-daemon in dry-run."""
+        combined = _setup_and_run(
+            tmp_path,
+            [
+                "--is-storage-node",
+                "--clone-backend",
+                "cow-daemon",
+                "--daemon-url",
+                "http://localhost:8081",
+                "--daemon-api-key",
+                "key",
+                "--nfs-mount",
+                "/mnt/nfs",
+            ],
+        )
+        assert "Storage node" in combined
+        assert "Would validate NFS mount" not in combined
+        assert "CoW daemon" in combined
