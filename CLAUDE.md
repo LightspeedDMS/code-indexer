@@ -102,6 +102,16 @@ Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_A
 
 After every E2E test, query the server log store for ERROR/WARNING entries. Use `sqlite3 ~/.cidx-server/logs.db` (solo) or `psql "$POSTGRES_DSN"` (cluster) to check `logs` table for `level IN ('ERROR','WARNING')`. Zero new entries attributable to your changes before declaring done.
 
+### Server E2E Testing -- Front Door Only (MANDATORY)
+
+When asked to test the server end-to-end (locally or on staging), ALL tests MUST exercise the **REST API / MCP front door**. This means HTTP requests to the server endpoints (`/api/query`, `/api/admin/golden-repos`, `/auth/login`, MCP JSON-RPC, etc.).
+
+**NEVER** use CLI tools (`cidx init`, `cidx index`, `cidx query`, etc.) or SSH shell commands to test server behavior. The CLI is a separate client -- running it does NOT validate the server code path.
+
+**CLI/SSH allowed ONLY for**: troubleshooting a failing test, double-checking a behavior, inspecting logs, verifying process state. Never as the primary test mechanism for server functionality.
+
+**Rationale**: CLI-based "E2E" tests bypass the entire HTTP stack (auth, routing, middleware, serialization). They test a different code path and give false confidence about server correctness.
+
 ### Lint and CI
 
 ```bash

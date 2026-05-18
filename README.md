@@ -2,61 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 10.43.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
-
-## What's New in v10.0
-
-A major release focused on hardening server-side surfaces, expanding shared knowledge, and broadening AI assistant integration. See [CHANGELOG.md](CHANGELOG.md) for the full list and `docs/migration-to-v10.md` for upgrade guidance.
-
-### Breaking Changes
-
-- **MCPB removed** (Epic #756): `cidx-bridge` and `cidx-token-refresh` console scripts deleted; the MCPB documentation tree removed. Clients must now connect directly to the server's native `/mcp` (JWT Bearer) or `/mcp-public` endpoints. See `docs/migration-to-v10.md` for client reconfiguration steps.
-
-### Security and Hardening
-
-- **Research Assistant curl wrapper** (#929): replaces 36 hardcoded RFC1918 prefix allow rules with `scripts/cidx-curl.sh` -- closed-set whitelist of safe curl flags, environment scrub, DNS rebinding mitigation via `--resolve` pin, always-on loopback, and operator-configured CIDR allowlist via `ra_curl_allowed_cidrs`
-- **TOTP step-up elevation** (Epic #922): admin operations require an active TOTP elevation window (rolling 5-minute idle, 30-minute absolute max). Recovery codes provide narrow `totp_repair` scope for credential recovery
-- **Maintenance mode localhost-only** (#924): `enter`/`exit` write endpoints restricted to loopback callers (auto-updater driven, system-process operated)
-
-### Operations
-
-- **Auto-trigger dep-map repair** (#927): scheduled delta and refinement jobs auto-trigger a single repair pass when anomalies are detected. Default-off, opt-in via Web UI `dep_map_auto_repair_enabled`. Cluster-aware decision lock via PostgreSQL advisory lock; solo via `threading.Lock`
-- **Refinement scheduler bootstrap fix** (#931): `update_tracking(refinement_next_run=...)` moved into `run_refinement_cycle`; the scheduler now routes through `run_tracked_refinement` for full JobTracker visibility
-- **Dep-map dashboard polish** (#930): removed the meaningless `0.0s` `finalize_s` timing pill from delta runs
-
-### Knowledge and Memory
-
-- **Memory store CRUD** (#877): shared technical memory via the MCP `create_memory` / `edit_memory` / `delete_memory` tools
-- **Memory retrieval pipeline** (#883): semantic memory injection into `search_code` results, gated by the `memory_retrieval_enabled` Web UI toggle
-- **Memory CRUD AttributeError fix** (#932): Protocol/real-class drift cleanup across four methods (`is_write_lock_held` -> `is_write_locked`, `ttl_seconds=` kwarg removal)
-
-### Integrations
-
-- **Codex CLI integration** (Epic #843, 5 stories): Codex GPT-5 background agents register `cidx-local` MCP at server startup with persistent Basic-auth credentials
-- **Unified CLI rerank + Embedder Provider Chain** (Epic #689): unified CLI search funnel with VoyageAI + Cohere reranking
-- **cidx-meta backup to remote git** (#926): continuous git backup of the `cidx-meta` directory with auto-conflict-resolution via Claude
-
-### Stability
-
-- **Phase 5 fault-injection resiliency** (#864): four startup scenarios plus bootstrap-only flags (non-prod safety guards)
-- **Server memory invariants** (Bug #897): glibc `malloc_trim` sweep + `MALLOC_ARENA_MAX=2` mitigations addressing HNSW cache fragmentation
-
-## Quick Navigation
-
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Key Features](#key-features)
-  - [Semantic Search](#semantic-search)
-  - [Multimodal Search](#multimodal-search-v88) (NEW in v8.8)
-  - [Full-Text Search](#full-text-search-fts)
-  - [SCIP Code Intelligence](#scip-code-intelligence)
-  - [Git History Search](#git-history-search-temporal)
-  - [Langfuse Trace Sync](#langfuse-trace-sync-v810) (NEW in v8.10)
-  - [Inter-Repository Dependency Map](#inter-repository-dependency-map-v90) (NEW in v9.0)
-  - [Multi-Provider Embedding](#multi-provider-embedding-v98) (NEW in v9.8)
-- [Operating Modes](#operating-modes)
-- [Common Commands](#common-commands)
-- [Documentation](#documentation)
+**Version 10.44.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
 
 ## What is CIDX?
 
@@ -64,43 +10,25 @@ CIDX combines semantic embeddings with traditional search to help you find code 
 
 ## Installation
 
-### pipx (Recommended)
-
 ```bash
 pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
-
-# Verify installation
 cidx --version
 ```
 
-### pip with virtual environment
-
-```bash
-python3 -m venv code-indexer-env
-source code-indexer-env/bin/activate
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
-```
-
-**Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key (or Cohere API key)
-
-For detailed installation instructions including Windows, configuration, and troubleshooting, see [Installation Guide](docs/installation.md).
+**Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key (or Cohere API key).
+For platform-specific instructions, Windows setup, and troubleshooting, see [Installation Guide](docs/installation.md).
 
 ## Quick Start
 
 ```bash
-# Navigate to your project
 cd /path/to/your/project
 
-# Set embedding provider API key (VoyageAI by default; Cohere also supported)
-export VOYAGE_API_KEY="your-api-key"  # or export CO_API_KEY="your-key" for Cohere
+# Set embedding provider API key (VoyageAI default; Cohere also supported)
+export VOYAGE_API_KEY="your-api-key"
 
-# Index your codebase
+# Index and search
 cidx index
-
-# Search semantically
 cidx query "authentication logic" --limit 5
-
-# Search with filters
 cidx query "user" --language python --min-score 0.7
 cidx query "save" --path-filter "*/models/*" --limit 10
 ```
@@ -111,48 +39,16 @@ For comprehensive query options and search strategies, see [Query Guide](docs/qu
 
 ### Semantic Search
 
-Find code by meaning using AI embeddings powered by VoyageAI or Cohere. Ask natural language questions and get semantically relevant results ranked by similarity.
+Find code by meaning using AI embeddings powered by VoyageAI or Cohere. Natural language queries return semantically relevant results ranked by similarity.
 
 ```bash
 cidx query "authentication logic" --limit 10
 cidx query "database connection setup" --language python
 ```
 
-See: [Query Guide](docs/query-guide.md)
+### Multimodal Search
 
-### Multimodal Search (v8.8+)
-
-Search documentation that includes diagrams, screenshots, and visual content. CIDX automatically detects markdown, HTML, and HTMX files with embedded images and indexes them using multimodal embeddings, making visual content semantically searchable.
-
-**How it works:**
-1. **Automatic detection**: During indexing, CIDX identifies files containing images (PNG, JPG, WebP, GIF):
-   - Markdown (`.md`): Parses `![alt](path)` syntax
-   - HTML/HTMX (`.html`, `.htmx`): Parses `<img src="path">` tags
-2. **Dual indexing**: Text goes to `voyage-code-3`, image+text content goes to `voyage-multimodal-3`
-3. **Parallel search**: Queries search both indexes simultaneously, merging results by relevance
-4. **Transparent experience**: No special flags needed - multimodal search happens automatically when multimodal content exists
-
-```bash
-# Index your project (multimodal detection is automatic)
-cidx index
-
-# Query searches both code AND visual documentation
-cidx query "database schema diagram"
-cidx query "API authentication flow"
-```
-
-**Query output shows dual-index status:**
-```
-Using: voyage-code-3, voyage-multimodal-3    # Both indexes active
-
-Query Timing:
-  Parallel multi-index query          1.09s
-      voyage-code-3 index (parallel)      1.09s
-      voyage-multimodal-3 index (parallel)      470ms
-      Merge & deduplicate         0.06ms
-```
-
-**Supported image formats**: PNG, JPG/JPEG, WebP, GIF (embedded in markdown via `![alt](path)` syntax)
+Search documentation that includes diagrams, screenshots, and visual content. CIDX automatically detects and indexes images embedded in markdown and HTML files using multimodal embeddings -- no special flags needed.
 
 See: [Architecture Guide](docs/architecture.md#dual-model-architecture-v88)
 
@@ -162,432 +58,145 @@ Fast exact text matching with fuzzy search, regex support, and case sensitivity 
 
 ```bash
 cidx query "authenticate_user" --fts
-cidx query "ParseError" --fts --case-sensitive
 cidx query "test_.*" --fts --regex --language python
 ```
 
-See: [Query Guide](docs/query-guide.md#full-text-search-fts)
-
 ### SCIP Code Intelligence
 
-Precise code navigation using SCIP (Source Code Intelligence Protocol). Find symbol definitions, references, dependencies, dependents, call chains, and perform impact analysis.
+Precise code navigation using SCIP (Source Code Intelligence Protocol). Find definitions, references, dependencies, call chains, and perform impact analysis.
 
 ```bash
 cidx scip generate                    # Generate SCIP indexes
 cidx scip definition "UserService"    # Find definition
 cidx scip references "authenticate"   # Find all usages
 cidx scip callchain "main" "login"    # Trace execution path
-cidx scip impact "DatabaseManager"    # Impact analysis
 ```
 
 See: [SCIP Code Intelligence Guide](docs/scip/README.md)
 
-### Git History Search (Temporal)
+### Git History Search
 
-Search your entire commit history semantically. Find when code was added, modified, or deleted with time-range filtering, author filtering, and diff type selection.
+Search your entire commit history semantically with time-range and author filtering.
 
 ```bash
-cidx index --index-commits                # Index git history (one-time)
-cidx query "JWT auth" --time-range-all    # Search all history
+cidx index --index-commits
+cidx query "JWT auth" --time-range-all
 cidx query "bug fix" --time-range 2024-01-01..2024-12-31
-cidx query "login" --time-range-all --author "john@example.com"
 ```
 
 See: [Temporal Search Guide](docs/temporal-search.md)
 
 ### Real-Time Watch Mode
 
-Monitor file changes and automatically re-index in real-time with daemon mode. Get ~5ms cached queries versus ~1s from disk.
+Background daemon with in-memory caching for ~5ms queries (vs ~1s from disk) and automatic re-indexing on file changes.
 
 ```bash
-cidx config --daemon    # Enable daemon mode
-cidx start              # Start daemon
-cidx watch              # Start watch mode
-cidx query "search"     # Fast cached queries
+cidx config --daemon && cidx start
+cidx watch
 ```
 
 See: [Operating Modes Guide](docs/operating-modes.md#daemon-mode)
 
 ### AI Integration
 
-Connect AI assistants to CIDX for semantic search directly in conversations. Supports local CLI integration (Claude Code, Gemini, Codex) and remote MCP server integration for any modern MCP-aware client (Claude.ai, Claude Desktop, Claude Code, Codex CLI).
+Connect AI assistants to CIDX for semantic search in conversations. Supports local CLI integration (Claude Code, Gemini, Codex) and remote MCP server endpoints (`/mcp` with JWT, `/mcp-public` unauthenticated).
 
 ```bash
-# Local CLI integration
-cidx teach-ai --claude --project    # Creates CLAUDE.md
-
-# Remote MCP for any MCP-aware client (no bridge required)
-# Connect directly to the CIDX server's native MCP endpoints:
-#   /mcp         — authenticated (JWT Bearer token via POST /auth/login)
-#   /mcp-public  — unauthenticated
+cidx teach-ai --claude --project    # Local CLI integration
 ```
-
-Since v10.0 the legacy `cidx-bridge` / MCPB packaging has been removed -- clients connect directly to the server's `/mcp` endpoint (see `docs/migration-to-v10.md`).
 
 See: [AI Integration Guide](docs/ai-integration.md)
 
-### Langfuse Trace Sync (v8.10+)
+### Langfuse Trace Sync
 
-Automatically pull AI conversation traces from Langfuse and make them semantically searchable. CIDX syncs traces in the background, indexes them with the same semantic search engine used for code, and makes them available via MCP tools and CLI queries.
+Pull AI conversation traces from Langfuse and make them semantically searchable alongside your code. Background sync, smart deduplication, and automatic indexing.
 
-**How it works:**
-1. **Background sync**: Pulls traces from configured Langfuse projects at a configurable interval (default: 5 minutes)
-2. **Smart deduplication**: Overlap window + content hash strategy detects trace mutations without re-downloading unchanged data
-3. **Auto-registration**: New trace folders are automatically registered as golden repos and indexed
-4. **Watch integration**: File system watchers trigger incremental re-indexing as new traces arrive
+See: [Langfuse Trace Sync Guide](docs/langfuse-trace-sync.md)
 
-**Trace storage layout:**
-```
-golden-repos/
-  langfuse_<project>_<userId>/
-    <sessionId>/
-      <traceId>.json    # Full trace + observations, chronologically ordered
-```
+### Inter-Repository Dependency Map
 
-Each trace file contains the user prompt (`trace.input`), AI response (`trace.output`), metadata, and all observations (tool calls) in chronological order.
-
-**Search traces via MCP:**
-```
-search_code("authentication error handling", repository_alias="langfuse_*")
-search_code("SQL query generation", repository_alias="langfuse_MyProject_*")
-```
-
-**Dashboard monitoring**: Real-time sync health, per-project metrics (traces checked/new/updated), storage statistics, and manual sync trigger from the admin dashboard.
-
-**Configuration**: Enable via the Web UI Config Screen under Langfuse settings. Requires Langfuse project public/secret key pair.
-
-### Inter-Repository Dependency Map (v9.0+)
-
-Pre-computed semantic dependency map that analyzes source code across all registered golden repos, identifies domain-level relationships, and produces queryable documents so MCP clients can immediately determine the relevant repo set for cross-repo tasks -- without performing exploratory searches.
-
-**How it works:**
-1. **Multi-pass analysis**: Claude CLI pipeline examines source code across all repos in three passes: domain synthesis, per-domain deep dive (imports, API contracts, shared types), and index generation
-2. **Domain-clustered output**: Produces per-domain `.md` files and an `_index.md` with domain catalog and repo-to-domain matrix, all stored in `cidx-meta/dependency-map/`
-3. **Incremental delta refresh**: Scheduled daemon detects changed/new/removed repos via commit hash comparison and updates only affected domain files
-4. **MCP discovery**: Quick reference automatically directs MCP clients to check the dependency map first for cross-repo tasks
-5. **Human corrections**: Power users can edit dependency map files directly via MCP file CRUD tools; changes are auto-reindexed
-6. **Cross-domain dependency graph**: Pass 3 automatically builds a directed graph of inter-domain connections by parsing each domain file, detecting which repos are mentioned across domain boundaries, and appending the graph to `_index.md` with edge list and standalone domain identification
-
-**Dependency map output structure:**
-```
-cidx-meta/
-  dependency-map/
-    _index.md                 # Domain catalog + repo-to-domain matrix + cross-domain dependency graph
-    authentication.md         # Per-domain: repo roles, subdomain deps, cross-domain connections
-    data-pipeline.md          # Each domain file has YAML frontmatter with participating repos
-    ...
-```
-
-**Usage via MCP:**
-```
-# Quick reference tells MCP clients about the dependency map
-cidx_quick_reference         # Shows dependency map section with workflow
-
-# Read the dependency map
-get_file_content("cidx-meta-global", "dependency-map/_index.md")
-get_file_content("cidx-meta-global", "dependency-map/authentication.md")
-
-# Search dependency map semantically
-search_code("authentication between repos", repository_alias="cidx-meta-global")
-
-# Admin: trigger analysis on demand
-trigger_dependency_analysis(mode="full")    # Full regeneration
-trigger_dependency_analysis(mode="delta")   # Incremental update
-
-# Power user: correct inaccuracies
-edit_file(repository_alias="cidx-meta-global", path="dependency-map/authentication.md", ...)
-```
-
-**Configuration** (via Web UI Config Screen):
-- `dependency_map_enabled`: Enable the feature (default: off, opt-in)
-- `dependency_map_interval_hours`: Refresh interval (default: 168 hours / weekly)
-- `dependency_map_pass_timeout_seconds`: Per-pass Claude CLI timeout (default: 1800s)
+Pre-computed semantic dependency map across all registered golden repos. Claude CLI pipeline analyzes source code, identifies domain-level relationships, and produces queryable documents for cross-repo discovery.
 
 See: [Meta-Repo Discovery Guide](docs/meta-repo-discovery.md)
 
-### Multi-Provider Embedding (v9.8)
+### Multi-Provider Embedding
 
-CIDX supports multiple embedding providers for redundancy and flexibility:
+Supports VoyageAI (default) and Cohere providers with configurable query strategies: primary-only, failover, parallel fusion (RRF), or explicit provider targeting.
 
-- **VoyageAI** (default): voyage-code-3 (1024 dims, default) or voyage-large-2 (1536 dims)
-- **Cohere** (new): embed-v4.0 with 1536 dimensions, embedded tokenizer (no SDK required)
+See: [Configuration Guide](docs/configuration.md#embedding-provider)
 
-**Query strategies** control which provider serves results:
-- `primary_only` — use configured primary provider (default)
-- `failover` — try primary, automatically fall back to secondary on failure
-- `parallel` — query both providers, fuse results (RRF, multiply, or average)
-- `specific` — explicitly target one provider with `--provider`
+### X-Ray AST Search
 
-**CLI usage:**
-```bash
-cidx query "authentication" --strategy parallel --score-fusion rrf
-cidx query "database setup" --strategy specific --provider cohere
-cidx provider-health  # check provider status
-cidx provider-index list  # manage per-provider indexes
-```
+Tree-sitter-powered AST analysis with sandboxed Python evaluators. Write custom evaluators that operate on parsed syntax trees for structural code search beyond text matching.
+
+See: [X-Ray Architecture](docs/xray-architecture.md) | [X-Ray Cookbook](docs/xray-cookbook.md)
 
 ## Operating Modes
 
-CIDX operates in three modes optimized for different use cases:
+| Mode | Query Speed | Best For | Details |
+|------|-------------|----------|---------|
+| **CLI** | ~1s (disk) | Individual developers, quick searches | [Operating Modes](docs/operating-modes.md#cli-mode) |
+| **Daemon** | ~5ms (cached) | Active development, watch mode | [Operating Modes](docs/operating-modes.md#daemon-mode) |
+| **Server** | <1ms (cached) | Team collaboration, multi-user | [Server Deployment](docs/server-deployment.md) |
+| **Cluster** | <1ms (cached) | High availability, horizontal scaling | [Cluster Setup](docs/cluster-setup.md) |
 
-### CLI Mode (Individual Developers & Remote Access)
+**Server Mode** provides multi-user access with OAuth 2.0/OIDC authentication, TOTP MFA, role-based permissions, REST API, MCP protocol, golden repository management, HNSW caching, and web administration. See [Operating Modes Guide](docs/operating-modes.md#server-mode) for the full feature set.
 
-Direct command-line interface with two operational sub-modes:
-
-**Local Mode** (default) - Direct file access with instant setup and no dependencies:
-```bash
-cidx init      # Create .code-indexer/ locally
-cidx index     # Index codebase locally
-cidx query     # Search (~1s per query from disk)
-```
-
-**Remote Mode** - Connect to CIDX server with repository linking:
-```bash
-# Initialize remote connection
-cidx init --remote https://cidx.example.com --username user --password pass
-
-# Query executes on remote server
-cidx query "search term"  # Transparent remote execution
-
-# Sync repositories with server
-cidx sync                 # Sync current repository
-cidx sync my-project     # Sync specific repository
-cidx sync --all          # Sync all repositories (multi-repo support)
-```
-
-**Remote Mode Features**:
-- Repository linking (automatic matching between local repo and server golden repo)
-- Transparent remote query execution (same CLI, server-side processing)
-- Multi-repo support (manage and sync multiple repositories)
-- OAuth 2.0 authentication with server
-- Access team's centralized indexed repositories
-
-### Daemon Mode (Performance)
-
-Background service with in-memory caching for faster queries (~5ms) and real-time watch mode.
-
-```bash
-cidx config --daemon    # Enable daemon
-cidx start              # Start daemon
-cidx query "search"     # Fast cached queries
-cidx watch              # Real-time indexing
-```
-
-### Server Mode (Team Collaboration)
-
-Multi-user server with centralized golden repositories for team-wide semantic search. Deploy CIDX as an HTTP/HTTPS service with OAuth 2.0 authentication, REST API, MCP interface, and web UI administration.
-
-```bash
-PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000       # Start multi-user server
-# Users query via REST API or MCP
-# Admin manages repos via web UI
-```
-
-**Core Capabilities**:
-- **Multi-Repo Indexing**: Centralized golden repositories shared across team
-- **Multi-User Access**: OAuth 2.0/OIDC authentication with role-based permissions
-- **TOTP Step-Up Elevation** (v10.0): admin operations require an active TOTP elevation window with rolling 5-minute idle and 30-minute absolute max
-- **Advanced Caching**: HNSW cache with <1ms warm queries (100-1800x speedup)
-- **REST API**: Programmatic access with full query parameter support
-- **MCP Protocol**: Direct `/mcp` (JWT) and `/mcp-public` endpoints for any MCP-aware client (Claude.ai, Claude Desktop, Claude Code, Codex CLI)
-- **Shared Memory Store** (v10.0): MCP `create_memory` / `edit_memory` / `delete_memory` tools with optional semantic injection into `search_code` results
-- **Research Assistant Hardening** (v10.0): closed-set curl wrapper with operator-configured CIDR allowlist and DNS rebinding mitigation
-- **Auto-Repair Dep-Map** (v10.0): scheduled delta and refinement jobs auto-trigger anomaly repair when enabled
-- **Web Administration**: Manage users, repositories, and configuration via browser
-- **Repository Management**: Add, refresh, remove golden repositories
-- **User Management**: Create users, assign roles (admin/power_user/normal_user)
-- **Cache Monitoring**: Real-time cache statistics and performance metrics
-
-### Cluster Mode (Multi-Node Server)
-
-Run multiple CIDX Server nodes sharing a single PostgreSQL database for horizontal scaling and high availability. Cluster mode requires setting `storage_mode` to `"postgres"` in `~/.cidx-server/config.json`. All application functionality (REST API, MCP, Web UI) is identical in standalone and cluster modes; the storage backends swap transparently via Protocol interfaces.
-
-Key cluster features:
-- Leader election via PostgreSQL advisory lock ensures exactly one node runs schedulers at a time
-- Node heartbeat tracking with automatic failover detection (30-second threshold)
-- Distributed background job queue with orphaned job recovery and re-execution
-- Centralized runtime configuration in PostgreSQL with 30-second cross-node propagation
-- All security services cluster-aware: rate limiters, session invalidation, token blacklist, OIDC state, MFA
-- Activated repository metadata shared across nodes via PostgreSQL
-- HNSW max_elements configurable via Web UI (default 1,000,000)
-- Per-node metrics carousel in the admin dashboard
-- SQLite-to-PostgreSQL data migration tool for converting existing installations
-
-For architecture details see [Cluster Architecture Guide](docs/cluster-architecture.md).
-For setup and operations see [Cluster Setup Guide](docs/cluster-setup.md).
-
-**Claude Delegation** (v8.5+):
-- **Protected Repository Analysis**: AI agents analyze code without exposing source to clients
-- **Delegation Functions**: Pre-defined AI workflows for code review, analysis, and transformation
-- **Collaborative Mode** (v9.7+): DAG-based orchestrated multi-step delegation with per-step engines and repos
-- **Competitive Mode** (v9.7+): Decompose-compete-judge pipeline with multiple AI engines
-- **Acting Users** (v9.7+): Scoped repository access via acting_users parameter for multi-tenant delegation
-- **Group-Based Access**: Control which users can execute which delegation functions
-- **Callback-Based Completion**: Efficient job polling with server-side callbacks and cross-node tracking
-
-**Security & Observability** (v8.5+):
-- **Group-Based Security**: Fine-grained access control using group membership
-- **OTEL Telemetry**: OpenTelemetry integration for traces, metrics, and observability
-- **Auto-Discovery**: Automatic repository discovery from GitHub organizations or local paths
-- **Auto-Update**: Job-aware server updates with graceful drain mode
-
-**Self-Monitoring** (v8.8.2+):
-- **Claude-Powered Log Analysis**: Scheduled background scans analyze server logs using Claude CLI
-- **Automatic Issue Creation**: Detected bugs automatically create GitHub issues with reproduction steps
-- **Actionable Focus**: Filters configuration noise, reports only development-actionable bugs
-- **Manual Trigger**: On-demand scans via admin API endpoint
-- **Debug Memory Snapshot** (v9.5.7+): Localhost-only endpoints for diagnosing memory leaks without restarting the server. `GET /debug/memory-snapshot` returns object counts and sizes by type (top 100), with module-qualified names and self-monitoring overhead. `GET /debug/memory-compare?baseline={timestamp}` diffs against a prior snapshot. Secured by network restriction (127.0.0.1/::1 only, no auth required).
-
-**Authentication & Authorization**:
-- OAuth 2.0 and OIDC (OpenID Connect) support with SSO
-- TOTP multi-factor authentication (MFA) with QR setup and recovery codes
-- Password expiry enforcement for non-SSO accounts
-- Login rate limiting with automatic account lockout
-- Configurable admin session timeout
-- Three role levels: admin (full access), power_user (activate repos), normal_user (query only)
-- Group-based repository and function access control
-- Secure token-based API access with cluster-wide JWT revocation
-
-**Performance**:
-- Cold query: ~277ms (first access, loads from disk)
-- Warm query: <1ms (cached, 100-1800x faster)
-- Configurable cache TTL (default 10 minutes)
-- Per-repository cache isolation
-
-For detailed setup, deployment, and configuration, see [Operating Modes Guide](docs/operating-modes.md).
-
-## Common Commands
-
-### Indexing
-
-```bash
-cidx init                    # Create .code-indexer/ config
-cidx index                   # Semantic indexing (default)
-cidx index --fts             # Add full-text search
-cidx index --index-commits   # Add git history indexing
-cidx scip generate           # Generate SCIP indexes
-```
-
-### Querying
-
-```bash
-# Semantic search
-cidx query "search term" --limit 10
-
-# Full-text search
-cidx query "exact text" --fts
-
-# Regex pattern matching
-cidx query "pattern" --fts --regex
-
-# Git history search
-cidx query "term" --time-range-all --quiet
-
-# SCIP code intelligence
-cidx scip definition "Symbol"
-cidx scip references "function_name"
-```
-
-### Filtering
-
-```bash
---language python           # Filter by language
---path-filter "*/tests/*"   # Filter by path pattern
---exclude-path "*/vendor/*" # Exclude paths
---min-score 0.8             # Minimum similarity score
---limit 20                  # Max results
-```
-
-### Daemon Mode
-
-```bash
-cidx config --daemon        # Enable daemon
-cidx start                  # Start daemon
-cidx stop                   # Stop daemon
-cidx status                 # Check status
-cidx watch                  # Start watch mode
-cidx watch-stop             # Stop watch mode
-```
+**Cluster Mode** extends Server Mode across multiple nodes sharing PostgreSQL with leader election, distributed job queuing, and cross-node configuration propagation. See [Cluster Architecture](docs/cluster-architecture.md).
 
 ## Configuration
 
-CIDX requires minimal configuration. The VoyageAI API key is the only required setting.
+CIDX requires a VoyageAI or Cohere API key. Project settings auto-generate in `.code-indexer/config.json` on first run.
 
-### VoyageAI API Key (Required)
-
-```bash
-# Add to shell profile (~/.bashrc or ~/.zshrc)
-export VOYAGE_API_KEY="your-api-key-here"
-source ~/.bashrc
-```
-
-### Project Configuration
-
-CIDX auto-creates `.code-indexer/config.json` on first run with sensible defaults. You can customize:
-
-- `file_extensions` - File types to index
-- `exclude_dirs` - Directories to skip
-- `max_file_size` - Maximum file size (default 1MB)
-
-For complete configuration reference including environment variables, daemon settings, and watch mode options, see [Configuration Guide](docs/configuration.md).
+See: [Configuration Guide](docs/configuration.md)
 
 ## Documentation
 
 ### Getting Started
-- [Installation Guide](docs/installation.md) - Complete installation for all platforms
-- [Query Guide](docs/query-guide.md) - All 23 query parameters and search strategies
-- [Configuration Guide](docs/configuration.md) - VoyageAI setup, config options, environment variables
+
+- [Installation Guide](docs/installation.md) -- Setup for all platforms
+- [Query Guide](docs/query-guide.md) -- All query parameters and search strategies
+- [Configuration Guide](docs/configuration.md) -- API keys, config options, environment variables
 
 ### Features
-- [SCIP Code Intelligence](docs/scip/README.md) - Symbol navigation, dependencies, call chains
-- [Temporal Search](docs/temporal-search.md) - Git history search with time-range filtering
-- [Operating Modes](docs/operating-modes.md) - CLI, Daemon, Server modes explained
+
+- [SCIP Code Intelligence](docs/scip/README.md) -- Symbol navigation, dependencies, call chains
+- [Temporal Search](docs/temporal-search.md) -- Git history search with time-range filtering
+- [Operating Modes](docs/operating-modes.md) -- CLI, Daemon, Server modes explained
+- [X-Ray Architecture](docs/xray-architecture.md) -- AST search engine and sandbox
+- [X-Ray Cookbook](docs/xray-cookbook.md) -- Evaluator examples and patterns
 
 ### AI Integration
-- [AI Integration Guide](docs/ai-integration.md) - Connect AI assistants to CIDX
-- [Guardrails Repository Convention](docs/guardrails-repo-convention.md) - Custom safety guardrails for open delegation jobs
+
+- [AI Integration Guide](docs/ai-integration.md) -- Connect AI assistants to CIDX
+- [Langfuse Trace Sync](docs/langfuse-trace-sync.md) -- Searchable AI conversation history
+- [Meta-Repo Discovery](docs/meta-repo-discovery.md) -- Cross-repo dependency mapping
+- [Guardrails Convention](docs/guardrails-repo-convention.md) -- Safety guardrails for delegation jobs
+- [Delegation Functions](docs/delegation-functions.md) -- AI workflows for code review and analysis
 
 ### Server Administration
-- [Auto-Update Guide](docs/auto-update.md) - Job-aware auto-update with graceful drain mode
-- [Cluster Architecture Guide](docs/cluster-architecture.md) - Multi-node cluster design, storage abstraction, leader election, and services
-- [Cluster Setup Guide](docs/cluster-setup.md) - Install and operate a CIDX Server cluster with PostgreSQL
-- [Fault Injection Operator Guide](docs/fault-injection-operator-guide.md) - Configure and operate the fault injection harness for non-production resilience testing
 
-### Advanced
-- [Architecture Guide](docs/architecture.md) - System design and storage architecture
-- [Migration Guide](docs/migration-to-v8.md) - Upgrading from v7.x to v8.x
-- [Changelog](CHANGELOG.md) - Version history and release notes
+- [Server Deployment](docs/server-deployment.md) -- Deploy and operate CIDX Server
+- [Cluster Architecture](docs/cluster-architecture.md) -- Multi-node design and storage abstraction
+- [Cluster Setup](docs/cluster-setup.md) -- Install and operate a cluster with PostgreSQL
+- [OIDC Setup](docs/oidc-setup-and-configuration.md) -- OpenID Connect SSO configuration
+- [TOTP Elevation](docs/totp-elevation.md) -- Step-up authentication for admin operations
+- [Auto-Update Guide](docs/auto-update.md) -- Job-aware updates with graceful drain mode
+- [Fault Injection](docs/fault-injection-operator-guide.md) -- Resilience testing harness (non-prod)
+- [Server Memory Invariants](docs/server-memory-invariants.md) -- Cache tuning and memory management
+
+### Architecture
+
+- [Architecture Guide](docs/architecture.md) -- System design and storage architecture
+- [Dep-Map Parser](docs/depmap-parser-architecture.md) -- Dependency map module design
+- [Memory Retrieval](docs/memory-retrieval-operator-guide.md) -- Semantic memory pipeline
+- [Migration to v10](docs/migration-to-v10.md) -- Upgrading from v9.x
+- [Migration to v8](docs/migration-to-v8.md) -- Upgrading from v7.x
+- [Changelog](CHANGELOG.md) -- Version history and release notes
 
 ## Contributing
 
-Contributions welcome! We appreciate bug reports, feature suggestions, and code contributions.
-
-### For Developers
-
-**Quick Setup:**
-```bash
-# 1. Clone and install
-git clone https://github.com/YOUR_USERNAME/code-indexer.git
-cd code-indexer
-
-# 2. Initialize submodule (required for custom hnswlib build)
-git submodule update --init --recursive
-
-# 3. Install in editable mode
-pip install -e ".[dev]"
-
-# 4. Install pre-commit hooks (REQUIRED)
-pre-commit install
-
-# 5. Run tests
-./fast-automation.sh
-```
-
-**Pre-commit Hooks**: All commits are automatically checked for linting, formatting, and type errors. Hooks auto-fix most issues.
-
-**See [CONTRIBUTING.md](CONTRIBUTING.md) for complete development setup, testing guidelines, and code quality standards.**
-
-### Reporting Issues
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing guidelines, and code quality standards.
 
 - **Bugs**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
 - **Features**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
@@ -599,9 +208,4 @@ MIT License - See repository for full license text.
 
 ---
 
-**Support**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
 **Repository**: [https://github.com/LightspeedDMS/code-indexer](https://github.com/LightspeedDMS/code-indexer)
-
-<!-- E2E Test: Auto-deployment validation for story #657 - 2025-12-31 16:15 CST -->
-<!-- E2E Test: Final auto-deployment test after fixes deployed - 2025-12-31 16:23 CST -->
-<!-- E2E Test: Complete workflow with server restart - 2025-12-31 16:26 CST -->
