@@ -33,7 +33,7 @@ class DeploymentLock:
         if self.lock_file.exists():
             # Read PID from lock file
             try:
-                with open(self.lock_file, "r") as f:
+                with open(self.lock_file, "r+") as f:
                     pid_str = f.read().strip()
 
                 # Try to parse PID
@@ -130,7 +130,7 @@ class DeploymentLock:
             return False
 
         try:
-            with open(self.lock_file, "r") as f:
+            with open(self.lock_file, "r+") as f:
                 pid_str = f.read().strip()
 
             # Try to parse PID
