@@ -1903,16 +1903,20 @@ class DependencyMapService:
         tracking = self._tracking_backend.get_tracking()
         stored_hashes_json = tracking.get("commit_hashes")
 
-        # Parse stored hashes (may be None for first run)
+        # Parse stored hashes (may be None for first run).
+        # PostgreSQL JSONB returns a dict directly; SQLite returns a JSON string.
         stored_hashes = {}
         if stored_hashes_json:
-            try:
-                stored_hashes = json.loads(stored_hashes_json)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "Failed to parse stored commit hashes, treating as empty"
-                )
-                stored_hashes = {}
+            if isinstance(stored_hashes_json, dict):
+                stored_hashes = stored_hashes_json
+            else:
+                try:
+                    stored_hashes = json.loads(stored_hashes_json)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "Failed to parse stored commit hashes, treating as empty"
+                    )
+                    stored_hashes = {}
 
         # Get current repos
         current_repos = self._get_activated_repos()

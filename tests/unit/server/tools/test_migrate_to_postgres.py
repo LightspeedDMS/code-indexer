@@ -1118,3 +1118,78 @@ class TestParseJsonColumn:
         from code_indexer.server.tools.migrate_to_postgres import _parse_json_column
 
         assert _parse_json_column(42) == 42
+
+
+# ---------------------------------------------------------------------------
+# Helper for SQL-capturing tests
+# ---------------------------------------------------------------------------
+
+
+def _build_sql_capturing_pg_conn() -> tuple:
+    """Return (mock_conn, executed_sqls) where executed_sqls captures every SQL executed.
+
+    The mock conn behaves like a psycopg v3 connection. Each call to
+    cursor.execute(sql, params=None) appends ``sql`` to executed_sqls so
+    tests can assert on the generated SQL without a real PG database.
+    """
+    executed_sqls: List[str] = []
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.__enter__ = MagicMock(return_value=mock_cursor)
+    mock_cursor.__exit__ = MagicMock(return_value=False)
+    mock_cursor.rowcount = 1
+
+    def capture_execute(sql, params=None):
+        executed_sqls.append(sql)
+
+    mock_cursor.execute.side_effect = capture_execute
+    mock_conn.cursor.return_value = mock_cursor
+    return mock_conn, executed_sqls
+
+
+# ---------------------------------------------------------------------------
+# TestUpsertOverwriteSemantics
+# ---------------------------------------------------------------------------
+
+
+class TestUpsertOverwriteSemantics:
+    """Tests that _upsert_rows() uses DO UPDATE for server_config and DO NOTHING for others.
+
+    Root cause being tested: server_config may be pre-seeded with defaults when
+    the server starts in cluster mode before migration runs. The migrated SQLite
+    data must take precedence, so ON CONFLICT DO NOTHING would silently discard it.
+    """
+
+    def test_upsert_overwrite_tables_constant_exists_with_server_config(self) -> None:
+        """
+        Given the migrate_to_postgres module
+        When UPSERT_OVERWRITE_TABLES is imported
+        Then it is a dict containing 'server_config' mapped to its PK column 'config_key'.
+        """
+        from code_indexer.server.tools.migrate_to_postgres import (
+            UPSERT_OVERWRITE_TABLES,
+        )
+
+        assert isinstance(UPSERT_OVERWRITE_TABLES, dict)
+        assert "server_config" in UPSERT_OVERWRITE_TABLES
+        assert UPSERT_OVERWRITE_TABLES["server_config"] == "config_key"
+
+    def test_server_config_uses_on_conflict_update_not_do_nothing(
+        self, migrator_class
+    ) -> None:
+        """
+        Given a server_config row with config_key='runtime'
+        When _upsert_rows() is called for the 'server_config' table
+        Then the SQL contains 'ON CONFLICT (config_key) DO UPDATE SET' (not DO NOTHING).
+        """
+        mock_conn, executed_sqls = _build_sql_capturing_pg_conn()
+
+        m = migrator_class("x.db", "g.db", "pg://x")
+        rows = [{"config_key": "runtime", "config_json": '{"k": "v"}', "version": 1}]
+        m._upsert_rows(mock_conn, "server_config", rows)
+
+        assert len(executed_sqls) == 1
+        sql = executed_sqls[0].upper()
+        assert "ON CONFLICT DO NOTHING" not in sql
+        assert "ON CONFLICT (CONFIG_KEY) DO UPDATE SET" in sql
