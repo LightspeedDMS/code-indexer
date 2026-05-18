@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.44.0 (2026-05-18) — Documentation and E2E Testing Standards
+
+### Added
+- Server E2E front-door testing mandate in CLAUDE.md -- all server E2E tests must use REST API/MCP endpoints, CLI/SSH only for troubleshooting
+- Langfuse trace sync documentation (`docs/langfuse-trace-sync.md`)
+
+### Changed
+- README.md streamlined -- removed redundant "What's New in v10.0" section, consolidated navigation, reduced by ~400 lines
+
 ## v10.43.0 (2026-05-18) — NFS Lock File Writable Mode
 
 ### Fixed
