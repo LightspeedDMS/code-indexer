@@ -4,6 +4,7 @@ Provides alternative to binary index using Hierarchical Navigable Small World (H
 algorithm for approximate nearest neighbor search with better query performance.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -11,6 +12,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 
 import numpy as np
 
@@ -527,15 +530,13 @@ class HNSWIndexManager:
         Note:
             This method is called by watch mode to defer HNSW rebuild until query time.
         """
-        import fcntl
-
         meta_file = collection_path / "collection_meta.json"
         lock_file = collection_path / ".metadata.lock"
         lock_file.touch(exist_ok=True)
 
         with open(lock_file, "r") as lock_f:
-            # Acquire exclusive lock (blocks if query is rebuilding)
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            # Acquire exclusive lock (blocks if query is rebuilding) — NFS-safe
+            _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
                 # Load existing metadata
                 if not meta_file.exists():
@@ -584,7 +585,7 @@ class HNSWIndexManager:
                     raise
             finally:
                 # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                nfs_safe_funlock(lock_f.fileno(), _used_lockf)
 
     def is_stale(self, collection_path: Path) -> bool:
         """Check if HNSW index needs rebuilding.
@@ -680,7 +681,6 @@ class HNSWIndexManager:
                            rebuilds after CoW snapshot to pass the branch to
                            rebuild_from_vectors() for hidden_branches filtering.
         """
-        import fcntl
         import uuid
 
         meta_file = collection_path / "collection_meta.json"
@@ -690,8 +690,8 @@ class HNSWIndexManager:
         lock_file.touch(exist_ok=True)
 
         with open(lock_file, "r") as lock_f:
-            # Acquire exclusive lock
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            # Acquire exclusive lock — NFS-safe
+            _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
                 # Load existing metadata or create new
                 if meta_file.exists():
@@ -768,7 +768,7 @@ class HNSWIndexManager:
                     raise
             finally:
                 # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                nfs_safe_funlock(lock_f.fileno(), _used_lockf)
 
     def _load_id_mapping(self, collection_path: Path) -> Dict[int, str]:
         """Load ID mapping from metadata.
@@ -965,8 +965,6 @@ class HNSWIndexManager:
             Updates both index file and metadata with new mappings.
             Preserves existing HNSW parameters (M, ef_construction).
         """
-        import fcntl
-
         # DEBUG: Mark incremental update for manual testing
         current_index_size = index.get_current_count() if index else 0
         num_new_vectors = len(id_to_label)
@@ -1007,7 +1005,7 @@ class HNSWIndexManager:
 
         with open(lock_file, "r") as lock_f:
             # Acquire exclusive lock
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
                 # Load existing metadata
                 if meta_file.exists():
@@ -1077,4 +1075,4 @@ class HNSWIndexManager:
                     raise
             finally:
                 # Release lock
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                nfs_safe_funlock(lock_f.fileno(), _used_lockf)

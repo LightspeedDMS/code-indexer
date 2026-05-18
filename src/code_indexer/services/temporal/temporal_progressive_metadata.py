@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Set
 
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+
 logger = logging.getLogger(__name__)
 
 FORMAT_VERSION = 2
@@ -138,8 +140,11 @@ class TemporalProgressiveMetadata:
         """
         self.temporal_dir.mkdir(parents=True, exist_ok=True)
         lock_file = open(self._lock_path, "w")
+        _used_lockf = False
+        _lock_acquired = False
         try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            _used_lockf = nfs_safe_flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _lock_acquired = True
 
             data = self._load()
             modifier(data)
@@ -153,7 +158,8 @@ class TemporalProgressiveMetadata:
 
             self._write_atomic(data)
         finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            if _lock_acquired:
+                nfs_safe_funlock(lock_file.fileno(), _used_lockf)
             lock_file.close()
 
     def _write_atomic(self, data: dict) -> None:

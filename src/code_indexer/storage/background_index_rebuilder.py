@@ -22,13 +22,14 @@ queries to continue reading the old index without blocking.
 """
 
 import contextlib
-import errno
 import fcntl
 import logging
 import os
 import time
 from pathlib import Path
 from typing import Callable, Generator
+
+from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 
 logger = logging.getLogger(__name__)
 
@@ -79,25 +80,15 @@ class BackgroundIndexRebuilder:
         """
         with open(self.lock_file, "r+") as lock_f:
             lock_acquired = False
-            use_lockf = False
+            _used_lockf = False
             try:
-                try:
-                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
-                except OSError as e:
-                    if e.errno == errno.EBADF:
-                        fcntl.lockf(lock_f.fileno(), fcntl.LOCK_EX)
-                        use_lockf = True
-                    else:
-                        raise
+                _used_lockf = nfs_safe_flock(lock_f.fileno(), fcntl.LOCK_EX)
                 lock_acquired = True
                 logger.debug(f"Acquired rebuild lock: {self.lock_file}")
                 yield
             finally:
                 if lock_acquired:
-                    if use_lockf:
-                        fcntl.lockf(lock_f.fileno(), fcntl.LOCK_UN)
-                    else:
-                        fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                    nfs_safe_funlock(lock_f.fileno(), _used_lockf)
                     logger.debug(f"Released rebuild lock: {self.lock_file}")
 
     def atomic_swap(self, temp_file: Path, target_file: Path) -> None:

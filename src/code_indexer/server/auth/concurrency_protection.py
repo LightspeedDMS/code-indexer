@@ -109,41 +109,62 @@ class PasswordChangeConcurrencyProtection:
     def _acquire_file_lock(self, username: str) -> Generator[bool, None, None]:
         """Acquire file-based lock for standalone SQLite mode."""
         import fcntl
+        from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 
-        lock_file_path = self.lock_dir / f"password_change_{username}.lock"
+        # Sanitize username to prevent path traversal in lock filename
+        safe_username = username.replace("/", "_").replace("\\", "_").replace("\0", "_")
+        lock_file_path = self.lock_dir / f"password_change_{safe_username}.lock"
         lock_file = None
+        _used_lockf = False
+        _lock_acquired = False
 
         try:
             lock_file = open(lock_file_path, "w")
 
             try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                lock_file.write(f"pid={os.getpid()}\n")
-                lock_file.write(f"timestamp={time.time()}\n")
-                lock_file.flush()
-                yield True
-
+                _used_lockf = nfs_safe_flock(
+                    lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                )
             except (IOError, OSError):
                 raise ConcurrencyConflictError(
                     f"Password change already in progress for user '{username}'. "
                     "Please try again in a few moments."
                 )
+            _lock_acquired = True
+            lock_file.write(f"pid={os.getpid()}\n")
+            lock_file.write(f"timestamp={time.time()}\n")
+            lock_file.flush()
+            yield True
 
         finally:
             if lock_file:
                 try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                except (IOError, OSError):
-                    pass
+                    if _lock_acquired:
+                        nfs_safe_funlock(lock_file.fileno(), _used_lockf)
+                except (IOError, OSError) as unlock_err:
+                    logger.warning(
+                        "Failed to release file lock for user '%s': %s",
+                        username,
+                        unlock_err,
+                    )
                 try:
                     lock_file.close()
-                except (IOError, OSError):
-                    pass
+                except (IOError, OSError) as close_err:
+                    logger.warning(
+                        "Failed to close lock file for user '%s': %s",
+                        username,
+                        close_err,
+                    )
             try:
                 if lock_file_path.exists():
                     lock_file_path.unlink()
-            except (IOError, OSError):
-                pass
+            except (IOError, OSError) as unlink_err:
+                logger.warning(
+                    "Failed to remove lock file %s for user '%s': %s",
+                    lock_file_path,
+                    username,
+                    unlink_err,
+                )
 
     def cleanup_stale_locks(self, max_age_seconds: int = 300) -> int:
         """Clean up stale file-based lock files."""
@@ -197,15 +218,20 @@ class PasswordChangeConcurrencyProtection:
     def _is_user_locked_file(self, username: str) -> bool:
         """Check file lock status."""
         import fcntl
+        from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
 
-        lock_file_path = self.lock_dir / f"password_change_{username}.lock"
+        # Sanitize username to prevent path traversal in lock filename
+        safe_username = username.replace("/", "_").replace("\\", "_").replace("\0", "_")
+        lock_file_path = self.lock_dir / f"password_change_{safe_username}.lock"
         if not lock_file_path.exists():
             return False
 
         try:
             with open(lock_file_path, "r") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                _used_lockf = nfs_safe_flock(
+                    lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                )
+                nfs_safe_funlock(lock_file.fileno(), _used_lockf)
                 return False
         except (IOError, OSError):
             return True

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.41.0 (2026-05-18) — NFS-Safe File Locking
+
+### Fixed
+- All 33 `fcntl.flock()` call sites across 12 files now use NFS-safe locking via centralized `nfs_safe_flock`/`nfs_safe_funlock` utility, fixing EBADF failures on NFS mounts with `local_lock=none`
+- Golden repo indexing on cluster nodes no longer fails during HNSW index builds, vector store writes, or background rebuilds due to BSD flock incompatibility with NFS
+
+### Added
+- `src/code_indexer/utils/file_locking.py` — centralized NFS-safe file locking utility that tries `flock()` first, falls back to `lockf()` (POSIX record locks via NLM) on EBADF
+- Git hook template in `git_hook_manager.py` uses inline flock-to-lockf fallback (standalone script, cannot import utility)
+
 ## v10.40.0 (2026-05-18) — NFS Cluster Stability Fixes
 
 ### Fixed
