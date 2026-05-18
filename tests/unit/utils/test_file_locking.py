@@ -19,7 +19,11 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+from code_indexer.utils.file_locking import (
+    nfs_safe_flock,
+    nfs_safe_funlock,
+    nfs_safe_fsync,
+)
 
 
 class TestNfsSafeFlock:
@@ -158,3 +162,40 @@ class TestNfsSafeFlockIntegration:
         with open(lock_file, "r+") as f:
             used_lockf = nfs_safe_flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             nfs_safe_funlock(f.fileno(), used_lockf)
+
+
+class TestNfsSafeFsync:
+    """Tests for nfs_safe_fsync()."""
+
+    def test_normal_fsync_calls_os_fsync(self):
+        """When os.fsync() succeeds, the fd is passed through and no error is raised."""
+        with patch("code_indexer.utils.file_locking.os") as mock_os:
+            mock_os.fsync.return_value = None
+
+            nfs_safe_fsync(5)
+
+            mock_os.fsync.assert_called_once_with(5)
+
+    def test_ebadf_is_suppressed(self):
+        """EBADF from os.fsync() is silently swallowed (NFS directory fd case)."""
+        ebadf_error = OSError(errno.EBADF, "Bad file descriptor")
+
+        with patch("code_indexer.utils.file_locking.os") as mock_os:
+            mock_os.fsync.side_effect = ebadf_error
+
+            # Must not raise
+            nfs_safe_fsync(5)
+
+            mock_os.fsync.assert_called_once_with(5)
+
+    def test_other_oserror_is_reraised(self):
+        """Non-EBADF OSErrors from os.fsync() are re-raised unchanged."""
+        eio_error = OSError(errno.EIO, "Input/output error")
+
+        with patch("code_indexer.utils.file_locking.os") as mock_os:
+            mock_os.fsync.side_effect = eio_error
+
+            with pytest.raises(OSError) as exc_info:
+                nfs_safe_fsync(5)
+
+            assert exc_info.value.errno == errno.EIO

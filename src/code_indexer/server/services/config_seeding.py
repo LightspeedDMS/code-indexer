@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+from code_indexer.utils.file_locking import nfs_safe_fsync
+
 logger = logging.getLogger(__name__)
 
 # Surface 1 keys: seeded to CLI config.json. NO sinbin, NO orchestration keys.
@@ -81,7 +83,7 @@ def _atomic_write(config_file: Path, data: Dict[str, Any]) -> None:
         with os.fdopen(tmp_fd, "w") as f:
             json.dump(data, f, indent=2)
             f.flush()
-            os.fsync(f.fileno())
+            nfs_safe_fsync(f.fileno())
         os.replace(tmp_name, str(config_file))
     except Exception as exc:
         logger.warning("Config seeding: atomic write failed: %s", exc)

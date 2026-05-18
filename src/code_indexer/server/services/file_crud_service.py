@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from code_indexer.utils.file_locking import nfs_safe_fsync
+
 
 class HashMismatchError(Exception):
     """
@@ -520,7 +522,7 @@ class FileCRUDService:
                 with os.fdopen(temp_fd, "w", encoding=write_encoding) as temp_file:
                     temp_file.write(content)
                     temp_file.flush()
-                    os.fsync(temp_file.fileno())
+                    nfs_safe_fsync(temp_file.fileno())
 
                 # Atomic rename (POSIX guarantees atomicity)
                 os.replace(temp_path, str(full_path))

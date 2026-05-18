@@ -8,7 +8,11 @@ import os
 from pathlib import Path
 from typing import Set
 
-from code_indexer.utils.file_locking import nfs_safe_flock, nfs_safe_funlock
+from code_indexer.utils.file_locking import (
+    nfs_safe_flock,
+    nfs_safe_funlock,
+    nfs_safe_fsync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -168,5 +172,5 @@ class TemporalProgressiveMetadata:
         with open(self._tmp_path, "w") as f:
             json.dump(data, f, indent=2)
             f.flush()
-            os.fsync(f.fileno())
+            nfs_safe_fsync(f.fileno())
         os.replace(str(self._tmp_path), str(self.progress_path))

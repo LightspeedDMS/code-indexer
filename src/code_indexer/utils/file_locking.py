@@ -4,10 +4,44 @@ fcntl.flock() uses BSD file locks which fail with EBADF on NFS mounts
 configured with local_lock=none. This module provides wrappers that
 try flock() first (better per-fd semantics on local filesystems) and
 fall back to POSIX record locks via lockf() when flock() returns EBADF.
+
+os.fsync() on directory file descriptors opened with O_RDONLY also raises
+EBADF on NFS. nfs_safe_fsync() suppresses EBADF because NFS provides
+close-to-open consistency — data is already at the server once the file is
+closed, making the directory fsync redundant for durability.
 """
 
 import errno
 import fcntl
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+
+def nfs_safe_fsync(fd: int) -> None:
+    """Call os.fsync(fd), tolerating EBADF on NFS-mounted directories.
+
+    On NFS mounts with local_lock=none, fsync() on a directory fd opened
+    with O_RDONLY raises EBADF (errno 9). The NFS protocol's close-to-open
+    consistency already guarantees data durability once the file is closed,
+    so the directory fsync is redundant in that environment.
+
+    Args:
+        fd: File descriptor integer (from fileno() or os.open())
+
+    Raises:
+        OSError: Any OSError other than EBADF (e.g. EIO, ENOSPC)
+    """
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        if e.errno == errno.EBADF:
+            logger.debug(
+                "nfs_safe_fsync: ignoring EBADF on fd %d (NFS directory fsync)", fd
+            )
+            return
+        raise
 
 
 def nfs_safe_flock(fd: int, operation: int) -> bool:
