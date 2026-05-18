@@ -35,7 +35,7 @@ Tags transfer automatically during merges. Before ANY work: `git branch --show-c
 
 ### Normal Workflow: dev -> staging -> master
 
-Bump MINOR version on development (e.g. 10.4.0 -> 10.5.0), tag, push. Merge development into staging (auto-deploys). After staging E2E validation AND explicit user authorization, merge staging into master. NEVER merge development directly into master. See memory: `feedback_bump_version_before_staging.md`. Files to edit: `src/code_indexer/__init__.py`, `CHANGELOG.md`, `README.md`.
+Bump MINOR version on development (e.g. 10.4.0 -> 10.5.0), push. CI auto-creates the git tag when `__init__.py` version changes on development (see `.github/workflows/main.yml` `create-tag` job). Do NOT create tags manually -- let CI handle it. Merge development into staging (auto-deploys). After staging E2E validation AND explicit user authorization, merge staging into master. NEVER merge development directly into master. See memory: `feedback_bump_version_before_staging.md`. Files to edit: `src/code_indexer/__init__.py`, `CHANGELOG.md`, `README.md`.
 
 ### Hotfix Workflow: surgical fix directly on master
 
@@ -49,7 +49,7 @@ NEVER push to `master` without explicit user authorization in the **current conv
 
 **Does NOT count**: completing a story or bug fix, "deploy to staging", prior-conversation authorization, assumed authorization because "the work is done".
 
-**Default on work completion**: push to `development` (with version bump and tag), merge and push to `staging`, **STOP** and wait. When in doubt, ASK.
+**Default on work completion**: push to `development` (with version bump; CI auto-tags), merge and push to `staging`, **STOP** and wait. When in doubt, ASK.
 
 ### Security-Sensitive Commit Discipline (Story #929)
 
