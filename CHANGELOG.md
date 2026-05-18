@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.40.0 (2026-05-18) — NFS Cluster Stability Fixes
+
+### Fixed
+- Background index rebuilder flock-first/lockf-fallback for NFS mounts where local_lock=none causes EBADF on flock(); lockf uses POSIX record locks via NLM protocol
+- Dependency map services handle commit_hashes as dict (PostgreSQL JSONB via psycopg3) or str (SQLite), fixing TypeError crash and silent empty-dict return
+- migrate_to_postgres tool handles JSONB dict type for commit_hashes column during SQLite-to-PostgreSQL migration
+
+### Added
+- cluster-migrate.sh --is-storage-node flag so the NFS export server uses local path validation instead of NFS self-mount
+
 ## v10.39.0 (2026-05-17) — NFS Golden Repo Compatibility
 
 ### Fixed
