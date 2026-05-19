@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.45.0 (2026-05-19) — Fix Extension Cascade Race Condition (Bug #1012)
+
+### Fixed
+- Removed `cascade_indexable_extensions_to_repos()` call from Web UI config save handler -- cascade was pre-empting drift detection by writing new extensions to repo configs immediately, causing `sync_repo_extensions_if_drifted()` to find no drift and never trigger `--reconcile`
+- Golden repos now pick up new indexable extensions via drift detection on next refresh cycle, which correctly detects the change and triggers a full reconcile index run
+
+### Changed
+- Web UI "Save & Cascade" button renamed to "Save" for indexing settings section
+- Help text updated: "Changes apply to golden repos on next refresh cycle"
+
 ## v10.44.0 (2026-05-18) — Documentation and E2E Testing Standards
 
 ### Added
