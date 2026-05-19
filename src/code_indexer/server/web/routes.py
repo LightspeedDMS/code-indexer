@@ -8051,13 +8051,6 @@ async def update_config_section(
             extra={"correlation_id": get_correlation_id()},
         )
 
-        # Story #223: Cascade indexing extensions to all golden repos after save
-        if section == "indexing":
-            try:
-                config_service.cascade_indexable_extensions_to_repos()
-            except Exception as e:
-                logger.warning("Extension cascade failed: %s", e)
-
         return _create_config_page_response(
             request,
             session,

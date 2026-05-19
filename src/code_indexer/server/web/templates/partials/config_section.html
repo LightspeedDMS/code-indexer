@@ -1293,11 +1293,11 @@ function saveLlmCredsConfig() {
                 <label for="indexing-extensions">
                     Indexable File Extensions
                     <textarea id="indexing-extensions" name="indexable_extensions" rows="4" style="font-family: monospace; font-size: 0.85em;">{{ config.indexing.indexable_extensions | join(', ') }}</textarea>
-                    <small>Comma-separated list with leading dots (e.g., .py, .js, .ts). Saved changes cascade to all golden repos.</small>
+                    <small>Comma-separated list with leading dots (e.g., .py, .js, .ts). Changes apply to golden repos on next refresh cycle.</small>
                 </label>
             </div>
             <div class="form-actions">
-                <button type="submit" class="primary">Save &amp; Cascade</button>
+                <button type="submit" class="primary">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('indexing')">Cancel</button>
             </div>
         </form>
