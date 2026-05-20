@@ -2244,7 +2244,9 @@ class DependencyMapService:
                 tmp_path.unlink(missing_ok=True)
 
         # Single write with (verified or original) content
-        domain_file.write_text(final_content)
+        atomic_tmp = domain_file.with_suffix(".tmp")
+        atomic_tmp.write_text(final_content)
+        atomic_tmp.replace(domain_file)
 
         logger.info(f"Updated domain file in-place: {domain_file}")
         return _DomainUpdateResult.WRITTEN
@@ -2514,7 +2516,9 @@ class DependencyMapService:
         write_file = Path(dependency_map_dir) / "_domains.json"
         try:
             Path(dependency_map_dir).mkdir(parents=True, exist_ok=True)
-            write_file.write_text(json.dumps(domain_list, indent=2))
+            atomic_tmp = write_file.with_suffix(".tmp")
+            atomic_tmp.write_text(json.dumps(domain_list, indent=2))
+            atomic_tmp.replace(write_file)
         except OSError as e:
             logger.warning(f"Failed to write _domains.json: {e}")
 
@@ -2576,7 +2580,9 @@ class DependencyMapService:
         write_domains_file = dependency_map_dir / "_domains.json"
         try:
             dependency_map_dir.mkdir(parents=True, exist_ok=True)
-            write_domains_file.write_text(json.dumps(domain_list, indent=2))
+            atomic_tmp = write_domains_file.with_suffix(".tmp")
+            atomic_tmp.write_text(json.dumps(domain_list, indent=2))
+            atomic_tmp.replace(write_domains_file)
             logger.info(
                 f"Cleaned _domains.json: removed {len(removed_set)} stale repo alias(es)"
             )
