@@ -2049,6 +2049,12 @@ def credentials_group():
     help="Create .code-indexer-override.yaml file for project-level file filtering rules",
 )
 @click.option(
+    "--no-override-file",
+    is_flag=True,
+    default=False,
+    help="Suppress creation of .code-indexer-override.yaml (used by server-side init in golden repos)",
+)
+@click.option(
     "--remote",
     type=str,
     help="Initialize remote mode with server URL (e.g., https://cidx.example.com)",
@@ -2095,6 +2101,7 @@ def init(
     voyage_model: str,
     interactive: bool,
     create_override_file: bool,
+    no_override_file: bool,
     remote: Optional[str],
     username: Optional[str],
     password: Optional[str],
@@ -2464,8 +2471,9 @@ def init(
             project_filesystem_dir.mkdir(parents=True, exist_ok=True)
 
         # Create override file (by default or if explicitly requested)
+        # Skip entirely when --no-override-file is set (used by server-side golden repo init)
         project_root = config.codebase_dir
-        if (
+        if not no_override_file and (
             create_override_file
             or not (project_root / ".code-indexer-override.yaml").exists()
         ):

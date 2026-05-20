@@ -16,6 +16,69 @@ from .update_strategy import UpdateStrategy
 
 logger = logging.getLogger(__name__)
 
+# Known cidx artifacts that may be created in a repo by `cidx init` and must
+# never block `git pull` or `git reset --hard` (Bug #1013).
+_CIDX_UNTRACKED_ARTIFACTS = frozenset(
+    [
+        ".code-indexer-override.yaml",
+        "language-mappings.yaml",
+    ]
+)
+
+
+def _remove_cidx_untracked_artifacts(repo_path: Path, status_lines: list[str]) -> None:
+    """
+    Remove known cidx artifacts that appear as untracked (??) in git status output.
+
+    Only removes files whose names are in _CIDX_UNTRACKED_ARTIFACTS and that
+    are reported as untracked by git status --porcelain.  Non-cidx untracked
+    files are left untouched.
+
+    Args:
+        repo_path: Absolute path to the git repository root.
+        status_lines: Lines from `git status --porcelain` stdout.
+    """
+    untracked_names = set()
+    for line in status_lines:
+        if line.startswith("?? "):
+            filename = line[3:].strip()
+            untracked_names.add(filename)
+
+    for name in _CIDX_UNTRACKED_ARTIFACTS:
+        if name in untracked_names:
+            artifact = repo_path / name
+            if artifact.exists():
+                artifact.unlink()
+                logger.info(
+                    f"Removed cidx untracked artifact before git operation: {artifact}"
+                )
+
+
+def _parse_untracked_overwrite_filenames(stderr: str) -> list[str]:
+    """
+    Parse filenames from a git error of the form:
+        error: The following untracked working tree files would be overwritten ...
+            file1.yaml
+            file2.yaml
+        Please move or remove them ...
+
+    Returns list of stripped filenames found between the error header and the
+    'Please move or remove' line.
+    """
+    filenames = []
+    in_list = False
+    for line in stderr.splitlines():
+        if "untracked working tree files would be overwritten" in line:
+            in_list = True
+            continue
+        if in_list:
+            stripped = line.strip()
+            if stripped.startswith("Please") or stripped.startswith("Aborting"):
+                break
+            if stripped:
+                filenames.append(stripped)
+    return filenames
+
 
 class GitPullUpdater(UpdateStrategy):
     """
@@ -177,9 +240,44 @@ class GitPullUpdater(UpdateStrategy):
             timeout=30,
         )
         if reset_result.returncode != 0:
+            reset_stderr = reset_result.stderr
+            # Bug #1013: Untracked files would be overwritten — remove and retry once
+            if "untracked working tree files would be overwritten" in reset_stderr:
+                conflicting = _parse_untracked_overwrite_filenames(reset_stderr)
+                logger.warning(
+                    f"Git reset blocked by untracked files in {self.repo_path}: "
+                    f"{conflicting}. Removing and retrying."
+                )
+                for filename in conflicting:
+                    artifact = self.repo_path / filename
+                    if not artifact.resolve().is_relative_to(self.repo_path.resolve()):
+                        logger.warning(
+                            f"Skipping suspicious path outside repo: {filename}"
+                        )
+                        continue
+                    if artifact.exists():
+                        artifact.unlink()
+                        logger.info(f"Removed conflicting untracked file: {artifact}")
+                retry_reset = subprocess.run(
+                    ["git", "reset", "--hard", f"origin/{branch}"],
+                    cwd=str(self.repo_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if retry_reset.returncode != 0:
+                    raise RuntimeError(
+                        f"Git reset --hard origin/{branch} failed after untracked-file "
+                        f"cleanup for {self.repo_path}: {retry_reset.stderr}"
+                    )
+                logger.info(
+                    f"Successfully reset {self.repo_path} to origin/{branch} after cleanup: "
+                    f"{retry_reset.stdout.strip()}"
+                )
+                return
             raise RuntimeError(
                 f"Git reset --hard origin/{branch} failed for {self.repo_path}: "
-                f"{reset_result.stderr}"
+                f"{reset_stderr}"
             )
 
         logger.info(
@@ -226,6 +324,8 @@ class GitPullUpdater(UpdateStrategy):
                 # Filter out untracked files (??) - only warn/reset for tracked modifications
                 all_files = status_result.stdout.strip().splitlines()
                 modified_files = [f for f in all_files if not f.startswith("??")]
+                # Bug #1013: Remove known cidx untracked artifacts before pull
+                _remove_cidx_untracked_artifacts(self.repo_path, all_files)
 
             if modified_files:
                 # Local modifications detected - log warning and reset
@@ -291,6 +391,46 @@ class GitPullUpdater(UpdateStrategy):
                         f"Auto-recovery successful for {self.repo_path} on branch '{branch}'"
                     )
                     return
+
+                # Bug #1013: Untracked files would be overwritten — remove and retry once
+                if "untracked working tree files would be overwritten" in stderr:
+                    conflicting = _parse_untracked_overwrite_filenames(stderr)
+                    logger.warning(
+                        f"Git pull blocked by untracked files in {self.repo_path}: "
+                        f"{conflicting}. Removing and retrying."
+                    )
+                    for filename in conflicting:
+                        artifact = self.repo_path / filename
+                        if not artifact.resolve().is_relative_to(
+                            self.repo_path.resolve()
+                        ):
+                            logger.warning(
+                                f"Skipping suspicious path outside repo: {filename}"
+                            )
+                            continue
+                        if artifact.exists():
+                            artifact.unlink()
+                            logger.info(
+                                f"Removed conflicting untracked file: {artifact}"
+                            )
+                    retry = subprocess.run(
+                        ["git", "pull"],
+                        cwd=str(self.repo_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        env=build_non_interactive_git_env(),
+                    )
+                    if retry.returncode == 0:
+                        logger.info(
+                            f"Git pull retry successful after removing untracked files: "
+                            f"{retry.stdout.strip()}"
+                        )
+                        return
+                    raise RuntimeError(
+                        f"Git pull failed after untracked-file cleanup for "
+                        f"{self.repo_path}: {retry.stderr}"
+                    )
 
                 # AC2: Non-divergence errors are not intercepted
                 raise RuntimeError(f"Git pull failed for {self.repo_path}: {stderr}")
