@@ -765,7 +765,7 @@ class GoldenRepoManager:
                 import subprocess
 
                 subprocess.run(
-                    ["cidx", "init"],
+                    ["cidx", "init", "--no-override-file"],
                     cwd=str(folder_path),
                     check=True,
                     capture_output=True,
@@ -1482,7 +1482,15 @@ class GoldenRepoManager:
         )
 
         # Build init command with optional --force flag
-        init_command = ["cidx", "init", "--embedding-provider", "voyage-ai"]
+        # --no-override-file prevents creating .code-indexer-override.yaml in golden repos
+        # which would block git pull if upstream tracks a file with the same name (Bug #1013)
+        init_command = [
+            "cidx",
+            "init",
+            "--embedding-provider",
+            "voyage-ai",
+            "--no-override-file",
+        ]
         if force_init:
             init_command.append("--force")
 
@@ -1802,7 +1810,14 @@ class GoldenRepoManager:
                 # Try init with force flag if it wasn't already used
                 logging.info("Attempting init conflict resolution with --force flag")
                 result = subprocess.run(
-                    ["cidx", "init", "--embedding-provider", "voyage-ai", "--force"],
+                    [
+                        "cidx",
+                        "init",
+                        "--embedding-provider",
+                        "voyage-ai",
+                        "--force",
+                        "--no-override-file",
+                    ],
                     cwd=clone_path,
                     capture_output=True,
                     text=True,
@@ -1819,7 +1834,13 @@ class GoldenRepoManager:
                     shutil.rmtree(config_dir)
 
                 result = subprocess.run(
-                    ["cidx", "init", "--embedding-provider", "voyage-ai"],
+                    [
+                        "cidx",
+                        "init",
+                        "--embedding-provider",
+                        "voyage-ai",
+                        "--no-override-file",
+                    ],
                     cwd=clone_path,
                     capture_output=True,
                     text=True,
@@ -2956,7 +2977,7 @@ class GoldenRepoManager:
 
                 # Ensure repo is initialized before running cidx index commands (idempotent)
                 init_result = subprocess.run(
-                    ["cidx", "init"],
+                    ["cidx", "init", "--no-override-file"],
                     cwd=repo_path,
                     capture_output=True,
                     text=True,

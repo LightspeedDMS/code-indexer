@@ -129,33 +129,16 @@ class TestExtensionMap:
 class TestHclAvailable:
     """Tests for _hcl_available() conditional HCL detection."""
 
-    def test_hcl_unavailable_when_import_fails(self) -> None:
-        """_hcl_available() returns False when tree_sitter_hcl is not importable."""
-        import sys
+    def test_hcl_unavailable_when_get_language_raises(self) -> None:
+        """_hcl_available() returns False when tree_sitter_languages.get_language('hcl') raises."""
         from code_indexer.xray.languages import _hcl_available
 
-        # Capture the real __import__ BEFORE patching so the side-effect closure
-        # can delegate to it without triggering the patched version.
-        real_import = (
-            __builtins__["__import__"]
-            if isinstance(__builtins__, dict)
-            else __builtins__.__import__
-        )  # type: ignore[union-attr]
-
-        def _fail_hcl(name: str, *args: object, **kwargs: object) -> object:
-            if name == "tree_sitter_hcl":
-                raise ImportError("Mocked: tree_sitter_hcl not available")
-            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-        # Remove cached module so the import inside _hcl_available actually runs
-        original = sys.modules.pop("tree_sitter_hcl", None)
-        try:
-            with patch("builtins.__import__", side_effect=_fail_hcl):
-                result = _hcl_available()
-            assert result is False
-        finally:
-            if original is not None:
-                sys.modules["tree_sitter_hcl"] = original
+        with patch(
+            "tree_sitter_languages.get_language",
+            side_effect=Exception("hcl grammar not available"),
+        ):
+            result = _hcl_available()
+        assert result is False
 
     def test_hcl_available_function_exists(self) -> None:
         """_hcl_available must be importable from languages module."""
@@ -171,11 +154,14 @@ class TestHclAvailable:
         assert isinstance(result, bool)
 
     def test_terraform_extension_when_hcl_available(self) -> None:
-        """When HCL is available, .tf extension maps to 'terraform'."""
-        from code_indexer.xray.languages import _hcl_available, EXTENSION_MAP
+        """When HCL is available, .tf extension maps to 'terraform' at instance level."""
+        from code_indexer.xray.languages import _hcl_available
 
         if _hcl_available():
-            assert EXTENSION_MAP.get(".tf") == "terraform"
+            from code_indexer.xray.ast_engine import AstSearchEngine
+
+            engine = AstSearchEngine()
+            assert engine.extension_map.get(".tf") == "terraform"
 
     def test_terraform_extension_absent_when_hcl_unavailable(self) -> None:
         """When HCL unavailable (our test environment), .tf not in EXTENSION_MAP."""
@@ -188,51 +174,29 @@ class TestHclAvailable:
 class TestTerraformConditionalEngine:
     """Deterministic tests for terraform conditional wiring in AstSearchEngine.
 
-    These tests inject or remove tree_sitter_hcl from sys.modules and reload
-    the relevant modules to verify that AstSearchEngine.supported_languages
-    and extension_map respond dynamically to HCL availability — without any
-    skip guard that could silently pass regardless of state.
+    These tests patch tree_sitter_languages.get_language to control whether
+    HCL is reported as available, verifying that AstSearchEngine.supported_languages
+    and extension_map respond dynamically to HCL availability.
     """
 
     def test_supported_languages_excludes_terraform_when_hcl_absent(self) -> None:
-        """When tree_sitter_hcl is NOT in sys.modules, terraform must be absent."""
-        import sys
+        """When get_language('hcl') raises, terraform must be absent from engine."""
+        from code_indexer.xray.ast_engine import AstSearchEngine
 
-        saved_hcl = sys.modules.pop("tree_sitter_hcl", None)
-        saved_lang = sys.modules.pop("code_indexer.xray.languages", None)
-        saved_engine = sys.modules.pop("code_indexer.xray.ast_engine", None)
-        try:
-            from code_indexer.xray.ast_engine import AstSearchEngine
-
+        with patch(
+            "tree_sitter_languages.get_language",
+            side_effect=Exception("hcl grammar not available"),
+        ):
             engine = AstSearchEngine()
-            assert "terraform" not in engine.supported_languages
-            assert engine.extension_map.get(".tf") is None
-        finally:
-            if saved_hcl is not None:
-                sys.modules["tree_sitter_hcl"] = saved_hcl
-            if saved_lang is not None:
-                sys.modules["code_indexer.xray.languages"] = saved_lang
-            if saved_engine is not None:
-                sys.modules["code_indexer.xray.ast_engine"] = saved_engine
+        assert "terraform" not in engine.supported_languages
+        assert engine.extension_map.get(".tf") is None
 
     def test_supported_languages_includes_terraform_when_hcl_present(self) -> None:
-        """When tree_sitter_hcl IS in sys.modules, terraform MUST appear."""
-        import sys
-        from unittest.mock import MagicMock
+        """When get_language('hcl') succeeds, terraform MUST appear in engine."""
+        from code_indexer.xray.ast_engine import AstSearchEngine
 
-        fake_hcl = MagicMock()
-        sys.modules["tree_sitter_hcl"] = fake_hcl
-        saved_lang = sys.modules.pop("code_indexer.xray.languages", None)
-        saved_engine = sys.modules.pop("code_indexer.xray.ast_engine", None)
-        try:
-            from code_indexer.xray.ast_engine import AstSearchEngine
-
-            engine = AstSearchEngine()
-            assert "terraform" in engine.supported_languages
-            assert engine.extension_map.get(".tf") == "terraform"
-        finally:
-            sys.modules.pop("tree_sitter_hcl", None)
-            if saved_lang is not None:
-                sys.modules["code_indexer.xray.languages"] = saved_lang
-            if saved_engine is not None:
-                sys.modules["code_indexer.xray.ast_engine"] = saved_engine
+        # The real tree_sitter_languages has HCL bundled (verified on this system),
+        # so instantiating without any patch is the definitive "available" test.
+        engine = AstSearchEngine()
+        assert "terraform" in engine.supported_languages
+        assert engine.extension_map.get(".tf") == "terraform"
