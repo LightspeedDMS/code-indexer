@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.47.0 (2026-05-20) -- Atomic Writes for Delta Dependency Map
+
+### Fixed
+- Delta dependency map writes now use temp-file + atomic rename pattern (`Path.replace()`) instead of direct `write_text()`, preventing partial/corrupt files on crash (Bug #1015). Three write sites fixed: `_update_domain_file` (domain .md), `_apply_domain_assignments` (_domains.json), `_remove_stale_repos_from_domains_json` (_domains.json).
+
 ## v10.46.0 (2026-05-20) -- Golden Repo Refresh Fixes, HCL Detection, REST Regex Search
 
 ### Fixed
