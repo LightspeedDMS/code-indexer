@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.46.0 (2026-05-20) -- Golden Repo Refresh Fixes, HCL Detection, REST Regex Search
+
+### Fixed
+- Golden repo refresh failures caused by `cidx init` creating `.code-indexer-override.yaml` in repo root, blocking subsequent `git pull` with "untracked working tree files would be overwritten" error (Bug #1013). Three-layer fix: `--no-override-file` CLI flag on all server subprocess calls, pre-pull cleanup of CIDX artifacts, and error recovery with retry and path traversal validation.
+- X-Ray `_hcl_available()` probed nonexistent `tree_sitter_hcl` package instead of `tree_sitter_languages.get_language("hcl")`, causing Terraform/HCL support to be silently disabled (Bug #1014)
+
+### Added
+- REST endpoint `POST /api/regex/search` for server-side regex search with single-repo and omni fan-out support, 50-repo cap, auth/permission checks, structured error codes, and per-repo metrics (Story #1011)
+
 ## v10.45.0 (2026-05-19) — Fix Extension Cascade Race Condition (Bug #1012)
 
 ### Fixed
