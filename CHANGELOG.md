@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.48.0 (2026-05-22) -- MCP Streamable HTTP Transport Fix (Codex Compatibility)
+
+### Fixed
+- MCP POST endpoints (`/mcp`, `/mcp-public`) now return HTTP 202 with empty body for JSON-RPC notifications (no `id` field), per MCP Streamable HTTP transport spec. Previously returned 200 with a JSON-RPC body, causing Codex's `rmcp` Rust client to close the transport during handshake on `notifications/initialized`.
+
 ## v10.47.0 (2026-05-20) -- Atomic Writes for Delta Dependency Map
 
 ### Fixed

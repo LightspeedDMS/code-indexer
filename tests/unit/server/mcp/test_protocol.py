@@ -541,7 +541,14 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_notification_request_without_id(self):
-        """Test notification (request without id) is processed."""
+        """Test internal process_jsonrpc_request() handles notification (no id) without error.
+
+        This tests the internal function only — it still returns a JSON-RPC dict.
+        The HTTP route handler (mcp_endpoint) is responsible for translating that
+        to HTTP 202 with no body per the MCP Streamable HTTP transport spec.
+        See TestStreamableHTTPTransport.test_post_mcp_notification_returns_202 for
+        the HTTP-layer behavior.
+        """
         user = User(
             username="test",
             password_hash="hashed_password",
@@ -552,7 +559,8 @@ class TestEdgeCases:
 
         response = await process_jsonrpc_request(request, user)
 
-        # Notification should still return response for Phase 1
+        # Internal function returns a JSON-RPC dict regardless of notification/request.
+        # HTTP 202 translation happens at the route handler level, not here.
         assert "jsonrpc" in response
 
     @pytest.mark.asyncio
@@ -848,3 +856,131 @@ class TestStreamableHTTPTransport:
         assert "www-authenticate" in response.headers, (
             "Expected WWW-Authenticate header for invalid token"
         )
+
+    def test_post_mcp_notification_returns_202(self):
+        """Test POST /mcp with notification (no id) returns HTTP 202 with empty body.
+
+        MCP Streamable HTTP transport spec requires notifications to return
+        HTTP 202 Accepted with no body. This is what rmcp (Codex Rust client)
+        expects during handshake when it sends notifications/initialized.
+        """
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            # JSON-RPC notification: no "id" field
+            notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            response = client.post("/mcp", json=notification)
+
+            assert response.status_code == 202, (
+                f"Expected HTTP 202 for notification, got {response.status_code}. "
+                "MCP Streamable HTTP spec requires 202 with no body for notifications."
+            )
+            assert response.content == b"", (
+                f"Expected empty body for notification 202, got: {response.content!r}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_regular_request_returns_200(self):
+        """Test POST /mcp with regular request (has id) returns HTTP 200 with JSON-RPC body."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            # JSON-RPC request: has "id" field
+            request_body = {"jsonrpc": "2.0", "method": "tools/list", "id": "req-1"}
+            response = client.post("/mcp", json=request_body)
+
+            assert response.status_code == 200, (
+                f"Expected HTTP 200 for regular request, got {response.status_code}"
+            )
+            body = response.json()
+            assert "jsonrpc" in body, (
+                f"Expected JSON-RPC body for regular request, got: {body}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_public_notification_returns_202(self):
+        """Test POST /mcp-public with notification (no id) returns HTTP 202 with empty body."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+
+        app = create_app()
+        client = TestClient(app)
+
+        try:
+            # JSON-RPC notification: no "id" field
+            notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            response = client.post("/mcp-public", json=notification)
+
+            assert response.status_code == 202, (
+                f"Expected HTTP 202 for mcp-public notification, got {response.status_code}. "
+                "MCP Streamable HTTP spec requires 202 with no body for notifications."
+            )
+            assert response.content == b"", (
+                f"Expected empty body for mcp-public notification 202, got: {response.content!r}"
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_mcp_notification_202_has_session_id_header(self):
+        """Test POST /mcp notification 202 response includes Mcp-Session-Id header."""
+        from fastapi.testclient import TestClient
+        from code_indexer.server.app import create_app
+        from code_indexer.server.auth.user_manager import User, UserRole
+        from code_indexer.server.auth.dependencies import get_current_user_for_mcp
+        import datetime
+
+        app = create_app()
+        test_user = User(
+            username="test_user",
+            password_hash="hashed",
+            role=UserRole.POWER_USER,
+            created_at=datetime.datetime.now(),
+        )
+        app.dependency_overrides[get_current_user_for_mcp] = lambda: test_user
+        client = TestClient(app)
+
+        try:
+            notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            response = client.post("/mcp", json=notification)
+
+            assert response.status_code == 202, (
+                f"Expected HTTP 202 for notification, got {response.status_code}"
+            )
+            assert "mcp-session-id" in response.headers, (
+                f"Expected Mcp-Session-Id header on 202 response, "
+                f"got headers: {list(response.headers.keys())}"
+            )
+            session_id = response.headers["mcp-session-id"]
+            assert len(session_id) > 0, "Session ID must not be empty"
+        finally:
+            app.dependency_overrides.clear()

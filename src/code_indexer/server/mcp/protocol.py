@@ -792,12 +792,12 @@ async def process_batch_request(
     return responses
 
 
-@mcp_router.post("/mcp")
+@mcp_router.post("/mcp", response_model=None)
 async def mcp_endpoint(
     request: Request,
     response: Response,
     current_user: User = Depends(get_current_user_for_mcp),
-) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]], Response]:
     """
     MCP JSON-RPC 2.0 endpoint.
 
@@ -857,9 +857,15 @@ async def mcp_endpoint(
             body, current_user, session_id=session_id, elevation_key=elevation_key
         )
     elif isinstance(body, dict):
-        return await process_jsonrpc_request(
+        # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
+        # Still process internally for side effects (e.g. notifications/initialized state).
+        is_notification = "id" not in body
+        jsonrpc_result = await process_jsonrpc_request(
             body, current_user, session_id=session_id, elevation_key=elevation_key
         )
+        if is_notification:
+            return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
+        return jsonrpc_result
     else:
         return create_jsonrpc_error(
             -32600, "Invalid Request: body must be object or array", None
@@ -1147,10 +1153,10 @@ async def unauthenticated_sse_generator():
         yield {"event": "ping", "data": "unauthenticated"}
 
 
-@mcp_router.post("/mcp-public")
+@mcp_router.post("/mcp-public", response_model=None)
 async def mcp_public_endpoint(
     request: Request, response: Response
-) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]], Response]:
     """Public MCP endpoint (no OAuth challenge)."""
     session_id = str(uuid.uuid4())
     response.headers["Mcp-Session-Id"] = session_id
@@ -1192,7 +1198,10 @@ async def mcp_public_endpoint(
             for req in body
         ]
     elif isinstance(body, dict):
-        return await process_public_jsonrpc_request(
+        # MCP Streamable HTTP spec: notifications (no "id") must return HTTP 202 with no body.
+        # Still process internally for side effects.
+        is_notification = "id" not in body
+        jsonrpc_result = await process_public_jsonrpc_request(
             body,
             user,
             request,
@@ -1200,6 +1209,9 @@ async def mcp_public_endpoint(
             session_id=session_id,
             elevation_key=elevation_key,
         )
+        if is_notification:
+            return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
+        return jsonrpc_result
     else:
         return create_jsonrpc_error(
             -32600, "Invalid Request: body must be object or array", None
