@@ -128,11 +128,11 @@ class TestGetFileContentBug:
 
             # Verify successful call
             assert data["success"] is True
-            assert "content" in data
-            # Content should be array of content blocks per MCP spec
-            assert isinstance(data["content"], list)
-            assert len(data["content"]) > 0
-            assert data["content"][0]["text"] == "def main():\n    pass"
+            assert "file_content" in data
+            # file_content should be array of content blocks per MCP spec
+            assert isinstance(data["file_content"], list)
+            assert len(data["file_content"]) > 0
+            assert data["file_content"][0]["text"] == "def main():\n    pass"
 
             # Verify service was called with correct parameters
             # Story #33: Handler now passes offset, limit, and skip_truncation

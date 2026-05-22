@@ -65,3 +65,26 @@ def test_bubble_phase_submit_listener_present():
         "Expected addEventListener('submit', function(...) { ... }, false) "
         "but the pattern was not found."
     )
+
+
+def test_do_submit_checks_cidx_redirecting_guard():
+    """Bug #1017: _doSubmit must check window._cidxRedirecting before processing
+    the response body, to prevent document.write from cancelling a pending
+    totp_setup_required redirect initiated by the fetch() interceptor.
+
+    The guard line 'if (window._cidxRedirecting) return;' must appear inside
+    the _doSubmit .then() handler, strictly before the resp.text() call that
+    would destroy the DOM via document.write().
+    """
+    content = _read_base()
+    # Locate _doSubmit function body and verify the guard precedes resp.text()
+    pattern = (
+        r"function\s+_doSubmit\s*\([^)]*\)\s*\{.*?"
+        r"if\s*\(\s*window\._cidxRedirecting\s*\)\s*return\s*;.*?"
+        r"resp\.text\s*\(\s*\)"
+    )
+    assert re.search(pattern, content, re.DOTALL) is not None, (
+        "base.html _doSubmit() is missing the window._cidxRedirecting guard "
+        "before resp.text(). This guard prevents document.write from cancelling "
+        "a totp_setup_required redirect (Bug #1017)."
+    )

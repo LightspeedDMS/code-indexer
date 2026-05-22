@@ -391,7 +391,7 @@ def _parse_pagination_params(params: Dict[str, Any]) -> Any:
             {
                 "success": False,
                 "error": "offset must be an integer >= 1",
-                "content": [],
+                "file_content": [],
                 "metadata": {},
             }
         ), None
@@ -401,7 +401,7 @@ def _parse_pagination_params(params: Dict[str, Any]) -> Any:
             {
                 "success": False,
                 "error": "limit must be an integer >= 1",
-                "content": [],
+                "file_content": [],
                 "metadata": {},
             }
         ), None
@@ -459,7 +459,7 @@ def _build_file_content_response(
     return _mcp_response(
         {
             "success": True,
-            "content": content_blocks,
+            "file_content": content_blocks,
             "metadata": metadata,
             "cache_handle": cache_handle,
             "truncated": truncated,
@@ -692,7 +692,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                         {
                             "success": False,
                             "error": f"Access denied: you are not authorized to access '{basename}'",
-                            "content": [],
+                            "file_content": [],
                             "metadata": {},
                         }
                     )
@@ -704,7 +704,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         if repository_alias and repository_alias.endswith("-global"):
             target_path, error_resp = _resolve_global_repo_target(
-                repository_alias, user, {"content": [], "metadata": {}}
+                repository_alias, user, {"file_content": [], "metadata": {}}
             )
             if error_resp is not None:
                 return error_resp
@@ -733,7 +733,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response(
-            {"success": False, "error": str(e), "content": [], "metadata": {}}
+            {"success": False, "error": str(e), "file_content": [], "metadata": {}}
         )
 
 

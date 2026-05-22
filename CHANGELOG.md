@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.52.0 (2026-05-22) -- MCP Response Key Collision Fix + TOTP Redirect Fix
+
+### Fixed
+- **Bug #1016**: Renamed inner `content` key to `file_content` in `get_file_content` MCP tool response to eliminate naming collision with MCP protocol's `CallToolResult.content` wrapper. Clients no longer navigate two identically-shaped `content` arrays. Updated tool doc schema accordingly.
+- **Bug #1017**: Fixed race condition in `base.html` form interceptor where `document.write()` cancelled a pending `window.location.replace()` navigation on `totp_setup_required` 403 responses. Admin forms (role change, email, password, delete) now correctly redirect to `/admin/mfa/setup` when TOTP is not configured.
+
 ## v10.51.0 (2026-05-22) -- Auto-Updater E2E Verification
 
 ### Fixed

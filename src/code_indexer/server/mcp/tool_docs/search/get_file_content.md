@@ -33,9 +33,9 @@ outputSchema:
     success:
       type: boolean
       description: Whether operation succeeded
-    content:
+    file_content:
       type: array
-      description: Array of content blocks (MCP spec compliant)
+      description: Array of file content blocks. Named file_content (not content) to avoid collision with the MCP protocol CallToolResult.content wrapper field.
       items:
         type: object
         properties:
