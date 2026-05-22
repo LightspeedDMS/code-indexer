@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.50.0 (2026-05-22) -- Auto-Updater Deployed to All Cluster Nodes
+
+### Fixed
+- Deployed auto-updater systemd service and timer to cluster nodes .22 and .23, which were missing the `cidx-auto-update.service` and `cidx-auto-update.timer` units. All 3 cluster nodes now auto-update from the staging branch every 60 seconds.
+
 ## v10.49.0 (2026-05-22) -- MCP Protocol Version Negotiation (Codex Compatibility)
 
 ### Fixed
