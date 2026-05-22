@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.51.0 (2026-05-22) -- Auto-Updater E2E Verification
+
+### Fixed
+- Upgraded root pip on cluster node .22 from 21.3.1 to 26.0.1 to fix `--break-system-packages` flag not recognized during auto-updater deployment step. All 3 cluster nodes now auto-update end-to-end.
+
 ## v10.50.0 (2026-05-22) -- Auto-Updater Deployed to All Cluster Nodes
 
 ### Fixed
