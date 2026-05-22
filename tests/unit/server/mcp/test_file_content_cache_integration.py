@@ -186,6 +186,6 @@ class TestCacheRetrievalIntegration:
             assert data.get("truncated") is False
             assert data.get("cache_handle") is None
 
-            content_blocks = data.get("content", [])
+            content_blocks = data.get("file_content", [])
             assert len(content_blocks) > 0
             assert content_blocks[0].get("text") == small_content
