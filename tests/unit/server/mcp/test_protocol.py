@@ -633,7 +633,7 @@ class TestInitializeMethod:
         # Result must contain required fields per MCP spec
         result = response["result"]
         assert "protocolVersion" in result
-        assert result["protocolVersion"] == "2025-06-18"
+        assert result["protocolVersion"] == "2024-11-05"
         assert "capabilities" in result
         assert "serverInfo" in result
 
@@ -665,6 +665,123 @@ class TestInitializeMethod:
 
         result = response["result"]
         assert "tools" in result["capabilities"]
+
+    @pytest.mark.asyncio
+    async def test_initialize_negotiates_client_protocol_version(self):
+        """Client sends 2025-03-26; server must echo it back."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "rmcp", "version": "0.1.0"},
+            },
+            "id": "init-neg-1",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["jsonrpc"] == "2.0"
+        assert "result" in response
+        assert response["result"]["protocolVersion"] == "2025-03-26"
+
+    @pytest.mark.asyncio
+    async def test_initialize_negotiates_latest_version(self):
+        """Client sends 2025-06-18; server echoes it back."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+            },
+            "id": "init-neg-2",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["result"]["protocolVersion"] == "2025-06-18"
+
+    @pytest.mark.asyncio
+    async def test_initialize_unknown_version_returns_latest(self):
+        """Client sends unknown version 9999-01-01; server returns latest 2025-06-18."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "9999-01-01",
+                "capabilities": {},
+            },
+            "id": "init-neg-3",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["result"]["protocolVersion"] == "2025-06-18"
+
+    @pytest.mark.asyncio
+    async def test_initialize_missing_version_returns_latest(self):
+        """Client sends no protocolVersion; server returns latest 2025-06-18."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "capabilities": {},
+            },
+            "id": "init-neg-4",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["result"]["protocolVersion"] == "2025-06-18"
+
+    @pytest.mark.asyncio
+    async def test_initialize_legacy_version_supported(self):
+        """Client sends legacy 2024-11-05; server echoes it back."""
+        user = User(
+            username="test",
+            password_hash="hashed_password",
+            role=UserRole.POWER_USER,
+            created_at=__import__("datetime").datetime.now(),
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+            },
+            "id": "init-neg-5",
+        }
+
+        response = await process_jsonrpc_request(request, user)
+
+        assert response["result"]["protocolVersion"] == "2024-11-05"
 
 
 @pytest.mark.slow

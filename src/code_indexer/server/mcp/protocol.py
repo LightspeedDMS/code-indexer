@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 mcp_router = APIRouter()
 
+SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18"}
+LATEST_PROTOCOL_VERSION = "2025-06-18"
+
 # Security scheme for bearer token authentication (auto_error=False for optional auth)
 security = HTTPBearer(auto_error=False)
 
@@ -706,7 +709,7 @@ async def process_jsonrpc_request(
     # Route to appropriate handler
     try:
         if method == "initialize":
-            # MCP protocol handshake
+            # MCP protocol handshake with version negotiation.
             # TODO: Verify full MCP 2025-06-18 compatibility
             # - 2025-06-18 removed JSON-RPC batching support (breaking change)
             # - Added structured JSON tool output (structuredContent)
@@ -714,10 +717,16 @@ async def process_jsonrpc_request(
             # - Server-initiated user input via elicitation/create requests
             # Current implementation status: Updated version only, features pending audit
             # Story #22: Use configured service_display_name, fallback to "Neo"
+            client_version = params.get("protocolVersion")
+            negotiated_version = (
+                client_version
+                if client_version in SUPPORTED_PROTOCOL_VERSIONS
+                else LATEST_PROTOCOL_VERSION
+            )
             config = get_config_service().get_config()
             display_name = config.service_display_name or "Neo"
-            result = {
-                "protocolVersion": "2025-06-18",
+            result: Dict[str, Any] = {
+                "protocolVersion": negotiated_version,
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": display_name, "version": __version__},
             }
@@ -1059,11 +1068,17 @@ async def process_public_jsonrpc_request(
     try:
         if method == "initialize":
             # Story #22: Use configured service_display_name, fallback to "Neo"
+            client_version = params.get("protocolVersion")
+            negotiated_version = (
+                client_version
+                if client_version in SUPPORTED_PROTOCOL_VERSIONS
+                else LATEST_PROTOCOL_VERSION
+            )
             config = get_config_service().get_config()
             display_name = config.service_display_name or "Neo"
             return create_jsonrpc_response(
                 {
-                    "protocolVersion": "2025-06-18",
+                    "protocolVersion": negotiated_version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": display_name, "version": __version__},
                 },

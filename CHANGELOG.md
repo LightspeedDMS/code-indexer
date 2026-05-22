@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.49.0 (2026-05-22) -- MCP Protocol Version Negotiation (Codex Compatibility)
+
+### Fixed
+- MCP initialize handler now negotiates protocol version by echoing back the client's requested version when supported (2024-11-05, 2025-03-26, 2025-06-18), falling back to latest (2025-06-18) for unknown versions. Previously hardcoded 2025-06-18, causing Codex's `rmcp` client to reject the handshake when it only supports 2025-03-26.
+
 ## v10.48.0 (2026-05-22) -- MCP Streamable HTTP Transport Fix (Codex Compatibility)
 
 ### Fixed
