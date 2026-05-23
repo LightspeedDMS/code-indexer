@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.54.0 (2026-05-23) -- hnswlib Pre-flight Check + FTS Bootstrap Fix
+
+### Fixed
+- **hnswlib pre-flight guard**: `smart_index()` now raises `RuntimeError` immediately — before acquiring the lock or generating any vectors — when the custom hnswlib fork is not installed. Previously the error surfaced only after all vector files had been written, requiring a full re-index.
+- **FTS bootstrap for new index**: `cidx index --fts` now correctly populates a brand-new Tantivy index from all codebase files when the semantic index is already up-to-date and there is nothing to embed. Previously the FTS index was left empty in this scenario.
+
+### Changed
+- **pyproject.toml**: Added hnswlib VCS dependency (`git+https://github.com/LightspeedDMS/hnswlib.git@89720633`) so `pip install` / `pipx install` builds the custom fork automatically. Also added `numpy>=1.24.0` as an explicit dependency.
+- **install-cidx-server.sh**: Added `g++` / `gcc-c++` to system package list for C++ compilation of hnswlib; added `--recurse-submodules` to fresh clone; added `git submodule update --init third_party/hnswlib` after `git pull`.
+- **docs/installation.md**: Documented C++ compiler prerequisite (gcc/g++/clang) required at install time.
+
+### Added
+- Unit tests for hnswlib pre-flight check and FTS bootstrap path (`tests/unit/services/test_smart_indexer.py`).
+
 ## v10.53.0 (2026-05-23) -- Python Version Constraint
 
 ### Changed
