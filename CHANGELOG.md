@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.53.0 (2026-05-23) -- Python Version Constraint
+
+### Changed
+- Tightened `requires-python` from `>=3.9` to `>=3.9,<3.13` in `pyproject.toml`. `tree-sitter-languages==1.10.2` and `tantivy==0.25.0` ship no pre-built wheels for Python 3.13+; without this bound, installation on Python 3.13/3.14 silently falls back to source builds requiring Rust/Cargo. Affects all platforms (macOS, Linux, Windows).
+
 ## v10.52.0 (2026-05-22) -- MCP Response Key Collision Fix + TOTP Redirect Fix
 
 ### Fixed
