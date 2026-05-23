@@ -44,12 +44,13 @@ dependencies = [
     "python-multipart>=0.0.6",
     "psutil>=5.9.0,<6.0.0",
     "PyJWT>=2.8.0",
+    "numpy>=1.24.0",
     "tokenizers>=0.13.0",
     "GitPython>=3.1.0",
     "zstandard>=0.25.0",
-    # hnswlib is built from third_party/hnswlib submodule (Story #54)
-    # DO NOT use PyPI hnswlib - it lacks check_integrity() method
-    # Install: git submodule update --init && pip install -e .
+    # Custom hnswlib fork (Story #54) — PyPI version lacks check_integrity().
+    # Pinned to same commit as third_party/hnswlib submodule. Requires gcc/g++ at install time.
+    "hnswlib @ git+https://github.com/LightspeedDMS/hnswlib.git@89720633ac089f451e0c3a36d49fca18f2f76e5a",
     "regex>=2023.0.0",
     "rpyc>=6.0.0",
     "authlib>=1.6.5",

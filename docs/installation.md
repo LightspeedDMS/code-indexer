@@ -22,6 +22,10 @@ Complete installation guide for Code Indexer (CIDX) across all platforms and sce
 ### System Requirements
 
 - **Python**: Version 3.9 or higher
+- **C++ compiler**: Required at install time to build the HNSW vector index library from source
+  - Ubuntu/Debian: `sudo apt install gcc g++ python3-dev`
+  - RHEL/Rocky/Fedora: `sudo dnf install gcc gcc-c++ python3-devel`
+  - macOS: `xcode-select --install` (provides clang via Xcode Command Line Tools)
 - **RAM**: 4GB minimum (8GB+ recommended for large codebases)
 - **Disk Space**: 500MB for installation + index storage (varies by codebase size)
 - **Network**: Internet connection for VoyageAI API (semantic search)

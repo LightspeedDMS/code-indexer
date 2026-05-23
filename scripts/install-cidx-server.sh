@@ -92,11 +92,11 @@ echo "--- Step 1: System dependencies ---"
 PACKAGES="git nfs-utils gcc"
 
 if [[ "$PKG_MGR" == "apt" ]]; then
-    PACKAGES="git nfs-common gcc python3-pip python3-dev libpq-dev"
+    PACKAGES="git nfs-common gcc g++ python3-pip python3-dev libpq-dev"
     sudo apt-get update -qq
 else
     # RHEL/Rocky
-    PACKAGES="git nfs-utils gcc python3-pip python3-devel"
+    PACKAGES="git nfs-utils gcc gcc-c++ python3-pip python3-devel"
     # Enable CRB/PowerTools for development headers
     sudo dnf install -y epel-release 2>/dev/null || true
     sudo dnf config-manager --set-enabled crb 2>/dev/null || true
@@ -123,10 +123,11 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
     git fetch origin
     git checkout "$BRANCH"
     git pull origin "$BRANCH"
+    git submodule update --init third_party/hnswlib
 else
     IS_FRESH_INSTALL=1
     echo "Cloning repository..."
-    git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+    git clone --recurse-submodules --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
@@ -141,7 +142,7 @@ echo "--- Step 3: Python dependencies ---"
 
 cd "$INSTALL_DIR"
 
-# Install the package in editable mode
+# Install the package in editable mode (hnswlib VCS dep built automatically)
 $PYTHON -m pip install -e . 2>&1 | tail -5
 
 # Install cluster-specific dependencies
