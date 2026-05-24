@@ -166,6 +166,9 @@ class AutoUpdateService:
 
             try:
                 self.transition_to(ServiceState.DEPLOYING)
+                self.deployment_executor._write_status_file(
+                    "in_progress", "Deploying changes (forced redeploy)"
+                )
                 success = self.deployment_executor.execute()
 
                 if success:
@@ -175,6 +178,9 @@ class AutoUpdateService:
                         logger.info(
                             "Forced redeployment and restart completed successfully",
                             extra={"correlation_id": get_correlation_id()},
+                        )
+                        self.deployment_executor._write_status_file(
+                            "success", "Deployment completed"
                         )
                     else:
                         logger.error(
@@ -191,6 +197,9 @@ class AutoUpdateService:
                             "Forced redeployment failed",
                             extra={"correlation_id": get_correlation_id()},
                         )
+                    )
+                    self.deployment_executor._write_status_file(
+                        "failed", "Forced redeployment failed"
                     )
 
             except Exception as e:
@@ -258,6 +267,9 @@ class AutoUpdateService:
             try:
                 # Execute deployment
                 self.transition_to(ServiceState.DEPLOYING)
+                self.deployment_executor._write_status_file(
+                    "in_progress", "Deploying changes"
+                )
                 success = self.deployment_executor.execute()
 
                 if success:
@@ -268,6 +280,9 @@ class AutoUpdateService:
                         logger.info(
                             "Deployment and restart completed successfully",
                             extra={"correlation_id": get_correlation_id()},
+                        )
+                        self.deployment_executor._write_status_file(
+                            "success", "Deployment completed"
                         )
                     else:
                         logger.error(
@@ -284,6 +299,9 @@ class AutoUpdateService:
                             "Deployment failed",
                             extra={"correlation_id": get_correlation_id()},
                         )
+                    )
+                    self.deployment_executor._write_status_file(
+                        "failed", "Deployment failed"
                     )
 
             except Exception as e:
