@@ -2355,13 +2355,29 @@ class DeploymentExecutor:
             details: Optional details about the status
         """
         try:
-            # Get current version from package
-            try:
-                from code_indexer import __version__
+            # Read version from disk so it reflects the newly-deployed code after
+            # git pull, rather than the stale cached import in sys.modules.
+            import re as _re
 
-                version = __version__
-            except ImportError:
-                version = "unknown"
+            version = "unknown"
+            init_py = self.repo_path / "src" / "code_indexer" / "__init__.py"
+            try:
+                text = init_py.read_text()
+                m = _re.search(
+                    r'^__version__\s*=\s*["\']([^"\']+)["\']', text, _re.MULTILINE
+                )
+                if m:
+                    version = m.group(1)
+                else:
+                    raise ValueError("no __version__ line found")
+            except Exception:
+                # Fall back to cached import when file is missing or unparseable
+                try:
+                    from code_indexer import __version__
+
+                    version = __version__
+                except ImportError:
+                    pass
 
             status_data = {
                 "status": status,

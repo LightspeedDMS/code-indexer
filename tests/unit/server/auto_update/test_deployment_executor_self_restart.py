@@ -276,6 +276,72 @@ class TestAutoUpdateSelfRestartDetection:
                         assert result is True
 
 
+class TestWriteStatusFileVersionFromDisk:
+    """Test that _write_status_file reads version from disk, not cached import."""
+
+    def _run_write_status(self, repo_path, tmp_path, status="success", details=""):
+        """Helper: run _write_status_file with real disk reads and a captured status file."""
+        import json as _json
+
+        status_file = tmp_path / "auto-update-status.json"
+        original_open = open
+
+        def selective_open(path, mode="r", **kwargs):
+            if mode == "w":
+                return original_open(str(status_file), mode, **kwargs)
+            return original_open(path, mode, **kwargs)
+
+        executor = DeploymentExecutor(repo_path=repo_path)
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.AUTO_UPDATE_STATUS_FILE",
+            status_file,
+        ):
+            with patch("pathlib.Path.mkdir"):
+                with patch("builtins.open", side_effect=selective_open):
+                    executor._write_status_file(status, details)
+
+        return _json.loads(status_file.read_text())
+
+    def test_write_status_file_reads_version_from_disk_not_cached_import(self, tmp_path):
+        """After git pull, on-disk version differs from cached import.
+        _write_status_file must read from __init__.py on disk, not sys.modules."""
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        init_dir = repo_path / "src" / "code_indexer"
+        init_dir.mkdir(parents=True)
+        (init_dir / "__init__.py").write_text('__version__ = "99.88.77"\n')
+
+        result = self._run_write_status(repo_path, tmp_path)
+
+        assert result["version"] == "99.88.77", (
+            f"Expected version '99.88.77' from disk, got '{result['version']}'"
+        )
+
+    def test_write_status_file_falls_back_to_import_when_init_py_missing(self, tmp_path):
+        """When __init__.py is absent from repo_path, fall back to cached import."""
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        # Do NOT create src/code_indexer/__init__.py
+
+        result = self._run_write_status(repo_path, tmp_path)
+
+        # Should not crash; version falls back to import value (not empty string)
+        assert "version" in result
+        assert result["version"] != ""
+
+    def test_write_status_file_falls_back_when_version_line_absent(self, tmp_path):
+        """When __init__.py exists but has no __version__ line, fall back to import."""
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        init_dir = repo_path / "src" / "code_indexer"
+        init_dir.mkdir(parents=True)
+        (init_dir / "__init__.py").write_text("# no version here\n")
+
+        result = self._run_write_status(repo_path, tmp_path)
+
+        assert "version" in result
+
+
 class TestAutoUpdateServiceRestart:
     """Test _restart_auto_update_service method."""
 
