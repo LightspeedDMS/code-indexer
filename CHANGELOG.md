@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.55.0 (2026-05-23) -- Skipped Test Cleanup
+
+### Removed
+- Deleted 12 dead test files containing only permanently-skipped or mock-heavy placeholder tests: `test_clean_file_chunking_manager`, `test_vector_calculation_manager`, `test_parallel_processing_replacement`, `test_voyage_threadpool_elimination`, `test_advanced_query_filtering`, `test_semantic_query_manager_warning_log_conditions`, `test_server_startup_crash_fix`, `test_fixed_size_chunking_documentation`, `test_temporal_indexer_project_id`, `test_resume_and_incremental_bugs`, `test_teach_ai_templates`, `test_cancellation_handling`.
+- Deleted ~32 permanently-skipped methods from 11 test files (RED-phase TDD stubs that were never un-skipped after implementation, unreachable-in-local-mode tests, placeholder classes).
+- Removed 15 obsolete ruff/mypy exclusion entries from `pyproject.toml` pointing to deleted test files.
+
+### Fixed
+- Un-skipped ~62 tests across 8 files that were guarded by `try/except ImportError` or `if X is None: pytest.skip()` patterns left over from TDD red phase. All are now active and passing.
+- Fixed indentation errors in `test_workspace_cleanup_service.py` and `test_file_crud_service.py` introduced during un-skip operations.
+- Fixed cascading import error in `test_cancellation_handling.py` (imported from deleted `test_vector_calculation_manager`).
+
+### Changed
+- Zero `@pytest.mark.skip` decorators remain in the test suite. Only legitimate runtime `pytest.skip()` calls (environment/fixture checks) remain.
+
+## v10.54.0 (2026-05-23) -- hnswlib Pre-flight Check + FTS Bootstrap Fix
+
+### Fixed
+- **hnswlib pre-flight guard**: `smart_index()` now raises `RuntimeError` immediately — before acquiring the lock or generating any vectors — when the custom hnswlib fork is not installed. Previously the error surfaced only after all vector files had been written, requiring a full re-index.
+- **FTS bootstrap for new index**: `cidx index --fts` now correctly populates a brand-new Tantivy index from all codebase files when the semantic index is already up-to-date and there is nothing to embed. Previously the FTS index was left empty in this scenario.
+
+### Changed
+- **pyproject.toml**: Added hnswlib VCS dependency (`git+https://github.com/LightspeedDMS/hnswlib.git@89720633`) so `pip install` / `pipx install` builds the custom fork automatically. Also added `numpy>=1.24.0` as an explicit dependency.
+- **install-cidx-server.sh**: Added `g++` / `gcc-c++` to system package list for C++ compilation of hnswlib; added `--recurse-submodules` to fresh clone; added `git submodule update --init third_party/hnswlib` after `git pull`.
+- **docs/installation.md**: Documented C++ compiler prerequisite (gcc/g++/clang) required at install time.
+
+### Added
+- Unit tests for hnswlib pre-flight check and FTS bootstrap path (`tests/unit/services/test_smart_indexer.py`).
+
+## v10.53.0 (2026-05-23) -- Python Version Constraint
+
+### Changed
+- Tightened `requires-python` from `>=3.9` to `>=3.9,<3.13` in `pyproject.toml`. `tree-sitter-languages==1.10.2` and `tantivy==0.25.0` ship no pre-built wheels for Python 3.13+; without this bound, installation on Python 3.13/3.14 silently falls back to source builds requiring Rust/Cargo. Affects all platforms (macOS, Linux, Windows).
+
 ## v10.52.0 (2026-05-22) -- MCP Response Key Collision Fix + TOTP Redirect Fix
 
 ### Fixed

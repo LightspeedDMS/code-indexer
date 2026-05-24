@@ -37,6 +37,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Pre-flight availability flag for hnswlib (custom fork, Story #54).
+# Patched to False in tests that simulate a missing hnswlib installation.
+try:
+    import hnswlib as _hnswlib  # noqa: F401
+
+    HNSWLIB_AVAILABLE = True
+except ImportError:
+    HNSWLIB_AVAILABLE = False
+
 # Number of files between periodic progress callbacks during deletion
 PROGRESS_BATCH_SIZE = 100
 
@@ -296,6 +305,14 @@ class SmartIndexer(HighThroughputProcessor):
         Returns:
             ProcessingStats with operation results
         """
+        # Pre-flight: hnswlib must be importable before we do any work
+        if not HNSWLIB_AVAILABLE:
+            raise RuntimeError(
+                "hnswlib is not installed. "
+                "Install the custom fork: "
+                "git submodule update --init && pip install -e ."
+            )
+
         # Create indexing lock to prevent concurrent operations
         metadata_dir = self.progressive_metadata.metadata_path.parent
         indexing_lock = create_indexing_lock(metadata_dir)
@@ -308,6 +325,9 @@ class SmartIndexer(HighThroughputProcessor):
 
         # Initialize FTS manager variable before try block to ensure it's defined for finally block
         fts_manager: Optional[TantivyIndexManager] = None
+        # Initialized here so it's always in scope when passed to _do_incremental_index,
+        # even when enable_fts=False (in which case fts_manager is also None).
+        create_new_fts: bool = False
 
         try:
             # Get current git status
@@ -574,6 +594,7 @@ class SmartIndexer(HighThroughputProcessor):
                 quiet,
                 vector_thread_count,
                 fts_manager,
+                create_new_fts,
             )
 
         except KeyboardInterrupt:
@@ -915,6 +936,7 @@ class SmartIndexer(HighThroughputProcessor):
         quiet: bool = False,
         vector_thread_count: Optional[int] = None,
         fts_manager=None,
+        create_new_fts: bool = False,
     ) -> ProcessingStats:
         """Perform incremental indexing."""
 
@@ -1088,6 +1110,10 @@ class SmartIndexer(HighThroughputProcessor):
                 self.progressive_metadata.update_commit_watermark(
                     current_branch, current_commit
                 )
+            # FTS bootstrap: if brand-new FTS index requested but nothing to embed,
+            # still build FTS from all files on disk.
+            if fts_manager is not None and create_new_fts:
+                self._populate_fts_from_all_files(fts_manager, progress_callback)
             # CRITICAL: Don't call complete_indexing() here as no indexing session was started
             # This preserves existing metadata when system is already up-to-date
             return ProcessingStats()
@@ -1256,6 +1282,43 @@ class SmartIndexer(HighThroughputProcessor):
             self.progress_log.mark_session_cancelled()
 
         return stats
+
+    def _populate_fts_from_all_files(self, fts_manager, progress_callback=None):
+        """Build FTS index from all codebase files when no semantic re-indexing is needed."""
+        if progress_callback:
+            progress_callback(
+                0,
+                0,
+                Path(""),
+                info="FTS index is new - scanning all files to build full-text index...",
+            )
+        codebase = Path(self.config.codebase_dir)
+        files = list(self.file_finder.find_files())
+        count = 0
+        for file_path in files:
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+                lines = text.splitlines()
+                rel_path = str(file_path.relative_to(codebase))
+                language = file_path.suffix.lstrip(".") or "txt"
+                fts_manager.add_document(
+                    {
+                        "path": rel_path,
+                        "content": text,
+                        "content_raw": text,
+                        "identifiers": text.split(),
+                        "line_start": 1,
+                        "line_end": max(len(lines), 1),
+                        "language": language,
+                    }
+                )
+                count += 1
+            except Exception as e:
+                logger.warning(f"FTS: skipping {file_path}: {e}")
+        if progress_callback:
+            progress_callback(
+                0, 0, Path(""), info=f"FTS index built from {count} files"
+            )
 
     def _do_reconcile_with_database(
         self,

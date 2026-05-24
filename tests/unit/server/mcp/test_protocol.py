@@ -788,48 +788,6 @@ class TestInitializeMethod:
 class TestStreamableHTTPTransport:
     """Test Streamable HTTP transport features (GET, DELETE, Mcp-Session-Id)."""
 
-    @pytest.mark.skip(
-        reason="Hangs indefinitely - TestClient blocks on infinite SSE stream"
-    )
-    @pytest.mark.slow
-    def test_get_mcp_returns_sse_stream_with_auth(self):
-        """Test GET /mcp returns SSE event stream when authenticated.
-
-        Marked as slow because TestClient blocks on SSE stream consumption.
-        """
-        from fastapi.testclient import TestClient
-        from code_indexer.server.app import create_app
-        from code_indexer.server.auth.user_manager import User, UserRole
-        from code_indexer.server.mcp.protocol import get_optional_user
-        import datetime
-
-        app = create_app()
-
-        # Mock authentication using dependency override
-        test_user = User(
-            username="test_user",
-            password_hash="hashed",
-            role=UserRole.POWER_USER,
-            created_at=datetime.datetime.now(),
-        )
-
-        app.dependency_overrides[get_optional_user] = lambda: test_user
-        client = TestClient(app)
-
-        try:
-            # GET /mcp with auth should return SSE stream
-            response = client.get("/mcp", headers={"Accept": "text/event-stream"})
-
-            # Should return 200 with SSE content-type
-            assert response.status_code == 200, (
-                f"Expected 200, got {response.status_code}"
-            )
-            assert "text/event-stream" in response.headers.get("content-type", ""), (
-                f"Expected SSE content-type, got {response.headers.get('content-type')}"
-            )
-        finally:
-            app.dependency_overrides.clear()
-
     def test_get_mcp_requires_authentication(self):
         """Test GET /mcp returns 401 Unauthorized for unauthenticated requests per MCP spec."""
         from fastapi.testclient import TestClient

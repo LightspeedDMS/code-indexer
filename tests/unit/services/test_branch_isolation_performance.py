@@ -146,19 +146,6 @@ class TestBranchIsolationPerformance:
             f"for {len(files_to_hide)} files. Should make 0 calls using pre-fetched data."
         )
 
-    def test_bug2_batch_update_points_should_batch_requests(self, temp_dir):
-        """
-        BUG 2: _batch_update_points makes ONE HTTP request PER POINT.
-
-        This test verifies that updating 1000 points does NOT make 1000 HTTP POST requests.
-        Expected: Should batch points together (e.g., 10 requests for 1000 points with batch size 100).
-
-        Note: This test is deprecated as the batch update functionality is now part of
-        FilesystemVectorStore which handles batching differently.
-        """
-        # Skip test - functionality moved to FilesystemVectorStore
-        pytest.skip("Batch update functionality moved to FilesystemVectorStore")
-
     def test_hide_files_not_in_branch_minimizes_http_requests(
         self, processor, mock_filesystem_client
     ):

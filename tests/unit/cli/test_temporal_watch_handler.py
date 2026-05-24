@@ -4,7 +4,6 @@ Tests git refs monitoring, polling fallback, and commit detection.
 Story: 02_Feat_WatchModeAutoDetection/01_Story_WatchModeAutoUpdatesAllIndexes.md
 """
 
-import pytest
 import subprocess
 from unittest.mock import Mock, patch
 from code_indexer.cli_temporal_watch_handler import TemporalWatchHandler
@@ -252,13 +251,6 @@ class TestTemporalWatchHandlerPollingFallback:
         assert handler.use_polling is True
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
-
-    @patch("code_indexer.cli_temporal_watch_handler.subprocess.run")
-    @patch("code_indexer.cli_temporal_watch_handler.time.sleep")
-    def test_polling_detects_commit_hash_change(self, mock_sleep, mock_run, tmp_path):
-        """Test that polling detects commit hash changes."""
-        # This is a more complex integration test that we'll implement later
-        pytest.skip("Requires more complex polling simulation")
 
 
 class TestTemporalWatchHandlerBranchSwitch:

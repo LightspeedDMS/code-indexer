@@ -9,7 +9,6 @@ import threading
 from pathlib import Path
 from typing import List
 
-import pytest
 
 from code_indexer.xray.sandbox import (
     EvalResult,
@@ -267,21 +266,6 @@ class TestRun:
         assert result.failure == "validation_failed"
         assert result.detail is not None
         assert "Import" in result.detail
-
-    def test_os_exit_segfault_returns_subprocess_died(self):
-        """Simulate segfault (exit code 139) => evaluator_subprocess_died."""
-        node, root = self._python_node_and_root()
-        # Use a code that calls os._exit via __builtins__ workaround —
-        # but open/eval/exec are stripped. Instead, use an exception
-        # path that causes non-zero exit. We use a code whose subprocess
-        # naturally dies with a non-zero code through NameError on stripped
-        # builtin, which the subprocess catches and sends as string payload.
-        # To specifically test exitcode != 0, we rely on the subprocess dying
-        # from a signal, which is tested in test_sandbox_lifecycle.py.
-        # Here we test the general case: subprocess returns non-zero exitcode.
-        # We cannot easily trigger os._exit inside whitelist-valid code.
-        # So skip this as @pytest.mark.slow and do it in lifecycle tests.
-        pytest.skip("Segfault simulation tested in test_sandbox_lifecycle.py")
 
     def test_concurrent_runs_do_not_interfere(self):
         """4 concurrent threads running distinct evaluators produce independent results."""
