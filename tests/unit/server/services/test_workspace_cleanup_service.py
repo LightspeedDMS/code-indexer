@@ -22,16 +22,9 @@ from code_indexer.server.repositories.background_jobs import (
 from code_indexer.server.utils.config_manager import ServerConfig
 
 
-# Import will fail initially - that's expected in TDD
-try:
-    from code_indexer.server.services.workspace_cleanup_service import (
-        WorkspaceCleanupService,
-        CleanupResult,
-    )
-except ImportError:
-    # Expected failure - service doesn't exist yet
-    WorkspaceCleanupService = None
-    CleanupResult = None
+from code_indexer.server.services.workspace_cleanup_service import (
+    WorkspaceCleanupService,
+)
 
 
 @pytest.fixture
@@ -68,9 +61,6 @@ class TestWorkspaceCleanupServiceAC2:
         When WorkspaceCleanupService is initialized
         Then it should store retention_days from config
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         service = WorkspaceCleanupService(config=server_config, job_manager=job_manager)
 
         assert service.retention_days == 7
@@ -84,9 +74,6 @@ class TestWorkspaceCleanupServiceAC2:
         When scan_workspaces is called
         Then it should return list of all cidx-scip-* directories
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create workspace directories
         ws1 = workspace_root / "cidx-scip-job1"
         ws2 = workspace_root / "cidx-scip-job2"
@@ -120,9 +107,6 @@ class TestWorkspaceCleanupServiceAC2:
         When checking if workspace is expired
         Then workspaces older than retention period should be marked expired
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create old workspace (10 days old)
         old_ws = workspace_root / "cidx-scip-old"
         old_ws.mkdir()
@@ -155,9 +139,6 @@ class TestWorkspaceCleanupServiceAC2:
         When cleanup_workspaces is called
         Then only expired workspaces should be deleted
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create expired workspace (10 days old)
         expired_ws = workspace_root / "cidx-scip-expired"
         expired_ws.mkdir()
@@ -203,9 +184,6 @@ class TestWorkspaceCleanupServiceAC2:
         When workspace is deleted
         Then space_reclaimed_bytes should reflect actual space freed
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create workspace with files of known size
         ws = workspace_root / "cidx-scip-sized"
         ws.mkdir()
@@ -239,9 +217,6 @@ class TestWorkspaceCleanupServiceAC2:
         When cleanup runs
         Then operations should be logged with summary
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create expired workspace
         ws = workspace_root / "cidx-scip-logged"
         ws.mkdir()
@@ -274,9 +249,6 @@ class TestWorkspaceCleanupServiceAC6:
         When cleanup runs
         Then workspace should be skipped even if expired
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create expired workspace
         ws = workspace_root / "cidx-scip-job123"
         ws.mkdir()
@@ -321,9 +293,6 @@ class TestWorkspaceCleanupServiceAC6:
         When cleanup runs
         Then workspace should be skipped regardless of creation date
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create old workspace but recently modified
         ws = workspace_root / "cidx-scip-recent-mod"
         ws.mkdir()
@@ -356,9 +325,6 @@ class TestWorkspaceCleanupServiceAC6:
         When cleanup runs
         Then error should be logged but cleanup continues
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create expired workspaces
         ws1 = workspace_root / "cidx-scip-error"
         ws1.mkdir()
@@ -410,9 +376,6 @@ class TestWorkspaceCleanupServiceAC6:
         When result is returned
         Then it should contain all required fields per AC2
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         service = WorkspaceCleanupService(
             config=server_config,
             job_manager=job_manager,
@@ -451,9 +414,6 @@ class TestWorkspaceCleanupServiceAC5:
         When get_cleanup_status is called
         Then it should return status dict with all required fields
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         service = WorkspaceCleanupService(
             config=server_config,
             job_manager=job_manager,
@@ -476,9 +436,6 @@ class TestWorkspaceCleanupServiceAC5:
         When get_cleanup_status is called
         Then last_cleanup_time should be None
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         service = WorkspaceCleanupService(
             config=server_config,
             job_manager=job_manager,
@@ -497,9 +454,6 @@ class TestWorkspaceCleanupServiceAC5:
         When get_cleanup_status is called
         Then last_cleanup_time should be set with ISO format timestamp
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         service = WorkspaceCleanupService(
             config=server_config,
             job_manager=job_manager,
@@ -525,9 +479,6 @@ class TestWorkspaceCleanupServiceAC5:
         When get_cleanup_status is called
         Then workspace_count should reflect actual count
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create workspace directories
         ws1 = workspace_root / "cidx-scip-job1"
         ws2 = workspace_root / "cidx-scip-job2"
@@ -554,9 +505,6 @@ class TestWorkspaceCleanupServiceAC5:
         When get_cleanup_status is called
         Then oldest_workspace_age should reflect the oldest workspace in days
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create old workspace (10 days old)
         old_ws = workspace_root / "cidx-scip-old"
         old_ws.mkdir()
@@ -589,9 +537,6 @@ class TestWorkspaceCleanupServiceAC5:
         When get_cleanup_status is called
         Then total_size_mb should reflect total workspace size
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         # Create workspaces with files
         ws1 = workspace_root / "cidx-scip-sized1"
         ws1.mkdir()
@@ -623,9 +568,6 @@ class TestWorkspaceCleanupServiceAC5:
         When get_cleanup_status is called
         Then status should show zero values gracefully
         """
-        if WorkspaceCleanupService is None:
-            pytest.skip("WorkspaceCleanupService not implemented yet (TDD red phase)")
-
         service = WorkspaceCleanupService(
             config=server_config,
             job_manager=job_manager,

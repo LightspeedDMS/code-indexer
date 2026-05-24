@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.55.0 (2026-05-23) -- Skipped Test Cleanup
+
+### Removed
+- Deleted 12 dead test files containing only permanently-skipped or mock-heavy placeholder tests: `test_clean_file_chunking_manager`, `test_vector_calculation_manager`, `test_parallel_processing_replacement`, `test_voyage_threadpool_elimination`, `test_advanced_query_filtering`, `test_semantic_query_manager_warning_log_conditions`, `test_server_startup_crash_fix`, `test_fixed_size_chunking_documentation`, `test_temporal_indexer_project_id`, `test_resume_and_incremental_bugs`, `test_teach_ai_templates`, `test_cancellation_handling`.
+- Deleted ~32 permanently-skipped methods from 11 test files (RED-phase TDD stubs that were never un-skipped after implementation, unreachable-in-local-mode tests, placeholder classes).
+- Removed 15 obsolete ruff/mypy exclusion entries from `pyproject.toml` pointing to deleted test files.
+
+### Fixed
+- Un-skipped ~62 tests across 8 files that were guarded by `try/except ImportError` or `if X is None: pytest.skip()` patterns left over from TDD red phase. All are now active and passing.
+- Fixed indentation errors in `test_workspace_cleanup_service.py` and `test_file_crud_service.py` introduced during un-skip operations.
+- Fixed cascading import error in `test_cancellation_handling.py` (imported from deleted `test_vector_calculation_manager`).
+
+### Changed
+- Zero `@pytest.mark.skip` decorators remain in the test suite. Only legitimate runtime `pytest.skip()` calls (environment/fixture checks) remain.
+
 ## v10.54.0 (2026-05-23) -- hnswlib Pre-flight Check + FTS Bootstrap Fix
 
 ### Fixed

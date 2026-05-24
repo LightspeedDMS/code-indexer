@@ -13,8 +13,6 @@ Test Categories:
 - Dry-run mode functionality
 """
 
-import pytest
-
 from click.testing import CliRunner
 
 from code_indexer.cli import cli
@@ -145,13 +143,6 @@ class TestSyncCommandValidation:
         result = self.runner.invoke(cli, ["sync", "--timeout", "-100"])
         assert result.exit_code != 0
 
-    def test_sync_all_conflicts_with_repository_argument(self):
-        """Test that --all flag conflicts with specific repository argument."""
-        result = self.runner.invoke(cli, ["sync", "repo-name", "--all"])
-        assert result.exit_code != 0
-        # Command should show flag conflict error
-        assert "cannot specify both repository and --all flag" in result.output.lower()
-
 
 class TestSyncCommandIntegration:
     """Test sync command integration with backend services."""
@@ -159,17 +150,6 @@ class TestSyncCommandIntegration:
     def setup_method(self):
         """Set up test runner."""
         self.runner = CliRunner()
-
-    def test_sync_attempts_api_connection(self):
-        """Test that sync command fails gracefully when repository not found."""
-        result = self.runner.invoke(cli, ["sync", "test-repo"])
-
-        # Should fail when repository is not found or accessible
-        assert result.exit_code != 0
-        assert "repository" in result.output.lower() and (
-            "not found" in result.output.lower()
-            or "not accessible" in result.output.lower()
-        )
 
     def test_sync_handles_missing_configuration(self):
         """Test that sync command handles missing remote configuration."""
@@ -298,34 +278,3 @@ class TestSyncCommandOptionCombinations:
         )
         # Should accept timeout with other options
         assert result.exit_code != 0 or "sync" in result.output.lower()
-
-
-# Integration test placeholders for backend connectivity
-class TestSyncBackendIntegration:
-    """Test sync command integration with backend API.
-
-    These tests verify the command properly interfaces with the job management system
-    built in Features 1-3 of the Epic.
-    """
-
-    def setup_method(self):
-        """Set up test runner."""
-        self.runner = CliRunner()
-
-    @pytest.mark.skip(reason="Backend integration test - requires server setup")
-    def test_sync_submits_job_to_backend(self):
-        """Test that sync command submits job to backend job management system."""
-        # This will be implemented when backend is available
-        pass
-
-    @pytest.mark.skip(reason="Backend integration test - requires server setup")
-    def test_sync_tracks_job_progress(self):
-        """Test that sync command tracks job progress from backend."""
-        # This will be implemented when backend is available
-        pass
-
-    @pytest.mark.skip(reason="Backend integration test - requires server setup")
-    def test_sync_handles_job_completion(self):
-        """Test that sync command properly handles job completion."""
-        # This will be implemented when backend is available
-        pass

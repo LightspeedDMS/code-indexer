@@ -9,7 +9,6 @@ Tests the error code registry system including:
 - Registry lookup functionality
 """
 
-import pytest
 from dataclasses import fields
 
 
@@ -88,10 +87,6 @@ def test_error_registry_lookup():
     """Test that we can look up error definitions by code."""
     from code_indexer.server.error_codes import ERROR_REGISTRY, get_error_definition
 
-    # Add a test entry if registry is empty
-    if len(ERROR_REGISTRY) == 0:
-        pytest.skip("ERROR_REGISTRY is empty, will be populated in implementation")
-
     # Get first error code from registry
     first_code = next(iter(ERROR_REGISTRY.keys()))
 
@@ -107,9 +102,6 @@ def test_error_registry_lookup():
 def test_error_code_uniqueness():
     """Test that all error codes in registry are unique."""
     from code_indexer.server.error_codes import ERROR_REGISTRY
-
-    if len(ERROR_REGISTRY) == 0:
-        pytest.skip("ERROR_REGISTRY is empty, will be populated in implementation")
 
     codes = list(ERROR_REGISTRY.keys())
     # Number of unique codes should equal total codes

@@ -9,7 +9,6 @@ Story #702: Migrate Central JSON Files to SQLite
 
 from pathlib import Path
 from unittest.mock import Mock, patch
-import pytest
 
 
 class TestTokenManagerFactoryFunction:
@@ -191,18 +190,6 @@ class TestSSHKeyManagerFactoryFunction:
                 assert call_kwargs["metadata_dir"] == tmp_path / "data" / "ssh_keys"
 
 
-class TestSSHKeysRouterFactoryFunction:
-    """Tests for get_ssh_key_manager() in routers/ssh_keys.py (Issue #3)."""
-
-    def test_ssh_keys_router_uses_sqlite_backend(self, tmp_path: Path) -> None:
-        """
-        Given get_ssh_key_manager() in ssh_keys router
-        When called
-        Then it creates SSHKeyManager with use_sqlite=True and correct db_path
-        """
-        pytest.skip("Placeholder - implementation will be tested after fix")
-
-
 class TestMCPSSHKeyManagerFactory:
     """Tests for get_ssh_key_manager() in mcp/handlers.py (Issue #3)."""
 
@@ -279,31 +266,3 @@ class TestSyncJobManagerFactoryFunction:
 
             assert call_kwargs["use_sqlite"] is True
             assert call_kwargs["db_path"] == str(db_path)
-
-
-class TestCommitterResolutionServiceSSHKeyManager:
-    """Tests for SSHKeyManager in CommitterResolutionService (Issue #3)."""
-
-    def test_committer_resolution_uses_sqlite_ssh_key_manager(
-        self, tmp_path: Path
-    ) -> None:
-        """
-        Given CommitterResolutionService created without explicit ssh_key_manager
-        When it creates a default SSHKeyManager
-        Then it should use SQLite backend
-        """
-        pytest.skip("Placeholder - requires injecting SSHKeyManager with SQLite config")
-
-
-class TestMigrationOrchestratorSSHKeyManager:
-    """Tests for SSHKeyManager in MigrationOrchestrator (Issue #3)."""
-
-    def test_migration_orchestrator_uses_sqlite_ssh_key_manager(
-        self, tmp_path: Path
-    ) -> None:
-        """
-        Given MigrationOrchestrator is created
-        When it initializes SSHKeyManager
-        Then it should use SQLite backend
-        """
-        pytest.skip("Placeholder - requires modifying MigrationOrchestrator")

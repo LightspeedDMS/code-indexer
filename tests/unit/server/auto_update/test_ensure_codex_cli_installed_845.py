@@ -103,6 +103,10 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         patch.object(
             executor, "_ensure_claude_cli_updated", side_effect=claude_side_effect
         ),
+        patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
+        patch.object(executor, "_ensure_claude_cli_installed", return_value=True),
+        patch.object(executor, "_ensure_nfs_research_symlinks", return_value=True),
+        patch.object(executor, "_ensure_systemd_claude_path", return_value=True),
         patch.object(executor, "_calculate_auto_update_hash", return_value="abc123"),
     ):
         yield

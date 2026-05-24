@@ -9,13 +9,9 @@ Private helpers:
   _init_remote  -- runs cidx init --remote (requires --username/--password); used by 4 tests
   _login        -- runs cidx auth login; used by 4 tests
 
-Test functions (9):
+Test functions (5):
   test_init_remote               -- AC1
   test_auth_login                -- AC1
-  test_auth_status               -- AC1
-  test_auth_validate             -- AC1
-  test_auth_refresh              -- AC1
-  test_auth_update               -- AC1 (skipped)
   test_auth_login_wrong_password -- AC2
   test_auth_logout_then_ops_fail -- AC2
   test_auth_register_and_login   -- AC4
@@ -124,76 +120,6 @@ def test_auth_login(
     )
     assert result.returncode == 0, (
         f"cidx auth login failed (rc={result.returncode}):\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-
-
-@pytest.mark.skip(reason="Known server bug: AuthStatus object used in await expression")
-def test_auth_status(
-    authenticated_workspace: Path,
-    e2e_cli_env: dict[str, str],
-) -> None:
-    """cidx auth status exits 0 in an authenticated workspace."""
-    result = run_cidx(
-        "auth", "status", cwd=str(authenticated_workspace), env=e2e_cli_env
-    )
-    assert result.returncode == 0, (
-        f"cidx auth status failed (rc={result.returncode}):\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-
-
-@pytest.mark.skip(reason="Known server bug: auth validate returns rc=1 silently")
-def test_auth_validate(
-    authenticated_workspace: Path,
-    e2e_cli_env: dict[str, str],
-) -> None:
-    """cidx auth validate exits 0 with a valid token."""
-    result = run_cidx(
-        "auth", "validate", cwd=str(authenticated_workspace), env=e2e_cli_env
-    )
-    assert result.returncode == 0, (
-        f"cidx auth validate failed (rc={result.returncode}):\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-
-
-@pytest.mark.skip(
-    reason="Known server bug: token refresh returns 'Field required' validation error"
-)
-def test_auth_refresh(
-    authenticated_workspace: Path,
-    e2e_cli_env: dict[str, str],
-) -> None:
-    """cidx auth refresh exits 0 and obtains a new token."""
-    result = run_cidx(
-        "auth", "refresh", cwd=str(authenticated_workspace), env=e2e_cli_env
-    )
-    assert result.returncode == 0, (
-        f"cidx auth refresh failed (rc={result.returncode}):\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
-    )
-
-
-@pytest.mark.skip(
-    reason="cidx auth update --url flag behavior needs verification before enabling"
-)
-def test_auth_update(
-    authenticated_workspace: Path,
-    e2e_server_url: str,
-    e2e_cli_env: dict[str, str],
-) -> None:
-    """cidx auth update --url <url> exits 0 (skipped pending flag verification)."""
-    result = run_cidx(
-        "auth",
-        "update",
-        "--url",
-        e2e_server_url,
-        cwd=str(authenticated_workspace),
-        env=e2e_cli_env,
-    )
-    assert result.returncode == 0, (
-        f"cidx auth update failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 

@@ -22,18 +22,11 @@ from pathlib import Path
 
 import pytest
 
-# Import will fail initially (TDD red phase)
-try:
-    from src.code_indexer.server.services.file_crud_service import (
-        FileCRUDService,
-        HashMismatchError,
-        CRUDOperationError,
-    )
-except ImportError:
-    # Expected during TDD red phase
-    FileCRUDService = None  # type: ignore
-    HashMismatchError = None  # type: ignore
-    CRUDOperationError = None  # type: ignore
+from src.code_indexer.server.services.file_crud_service import (
+    FileCRUDService,
+    HashMismatchError,
+    CRUDOperationError,
+)
 
 
 @pytest.fixture
@@ -54,9 +47,6 @@ def test_repo_dir():
 @pytest.fixture
 def service_with_mock_repo(test_repo_dir, monkeypatch):
     """Create FileCRUDService with mocked ActivatedRepoManager."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     # Mock get_activated_repo_path to return our test repo
@@ -77,25 +67,16 @@ def service_with_mock_repo(test_repo_dir, monkeypatch):
 
 def test_hash_mismatch_error_is_exception():
     """HashMismatchError should be a subclass of Exception."""
-    if HashMismatchError is None:
-        pytest.skip("HashMismatchError not yet implemented (TDD red phase)")
-
     assert issubclass(HashMismatchError, Exception)
 
 
 def test_crud_operation_error_is_exception():
     """CRUDOperationError should be a subclass of Exception."""
-    if CRUDOperationError is None:
-        pytest.skip("CRUDOperationError not yet implemented (TDD red phase)")
-
     assert issubclass(CRUDOperationError, Exception)
 
 
 def test_hash_mismatch_error_can_be_raised():
     """HashMismatchError can be raised and caught."""
-    if HashMismatchError is None:
-        pytest.skip("HashMismatchError not yet implemented (TDD red phase)")
-
     with pytest.raises(HashMismatchError) as exc_info:
         raise HashMismatchError("Hash validation failed")
 
@@ -109,9 +90,6 @@ def test_hash_mismatch_error_can_be_raised():
 
 def test_compute_hash_returns_sha256_hex():
     """_compute_hash should return SHA-256 hex digest."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
     content = b"test content"
 
@@ -123,9 +101,6 @@ def test_compute_hash_returns_sha256_hex():
 
 def test_compute_hash_consistent_for_same_content():
     """_compute_hash should produce consistent results."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
     content = b"hello world"
 
@@ -137,9 +112,6 @@ def test_compute_hash_consistent_for_same_content():
 
 def test_compute_hash_different_for_different_content():
     """_compute_hash should produce different hashes for different content."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     hash1 = service._compute_hash(b"content1")
@@ -155,9 +127,6 @@ def test_compute_hash_different_for_different_content():
 
 def test_validate_crud_path_blocks_git_directory():
     """_validate_crud_path should block .git/ directory access."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     with pytest.raises(PermissionError) as exc_info:
@@ -168,9 +137,6 @@ def test_validate_crud_path_blocks_git_directory():
 
 def test_validate_crud_path_blocks_git_subdirectory():
     """_validate_crud_path should block .git/ subdirectory access."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     with pytest.raises(PermissionError) as exc_info:
@@ -181,9 +147,6 @@ def test_validate_crud_path_blocks_git_subdirectory():
 
 def test_validate_crud_path_blocks_path_traversal():
     """_validate_crud_path should block path traversal attempts."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     with pytest.raises(PermissionError) as exc_info:
@@ -194,9 +157,6 @@ def test_validate_crud_path_blocks_path_traversal():
 
 def test_validate_crud_path_blocks_parent_reference():
     """_validate_crud_path should block parent directory references."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     with pytest.raises(PermissionError) as exc_info:
@@ -207,9 +167,6 @@ def test_validate_crud_path_blocks_parent_reference():
 
 def test_validate_crud_path_allows_normal_paths():
     """_validate_crud_path should allow normal relative paths."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     # Should not raise
@@ -220,9 +177,6 @@ def test_validate_crud_path_allows_normal_paths():
 
 def test_validate_crud_path_allows_gitignore():
     """_validate_crud_path should allow .gitignore files (not .git/ directory)."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     # Should not raise - .gitignore is a legitimate file
@@ -233,9 +187,6 @@ def test_validate_crud_path_allows_gitignore():
 
 def test_validate_crud_path_allows_github_directory():
     """_validate_crud_path should allow .github/ directory files (not .git/ directory)."""
-    if FileCRUDService is None:
-        pytest.skip("FileCRUDService not yet implemented (TDD red phase)")
-
     service = FileCRUDService()
 
     # Should not raise - .github/ is for GitHub Actions/config

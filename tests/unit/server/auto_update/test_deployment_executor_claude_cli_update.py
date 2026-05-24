@@ -10,6 +10,7 @@ because the initial install from installer.py was never refreshed.
 """
 
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -146,7 +147,7 @@ class TestEnsureClaudeCliUpdated:
 
             return inner
 
-        with (
+        patches = [
             patch.object(executor, "git_pull", return_value=True),
             patch.object(executor, "git_submodule_update", return_value=True),
             patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
@@ -161,6 +162,9 @@ class TestEnsureClaudeCliUpdated:
             patch.object(
                 executor, "_ensure_auto_updater_uses_server_python", return_value=True
             ),
+            patch.object(executor, "_ensure_data_dir_env_var", return_value=True),
+            patch.object(executor, "_ensure_malloc_arena_max", return_value=True),
+            patch.object(executor, "_ensure_codex_cli_installed", return_value=True),
             patch.object(executor, "ensure_ripgrep", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             patch.object(executor, "_ensure_memory_overcommit", return_value=True),
@@ -170,10 +174,17 @@ class TestEnsureClaudeCliUpdated:
                 "_ensure_claude_cli_updated",
                 side_effect=record("claude_cli_updated"),
             ),
+            patch.object(executor, "_ensure_pace_maker_installed", return_value=True),
+            patch.object(executor, "_ensure_claude_cli_installed", return_value=True),
+            patch.object(executor, "_ensure_nfs_research_symlinks", return_value=True),
+            patch.object(executor, "_ensure_systemd_claude_path", return_value=True),
             patch.object(
                 executor, "_calculate_auto_update_hash", return_value="abc123"
             ),
-        ):
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
             executor.execute()
 
         assert "claude_cli_updated" in call_order
