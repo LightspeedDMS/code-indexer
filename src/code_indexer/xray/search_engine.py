@@ -82,10 +82,12 @@ class XRaySearchEngine:
     def __init__(self) -> None:
         """Initialise the engine, importing tree-sitter at this point."""
         from code_indexer.xray.ast_engine import AstSearchEngine
+        from code_indexer.xray.rust_backend import RustNativeBackend
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
         self.ast_engine = AstSearchEngine()
         self.sandbox = PythonEvaluatorSandbox()
+        self.rust_backend = RustNativeBackend()
 
     @staticmethod
     def _serialize_ast(node: Any, max_nodes: int) -> Dict[str, Any]:
@@ -323,13 +325,23 @@ class XRaySearchEngine:
 
         if file_specs:
             remaining = max(1, timeout_seconds - int(_elapsed()))
-            batch_results = self.sandbox.run_batch(
-                evaluator_code=evaluator_code,
-                file_specs=file_specs,
-                worker_threads=worker_threads,
-                timeout_seconds=remaining,
-                on_process_spawned=on_process_spawned,
-            )
+            if "def evaluate_node" in evaluator_code:
+                batch_results = self.rust_backend.run_batch(
+                    evaluator_code=evaluator_code,
+                    file_specs=file_specs,
+                    worker_threads=worker_threads,
+                    timeout_seconds=remaining,
+                    on_process_spawned=on_process_spawned,
+                    repo_path=str(repo_path),
+                )
+            else:
+                batch_results = self.sandbox.run_batch(
+                    evaluator_code=evaluator_code,
+                    file_specs=file_specs,
+                    worker_threads=worker_threads,
+                    timeout_seconds=remaining,
+                    on_process_spawned=on_process_spawned,
+                )
             for file_matches, file_errors, file_meta in batch_results:
                 if _timed_out():
                     timeout_hit = True

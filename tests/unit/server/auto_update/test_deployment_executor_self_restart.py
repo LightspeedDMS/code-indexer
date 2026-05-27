@@ -302,7 +302,9 @@ class TestWriteStatusFileVersionFromDisk:
 
         return _json.loads(status_file.read_text())
 
-    def test_write_status_file_reads_version_from_disk_not_cached_import(self, tmp_path):
+    def test_write_status_file_reads_version_from_disk_not_cached_import(
+        self, tmp_path
+    ):
         """After git pull, on-disk version differs from cached import.
         _write_status_file must read from __init__.py on disk, not sys.modules."""
         repo_path = tmp_path / "repo"
@@ -317,7 +319,9 @@ class TestWriteStatusFileVersionFromDisk:
             f"Expected version '99.88.77' from disk, got '{result['version']}'"
         )
 
-    def test_write_status_file_falls_back_to_import_when_init_py_missing(self, tmp_path):
+    def test_write_status_file_falls_back_to_import_when_init_py_missing(
+        self, tmp_path
+    ):
         """When __init__.py is absent from repo_path, fall back to cached import."""
         repo_path = tmp_path / "repo"
         repo_path.mkdir()

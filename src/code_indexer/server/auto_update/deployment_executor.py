@@ -85,6 +85,13 @@ PACE_MAKER_CMD_TIMEOUT = 10
 # Mirrors the convention used for /usr/bin/systemctl elsewhere in this file.
 SYSTEMD_DEFAULT_PATH_SUFFIX = "/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
 
+# Step 16: Story #1024 - Rust toolchain + xray-cli build constants
+RUST_INSTALL_CMD = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable"
+RUSTUP_INSTALL_TIMEOUT_SECONDS = 300  # curl + sh pipeline; generous budget
+RUSTUP_CMD_TIMEOUT_SECONDS = 30  # rustup default stable; quick
+CARGO_BUILD_TIMEOUT_SECONDS = 600  # 10 min for first-time xray-cli build
+RUSTC_VERSION_TIMEOUT_SECONDS = 10  # quick binary probe
+
 # Maximum bytes of subprocess stderr captured in warning log messages.
 MAX_ERROR_SNIPPET_LENGTH = 200
 
@@ -2979,6 +2986,19 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 16: Story #1024 - Ensure Rust toolchain + build xray-cli (FATAL)
+        if not self._ensure_rust_toolchain():
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    "Rust toolchain provisioning failed - "
+                    "xray native backend will not function. "
+                    "Deployment cannot continue.",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
         logger.info(
             "Deployment execution completed successfully",
             extra={"correlation_id": get_correlation_id()},
@@ -3716,3 +3736,181 @@ class DeploymentExecutor:
             extra={"correlation_id": get_correlation_id()},
         )
         return True
+
+    # ------------------------------------------------------------------
+    # Story #1024: Rust toolchain + xray-cli build helpers
+    # ------------------------------------------------------------------
+
+    def _check_rustc_installed(self, env: dict) -> bool:
+        """Return True if rustc is available on PATH (including ~/.cargo/bin)."""
+        try:
+            result = subprocess.run(
+                ["rustc", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=RUSTC_VERSION_TIMEOUT_SECONDS,
+                env=env,
+            )
+            if result.returncode == 0:
+                logger.info(
+                    "Rust toolchain already installed: %s",
+                    result.stdout.strip(),
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return False
+
+    def _install_rust_toolchain(self, env: dict) -> bool:
+        """Download and run the rustup installer, then pin stable.
+
+        Returns True on success, False on any failure.
+        """
+        logger.info(
+            "rustc not found — installing Rust toolchain via rustup",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            install_result = subprocess.run(
+                RUST_INSTALL_CMD,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=RUSTUP_INSTALL_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"Rust toolchain install failed: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if install_result.returncode != 0:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"Rust toolchain install failed: "
+                    f"{install_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        # Pin stable toolchain (best-effort: non-fatal if it fails)
+        try:
+            pin_result = subprocess.run(
+                ["rustup", "default", "stable"],
+                capture_output=True,
+                text=True,
+                timeout=RUSTUP_CMD_TIMEOUT_SECONDS,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning(
+                "Failed to pin stable toolchain (non-fatal): %s",
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            pin_result = None
+        if pin_result is not None and pin_result.returncode != 0:
+            logger.warning(
+                "Failed to pin stable toolchain (non-fatal): %s",
+                pin_result.stderr[:MAX_ERROR_SNIPPET_LENGTH],
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        logger.info(
+            "Rust toolchain installed and pinned to stable",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _verify_c_compiler(self) -> bool:
+        """Return True if gcc, cc, or clang is available (needed by tree-sitter crate)."""
+        import shutil
+
+        for cc in ["gcc", "cc", "clang"]:
+            if shutil.which(cc) is not None:
+                return True
+        logger.error(
+            format_error_log(
+                "DEPLOY-GENERAL-172",
+                "No C compiler found (gcc/cc/clang) — tree-sitter build will fail",
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return False
+
+    def _build_xray_cli(self, rust_dir: Path, env: dict) -> bool:
+        """Run cargo build --release -p xray-cli inside rust_dir.
+
+        Returns True on success, False on nonzero exit or timeout.
+        """
+        try:
+            build_result = subprocess.run(
+                ["cargo", "build", "--release", "-p", "xray-cli"],
+                cwd=str(rust_dir),
+                capture_output=True,
+                text=True,
+                timeout=CARGO_BUILD_TIMEOUT_SECONDS,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"cargo build xray-cli failed: {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if build_result.returncode != 0:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"cargo build xray-cli failed: "
+                    f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        logger.info(
+            "xray-cli binary built successfully",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
+    def _ensure_rust_toolchain(self) -> bool:
+        """Story #1024: Ensure Rust toolchain is installed and xray-cli binary is built.
+
+        Idempotent: skips install when rustc is already on PATH.
+        Returns True on success or when rust/ dir is absent (non-fatal skip).
+        Returns False on install failure, missing C compiler, or build failure (FATAL).
+        """
+        cargo_bin = Path.home() / ".cargo" / "bin"
+        env = os.environ.copy()
+        env["PATH"] = f"{cargo_bin}:{env.get('PATH', '')}"
+
+        if not self._check_rustc_installed(env):
+            if not self._install_rust_toolchain(env):
+                return False
+
+        repo_root = Path(__file__).resolve().parents[4]
+        rust_dir = repo_root / "rust"
+        if not rust_dir.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    "rust/ directory not found — xray native backend unavailable",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True  # Non-fatal: older code versions may not have rust/
+
+        if not self._verify_c_compiler():
+            return False
+
+        return self._build_xray_cli(rust_dir, env)

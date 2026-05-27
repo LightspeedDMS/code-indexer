@@ -178,6 +178,7 @@ class TestEnsureClaudeCliUpdated:
             patch.object(executor, "_ensure_claude_cli_installed", return_value=True),
             patch.object(executor, "_ensure_nfs_research_symlinks", return_value=True),
             patch.object(executor, "_ensure_systemd_claude_path", return_value=True),
+            patch.object(executor, "_ensure_rust_toolchain", return_value=True),
             patch.object(
                 executor, "_calculate_auto_update_hash", return_value="abc123"
             ),

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.57.0 (2026-05-27) -- Rust Native Xray Engine (Epic #1019)
+
+### Added
+- Rust xray-core crate: tree-sitter parsing, rayon parallel scanning, OwnedNode heap-allocated AST, file collection across 10 languages (Java, Kotlin, Python, TypeScript, JavaScript, Go, C#, Bash, HTML, CSS).
+- Rust xray-cli binary: `--dynlib`, `--json`, `--files` flags for pipeline integration. Scans 19K+ files in under 4 seconds.
+- Dynamic evaluator compilation and caching: `rustc --crate-type cdylib` (~210ms compile), SHA-256 cache at `~/.cidx-server/xray-cache/`, libloading for native-speed execution, LRU eviction at 100 entries.
+- Rust AST validator: whitelist enforcement (no unsafe, no std::fs/net/process, no raw pointers) before compilation.
+- Python-to-Rust transpiler (`src/code_indexer/xray/transpiler.py`): converts Python evaluator code to Rust. Handles conditionals, loops, list comprehensions, string methods (~20 mapped), re module (regex crate), dynamic typing via Value enum.
+- RustNativeBackend (`src/code_indexer/xray/rust_backend.py`): drop-in replacement for PythonEvaluatorSandbox.run_batch(). Transpiles, compiles, invokes xray-cli, parses JSON output.
+- Evaluator format detection in XRaySearchEngine.run(): routes `def evaluate_node` code to Rust backend, legacy bare-expression code to Python sandbox.
+- DeploymentExecutor Step 16: `_ensure_rust_toolchain()` installs rustup + stable toolchain idempotently, verifies C compiler, builds xray-cli. FATAL on failure.
+- 123 new tests: 42 transpiler, 10 rust_backend, 19 toolchain provisioning, 11 Rust unit tests, 41 spike pattern validation.
+
 ## v10.56.0 (2026-05-23) -- Auto-Updater E2E Verification
 
 ### Changed
