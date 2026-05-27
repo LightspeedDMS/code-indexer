@@ -325,23 +325,14 @@ class XRaySearchEngine:
 
         if file_specs:
             remaining = max(1, timeout_seconds - int(_elapsed()))
-            if "def evaluate_node" in evaluator_code:
-                batch_results = self.rust_backend.run_batch(
-                    evaluator_code=evaluator_code,
-                    file_specs=file_specs,
-                    worker_threads=worker_threads,
-                    timeout_seconds=remaining,
-                    on_process_spawned=on_process_spawned,
-                    repo_path=str(repo_path),
-                )
-            else:
-                batch_results = self.sandbox.run_batch(
-                    evaluator_code=evaluator_code,
-                    file_specs=file_specs,
-                    worker_threads=worker_threads,
-                    timeout_seconds=remaining,
-                    on_process_spawned=on_process_spawned,
-                )
+            batch_results = self.rust_backend.run_batch(
+                evaluator_code=evaluator_code,
+                file_specs=file_specs,
+                worker_threads=worker_threads,
+                timeout_seconds=remaining,
+                on_process_spawned=on_process_spawned,
+                repo_path=str(repo_path),
+            )
             for file_matches, file_errors, file_meta in batch_results:
                 if _timed_out():
                     timeout_hit = True

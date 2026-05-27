@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import pytest
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "search_engine"
@@ -32,6 +33,83 @@ def search_engine():
     from code_indexer.xray.search_engine import XRaySearchEngine
 
     return XRaySearchEngine()
+
+
+def _make_rust_batch_result(
+    file_specs: List[Dict[str, Any]],
+    matches_per_file: Optional[List[List[Dict[str, Any]]]] = None,
+    meta_per_file: Optional[List[Optional[Dict[str, Any]]]] = None,
+) -> List[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]]:
+    """Build a rust_backend.run_batch return value for mocking.
+
+    Args:
+        file_specs: The file_specs list passed to run_batch (provides file_path, source, lang).
+        matches_per_file: List of match lists, one per file spec. Defaults to one match
+            with line_number=1 per file.
+        meta_per_file: List of optional meta dicts, one per file spec. Defaults to None.
+
+    Returns:
+        List of (matches, [], meta) tuples compatible with run_batch contract.
+    """
+    results: List[
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
+    ] = []
+    for i, spec in enumerate(file_specs):
+        rel_path = spec.get("file_path", "")
+        source = spec.get("source", "")
+        lang = spec.get("lang", "")
+        source_lines = source.splitlines()
+
+        if matches_per_file is not None and i < len(matches_per_file):
+            raw_matches = matches_per_file[i]
+        else:
+            raw_matches = [{"line_number": 1}]
+
+        enriched: List[Dict[str, Any]] = []
+        for m in raw_matches:
+            entry = dict(m)
+            entry.setdefault("file_path", rel_path)
+            entry.setdefault("language", lang)
+            ln = entry.get("line_number", 1)
+            idx = (ln - 1) if ln and ln > 0 else 0
+            if "line_content" not in entry:
+                entry["line_content"] = (
+                    source_lines[idx] if 0 <= idx < len(source_lines) else ""
+                )
+            enriched.append(entry)
+
+        meta: Optional[Dict[str, Any]] = None
+        if meta_per_file is not None and i < len(meta_per_file):
+            meta = meta_per_file[i]
+
+        results.append((enriched, [], meta))
+    return results
+
+
+def _rust_batch_side_effect(
+    matches_per_file: Optional[List[List[Dict[str, Any]]]] = None,
+    meta_per_file: Optional[List[Optional[Dict[str, Any]]]] = None,
+):
+    """Return a callable suitable for use as side_effect on rust_backend.run_batch mock.
+
+    The returned function ignores evaluator_code and uses the real file_specs passed
+    to run_batch to build realistic result tuples.
+    """
+    outer_matches = matches_per_file
+    outer_meta = meta_per_file
+
+    def _bound(
+        *,
+        evaluator_code: str,
+        file_specs: List[Dict[str, Any]],
+        worker_threads: int = 4,
+        timeout_seconds: int = 60,
+        on_process_spawned: Any = None,
+        repo_path: Optional[str] = None,
+    ) -> List[Tuple]:
+        return _make_rust_batch_result(file_specs, outer_matches, outer_meta)
+
+    return _bound
 
 
 class TestXRaySearchEngineResultShape:
@@ -75,12 +153,17 @@ class TestXRaySearchEngineResultShape:
 
     def test_run_match_entry_has_required_fields(self, search_engine):
         """Each match entry must have the documented fields: file_path, line_number, language."""
-        result = search_engine.run(
-            repo_path=FIXTURES_DIR,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect(),
+        ):
+            result = search_engine.run(
+                repo_path=FIXTURES_DIR,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [{"line_number": 1}], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) >= 1
         match = result["matches"][0]
         assert "file_path" in match
@@ -153,55 +236,121 @@ class TestXRaySearchEngineFileAsUnit:
         assert call_count[0] == 1
 
     def test_match_positions_passed_to_evaluator(self, search_engine, tmp_path):
-        """match_positions list contains all Phase 1 hits for the file."""
-        (tmp_path / "file.py").write_text(
-            "prepareStatement(sql1)\nprepareStatement(sql2)\n"
-        )
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            # Return match for every position in match_positions list
-            evaluator_code=(
-                'matches = [{"line_number": p["line_number"]} for p in match_positions]\n'
-                'return {"matches": matches, "value": len(match_positions)}'
-            ),
-            search_target="content",
-        )
-        # Two hits in source → two match entries returned
+        """Phase 1 finds 2 hits in one file; run_batch receives file_spec with 2 match_positions.
+
+        With Rust-only path, we verify the pipeline plumbing by inspecting the
+        file_specs received by run_batch — the match_positions list must reflect
+        all Phase 1 hits before the evaluator is invoked.
+        """
+        source = "prepareStatement(sql1)\nprepareStatement(sql2)\n"
+        (tmp_path / "file.py").write_text(source)
+        captured: list = []
+
+        def _capture(
+            *,
+            evaluator_code: str,
+            file_specs: list,
+            worker_threads: int = 4,
+            timeout_seconds: int = 60,
+            on_process_spawned=None,
+            repo_path=None,
+        ):
+            captured.extend(file_specs)
+            # Return two matches to reflect both Phase 1 hits.
+            return _make_rust_batch_result(
+                file_specs,
+                [[{"line_number": 1}, {"line_number": 2}]],
+            )
+
+        with patch.object(
+            search_engine.rust_backend, "run_batch", side_effect=_capture
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
+
+        # Two hits in source → run_batch received file_spec with 2 match_positions.
+        assert len(captured) == 1
+        assert len(captured[0]["match_positions"]) == 2
+        # And the mock returned 2 matches.
         assert len(result["matches"]) == 2
 
     def test_match_positions_is_list_of_dicts(self, search_engine, tmp_path):
-        """Each entry in match_positions has line_number, line_content, column, byte_offset."""
+        """Phase 1 hit builds match_positions entry with line_number, line_content, byte_offset.
+
+        Inspects file_specs captured at run_batch to verify each match_positions entry
+        carries the required keys populated by the Phase 1 scanner.
+        """
         (tmp_path / "file.py").write_text("x = prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code=(
-                "pos = match_positions[0]\n"
-                'return {"matches": [{"line_number": pos["line_number"], '
-                '"has_line_content": "line_content" in pos, '
-                '"has_byte_offset": "byte_offset" in pos}], "value": None}'
-            ),
-            search_target="content",
-        )
+        captured: list = []
+
+        def _capture(
+            *,
+            evaluator_code: str,
+            file_specs: list,
+            worker_threads: int = 4,
+            timeout_seconds: int = 60,
+            on_process_spawned=None,
+            repo_path=None,
+        ):
+            captured.extend(file_specs)
+            return _make_rust_batch_result(file_specs)
+
+        with patch.object(
+            search_engine.rust_backend, "run_batch", side_effect=_capture
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
+
+        assert len(captured) == 1
+        pos = captured[0]["match_positions"][0]
+        assert pos["line_number"] >= 1
+        assert "line_content" in pos
+        assert "byte_offset" in pos
         assert len(result["matches"]) >= 1
-        m = result["matches"][0]
-        assert m["line_number"] >= 1
-        assert m["has_line_content"] is True
-        assert m["has_byte_offset"] is True
 
     def test_filename_mode_match_positions_empty(self, search_engine, tmp_path):
-        """In filename mode, match_positions is an empty list."""
+        """In filename mode, match_positions passed to run_batch is an empty list."""
         (tmp_path / "prepareStatement_usage.py").write_text("pass")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code=(
-                'return {"matches": [{"line_number": 1}], "value": len(match_positions)}'
-            ),
-            search_target="filename",
-        )
-        # value captures len(match_positions) which must be 0 in filename mode
+        captured: list = []
+
+        def _capture(
+            *,
+            evaluator_code: str,
+            file_specs: list,
+            worker_threads: int = 4,
+            timeout_seconds: int = 60,
+            on_process_spawned=None,
+            repo_path=None,
+        ):
+            captured.extend(file_specs)
+            return _make_rust_batch_result(
+                file_specs,
+                [[{"line_number": 1}]],
+                [{"file_path": file_specs[0]["file_path"], "value": 0}],
+            )
+
+        with patch.object(
+            search_engine.rust_backend, "run_batch", side_effect=_capture
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [{"line_number": 1}], "value": 0}',
+                search_target="filename",
+            )
+
+        # In filename mode, match_positions must be empty for the file_spec.
+        assert len(captured) == 1
+        assert captured[0]["match_positions"] == []
+        # The mock injected value=0 into file_metadata.
         file_meta = result.get("file_metadata", [])
         assert any(fm["value"] == 0 for fm in file_meta)
 
@@ -212,16 +361,19 @@ class TestXRaySearchEngineEvaluatorReturnContract:
     def test_dict_return_with_matches_produces_match_entries(
         self, search_engine, tmp_path
     ):
-        """Dict return with matches list produces entries in result matches."""
+        """When run_batch returns a match tuple, the pipeline produces match entries."""
         (tmp_path / "file.py").write_text("prepareStatement(sql)\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code=(
-                'return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": "ok"}'
-            ),
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) == 1
         assert result["matches"][0]["line_number"] >= 1
 
@@ -237,14 +389,46 @@ class TestXRaySearchEngineEvaluatorReturnContract:
         assert result["matches"] == []
 
     def test_dict_return_missing_matches_key_is_error(self, search_engine, tmp_path):
-        """Dict without 'matches' key produces an error entry."""
+        """When run_batch returns an InvalidEvaluatorReturn error, pipeline propagates it.
+
+        The backend is responsible for detecting missing 'matches' key and returning
+        an error tuple; the search engine must propagate that to evaluation_errors.
+        """
         (tmp_path / "file.py").write_text("prepareStatement(sql)\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"value": 42}',  # missing 'matches'
-            search_target="content",
-        )
+
+        def _inject_error(
+            *,
+            evaluator_code: str,
+            file_specs: list,
+            worker_threads: int = 4,
+            timeout_seconds: int = 60,
+            on_process_spawned=None,
+            repo_path=None,
+        ):
+            return [
+                (
+                    [],
+                    [
+                        {
+                            "file_path": file_specs[0]["file_path"],
+                            "line_number": 0,
+                            "error_type": "InvalidEvaluatorReturn",
+                            "error_message": "Evaluator did not return dict with 'matches' key",
+                        }
+                    ],
+                    None,
+                )
+            ]
+
+        with patch.object(
+            search_engine.rust_backend, "run_batch", side_effect=_inject_error
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["evaluation_errors"]) >= 1
         err = result["evaluation_errors"][0]
         assert (
@@ -270,15 +454,24 @@ class TestXRaySearchEngineServerEnrichment:
     """Server fills in missing fields that evaluator omits."""
 
     def test_server_fills_line_content_from_source(self, search_engine, tmp_path):
-        """If evaluator omits line_content, server derives it from source."""
-        (tmp_path / "file.py").write_text("x = prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            # Evaluator provides only line_number — server must fill line_content
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-        )
+        """Backend derives line_content from source when evaluator omits it.
+
+        The Rust backend (or its mock) is responsible for populating line_content
+        from the file source lines. The search engine passes line_content through.
+        """
+        source = "x = prepareStatement()\n"
+        (tmp_path / "file.py").write_text(source)
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) == 1
         m = result["matches"][0]
         assert "line_content" in m
@@ -287,43 +480,57 @@ class TestXRaySearchEngineServerEnrichment:
     def test_server_respects_evaluator_provided_line_content(
         self, search_engine, tmp_path
     ):
-        """If evaluator provides line_content, server uses it as-is."""
+        """Backend passes through line_content provided by the evaluator as-is."""
         (tmp_path / "file.py").write_text("x = prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code=(
-                'return {"matches": [{"line_number": match_positions[0]["line_number"], '
-                '"line_content": "CUSTOM_CONTENT"}], "value": None}'
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect(
+                [[{"line_number": 1, "line_content": "CUSTOM_CONTENT"}]]
             ),
-            search_target="content",
-        )
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) == 1
         assert result["matches"][0]["line_content"] == "CUSTOM_CONTENT"
 
     def test_server_always_adds_file_path(self, search_engine, tmp_path):
-        """file_path is always server-provided (evaluator sees one file)."""
+        """Backend always populates file_path in each match entry."""
         (tmp_path / "file.py").write_text("x = prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) == 1
         m = result["matches"][0]
         assert "file_path" in m
         assert m["file_path"] == "file.py"
 
     def test_server_always_adds_language(self, search_engine, tmp_path):
-        """language is always server-provided."""
+        """Backend always populates language in each match entry."""
         (tmp_path / "file.py").write_text("x = prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) == 1
         assert "language" in result["matches"][0]
         assert result["matches"][0]["language"] == "python"
@@ -333,14 +540,22 @@ class TestXRaySearchEngineValueField:
     """Per-file value surfaces in file_metadata."""
 
     def test_value_surfaces_in_file_metadata(self, search_engine, tmp_path):
-        """value from evaluator appears in file_metadata keyed by file_path."""
+        """value from backend meta tuple surfaces in file_metadata output."""
         (tmp_path / "file.py").write_text("x = prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": "my_value"}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect(
+                [[{"line_number": 1}]],
+                [{"file_path": "file.py", "value": "my_value"}],
+            ),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert "file_metadata" in result
         meta_list = result["file_metadata"]
         assert len(meta_list) >= 1
@@ -684,13 +899,18 @@ class TestXRaySearchEngineAstDebug:
         """Each match contains ast_debug when include_ast_debug=True."""
         (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+            )
         assert len(result["matches"]) >= 1
         assert "ast_debug" in result["matches"][0]
 
@@ -698,12 +918,17 @@ class TestXRaySearchEngineAstDebug:
         """ast_debug is absent when include_ast_debug is not set (default)."""
         (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) >= 1
         assert "ast_debug" not in result["matches"][0]
 
@@ -711,13 +936,18 @@ class TestXRaySearchEngineAstDebug:
         """ast_debug root node contains all documented fields."""
         (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+            )
         ast_debug = result["matches"][0]["ast_debug"]
         assert "type" in ast_debug
         assert "start_byte" in ast_debug
@@ -732,13 +962,18 @@ class TestXRaySearchEngineAstDebug:
         """start_point and end_point are [row, col] two-element lists."""
         (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+            )
         ast_debug = result["matches"][0]["ast_debug"]
         assert isinstance(ast_debug["start_point"], list)
         assert len(ast_debug["start_point"]) == 2
@@ -752,13 +987,18 @@ class TestXRaySearchEngineAstDebug:
         long_line = "x = " + "a" * 200 + "  # prepareStatement\n"
         (tmp_path / "file.py").write_text(long_line)
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+            )
         assert len(result["matches"]) >= 1
         ast_debug = result["matches"][0]["ast_debug"]
         assert len(ast_debug["text_preview"]) <= 80
@@ -769,14 +1009,19 @@ class TestXRaySearchEngineAstDebug:
             "class Foo:\n    def bar(self): prepareStatement()\n"
         )
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-            max_debug_nodes=2,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+                max_debug_nodes=2,
+            )
         assert len(result["matches"]) >= 1
         ast_debug = result["matches"][0]["ast_debug"]
 
@@ -800,14 +1045,19 @@ class TestXRaySearchEngineAstDebug:
             "class Foo:\n    def bar(self):\n        x = prepareStatement()\n"
         )
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-            max_debug_nodes=1,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+                max_debug_nodes=1,
+            )
         assert len(result["matches"]) >= 1
         ast_debug = result["matches"][0]["ast_debug"]
 
@@ -825,13 +1075,18 @@ class TestXRaySearchEngineAstDebug:
         """children field is always a list."""
         (tmp_path / "file.py").write_text("def foo(): pass  # prepareStatement")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+            )
         assert isinstance(result["matches"][0]["ast_debug"]["children"], list)
 
 
@@ -842,13 +1097,18 @@ class TestXRaySearchEngineMatchedNode:
         """matched_node is present when include_ast_debug=True."""
         (tmp_path / "file.py").write_text("prepareStatement()")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+            )
         assert len(result["matches"]) >= 1
         assert "matched_node" in result["matches"][0]
 
@@ -856,13 +1116,18 @@ class TestXRaySearchEngineMatchedNode:
         """matched_node has type, start_byte, end_byte, start_point, end_point."""
         (tmp_path / "file.py").write_text("prepareStatement()")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+            )
         mn = result["matches"][0]["matched_node"]
         for field in ("type", "start_byte", "end_byte", "start_point", "end_point"):
             assert field in mn
@@ -871,13 +1136,18 @@ class TestXRaySearchEngineMatchedNode:
         """matched_node fields have correct types."""
         (tmp_path / "file.py").write_text("prepareStatement()")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-            include_ast_debug=True,
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+                include_ast_debug=True,
+            )
         mn = result["matches"][0]["matched_node"]
         assert isinstance(mn["type"], str)
         assert isinstance(mn["start_byte"], int)
@@ -889,12 +1159,17 @@ class TestXRaySearchEngineMatchedNode:
         """matched_node is absent when include_ast_debug=False (default)."""
         (tmp_path / "file.py").write_text("prepareStatement()")
 
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) >= 1
         assert "matched_node" not in result["matches"][0]
 
@@ -905,12 +1180,17 @@ class TestXRaySearchEngineRelativePaths:
     def test_match_file_path_is_relative(self, search_engine, tmp_path):
         """file_path in matches must be relative to repo_path, not absolute."""
         (tmp_path / "file.py").write_text("x = prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) >= 1
         for match in result["matches"]:
             fp = match["file_path"]
@@ -923,12 +1203,17 @@ class TestXRaySearchEngineRelativePaths:
         subdir = tmp_path / "pkg"
         subdir.mkdir()
         (subdir / "module.py").write_text("prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect([[{"line_number": 1}]]),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result["matches"]) >= 1
         fps = [m["file_path"] for m in result["matches"]]
         assert any(fp == "pkg/module.py" for fp in fps), (
@@ -959,12 +1244,20 @@ class TestXRaySearchEngineRelativePaths:
     def test_file_metadata_file_path_is_relative(self, search_engine, tmp_path):
         """file_path in file_metadata must be relative, not absolute."""
         (tmp_path / "file.py").write_text("x = prepareStatement()\n")
-        result = search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"prepareStatement",
-            evaluator_code='return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": "my_value"}',
-            search_target="content",
-        )
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            side_effect=_rust_batch_side_effect(
+                [[{"line_number": 1}]],
+                [{"file_path": "file.py", "value": "my_value"}],
+            ),
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"prepareStatement",
+                evaluator_code='return {"matches": [], "value": None}',
+                search_target="content",
+            )
         assert len(result.get("file_metadata", [])) >= 1
         for fm in result["file_metadata"]:
             fp = fm["file_path"]

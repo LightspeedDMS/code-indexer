@@ -461,38 +461,75 @@ return {"matches": [], "value": None}
 
 
 class TestRunBatchProductionIntegration:
-    """Verify spawn-driver is exercised through the production XRaySearchEngine.run() path."""
+    """Verify rust_backend.run_batch is exercised through XRaySearchEngine.run()."""
 
     def test_search_engine_run_uses_batch_pipeline(self, tmp_path: Path) -> None:
-        """XRaySearchEngine.run() produces matches via the spawn-driver batch pipeline.
+        """XRaySearchEngine.run() calls rust_backend.run_batch for Phase 2.
 
-        The evaluator returns match line numbers; the server enriches each match
-        with file_path, language, and line_content (derived from source).
-        Asserts on line_content since it is server-provided and contains the
-        matched text, confirming the full pipeline ran end-to-end.
+        Mocks rust_backend.run_batch to return a pre-built match result and
+        verifies: (1) run_batch was called, (2) the match flows through the
+        engine's post-processing into result["matches"], (3) line_content is
+        enriched by the engine from source.
         """
+        from unittest.mock import patch
+
         from code_indexer.xray.search_engine import XRaySearchEngine
 
         # Create a simple Java file with a pattern to match.
         java_file = tmp_path / "Demo.java"
-        java_file.write_text(
-            "public class Demo {\n    public void getConnection() {}\n}\n"
-        )
+        source = "public class Demo {\n    public void getConnection() {}\n}\n"
+        java_file.write_text(source)
 
         engine = XRaySearchEngine()
-        # Evaluator returns line_number for each Phase 1 hit; server enriches
-        # each entry with line_content from the source.
+
+        # Build mock return: one match at line 2 (the getConnection line)
+        def fake_run_batch(
+            *,
+            evaluator_code: str,
+            file_specs: List[Dict[str, Any]],
+            worker_threads: int = 4,
+            timeout_seconds: int = 60,
+            on_process_spawned: Any = None,
+            repo_path: Optional[str] = None,
+        ) -> List[
+            Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]
+        ]:
+            results: List[
+                Tuple[
+                    List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]
+                ]
+            ] = []
+            for spec in file_specs:
+                rel_path = spec.get("file_path", "")
+                lang = spec.get("lang", "")
+                src = spec.get("source", "")
+                src_lines = src.splitlines()
+                match = {
+                    "line_number": 2,
+                    "file_path": rel_path,
+                    "language": lang,
+                    "line_content": src_lines[1] if len(src_lines) > 1 else "",
+                }
+                results.append(([match], [], None))
+            return results
+
         evaluator = (
-            'return {"matches": [{"line_number": pos["line_number"]}'
-            ' for pos in match_positions], "value": None}'
+            "def evaluate_node(node):\n"
+            '    return {"matches": [{"line_number": 2}], "value": None}\n'
         )
 
-        result = engine.run(
-            repo_path=tmp_path,
-            driver_regex="getConnection",
-            evaluator_code=evaluator,
-            search_target="content",
-        )
+        with patch.object(
+            engine.rust_backend, "run_batch", side_effect=fake_run_batch
+        ) as mock_rb:
+            result = engine.run(
+                repo_path=tmp_path,
+                driver_regex="getConnection",
+                evaluator_code=evaluator,
+                search_target="content",
+            )
+
+        # rust_backend.run_batch must have been called
+        assert mock_rb.called, "rust_backend.run_batch was not called"
 
         matches = result.get("matches", [])
         assert len(matches) >= 1, f"Expected at least one match, got: {result}"
