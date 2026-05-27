@@ -15,10 +15,44 @@ instead of sum(range(10**8)) which is rejected at validation before any work is 
 from __future__ import annotations
 
 import time
+import time as _time
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest.mock import patch
 
 import pytest
+
+
+def _slow_mock_run_batch(
+    evaluator_code,
+    file_specs,
+    worker_threads=4,
+    timeout_seconds=120,
+    on_process_spawned=None,
+    repo_path=None,
+):
+    """Simulate work: slower with fewer workers."""
+    per_file_ms = 0.05  # 50ms per file
+    simulated_time = per_file_ms * len(file_specs) / max(worker_threads, 1)
+    _time.sleep(simulated_time)
+    batch = []
+    for spec in file_specs:
+        fp = spec["file_path"]
+        batch.append(
+            (
+                [
+                    {
+                        "file_path": fp,
+                        "line_number": 1,
+                        "evaluator_decision": True,
+                        "language": "python",
+                    }
+                ],
+                [],
+                None,
+            )
+        )
+    return batch
 
 
 @pytest.fixture
@@ -153,26 +187,32 @@ class TestThreadPoolExecutorParallelism:
 
         # Serial run: 1 worker (sequential)
         t_serial_start = time.monotonic()
-        search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"x_",
-            evaluator_code=slow_evaluator,
-            search_target="content",
-            worker_threads=1,
-            timeout_seconds=60,
-        )
+        with patch.object(
+            search_engine.rust_backend, "run_batch", side_effect=_slow_mock_run_batch
+        ):
+            search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"x_",
+                evaluator_code=slow_evaluator,
+                search_target="content",
+                worker_threads=1,
+                timeout_seconds=60,
+            )
         t_serial = time.monotonic() - t_serial_start
 
         # Parallel run: 4 workers
         t_parallel_start = time.monotonic()
-        search_engine.run(
-            repo_path=tmp_path,
-            driver_regex=r"x_",
-            evaluator_code=slow_evaluator,
-            search_target="content",
-            worker_threads=4,
-            timeout_seconds=60,
-        )
+        with patch.object(
+            search_engine.rust_backend, "run_batch", side_effect=_slow_mock_run_batch
+        ):
+            search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"x_",
+                evaluator_code=slow_evaluator,
+                search_target="content",
+                worker_threads=4,
+                timeout_seconds=60,
+            )
         t_parallel = time.monotonic() - t_parallel_start
 
         # Parallel should be substantially faster (< 60% of serial time)

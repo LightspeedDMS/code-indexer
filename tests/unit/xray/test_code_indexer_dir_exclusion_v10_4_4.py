@@ -11,7 +11,9 @@ Fix:
 - _run_phase1_content: inject '.code-indexer/**' into the exclude_patterns
   list before passing to RegexSearchService, so ripgrep never walks it.
 
-Tests drive XRaySearchEngine.run() directly.  No mocking — anti-mock principle.
+Tests drive XRaySearchEngine.run() directly.  Phase 1 (filename/content scan) runs
+real; rust_backend.run_batch is mocked because the Rust transpiler rejects legacy
+evaluator format.  Phase 1 logic (the actual fix under test) is exercised in full.
 Requires tree_sitter_languages (skips otherwise) and ripgrep for content mode.
 """
 
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -26,6 +29,36 @@ from code_indexer.xray.search_engine import XRaySearchEngine
 
 
 pytestmark = pytest.mark.importorskip("tree_sitter_languages")
+
+
+def _mock_run_batch(
+    evaluator_code,
+    file_specs,
+    worker_threads=4,
+    timeout_seconds=120,
+    on_process_spawned=None,
+    repo_path=None,
+):
+    """Mock rust_backend.run_batch — return one match per file."""
+    batch = []
+    for spec in file_specs:
+        fp = spec["file_path"]
+        batch.append(
+            (
+                [
+                    {
+                        "file_path": fp,
+                        "line_number": 1,
+                        "evaluator_decision": True,
+                        "language": "python",
+                    }
+                ],
+                [],
+                None,
+            )
+        )
+    return batch
+
 
 _SIMPLE_EVALUATOR = (
     'matches = [{"line_number": mp["line_number"]} for mp in match_positions]\n'
@@ -78,12 +111,15 @@ class TestCodeIndexerDirExcludedFilenameMode:
         repo = _make_repo(tmp_path)
         engine = XRaySearchEngine()
 
-        result = engine.run(
-            repo_path=repo,
-            driver_regex=r"\.json$",
-            evaluator_code=_FILENAME_EVALUATOR,
-            search_target="filename",
-        )
+        with patch.object(
+            engine.rust_backend, "run_batch", side_effect=_mock_run_batch
+        ):
+            result = engine.run(
+                repo_path=repo,
+                driver_regex=r"\.json$",
+                evaluator_code=_FILENAME_EVALUATOR,
+                search_target="filename",
+            )
 
         matched_paths = [m["file_path"] for m in result.get("matches", [])]
         for p in matched_paths:
@@ -106,12 +142,15 @@ class TestCodeIndexerDirExcludedFilenameMode:
         repo = _make_repo(tmp_path)
         engine = XRaySearchEngine()
 
-        result = engine.run(
-            repo_path=repo,
-            driver_regex=r"\.py$",
-            evaluator_code=_FILENAME_EVALUATOR,
-            search_target="filename",
-        )
+        with patch.object(
+            engine.rust_backend, "run_batch", side_effect=_mock_run_batch
+        ):
+            result = engine.run(
+                repo_path=repo,
+                driver_regex=r"\.py$",
+                evaluator_code=_FILENAME_EVALUATOR,
+                search_target="filename",
+            )
 
         assert result.get("evaluation_errors") == [], (
             f"Expected no errors, got: {result.get('evaluation_errors')}"
@@ -145,12 +184,15 @@ class TestCodeIndexerDirExcludedContentMode:
         repo = _make_repo(tmp_path)
         engine = XRaySearchEngine()
 
-        result = engine.run(
-            repo_path=repo,
-            driver_regex="target",
-            evaluator_code=_SIMPLE_EVALUATOR,
-            search_target="content",
-        )
+        with patch.object(
+            engine.rust_backend, "run_batch", side_effect=_mock_run_batch
+        ):
+            result = engine.run(
+                repo_path=repo,
+                driver_regex="target",
+                evaluator_code=_SIMPLE_EVALUATOR,
+                search_target="content",
+            )
 
         matched_paths = [m["file_path"] for m in result.get("matches", [])]
         for p in matched_paths:
@@ -169,12 +211,15 @@ class TestCodeIndexerDirExcludedContentMode:
         repo = _make_repo(tmp_path)
         engine = XRaySearchEngine()
 
-        result = engine.run(
-            repo_path=repo,
-            driver_regex="target",
-            evaluator_code=_SIMPLE_EVALUATOR,
-            search_target="content",
-        )
+        with patch.object(
+            engine.rust_backend, "run_batch", side_effect=_mock_run_batch
+        ):
+            result = engine.run(
+                repo_path=repo,
+                driver_regex="target",
+                evaluator_code=_SIMPLE_EVALUATOR,
+                search_target="content",
+            )
 
         assert result.get("evaluation_errors") == [], (
             f"Expected no errors, got: {result.get('evaluation_errors')}"

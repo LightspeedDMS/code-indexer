@@ -11,7 +11,9 @@ Fix (v10.4.6):
 - _run_phase1_content: inject '.git/**' into effective_excludes so ripgrep
   never walks .git/ (mirrors the v10.4.4 .code-indexer/** exclusion).
 
-Tests drive XRaySearchEngine.run() directly.  No mocking — anti-mock principle.
+Tests drive XRaySearchEngine.run() directly.  Phase 1 (filename/content scan) runs
+real; rust_backend.run_batch is mocked because the Rust transpiler rejects legacy
+evaluator format.  Phase 1 logic (the actual fix under test) is exercised in full.
 Requires tree_sitter_languages (skips otherwise) and ripgrep for content mode.
 """
 
@@ -20,6 +22,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 from typing import List
+from unittest.mock import patch
 
 import pytest
 
@@ -27,6 +30,36 @@ from code_indexer.xray.search_engine import XRaySearchEngine
 
 
 pytestmark = pytest.mark.importorskip("tree_sitter_languages")
+
+
+def _mock_run_batch(
+    evaluator_code,
+    file_specs,
+    worker_threads=4,
+    timeout_seconds=120,
+    on_process_spawned=None,
+    repo_path=None,
+):
+    """Mock rust_backend.run_batch — return one match per file."""
+    batch = []
+    for spec in file_specs:
+        fp = spec["file_path"]
+        batch.append(
+            (
+                [
+                    {
+                        "file_path": fp,
+                        "line_number": 1,
+                        "evaluator_decision": True,
+                        "language": "python",
+                    }
+                ],
+                [],
+                None,
+            )
+        )
+    return batch
+
 
 _SIMPLE_EVALUATOR = (
     'matches = [{"line_number": mp["line_number"]} for mp in match_positions]\n'
@@ -98,12 +131,15 @@ class TestGitDirExcludedFilenameMode:
         engine = XRaySearchEngine()
 
         # Match every filename (dot-star) to catch any .git/ file that leaks through.
-        result = engine.run(
-            repo_path=repo,
-            driver_regex=r".*",
-            evaluator_code=_FILENAME_EVALUATOR,
-            search_target="filename",
-        )
+        with patch.object(
+            engine.rust_backend, "run_batch", side_effect=_mock_run_batch
+        ):
+            result = engine.run(
+                repo_path=repo,
+                driver_regex=r".*",
+                evaluator_code=_FILENAME_EVALUATOR,
+                search_target="filename",
+            )
 
         matched_paths = [m["file_path"] for m in result.get("matches", [])]
         error_paths = [e["file_path"] for e in result.get("evaluation_errors", [])]
@@ -140,12 +176,15 @@ class TestGitDirExcludedContentMode:
         repo = _make_repo(tmp_path)
         engine = XRaySearchEngine()
 
-        result = engine.run(
-            repo_path=repo,
-            driver_regex="target",
-            evaluator_code=_SIMPLE_EVALUATOR,
-            search_target="content",
-        )
+        with patch.object(
+            engine.rust_backend, "run_batch", side_effect=_mock_run_batch
+        ):
+            result = engine.run(
+                repo_path=repo,
+                driver_regex="target",
+                evaluator_code=_SIMPLE_EVALUATOR,
+                search_target="content",
+            )
 
         matched_paths = [m["file_path"] for m in result.get("matches", [])]
 
@@ -175,12 +214,15 @@ class TestGitNamedFilesOutsideDotGitIncluded:
         repo = _make_repo(tmp_path)
         engine = XRaySearchEngine()
 
-        result = engine.run(
-            repo_path=repo,
-            driver_regex=r"\.py$",
-            evaluator_code=_FILENAME_EVALUATOR,
-            search_target="filename",
-        )
+        with patch.object(
+            engine.rust_backend, "run_batch", side_effect=_mock_run_batch
+        ):
+            result = engine.run(
+                repo_path=repo,
+                driver_regex=r"\.py$",
+                evaluator_code=_FILENAME_EVALUATOR,
+                search_target="filename",
+            )
 
         matched_paths = [m["file_path"] for m in result.get("matches", [])]
         file_names = [Path(p).name for p in matched_paths]
