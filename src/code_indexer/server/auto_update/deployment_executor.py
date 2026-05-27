@@ -86,7 +86,17 @@ PACE_MAKER_CMD_TIMEOUT = 10
 SYSTEMD_DEFAULT_PATH_SUFFIX = "/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
 
 # Step 16: Story #1024 - Rust toolchain + xray-cli build constants
-RUST_INSTALL_CMD = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable"
+# M5: Two-step install: curl downloads the installer, sh runs it via stdin (no shell=True).
+RUSTUP_INSTALLER_URL = "https://sh.rustup.rs"
+RUSTUP_CURL_ARGS = [
+    "curl",
+    "--proto",
+    "=https",
+    "--tlsv1.2",
+    "-sSf",
+    RUSTUP_INSTALLER_URL,
+]
+RUSTUP_SH_ARGS = ["sh", "-s", "--", "-y", "--default-toolchain", "stable"]
 RUSTUP_INSTALL_TIMEOUT_SECONDS = 300  # curl + sh pipeline; generous budget
 RUSTUP_CMD_TIMEOUT_SECONDS = 30  # rustup default stable; quick
 CARGO_BUILD_TIMEOUT_SECONDS = 600  # 10 min for first-time xray-cli build
@@ -3771,19 +3781,47 @@ class DeploymentExecutor:
             "rustc not found — installing Rust toolchain via rustup",
             extra={"correlation_id": get_correlation_id()},
         )
+        # M5: Use two separate subprocess calls instead of shell=True pipeline.
+        # Step 1: Download the installer script via curl (bytes, no text=True).
         try:
-            install_result = subprocess.run(
-                RUST_INSTALL_CMD,
-                shell=True,
+            curl_result = subprocess.run(
+                RUSTUP_CURL_ARGS,
                 capture_output=True,
-                text=True,
                 timeout=RUSTUP_INSTALL_TIMEOUT_SECONDS,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"Rust toolchain install failed: {exc}",
+                    f"Rust toolchain install failed (curl): {exc}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        if curl_result.returncode != 0:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"Rust toolchain install failed (curl): "
+                    f"{curl_result.stderr[:MAX_ERROR_SNIPPET_LENGTH].decode()}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        # Step 2: Pipe the downloaded script into sh (no shell=True).
+        try:
+            install_result = subprocess.run(
+                RUSTUP_SH_ARGS,
+                input=curl_result.stdout,
+                capture_output=True,
+                timeout=RUSTUP_INSTALL_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"Rust toolchain install failed (sh): {exc}",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -3792,8 +3830,8 @@ class DeploymentExecutor:
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"Rust toolchain install failed: "
-                    f"{install_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                    f"Rust toolchain install failed (sh): "
+                    f"{install_result.stderr[:MAX_ERROR_SNIPPET_LENGTH].decode()}",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -3830,8 +3868,6 @@ class DeploymentExecutor:
 
     def _verify_c_compiler(self) -> bool:
         """Return True if gcc, cc, or clang is available (needed by tree-sitter crate)."""
-        import shutil
-
         for cc in ["gcc", "cc", "clang"]:
             if shutil.which(cc) is not None:
                 return True
@@ -3892,7 +3928,12 @@ class DeploymentExecutor:
         """
         cargo_bin = Path.home() / ".cargo" / "bin"
         env = os.environ.copy()
-        env["PATH"] = f"{cargo_bin}:{env.get('PATH', '')}"
+        # M6: Avoid trailing colon (empty segment = CWD on PATH — security risk).
+        current_path = env.get("PATH", "")
+        if current_path:
+            env["PATH"] = f"{cargo_bin}:{current_path}"
+        else:
+            env["PATH"] = str(cargo_bin)
 
         if not self._check_rustc_installed(env):
             if not self._install_rust_toolchain(env):

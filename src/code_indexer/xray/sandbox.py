@@ -5,9 +5,7 @@ Three defense layers:
      allowed set before any subprocess is spawned.
   2. Stripped exec() environment — removes dangerous builtins (getattr,
      setattr, delattr, __import__, eval, exec, open, compile) from
-     the globals dict passed to exec().  Note: ``hasattr`` is in
-     SAFE_BUILTIN_NAMES (not stripped) because it has no escalation
-     power beyond what the dunder blocklist already prevents.
+     the globals dict passed to exec().
   3. multiprocessing.Process isolation with hard 5.0 s SIGTERM + 1.0 s
      SIGKILL escalation — protects the parent against infinite loops,
      C-level crashes, and unbounded resource consumption.
@@ -47,7 +45,7 @@ import textwrap
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from code_indexer.xray.xray_node import XRayNode
@@ -102,47 +100,13 @@ class EvalResult:
 SAFE_BUILTIN_NAMES: frozenset[str] = frozenset(
     {
         "len",
-        "str",
-        "int",
-        "bool",
-        "list",
-        # Exception types — needed for ``except Exception:`` / ``except ValueError:``
-        # in try/except blocks (Group D, v10.4.0).  These are read-only references;
-        # none grant escalation power beyond what the dunder blocklist prevents.
-        "Exception",
-        "ValueError",
-        "TypeError",
-        "RuntimeError",
-        "AttributeError",
-        "KeyError",
-        "IndexError",
-        "NameError",
-        "StopIteration",
-        "tuple",
-        "dict",
-        "min",
-        "max",
-        "sum",
         "any",
         "all",
         "range",
         "enumerate",
-        "zip",
         "sorted",
-        "reversed",
-        # hasattr is safe: it is equivalent to try/getattr/except AttributeError
-        # and has no escalation power beyond the dunder blocklist already enforced
-        # at AST validation time (M1 Codex review finding).
-        "hasattr",
-        # Story #993 additions — common introspection / type helpers that have no
-        # escalation power beyond what the dunder blocklist already prevents.
-        "isinstance",  # type checking in evaluator logic
-        "type",  # inspect node type objects
-        "set",  # mutable set literals
-        "frozenset",  # immutable set for membership tests
-        "float",  # numeric coercion
-        "repr",  # debugging output inside evaluators
-        "print",  # debugging output; subprocess stdout is not visible to callers
+        "min",
+        "max",
     }
 )
 
@@ -245,29 +209,6 @@ def _run_evaluator(
             for k, v in all_builtins.items()
             if k in SAFE_BUILTIN_NAMES and k not in stripped
         }
-
-        # Restricted __import__ that only permits whitelisted stdlib modules.
-        # The real __import__ is captured here (in the parent before exec) and
-        # called only when the top-level name is in STDLIB_WHITELIST.
-        _real_import = builtins.__import__
-        _whitelist = PythonEvaluatorSandbox.STDLIB_WHITELIST
-
-        def _restricted_import(
-            name: str,
-            globals: Any = None,
-            locals: Any = None,
-            fromlist: Any = (),
-            level: int = 0,
-        ) -> Any:
-            top = name.split(".")[0]
-            if top not in _whitelist:
-                raise ImportError(
-                    f"Import of '{top}' is blocked by the evaluator sandbox. "
-                    f"Allowed: {', '.join(sorted(_whitelist))}."
-                )
-            return _real_import(name, globals, locals, fromlist, level)
-
-        safe["__import__"] = _restricted_import
 
         globals_dict: dict[str, Any] = {
             "__builtins__": safe,
@@ -388,8 +329,6 @@ class PythonEvaluatorSandbox:
         # Comprehension expression forms — all share the same clause node
         ast.GeneratorExp,  # (x for x in items)
         ast.ListComp,  # [x for x in items]
-        ast.SetComp,  # {x for x in items}
-        ast.DictComp,  # {k: v for k, v in items}
         # IfExp: ternary expression — ``a if cond else b``
         ast.IfExp,
         # Group C — statement-level control flow
@@ -401,25 +340,13 @@ class PythonEvaluatorSandbox:
         ast.Break,  # early loop exit
         ast.Continue,  # skip current iteration
         ast.Pass,  # empty body placeholder: if cond: pass
-        # Group D — structured exception handling (Directive D, v10.4.0)
-        # try/except/finally lets evaluators handle per-node errors gracefully.
-        # raise lets evaluators surface clean errors — produces EvaluatorCrash,
-        # not validation_failed.
-        ast.Try,  # try/except/finally blocks
-        ast.ExceptHandler,  # except clauses (bare and typed)
-        ast.Raise,  # raise statements
         # Group E — arithmetic binary operations
         # BinOp allows x + n, x - n, x * n etc. in evaluator code.
         # ast.operator covers concrete subclasses Add, Sub, Mult, Div etc.
         # via isinstance() — already included in Group A above.
         ast.BinOp,  # binary arithmetic: x + y, x * y, etc.
-        # Group F — import statements (Story #993)
-        ast.Import,
-        ast.ImportFrom,
-        ast.alias,  # name alias node inside Import/ImportFrom
-        # Group G — function definitions and lambdas (Story #993)
+        # Group G — function definitions (transpilable subset)
         ast.FunctionDef,
-        ast.Lambda,
         ast.arguments,
         ast.arg,
     )
@@ -474,8 +401,6 @@ class PythonEvaluatorSandbox:
     )
 
     # Builtins removed from the exec() environment.
-    # Note: hasattr is in SAFE_BUILTIN_NAMES (not here) — see M1 rationale
-    # in module docstring and SAFE_BUILTIN_NAMES comment above.
     STRIPPED_BUILTINS: frozenset[str] = frozenset(
         {
             "getattr",
@@ -489,36 +414,9 @@ class PythonEvaluatorSandbox:
         }
     )
 
-    # Stdlib modules allowed in evaluator import statements (Story #993 Group F).
-    # Only the top-level module name is checked (e.g. "os.path" → "os").
-    # Non-whitelisted imports are rejected in validate() with a descriptive error.
-    STDLIB_WHITELIST: frozenset[str] = frozenset(
-        {"re", "collections", "itertools", "functools"}
-    )
-
     # ---------------------------------------------------------------------------
     # Internal class helpers
     # ---------------------------------------------------------------------------
-
-    @classmethod
-    def _import_top_level_modules(
-        cls, node: "Union[ast.Import, ast.ImportFrom]"
-    ) -> list[str]:
-        """Return the top-level module name(s) from an import statement node.
-
-        For ``ast.Import`` (``import re, os``): one entry per alias name.
-        For ``ast.ImportFrom`` (``from re import search``): one entry for the module.
-        Raises TypeError for any other node type (caller must gate with isinstance).
-        """
-        if isinstance(node, ast.Import):
-            return [alias.name.split(".")[0] for alias in node.names]
-        if isinstance(node, ast.ImportFrom):
-            top = (node.module or "").split(".")[0]
-            return [top] if top else []
-        raise TypeError(
-            f"_import_top_level_modules expects ast.Import or ast.ImportFrom, "
-            f"got {type(node).__name__}"
-        )
 
     @classmethod
     def _allowed_node_names(cls) -> list[str]:
@@ -597,23 +495,6 @@ class PythonEvaluatorSandbox:
                     offending_construct=type(node).__name__,
                     offending_line=getattr(node, "lineno", None),
                 )
-
-            # Secondary whitelist check for import statements (Group F).
-            # Runs only for nodes that already passed the ALLOWED_NODES isinstance check.
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                for top in self._import_top_level_modules(node):
-                    if top not in self.STDLIB_WHITELIST:
-                        return ValidationResult(
-                            ok=False,
-                            reason=(
-                                f"Import of '{top}' is not allowed. "
-                                f"Only whitelisted stdlib modules may be imported: "
-                                f"{', '.join(sorted(self.STDLIB_WHITELIST))}."
-                            ),
-                            error_code="import_not_whitelisted",
-                            offending_construct=top,
-                            offending_line=getattr(node, "lineno", None),
-                        )
 
             # Block Attribute access to dunder names (Python sandbox escape vector).
             # e.g. node.__class__, ''.join.__globals__, dict.__base__

@@ -189,21 +189,26 @@ class TestXRaySearchEngineFileAsUnit:
     """Evaluator is called ONCE per candidate file with match_positions list."""
 
     def test_evaluator_called_once_per_file(self, search_engine, tmp_path):
-        """With 2 regex hits in one file, _evaluate_file calls sandbox.run once.
+        """With 2 regex hits in one file, _evaluate_file calls rust_backend.run_batch once.
 
         Uses _evaluate_file directly (lower-level test API) because the production
         run() path now uses the spawn-driver which runs in a separate process where
-        parent-process patches on sandbox.run cannot be intercepted.
+        parent-process patches on run_batch cannot be intercepted.
         """
         source_text = "prepareStatement(sql1)\nprepareStatement(sql2)\n"
         fp = tmp_path / "file.py"
         fp.write_text(source_text)
         call_count = [0]
-        real_run = search_engine.sandbox.run
 
-        def counting_run(code, **kwargs):
+        def counting_run_batch(*, evaluator_code, file_specs, **kwargs):
             call_count[0] += 1
-            return real_run(code, **kwargs)
+            return [
+                (
+                    [{"line_number": 1, "file_path": str(fp), "language": "python"}],
+                    [],
+                    None,
+                )
+            ]
 
         match_positions = [
             {
@@ -220,7 +225,9 @@ class TestXRaySearchEngineFileAsUnit:
             },
         ]
 
-        with patch.object(search_engine.sandbox, "run", side_effect=counting_run):
+        with patch.object(
+            search_engine.rust_backend, "run_batch", side_effect=counting_run_batch
+        ):
             search_engine._evaluate_file(
                 fp,
                 'return {"matches": [{"line_number": match_positions[0]["line_number"]}], "value": None}',
@@ -232,7 +239,7 @@ class TestXRaySearchEngineFileAsUnit:
                 context_lines=0,
             )
 
-        # One file → one evaluator call regardless of hit count
+        # One file → one run_batch call regardless of hit count
         assert call_count[0] == 1
 
     def test_match_positions_passed_to_evaluator(self, search_engine, tmp_path):
@@ -757,20 +764,31 @@ class TestXRaySearchEngineCoverageEdgeCases:
     def test_evaluator_timeout_populates_evaluation_errors(
         self, search_engine, tmp_path
     ):
-        """evaluator_timeout sandbox result produces EvaluatorTimeout error entry.
+        """EvaluatorTimeout error from run_batch propagates through _evaluate_file.
 
         Uses _evaluate_file directly (lower-level test API) because the production
-        run() path now uses the spawn-driver which runs in a separate process where
-        parent-process patches on sandbox.run cannot be intercepted.
+        run() path uses the spawn-driver in a separate process where parent-process
+        patches on run_batch cannot be intercepted.
         """
-        from code_indexer.xray.sandbox import EvalResult
-
         source_text = "prepareStatement()"
         fp = tmp_path / "file.py"
         fp.write_text(source_text)
-        timeout_result = EvalResult(failure="evaluator_timeout")
+        timeout_error_tuple: tuple[list[Any], list[dict[str, Any]], None] = (
+            [],
+            [
+                {
+                    "file_path": str(fp),
+                    "line_number": 0,
+                    "error_type": "EvaluatorTimeout",
+                    "error_message": "evaluator exceeded 5s sandbox limit",
+                }
+            ],
+            None,
+        )
 
-        with patch.object(search_engine.sandbox, "run", return_value=timeout_result):
+        with patch.object(
+            search_engine.rust_backend, "run_batch", return_value=[timeout_error_tuple]
+        ):
             _matches, errors, _meta = search_engine._evaluate_file(
                 fp,
                 'return {"matches": [], "value": None}',
@@ -791,62 +809,62 @@ class TestXRaySearchEngineCoverageEdgeCases:
 
         assert any(e["error_type"] == "EvaluatorTimeout" for e in errors)
 
-    def test_parse_exception_populates_evaluation_errors(self, search_engine, tmp_path):
-        """Unexpected exception during parse is caught and added to evaluation_errors.
+    def test_file_read_exception_populates_evaluation_errors(
+        self, search_engine, tmp_path
+    ):
+        """File read failure is caught and added to evaluation_errors.
 
-        Uses _evaluate_file directly (lower-level test API) because the production
-        run() path now uses the spawn-driver which runs in a separate process where
-        parent-process patches on ast_engine.parse cannot be intercepted.
+        Uses _evaluate_file directly (lower-level test API). When source is not
+        supplied and the file does not exist, _evaluate_file captures the OSError
+        and returns it as an error tuple — no uncaught exception propagates.
         """
-        source_text = "prepareStatement()"
-        fp = tmp_path / "file.py"
-        fp.write_text(source_text)
+        fp = tmp_path / "missing.py"
+        # Deliberately do NOT create the file so read_bytes() raises FileNotFoundError.
 
-        with patch.object(
-            search_engine.ast_engine,
-            "parse",
-            side_effect=RuntimeError("parse failure"),
-        ):
-            _matches, errors, _meta = search_engine._evaluate_file(
-                fp,
-                'return {"matches": [], "value": None}',
-                include_ast_debug=False,
-                max_debug_nodes=50,
-                match_positions=[
-                    {
-                        "line_number": 1,
-                        "line_content": "prepareStatement()",
-                        "column": 0,
-                        "byte_offset": 0,
-                    }
-                ],
-                lang="python",
-                source=source_text,
-                context_lines=0,
-            )
+        _matches, errors, _meta = search_engine._evaluate_file(
+            fp,
+            'return {"matches": [], "value": None}',
+            include_ast_debug=False,
+            max_debug_nodes=50,
+            lang="python",
+            # source omitted — forces file I/O which will fail
+        )
 
         assert len(errors) >= 1
-        assert errors[0]["error_type"] == "RuntimeError"
+        assert errors[0]["error_type"] in ("FileNotFoundError", "OSError")
 
     def test_evaluator_returned_non_dict_populates_error(self, search_engine, tmp_path):
-        """Non-dict return from sandbox produces InvalidEvaluatorReturn error entry.
+        """InvalidEvaluatorReturn error from run_batch propagates through _evaluate_file.
 
-        The sandbox subprocess sends back whatever the evaluator returns.
-        A dict is required; bool/int/str produces an error.
+        The Rust backend validates evaluator return contract; a non-dict return
+        surfaces as an InvalidEvaluatorReturn error tuple from run_batch.
 
         Uses _evaluate_file directly (lower-level test API) because the production
-        run() path now uses the spawn-driver which runs in a separate process where
-        parent-process patches on sandbox.run cannot be intercepted.
+        run() path uses the spawn-driver in a separate process where parent-process
+        patches on run_batch cannot be intercepted.
         """
-        from code_indexer.xray.sandbox import EvalResult
-
         source_text = "prepareStatement()"
         fp = tmp_path / "file.py"
         fp.write_text(source_text)
-        # Simulate sandbox returning success with a bool (old contract)
-        bool_result = EvalResult(value=True)
+        invalid_return_tuple: tuple[list[Any], list[dict[str, Any]], None] = (
+            [],
+            [
+                {
+                    "file_path": str(fp),
+                    "line_number": 0,
+                    "error_type": "InvalidEvaluatorReturn",
+                    "error_message": (
+                        'Evaluator must return a dict {"matches": [...], "value": ...},'
+                        " got 'bool'. Note: bool return (legacy contract) is no longer accepted."
+                    ),
+                }
+            ],
+            None,
+        )
 
-        with patch.object(search_engine.sandbox, "run", return_value=bool_result):
+        with patch.object(
+            search_engine.rust_backend, "run_batch", return_value=[invalid_return_tuple]
+        ):
             _matches, errors, _meta = search_engine._evaluate_file(
                 fp,
                 'return {"matches": [], "value": None}',

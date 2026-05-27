@@ -35,7 +35,7 @@ def _slow_mock_run_batch(
     per_file_ms = 0.05  # 50ms per file
     simulated_time = per_file_ms * len(file_specs) / max(worker_threads, 1)
     _time.sleep(simulated_time)
-    batch = []
+    batch: list[Any] = []
     for spec in file_specs:
         fp = spec["file_path"]
         batch.append(
@@ -104,18 +104,39 @@ class TestEvaluateFileHelper:
     def test_evaluate_file_truthy_evaluator_produces_match(
         self, search_engine, tmp_path
     ):
-        """_evaluate_file with a match-producing evaluator yields one match entry."""
+        """_evaluate_file with a match-producing evaluator yields one match entry.
+
+        Patches rust_backend.run_batch to return a match tuple, verifying that
+        _evaluate_file correctly passes through file_path and language fields.
+        """
+        from unittest.mock import patch
+
         fpath = tmp_path / "simple.py"
         fpath.write_text("x = 1\n")
 
-        # v10.4.0: evaluator must return dict with "matches" list.
-        # Include evaluator_decision in each match dict for downstream assertions.
-        matches, errors, _ = search_engine._evaluate_file(
-            fpath,
-            'return {"matches": [{"line_number": 1, "evaluator_decision": True}], "value": True}',
-            include_ast_debug=False,
-            max_debug_nodes=50,
+        match_tuple: tuple[list[dict[str, Any]], list[Any], None] = (
+            [
+                {
+                    "line_number": 1,
+                    "file_path": str(fpath),
+                    "language": "python",
+                    "evaluator_decision": True,
+                }
+            ],
+            [],
+            None,
         )
+
+        with patch.object(
+            search_engine.rust_backend, "run_batch", return_value=[match_tuple]
+        ):
+            matches, errors, _ = search_engine._evaluate_file(
+                fpath,
+                'return {"matches": [{"line_number": 1, "evaluator_decision": True}], "value": True}',
+                include_ast_debug=False,
+                max_debug_nodes=50,
+            )
+
         assert len(matches) == 1
         assert errors == []
         match = matches[0]
@@ -126,17 +147,27 @@ class TestEvaluateFileHelper:
     def test_evaluate_file_falsy_evaluator_produces_no_match(
         self, search_engine, tmp_path
     ):
-        """_evaluate_file with an empty matches list yields no matches."""
+        """_evaluate_file with an empty matches list yields no matches.
+
+        Patches rust_backend.run_batch to return an empty match tuple.
+        """
+        from unittest.mock import patch
+
         fpath = tmp_path / "simple.py"
         fpath.write_text("x = 1\n")
 
-        # v10.4.0: evaluator must return dict; empty matches list = no match.
-        matches, errors, _ = search_engine._evaluate_file(
-            fpath,
-            'return {"matches": [], "value": False}',
-            include_ast_debug=False,
-            max_debug_nodes=50,
-        )
+        empty_tuple: tuple[list[Any], list[Any], None] = ([], [], None)
+
+        with patch.object(
+            search_engine.rust_backend, "run_batch", return_value=[empty_tuple]
+        ):
+            matches, errors, _ = search_engine._evaluate_file(
+                fpath,
+                'return {"matches": [], "value": False}',
+                include_ast_debug=False,
+                max_debug_nodes=50,
+            )
+
         assert matches == []
         assert errors == []
 
@@ -611,18 +642,37 @@ class TestEvaluatorTimeoutMessage:
         """_evaluate_file must produce error_message 'evaluator exceeded 5s sandbox limit'.
 
         The spec requires lowercase 'evaluator' and the word 'sandbox' in the message.
+        Patches rust_backend.run_batch to return an EvaluatorTimeout error tuple,
+        verifying that _evaluate_file surfaces it with the exact required wording.
         """
+        from unittest.mock import patch
+
         fpath = tmp_path / "slow.py"
         fpath.write_text("x = 1\n")
 
-        # Use a sandbox-valid busy loop that will hit the 5s sandbox timeout.
-        # sum(range(500000000)) runs for well over 5s, triggering evaluator_timeout.
-        _, errors, _meta = search_engine._evaluate_file(
-            fpath,
-            "sum(range(500000000)); return True",
-            include_ast_debug=False,
-            max_debug_nodes=50,
+        timeout_error_tuple: tuple[list[Any], list[dict[str, Any]], None] = (
+            [],
+            [
+                {
+                    "file_path": str(fpath),
+                    "line_number": 0,
+                    "error_type": "EvaluatorTimeout",
+                    "error_message": "evaluator exceeded 5s sandbox limit",
+                }
+            ],
+            None,
         )
+
+        with patch.object(
+            search_engine.rust_backend, "run_batch", return_value=[timeout_error_tuple]
+        ):
+            _, errors, _meta = search_engine._evaluate_file(
+                fpath,
+                "sum(range(500000000)); return True",
+                include_ast_debug=False,
+                max_debug_nodes=50,
+            )
+
         timeout_errors = [
             e for e in errors if e.get("error_type") == "EvaluatorTimeout"
         ]

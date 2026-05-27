@@ -65,16 +65,16 @@ class TestValidation:
         assert result.ok is True
 
     def test_rejects_lambda(self):
-        # Lambda is now ALLOWED (Story #993 Group G) — was previously rejected.
+        # Lambda removed from ALLOWED_NODES (Rust-only path — not transpilable).
         sb = PythonEvaluatorSandbox()
         result = sb.validate("lambda x: x")
-        assert result.ok is True
+        assert result.ok is False
 
     def test_now_accepts_try_except_v10_4_0(self):
-        # try/except was added to ALLOWED_NODES in v10.4.0 (loops/control-flow lift).
+        # try/except removed from ALLOWED_NODES (Rust-only path — not transpilable).
         sb = PythonEvaluatorSandbox()
         result = sb.validate("try:\n    1\nexcept:\n    2")
-        assert result.ok is True
+        assert result.ok is False
 
     def test_now_accepts_for_loop_v10_4_0(self):
         # for-loop was added to ALLOWED_NODES in v10.4.0 (loops/control-flow lift).
@@ -237,11 +237,12 @@ class TestRun:
         assert result_prod.value is True
 
     def test_file_path_accessible_as_str(self):
-        # isinstance is not in safe builtins; verify via str() roundtrip instead
+        # str() removed from SAFE_BUILTIN_NAMES (Rust-only path).
+        # Verify file_path is accessible as a string by using its endswith method.
         sb = PythonEvaluatorSandbox()
         node, root = self._python_node_and_root()
         result = sb.run(
-            "return str(file_path) == file_path",
+            "return file_path.endswith('.py')",
             node=node,
             root=root,
             source="x = 1",

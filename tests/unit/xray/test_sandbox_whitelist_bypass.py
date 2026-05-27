@@ -97,21 +97,21 @@ class TestWhitelistBypassAttempts:
         _assert_rejected("from os import system", "Import")
         _assert_no_subprocess_spawned("from os import system")
 
-    # --- FunctionDef (now allowed, Story #993 Group G) ---
+    # --- FunctionDef (remains in ALLOWED_NODES — transpilable to Rust) ---
 
     def test_function_def_rejected(self):
-        # FunctionDef was previously rejected; now allowed in Group G (Story #993).
+        # FunctionDef remains in ALLOWED_NODES — transpilable to Rust.
         sb = PythonEvaluatorSandbox()
         result = sb.validate("def helper(): return 1\nreturn helper()")
         assert result.ok is True
 
-    # --- Lambda (now allowed, Story #993 Group G) ---
+    # --- Lambda (removed from ALLOWED_NODES — Rust-only path) ---
 
     def test_lambda_rejected(self):
-        # Lambda was previously rejected; now allowed in Group G (Story #993).
+        # Lambda removed from ALLOWED_NODES — not transpilable to Rust.
         sb = PythonEvaluatorSandbox()
         result = sb.validate("return (lambda x: x > 0)(5)")
-        assert result.ok is True
+        assert result.ok is False
 
     # --- ClassDef ---
 
@@ -119,10 +119,10 @@ class TestWhitelistBypassAttempts:
         _assert_rejected("class X: pass", "ClassDef")
         _assert_no_subprocess_spawned("class X: pass")
 
-    # --- Try / ExceptHandler ---
+    # --- Try / ExceptHandler (removed from ALLOWED_NODES — Rust-only path) ---
 
     def test_try_except_now_accepted_v10_4_0(self):
-        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        """Try/ExceptHandler removed from ALLOWED_NODES — not transpilable to Rust."""
         code = (
             "try:\n"
             "    return {'matches': [], 'value': None}\n"
@@ -131,7 +131,7 @@ class TestWhitelistBypassAttempts:
         )
         sb = PythonEvaluatorSandbox()
         result = sb.validate(code)
-        assert result.ok is True
+        assert result.ok is False
 
     # --- For loop ---
 
@@ -174,29 +174,27 @@ class TestWhitelistBypassAttempts:
             f"got reason={result.reason!r}"
         )
 
-    # --- DictComp ---
+    # --- DictComp (removed from ALLOWED_NODES — Rust-only path) ---
 
     def test_dict_comp_accepted(self):
-        # DictComp was added to ALLOWED_NODES (field-feedback fix #7).
-        # Use {x: 1 for x in range(10)} — avoids BinOp (x*2 is not whitelisted).
+        # DictComp removed from ALLOWED_NODES — not transpilable to Rust.
         sb = PythonEvaluatorSandbox()
         code = "{x: 1 for x in range(10)}"
         result = sb.validate(code)
-        assert result.ok is True, (
-            f"DictComp should be accepted after whitelist expansion; "
+        assert result.ok is False, (
+            f"DictComp should be rejected (Rust-only path); "
             f"got reason={result.reason!r}"
         )
 
-    # --- SetComp ---
+    # --- SetComp (removed from ALLOWED_NODES — Rust-only path) ---
 
     def test_set_comp_accepted(self):
-        # SetComp was added to ALLOWED_NODES (field-feedback fix #7).
+        # SetComp removed from ALLOWED_NODES — not transpilable to Rust.
         sb = PythonEvaluatorSandbox()
         code = "{x for x in range(10)}"
         result = sb.validate(code)
-        assert result.ok is True, (
-            f"SetComp should be accepted after whitelist expansion; "
-            f"got reason={result.reason!r}"
+        assert result.ok is False, (
+            f"SetComp should be rejected (Rust-only path); got reason={result.reason!r}"
         )
 
     # --- GeneratorExp ---
@@ -300,14 +298,14 @@ class TestWhitelistBypassAttempts:
         _assert_rejected(code, "Delete")
         _assert_no_subprocess_spawned(code)
 
-    # --- Raise ---
+    # --- Raise (removed from ALLOWED_NODES — Rust-only path) ---
 
     def test_raise_now_accepted_v10_4_0(self):
-        """v10.4.0 lifted ban — was rejected pre-v10.4.0."""
+        """ast.Raise removed from ALLOWED_NODES — not transpilable to Rust."""
         code = "raise ValueError('test')"
         sb = PythonEvaluatorSandbox()
         result = sb.validate(code)
-        assert result.ok is True
+        assert result.ok is False
 
     # --- Assert ---
 

@@ -11,6 +11,13 @@ pub struct OwnedNode {
     pub end_byte: usize,
     pub children: Vec<OwnedNode>,
     pub is_named: bool,
+    /// `text` is eagerly copied from source for every node because:
+    /// 1. OwnedNode must be fully self-contained (no source lifetime dependency).
+    /// 2. Dynlib evaluators access `node.text` at any tree depth.
+    /// 3. The dynlib boundary prevents passing source references across the ABI.
+    ///
+    /// Future optimization: store byte spans + source Arc if evaluator API changes
+    /// to allow a shared source reference at the dynlib boundary.
     pub text: String,
 }
 
@@ -37,6 +44,22 @@ impl OwnedNode {
             }
         }
         false
+    }
+
+    /// Returns all descendant nodes (at any depth) whose kind matches `kind`.
+    pub fn descendants_of_kind(&self, kind: &str) -> Vec<&OwnedNode> {
+        let mut results = Vec::new();
+        self.collect_descendants_of_kind(kind, &mut results);
+        results
+    }
+
+    fn collect_descendants_of_kind<'a>(&'a self, kind: &str, results: &mut Vec<&'a OwnedNode>) {
+        for child in &self.children {
+            if child.kind == kind {
+                results.push(child);
+            }
+            child.collect_descendants_of_kind(kind, results);
+        }
     }
 
     /// Recursively builds an OwnedNode tree from a tree-sitter Node.

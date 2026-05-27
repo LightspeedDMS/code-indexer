@@ -62,16 +62,15 @@ pub fn parse_file(path: &Path) -> Option<OwnedNode> {
     Some(OwnedNode::build_from_ts_node(tree.root_node(), &source))
 }
 
-/// Recursively walk the OwnedNode tree, calling every evaluator on each node
-/// and accumulating findings.
-fn scan_node(
-    node: &OwnedNode,
+/// Call every evaluator once with the file's root node, accumulating findings.
+fn evaluate_file(
+    root: &OwnedNode,
     evaluators: &[Box<dyn Evaluator>],
     file: &str,
     findings: &mut Vec<Finding>,
 ) {
     for eval in evaluators {
-        for ef in eval.evaluate_node(node) {
+        for ef in eval.evaluate_node(root) {
             findings.push(Finding {
                 pattern: ef.pattern,
                 file: file.to_string(),
@@ -80,13 +79,10 @@ fn scan_node(
             });
         }
     }
-    for child in &node.children {
-        scan_node(child, evaluators, file, findings);
-    }
 }
 
-/// Scan `files` in parallel using rayon, applying `evaluators` to every node
-/// in every parsed AST.
+/// Scan `files` in parallel using rayon, applying `evaluators` to each file's
+/// root node.
 ///
 /// Each rayon thread creates its own Parser (Parser is !Send), so there is no
 /// cross-thread sharing of mutable parser state.
@@ -139,7 +135,7 @@ pub fn scan_files_parallel(files: &[PathBuf], evaluators: &[Box<dyn Evaluator>])
         let file_str = path.to_string_lossy().to_string();
 
         let mut local_findings = Vec::new();
-        scan_node(&root, evaluators, &file_str, &mut local_findings);
+        evaluate_file(&root, evaluators, &file_str, &mut local_findings);
 
         files_parsed.fetch_add(1, Ordering::Relaxed);
 

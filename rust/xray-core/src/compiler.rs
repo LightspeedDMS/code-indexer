@@ -37,7 +37,13 @@ impl std::fmt::Display for CompileError {
 ///
 /// `truncate_snippet` is included as a utility helper for user evaluator code
 /// that needs to trim long text snippets before storing them in EvalFinding.
+///
+/// `XRAY_ABI_VERSION` is exported so the loader can verify the compiled .so
+/// was built with a compatible type layout before calling the evaluate function.
 const PREAMBLE: &str = r#"
+/// ABI version sentinel — must match EXPECTED_ABI_VERSION in dynlib.rs.
+const XRAY_ABI_VERSION: u64 = 1;
+
 #[derive(Debug, Clone)]
 pub struct OwnedNode {
     pub kind: String,
@@ -63,6 +69,17 @@ impl OwnedNode {
         }
         false
     }
+    pub fn descendants_of_kind(&self, kind: &str) -> Vec<&OwnedNode> {
+        let mut results = Vec::new();
+        self.collect_descendants_of_kind(kind, &mut results);
+        results
+    }
+    fn collect_descendants_of_kind<'a>(&'a self, kind: &str, results: &mut Vec<&'a OwnedNode>) {
+        for child in &self.children {
+            if child.kind == kind { results.push(child); }
+            child.collect_descendants_of_kind(kind, results);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -72,12 +89,22 @@ pub struct EvalFinding {
     pub snippet: String,
 }
 
-/// Utility for user evaluator code: collapse whitespace and truncate to max_len.
+/// Utility for user evaluator code: collapse whitespace and truncate to max_len bytes.
+/// Truncation always falls on a UTF-8 char boundary — never panics on multibyte chars.
 /// If truncation occurs, appends "...".
 fn truncate_snippet(s: &str, max_len: usize) -> String {
     let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.len() <= max_len { collapsed }
-    else { format!("{}...", &collapsed[..max_len]) }
+    if collapsed.len() <= max_len {
+        collapsed
+    } else {
+        let boundary = collapsed
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= max_len)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &collapsed[..boundary])
+    }
 }
 "#;
 
@@ -85,6 +112,11 @@ const EPILOGUE: &str = r#"
 #[no_mangle]
 pub fn xray_evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
     evaluate_node(node)
+}
+
+#[no_mangle]
+pub fn xray_abi_version() -> u64 {
+    XRAY_ABI_VERSION
 }
 "#;
 
@@ -110,8 +142,8 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
         });
     }
 
-    // Step 2: Check that evaluate_node function exists
-    if !user_code.contains("fn evaluate_node") {
+    // Step 2: Check that evaluate_node function exists (AST-level, not substring)
+    if !has_evaluate_node_fn(user_code) {
         return Err(CompileError {
             message: "Evaluator must define: fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>".to_string(),
             details: vec![],
@@ -176,14 +208,16 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
         });
     }
 
-    // Step 7: Write metadata
+    // Step 7: Write metadata (best-effort — .so already exists, warn but don't fail)
     let now = chrono_now_iso();
-    cache::write_metadata(&meta_path, &CacheMetadata {
+    if let Err(e) = cache::write_metadata(&meta_path, &CacheMetadata {
         source_hash: hash,
         rustc_version,
         compiled_at: now,
         compile_ms,
-    });
+    }) {
+        eprintln!("xray: warning: failed to write cache metadata {}: {}", meta_path.display(), e);
+    }
 
     // Step 8: LRU eviction
     cache::evict_lru(cache_dir, MAX_CACHE_ENTRIES);
@@ -192,6 +226,22 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
         so_path,
         compile_ms,
         cached: false,
+    })
+}
+
+/// Returns true only if `source` contains an actual `fn evaluate_node` function
+/// definition at the top level — not just the text in a comment or string literal.
+fn has_evaluate_node_fn(source: &str) -> bool {
+    let file: syn::File = match syn::parse_str(source) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    file.items.iter().any(|item| {
+        if let syn::Item::Fn(func) = item {
+            func.sig.ident == "evaluate_node"
+        } else {
+            false
+        }
     })
 }
 
@@ -364,5 +414,56 @@ fn helper() -> Vec<u8> { vec![] }
             "error must mention evaluate_node: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn test_rejects_evaluate_node_in_comment() {
+        let dir = TempDir::new().unwrap();
+        // The string "fn evaluate_node" appears only in a comment — no actual function
+        let user_code = r#"
+// fn evaluate_node is documented here
+fn helper() -> Vec<u8> { vec![] }
+"#;
+        let result = compile_evaluator(user_code, dir.path());
+        assert!(result.is_err(), "evaluate_node only in comment must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("evaluate_node"),
+            "error must mention evaluate_node: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_rejects_evaluate_node_in_string() {
+        let dir = TempDir::new().unwrap();
+        // The string "fn evaluate_node" appears only inside a string literal
+        let user_code = r#"
+fn helper() -> &'static str { "fn evaluate_node" }
+"#;
+        let result = compile_evaluator(user_code, dir.path());
+        assert!(result.is_err(), "evaluate_node only in string must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("evaluate_node"),
+            "error must mention evaluate_node: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_preamble_types_match_crate_types() {
+        // Verify PREAMBLE contains the same fields as the real types.
+        // This catches drift between preamble and crate definitions.
+        assert!(PREAMBLE.contains("pub kind: String"), "OwnedNode.kind missing from preamble");
+        assert!(PREAMBLE.contains("pub start_line: usize"), "OwnedNode.start_line missing");
+        assert!(PREAMBLE.contains("pub start_byte: usize"), "OwnedNode.start_byte missing");
+        assert!(PREAMBLE.contains("pub end_byte: usize"), "OwnedNode.end_byte missing");
+        assert!(PREAMBLE.contains("pub children: Vec<OwnedNode>"), "OwnedNode.children missing");
+        assert!(PREAMBLE.contains("pub is_named: bool"), "OwnedNode.is_named missing");
+        assert!(PREAMBLE.contains("pub text: String"), "OwnedNode.text missing");
+        assert!(PREAMBLE.contains("pub pattern: String"), "EvalFinding.pattern missing");
+        assert!(PREAMBLE.contains("pub line: usize"), "EvalFinding.line missing");
+        assert!(PREAMBLE.contains("pub snippet: String"), "EvalFinding.snippet missing");
     }
 }

@@ -10,34 +10,33 @@ use crate::scanner::Evaluator;
 pub struct AllocationInTryEvaluator;
 
 impl Evaluator for AllocationInTryEvaluator {
-    fn evaluate_node(&self, node: &OwnedNode) -> Vec<EvalFinding> {
-        if node.kind != "try_statement" {
-            return vec![];
-        }
+    fn evaluate_node(&self, root: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for node in root.descendants_of_kind("try_statement") {
+            let has_finally = node.children.iter().any(|c| c.kind == "finally_clause");
+            if !has_finally {
+                continue;
+            }
 
-        let has_finally = node.children.iter().any(|c| c.kind == "finally_clause");
-        if !has_finally {
-            return vec![];
-        }
+            let body = match node.child_by_kind("block") {
+                Some(b) => b,
+                None => continue,
+            };
 
-        let body = match node.child_by_kind("block") {
-            Some(b) => b,
-            None => return vec![],
-        };
-
-        for stmt in body.named_children().into_iter().take(3) {
-            if stmt.kind == "local_variable_declaration"
-                && stmt.has_descendant_of_kind("object_creation_expression")
-            {
-                return vec![EvalFinding {
-                    pattern: "allocation-in-try".to_string(),
-                    line: stmt.start_line,
-                    snippet: crate::finding::truncate_snippet(&stmt.text, 80),
-                }];
+            for stmt in body.named_children().into_iter().take(3) {
+                if stmt.kind == "local_variable_declaration"
+                    && stmt.has_descendant_of_kind("object_creation_expression")
+                {
+                    findings.push(EvalFinding {
+                        pattern: "allocation-in-try".to_string(),
+                        line: stmt.start_line,
+                        snippet: crate::finding::truncate_snippet(&stmt.text, 80),
+                    });
+                    break;
+                }
             }
         }
-
-        vec![]
+        findings
     }
 }
 
@@ -50,66 +49,59 @@ impl Evaluator for AllocationInTryEvaluator {
 pub struct CatchRethrowEvaluator;
 
 impl Evaluator for CatchRethrowEvaluator {
-    fn evaluate_node(&self, node: &OwnedNode) -> Vec<EvalFinding> {
-        if node.kind != "catch_clause" {
-            return vec![];
+    fn evaluate_node(&self, root: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for node in root.descendants_of_kind("catch_clause") {
+            let param = match node
+                .children
+                .iter()
+                .find(|c| c.kind == "catch_formal_parameter")
+            {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let param_name = match param
+                .children
+                .iter()
+                .filter(|c| c.kind == "identifier")
+                .last()
+            {
+                Some(id) => id.text.clone(),
+                None => continue,
+            };
+
+            let body = match node.child_by_kind("block") {
+                Some(b) => b,
+                None => continue,
+            };
+
+            let named = body.named_children();
+            if named.len() != 1 {
+                continue;
+            }
+
+            let stmt = named[0];
+            if stmt.kind != "throw_statement" {
+                continue;
+            }
+
+            let expr_named: Vec<&OwnedNode> =
+                stmt.children.iter().filter(|c| c.is_named).collect();
+            if expr_named.is_empty() {
+                continue;
+            }
+
+            let expr = expr_named[0];
+            if expr.kind == "identifier" && expr.text == param_name {
+                findings.push(EvalFinding {
+                    pattern: "catch-rethrow".to_string(),
+                    line: stmt.start_line,
+                    snippet: crate::finding::truncate_snippet(&stmt.text, 80),
+                });
+            }
         }
-
-        // Get catch parameter name (last identifier child of catch_formal_parameter)
-        let param = match node
-            .children
-            .iter()
-            .find(|c| c.kind == "catch_formal_parameter")
-        {
-            Some(p) => p,
-            None => return vec![],
-        };
-
-        let param_name = match param
-            .children
-            .iter()
-            .filter(|c| c.kind == "identifier")
-            .last()
-        {
-            Some(id) => id.text.clone(),
-            None => return vec![],
-        };
-
-        let body = match node.child_by_kind("block") {
-            Some(b) => b,
-            None => return vec![],
-        };
-
-        let named = body.named_children();
-        if named.len() != 1 {
-            return vec![];
-        }
-
-        let stmt = named[0];
-        if stmt.kind != "throw_statement" {
-            return vec![];
-        }
-
-        // The thrown expression must be a direct identifier (not wrapped/transformed)
-        let expr_named: Vec<&OwnedNode> = stmt.children.iter().filter(|c| c.is_named).collect();
-        if expr_named.is_empty() {
-            return vec![];
-        }
-
-        let expr = expr_named[0];
-        if expr.kind != "identifier" {
-            return vec![];
-        }
-
-        if expr.text == param_name {
-            return vec![EvalFinding {
-                pattern: "catch-rethrow".to_string(),
-                line: stmt.start_line,
-                snippet: crate::finding::truncate_snippet(&stmt.text, 80),
-            }];
-        }
-
-        vec![]
+        findings
     }
 }
 
@@ -168,8 +160,9 @@ mod tests {
         let body = node("block", vec![decl]);
         let finally = node("finally_clause", vec![]);
         let try_node = node("try_statement", vec![body, finally]);
+        let root = node("program", vec![try_node]);
 
-        let findings = evaluator.evaluate_node(&try_node);
+        let findings = evaluator.evaluate_node(&root);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].pattern, "allocation-in-try");
     }
@@ -184,8 +177,9 @@ mod tests {
         );
         let body = node("block", vec![decl]);
         let try_node = node("try_statement", vec![body]);
+        let root = node("program", vec![try_node]);
 
-        let findings = evaluator.evaluate_node(&try_node);
+        let findings = evaluator.evaluate_node(&root);
         assert!(findings.is_empty());
     }
 
@@ -193,7 +187,8 @@ mod tests {
     fn test_allocation_in_try_wrong_node_kind_no_match() {
         let evaluator = AllocationInTryEvaluator;
         let other = node("if_statement", vec![]);
-        assert!(evaluator.evaluate_node(&other).is_empty());
+        let root = node("program", vec![other]);
+        assert!(evaluator.evaluate_node(&root).is_empty());
     }
 
     #[test]
@@ -205,8 +200,9 @@ mod tests {
         let body = node("block", vec![stmt]);
         let finally = node("finally_clause", vec![]);
         let try_node = node("try_statement", vec![body, finally]);
+        let root = node("program", vec![try_node]);
 
-        let findings = evaluator.evaluate_node(&try_node);
+        let findings = evaluator.evaluate_node(&root);
         assert!(findings.is_empty());
     }
 
@@ -236,8 +232,9 @@ mod tests {
         };
         let body = node("block", vec![throw_stmt]);
         let catch_node = node("catch_clause", vec![catch_param, body]);
+        let root = node("program", vec![catch_node]);
 
-        let findings = evaluator.evaluate_node(&catch_node);
+        let findings = evaluator.evaluate_node(&root);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].pattern, "catch-rethrow");
         assert_eq!(findings[0].line, 10);
@@ -265,8 +262,9 @@ mod tests {
         };
         let body = node("block", vec![throw_stmt]);
         let catch_node = node("catch_clause", vec![catch_param, body]);
+        let root = node("program", vec![catch_node]);
 
-        let findings = evaluator.evaluate_node(&catch_node);
+        let findings = evaluator.evaluate_node(&root);
         assert!(findings.is_empty());
     }
 
@@ -293,8 +291,9 @@ mod tests {
         let log_stmt = node("expression_statement", vec![]);
         let body = node("block", vec![log_stmt, throw_stmt]);
         let catch_node = node("catch_clause", vec![catch_param, body]);
+        let root = node("program", vec![catch_node]);
 
-        let findings = evaluator.evaluate_node(&catch_node);
+        let findings = evaluator.evaluate_node(&root);
         assert!(findings.is_empty());
     }
 
@@ -302,6 +301,7 @@ mod tests {
     fn test_catch_rethrow_wrong_node_kind_no_match() {
         let evaluator = CatchRethrowEvaluator;
         let other = node("try_statement", vec![]);
-        assert!(evaluator.evaluate_node(&other).is_empty());
+        let root = node("program", vec![other]);
+        assert!(evaluator.evaluate_node(&root).is_empty());
     }
 }

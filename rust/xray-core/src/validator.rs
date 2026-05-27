@@ -85,7 +85,8 @@ impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
         syn::visit::visit_item_fn(self, node);
     }
 
-    // Reject `use std::fs`, `use std::net`, `use std::process` (and sub-paths)
+    // Reject `use std::fs`, `use std::net`, `use std::process`, `use std::env`,
+    // `use std::io` (and sub-paths)
     fn visit_use_tree(&mut self, node: &'ast syn::UseTree) {
         if let syn::UseTree::Path(path) = node {
             let ident = path.ident.to_string();
@@ -94,6 +95,41 @@ impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
             }
         }
         syn::visit::visit_use_tree(self, node);
+    }
+
+    // Reject fully-qualified std::fs::*, std::net::*, std::process::*,
+    // std::env::*, std::io::* path expressions used directly without import.
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if node.segments.len() >= 2 {
+            let first = node.segments[0].ident.to_string();
+            let second = node.segments[1].ident.to_string();
+            if first == "std"
+                && matches!(
+                    second.as_str(),
+                    "fs" | "net" | "process" | "env" | "io"
+                )
+            {
+                let line = Self::span_line(node.segments[0].ident.span());
+                self.add_error(
+                    line,
+                    format!(
+                        "`std::{}` is not allowed in evaluator code",
+                        second
+                    ),
+                );
+            }
+        }
+        syn::visit::visit_path(self, node);
+    }
+
+    // Reject `static` and `static mut` declarations (shared mutable state)
+    fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+        let line = Self::span_line(node.static_token.span);
+        self.add_error(
+            line,
+            "`static` declarations are not allowed in evaluator code".to_string(),
+        );
+        syn::visit::visit_item_static(self, node);
     }
 
     // Reject raw pointer types: *const T, *mut T
@@ -130,13 +166,22 @@ impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
         syn::visit::visit_item_mod(self, node);
     }
 
-    // Reject forbidden macros: include!, include_str!, include_bytes!, env!, option_env!
+    // Reject forbidden macros: include!, include_str!, include_bytes!, env!, option_env!,
+    // println!, eprintln!, print!, eprint! (I/O side effects)
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if let Some(last) = node.path.segments.last() {
             let name = last.ident.to_string();
             if matches!(
                 name.as_str(),
-                "include" | "include_str" | "include_bytes" | "env" | "option_env"
+                "include"
+                    | "include_str"
+                    | "include_bytes"
+                    | "env"
+                    | "option_env"
+                    | "println"
+                    | "eprintln"
+                    | "print"
+                    | "eprint"
             ) {
                 let line = Self::span_line(node.path.segments.first().unwrap().ident.span());
                 self.add_error(
@@ -154,7 +199,7 @@ fn check_forbidden_std_subpath(tree: &syn::UseTree, errors: &mut Vec<ValidationE
     match tree {
         syn::UseTree::Path(path) => {
             let name = path.ident.to_string();
-            if matches!(name.as_str(), "fs" | "net" | "process") {
+            if matches!(name.as_str(), "fs" | "net" | "process" | "env" | "io") {
                 let line = path.ident.span().start().line;
                 errors.push(ValidationError {
                     line,
@@ -174,7 +219,7 @@ fn check_forbidden_std_subpath(tree: &syn::UseTree, errors: &mut Vec<ValidationE
         }
         syn::UseTree::Name(name) => {
             let ident = name.ident.to_string();
-            if matches!(ident.as_str(), "fs" | "net" | "process") {
+            if matches!(ident.as_str(), "fs" | "net" | "process" | "env" | "io") {
                 let line = name.ident.span().start().line;
                 errors.push(ValidationError {
                     line,
@@ -187,7 +232,7 @@ fn check_forbidden_std_subpath(tree: &syn::UseTree, errors: &mut Vec<ValidationE
         }
         syn::UseTree::Rename(rename) => {
             let ident = rename.ident.to_string();
-            if matches!(ident.as_str(), "fs" | "net" | "process") {
+            if matches!(ident.as_str(), "fs" | "net" | "process" | "env" | "io") {
                 let line = rename.ident.span().start().line;
                 errors.push(ValidationError {
                     line,
@@ -384,5 +429,110 @@ use std::fmt;
 fn foo() {}
 "#;
         assert!(validate_evaluator_source(code).is_ok());
+    }
+
+    #[test]
+    fn test_rejects_direct_std_fs_call() {
+        let code = r#"fn f() { let _ = std::fs::read_to_string("x"); }"#;
+        let result = validate_evaluator_source(code);
+        assert!(result.is_err(), "direct std::fs path must be rejected");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("std::fs")),
+            "error must mention std::fs, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_rejects_direct_std_env_call() {
+        let code = r#"fn f() { let _ = std::env::var("X"); }"#;
+        let result = validate_evaluator_source(code);
+        assert!(result.is_err(), "direct std::env path must be rejected");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("std::env")),
+            "error must mention std::env, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_rejects_direct_std_io() {
+        let code = r#"fn f() { let _ = std::io::stdin(); }"#;
+        let result = validate_evaluator_source(code);
+        assert!(result.is_err(), "direct std::io path must be rejected");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("std::io")),
+            "error must mention std::io, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_allowed_std_collections_path() {
+        let code = r#"fn f() { let _: std::collections::HashMap<i32, i32> = std::collections::HashMap::new(); }"#;
+        let result = validate_evaluator_source(code);
+        assert!(result.is_ok(), "std::collections path must be allowed, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_rejects_println_macro() {
+        let code = r#"fn f() { println!("hi"); }"#;
+        let result = validate_evaluator_source(code);
+        assert!(result.is_err(), "println! macro must be rejected");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("println")),
+            "error must mention println, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_rejects_eprintln_macro() {
+        let code = r#"fn f() { eprintln!("hi"); }"#;
+        let result = validate_evaluator_source(code);
+        assert!(result.is_err(), "eprintln! macro must be rejected");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("eprintln")),
+            "error must mention eprintln, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_rejects_static_mut() {
+        let code = "static mut X: i32 = 0; fn f() {}";
+        let result = validate_evaluator_source(code);
+        assert!(result.is_err(), "static mut must be rejected");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("static")),
+            "error must mention static, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_rejects_static_non_const() {
+        let code = "static X: i32 = 0; fn f() {}";
+        let result = validate_evaluator_source(code);
+        assert!(result.is_err(), "static declaration must be rejected");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("static")),
+            "error must mention static, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_allows_const() {
+        let code = "const X: i32 = 42; fn f() {}";
+        let result = validate_evaluator_source(code);
+        assert!(result.is_ok(), "const declaration must be allowed, got: {:?}", result.err());
     }
 }

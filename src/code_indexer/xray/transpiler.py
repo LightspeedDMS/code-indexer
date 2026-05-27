@@ -189,8 +189,11 @@ class _RustEmitter:
         # Build parameter list
         params = _build_param_list(node)
 
-        # Return type: always Vec<EvalFinding> for evaluate_node and helpers
-        ret_type = "Vec<EvalFinding>"
+        # Return type: evaluate_node always Vec<EvalFinding>; helpers inferred from body
+        if func_name == "evaluate_node":
+            ret_type = "Vec<EvalFinding>"
+        else:
+            ret_type = self._infer_return_type(node)
 
         lines: List[str] = []
         # Docstring as comment
@@ -218,6 +221,50 @@ class _RustEmitter:
 
         lines.append("}")
         return "\n".join(lines)
+
+    def _infer_return_type(self, func_node: ast.FunctionDef) -> str:
+        """Infer the Rust return type of a helper function from its return statements.
+
+        Rules (first match wins across all return statements):
+        - Returns a comparison, BoolOp, UnaryOp(Not), bool constant, or is_none/is_some
+          call → ``bool``
+        - Returns an integer constant (non-bool) → ``usize``
+        - Returns a string constant → ``String``
+        - Default → ``Vec<EvalFinding>``
+        """
+        return_values: list[ast.expr] = []
+        for node in ast.walk(func_node):
+            if isinstance(node, ast.Return) and node.value is not None:
+                return_values.append(node.value)
+
+        for val in return_values:
+            # Bool constant
+            if isinstance(val, ast.Constant) and isinstance(val.value, bool):
+                return "bool"
+            # Comparison expression → bool
+            if isinstance(val, ast.Compare):
+                return "bool"
+            # BoolOp (and/or) → bool
+            if isinstance(val, ast.BoolOp):
+                return "bool"
+            # UnaryOp not → bool
+            if isinstance(val, ast.UnaryOp) and isinstance(val.op, ast.Not):
+                return "bool"
+            # Method call .is_none() / .is_some() → bool
+            if (
+                isinstance(val, ast.Call)
+                and isinstance(val.func, ast.Attribute)
+                and val.func.attr in ("is_none", "is_some")
+            ):
+                return "bool"
+            # Integer constant (not bool — bool is subclass of int, already handled above)
+            if isinstance(val, ast.Constant) and isinstance(val.value, int):
+                return "usize"
+            # String constant
+            if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                return "String"
+
+        return "Vec<EvalFinding>"
 
     def _prescan_body(self, stmts: list) -> None:
         """Pre-scan statements to identify variable names and their types."""
@@ -293,8 +340,8 @@ class _RustEmitter:
             return []
         if isinstance(stmt, ast.Pass):
             return []
-        # Unknown statement — emit as comment
-        return [indent + f"// TODO: unsupported stmt {type(stmt).__name__}"]
+        # Unknown statement — fail loudly
+        raise TranspileError(f"Unsupported statement: {type(stmt).__name__}")
 
     def _emit_return(self, node: ast.Return) -> str:
         if node.value is None:
@@ -307,6 +354,11 @@ class _RustEmitter:
         if isinstance(val, ast.List) and val.elts:
             items = [self._emit_expr(e) for e in val.elts]
             return f"return vec![{', '.join(items)}];"
+        # return {'matches': X, 'value': Y} -> return X (extract matches field)
+        if isinstance(val, ast.Dict):
+            for key, dval in zip(val.keys, val.values):
+                if isinstance(key, ast.Constant) and key.value == "matches":
+                    return f"return {self._emit_expr(dval)};"
         # return variable
         return f"return {self._emit_expr(val)};"
 
@@ -360,6 +412,15 @@ class _RustEmitter:
                 escaped = val.value.replace('"', '\\"')
                 return f'let mut {name} = "{escaped}".to_string();'
 
+            # child_by_kind() returns Option<&OwnedNode>
+            if (
+                isinstance(val, ast.Call)
+                and isinstance(val.func, ast.Attribute)
+                and val.func.attr == "child_by_kind"
+            ):
+                self._option_vars.add(name)
+                return f"let mut {name} = {rust_val};"
+
             # List comprehension
             if isinstance(val, ast.ListComp):
                 comp_rust = self._emit_listcomp(val)
@@ -389,7 +450,7 @@ class _RustEmitter:
             target_str = self._emit_expr(target)
             return f"{target_str} = {self._emit_expr(val)};"
 
-        return f"// TODO: unsupported assign target {type(target).__name__}"
+        raise TranspileError(f"Unsupported assignment target: {type(target).__name__}")
 
     def _emit_augassign(self, node: ast.AugAssign) -> str:
         target = self._emit_expr(node.target)
@@ -457,6 +518,20 @@ class _RustEmitter:
         # node.named_children() call
         if isinstance(iter_node, ast.Call):
             func = iter_node.func
+            if isinstance(func, ast.Name) and func.id == "range":
+                args = iter_node.args
+                if len(args) == 1:
+                    return f"0..{self._emit_expr(args[0])}"
+                if len(args) == 2:
+                    return f"{self._emit_expr(args[0])}..{self._emit_expr(args[1])}"
+            if isinstance(func, ast.Name) and func.id == "enumerate":
+                if iter_node.args:
+                    inner = self._emit_for_iter(iter_node.args[0])
+                    return f"{inner}.iter().enumerate()"
+            if isinstance(func, ast.Name) and func.id == "sorted":
+                if iter_node.args:
+                    inner = self._emit_for_iter(iter_node.args[0])
+                    return f"{{ let mut v = {inner}.to_vec(); v.sort(); v }}"
             if isinstance(func, ast.Attribute) and func.attr == "named_children":
                 obj = self._emit_expr(func.value)
                 if (
@@ -465,6 +540,20 @@ class _RustEmitter:
                 ):
                     obj = f"{obj}.unwrap()"
                 return f"{obj}.named_children()"
+            if isinstance(func, ast.Attribute) and func.attr == "descendants_of_kind":
+                obj = self._emit_expr(func.value)
+                if (
+                    isinstance(func.value, ast.Name)
+                    and func.value.id in self._option_vars
+                ):
+                    obj = f"{obj}.unwrap()"
+                if not iter_node.args:
+                    raise TranspileError(
+                        "descendants_of_kind() requires a kind argument"
+                    )
+                return (
+                    f"{obj}.descendants_of_kind({self._emit_expr(iter_node.args[0])})"
+                )
             # body.named_children().into_iter().take(N) already handled in expr
         return self._emit_expr(iter_node)
 
@@ -517,7 +606,15 @@ class _RustEmitter:
         if isinstance(node, ast.Tuple):
             items = [self._emit_expr(e) for e in node.elts]
             return f"({', '.join(items)})"
-        return f"/* unsupported expr: {type(node).__name__} */"
+        if isinstance(node, ast.Slice):
+            lower = self._emit_expr(node.lower) if node.lower else "0"
+            upper = self._emit_expr(node.upper) if node.upper else ""
+            if node.step:
+                raise TranspileError("Step slices are not supported")
+            if upper:
+                return f"{lower}..{upper}"
+            return f"{lower}.."
+        raise TranspileError(f"Unsupported expression: {type(node).__name__}")
 
     def _emit_attribute(self, node: ast.Attribute) -> str:
         obj = self._emit_expr(node.value)
@@ -573,6 +670,9 @@ class _RustEmitter:
         if isinstance(func, ast.Attribute):
             obj = self._emit_expr(func.value)
             method = func.attr
+            # Unwrap Option variables before method calls
+            if isinstance(func.value, ast.Name) and func.value.id in self._option_vars:
+                obj = f"{obj}.unwrap()"
 
             # list.append(x) → vec.push(x)
             if method == "append":
@@ -615,6 +715,12 @@ class _RustEmitter:
                     return f"{obj}.has_descendant_of_kind({self._emit_expr(args[0])})"
                 return f'{obj}.has_descendant_of_kind("")'
 
+            # .descendants_of_kind(x) — pass through
+            if method == "descendants_of_kind":
+                if args:
+                    return f"{obj}.descendants_of_kind({self._emit_expr(args[0])})"
+                return f'{obj}.descendants_of_kind("")'
+
             # .iter().take(n) chaining
             if method == "take":
                 if args:
@@ -651,6 +757,20 @@ class _RustEmitter:
                 # x is not None → x.is_some()
                 left_expr = self._emit_expr(node.left)
                 return f"{left_expr}.is_some()"
+            if isinstance(op, (ast.In, ast.NotIn)):
+                left_expr = self._emit_expr(node.left)
+                if isinstance(comparator, (ast.Tuple, ast.List)):
+                    if not comparator.elts:
+                        return "true" if isinstance(op, ast.NotIn) else "false"
+                    parts = [
+                        f"{left_expr} == {self._emit_expr(e)}" for e in comparator.elts
+                    ]
+                    chain = " || ".join(parts)
+                    result = f"({chain})"
+                    if isinstance(op, ast.NotIn):
+                        return f"!{result}"
+                    return result
+                raise TranspileError("'in'/'not in' requires a literal tuple or list")
             rust_op = _cmp_op(op)
             comp_str = self._emit_expr(comparator)
             # Handle comparison with Option<String> variables
@@ -700,6 +820,9 @@ class _RustEmitter:
         # Handle start_point[0] → start_line (already 1-based in Rust)
         if isinstance(node.value, ast.Attribute) and node.value.attr == "start_point":
             return f"{self._emit_expr(node.value.value)}.start_line"
+        if isinstance(node.slice, ast.Slice):
+            slice_expr = self._emit_expr(node.slice)
+            return f"{obj}[{slice_expr}]"
         idx = self._emit_expr(node.slice)
         return f"{obj}[{idx}]"
 
@@ -745,7 +868,7 @@ class _RustEmitter:
                 fields[key.value] = self._emit_expr(val)
 
         pattern = fields.get("pattern", '""')
-        line = fields.get("line", "0")
+        line = fields.get("line", fields.get("line_number", "0"))
         snippet = fields.get("snippet", '""')
 
         # pattern: convert to owned String

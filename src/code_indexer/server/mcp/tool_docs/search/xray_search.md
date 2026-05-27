@@ -2,7 +2,7 @@
 name: xray_search
 category: search
 required_permission: query_repos
-tl_dr: Two-phase AST-aware search — regex driver narrows candidate files, Python evaluator inspects each file's AST and returns a list of matches with open-ended per-match metadata.
+tl_dr: Two-phase AST-aware search — regex driver narrows candidate files, sandboxed evaluator inspects each file's AST and returns a list of matches with open-ended per-match metadata.
 slim_description: "Two-phase AST-aware code search: regex pattern narrows files, then sandboxed Python evaluator runs against each file's tree-sitter AST. Supports multi-repo, glob filters, and async polling."
 inputSchema:
   type: object
@@ -19,7 +19,7 @@ inputSchema:
       description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files. Backed by RegexSearchService (ripgrep) for content. Renamed from driver_regex in v10.3.x.'
     evaluator_code:
       type: string
-      description: 'Python code snippet evaluated ONCE per candidate file in a sandboxed subprocess. Receives globals: node (file root XRayNode), root (alias for node), source (file UTF-8 text), lang (language name), file_path (absolute path), match_positions (list of dicts: one per Phase 1 hit, each with line_number/column/line_content/byte_offset/ast_node/context_before/context_after; ast_node is the XRayNode at the hit location; empty list in filename mode). Can use import re/collections/itertools/functools and define helper functions with def/lambda. MUST return a dict with shape {"matches": [...], "value": <any>} or {"skip": True} to bail out. Optional "file_role" key in return dict tags the file in file_metadata. Each match in the list is a dict requiring at minimum line_number; may carry any open keys. Server enriches every match with file_path, language, and (if omitted) line_content derived from source. Per-file value is collected into the response file_metadata list.'
+      description: 'Python code snippet evaluated ONCE per candidate file in a sandboxed subprocess. Receives globals: node (file root XRayNode), root (alias for node), source (file UTF-8 text), lang (language name), file_path (absolute path), match_positions (list of dicts: one per Phase 1 hit, each with line_number/column/line_content/byte_offset/ast_node/context_before/context_after; ast_node is the XRayNode at the hit location; empty list in filename mode). Can define helper functions with def. MUST return a dict with shape {"matches": [...], "value": <any>} or {"skip": True} to bail out. Optional "file_role" key in return dict tags the file in file_metadata. Each match in the list is a dict requiring at minimum line_number; may carry any open keys. Server enriches every match with file_path, language, and (if omitted) line_content derived from source. Per-file value is collected into the response file_metadata list.'
     search_target:
       type: string
       enum:
@@ -145,7 +145,7 @@ Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately
 
 ## Evaluator API
 
-### File-as-unit contract (v10.4.0)
+### File-as-unit contract
 
 The evaluator runs **ONCE per candidate file**, not per Phase 1 hit. It receives the file root AST node plus the entire list of Phase 1 hits for the file, and returns a dict carrying its own list of matches and an optional per-file value.
 
@@ -171,7 +171,7 @@ return {
 | `source` | `str` | Full file content as a UTF-8 string. Equivalent to `node.text`. |
 | `lang` | `str` | tree-sitter language name. One of: `java`, `kotlin`, `go`, `python`, `typescript`, `javascript`, `bash`, `csharp`, `html`, `css` (and `terraform` when `tree_sitter_hcl` is installed). |
 | `file_path` | `str` | Absolute path of the file being evaluated. |
-| `match_positions` | `list[dict]` | List of every Phase 1 regex hit in this file. Each entry: `{"line_number": int, "column": int, "line_content": str, "byte_offset": int, "ast_node": XRayNode, "context_before": list[str], "context_after": list[str]}`. The `ast_node` field (v10.5.0) is the smallest named AST node whose byte range contains the hit's `byte_offset` — use it directly instead of manually scanning `descendants_of_type`. EMPTY LIST in `search_target='filename'` mode. |
+| `match_positions` | `list[dict]` | List of every Phase 1 regex hit in this file. Each entry: `{"line_number": int, "column": int, "line_content": str, "byte_offset": int, "ast_node": XRayNode, "context_before": list[str], "context_after": list[str]}`. The `ast_node` field is the smallest named AST node whose byte range contains the hit's `byte_offset` — use it directly instead of manually scanning `descendants_of_type`. EMPTY LIST in `search_target='filename'` mode. |
 
 The legacy per-position globals `match_byte_offset`, `match_line_number`, `match_line_content` are still passed (always `None` under the file-as-unit contract) and SHOULD NOT be referenced by new evaluators. Use `match_positions` instead.
 
@@ -191,8 +191,8 @@ The evaluator MUST return a dict with the following shape:
 
 - `matches` (required): list of dicts. Each match dict requires `line_number: int`. May carry any open keys: `column`, `line_content`, `context_before`, `context_after`, plus arbitrary application-specific fields (e.g. `complexity_score`, `severity`, `enclosing_function`, `notes`).
 - `value` (optional): an open-typed per-file payload. When non-None it is collected into the response `file_metadata[]` list as `{"file_path": ..., "value": <value>}`. Useful for whole-file metrics (line count, total complexity, list of imported modules).
-- `file_role` (optional, v10.5.0): a string tag classifying the file (e.g. `"connection_factory"`, `"test_helper"`, `"config"`). When present, surfaced in `file_metadata[]` as `{"file_path": ..., "file_role": <str>}`. Use this to categorize files by their role without emitting matches.
-- `skip` (optional, v10.5.0): when `True`, the file is skipped entirely — produces zero matches, no file_metadata entry, no errors. Use for early bail-out when the evaluator determines the file is irrelevant after inspecting the AST (e.g. file has no function definitions, wrong package declaration). Takes precedence over `matches` and `value` if both are present.
+- `file_role` (optional): a string tag classifying the file (e.g. `"connection_factory"`, `"test_helper"`, `"config"`). When present, surfaced in `file_metadata[]` as `{"file_path": ..., "file_role": <str>}`. Use this to categorize files by their role without emitting matches.
+- `skip` (optional): when `True`, the file is skipped entirely — produces zero matches, no file_metadata entry, no errors. Use for early bail-out when the evaluator determines the file is irrelevant after inspecting the AST (e.g. file has no function definitions, wrong package declaration). Takes precedence over `matches` and `value` if both are present.
 
 ### Server enrichment
 
@@ -224,9 +224,9 @@ The full public surface of any `XRayNode` reachable via `node`, `descendants_of_
 | `node.count_descendants_of_type(type_name)` | int | fast count without materialising a list — use this when you only need a count |
 | `node.enclosing(type_name)` | XRayNode \| None | walks UP parent chain (inclusive of self) and returns first ancestor matching `type_name` |
 | `node.child_by_field_name(name)` | XRayNode \| None | child with a specific grammar field name (e.g. `"name"`, `"body"`, `"condition"`) |
-| `node.node_at_byte_offset(offset)` | XRayNode \| None | (v10.5.0) finds the smallest named AST node whose byte range contains `offset` — this is what populates `match_positions[i]["ast_node"]` |
-| `node.is_in_try_resources()` | bool | (v10.5.0) walks parent chain, returns True if inside a Java `try-with-resources` resource declaration (`resource_specification` or `try_with_resources_statement`) |
-| `node.enclosing_method_body()` | XRayNode \| None | (v10.5.0) walks parent chain, returns the body block of the enclosing method/function declaration (supports: `method_declaration`, `function_definition`, `function_declaration`, `constructor_declaration`, `lambda_expression`, `arrow_function`) |
+| `node.node_at_byte_offset(offset)` | XRayNode \| None | finds the smallest named AST node whose byte range contains `offset` — this is what populates `match_positions[i]["ast_node"]` |
+| `node.is_in_try_resources()` | bool | walks parent chain, returns True if inside a Java `try-with-resources` resource declaration (`resource_specification` or `try_with_resources_statement`) |
+| `node.enclosing_method_body()` | XRayNode \| None | walks parent chain, returns the body block of the enclosing method/function declaration (supports: `method_declaration`, `function_definition`, `function_declaration`, `constructor_declaration`, `lambda_expression`, `arrow_function`) |
 
 ### Whitelisted node types
 
@@ -234,11 +234,9 @@ The sandbox accepts the following Python AST node types in evaluator code (every
 
 - Expression core: `Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, BinOp, List, Tuple, Dict, Return, Expr`
 - Local binding: `Assign` (e.g. `x = node.named_children`), `AugAssign` (e.g. `count += 1`)
-- Comprehensions and ternary: `comprehension, GeneratorExp, ListComp, SetComp, DictComp, IfExp`
-- Statement-level control flow (v10.4.0): `If` (statement-level if/elif/else), `For` (statement-level for-loop), `While` (statement-level while-loop), `Break`, `Continue`, `Pass`
-- Structured exception handling (v10.4.0): `Try` (try/except/finally), `ExceptHandler` (except clauses, bare and typed), `Raise`
-- Imports with stdlib whitelist (v10.5.0): `Import`, `ImportFrom` — allowed ONLY for whitelisted modules: `re`, `collections`, `itertools`, `functools`. Any other module raises `ImportError` at runtime. Use `import re` to get regex, `import collections` for Counter/defaultdict, `import itertools` for chain/groupby, `import functools` for reduce/partial.
-- Function definitions (v10.5.0): `FunctionDef`, `Lambda`, `arguments`, `arg` — define helper functions to structure multi-pass evaluator logic. Nested functions and lambdas both work.
+- Comprehensions and ternary: `comprehension, GeneratorExp, ListComp, IfExp`
+- Statement-level control flow: `If` (statement-level if/elif/else), `For` (statement-level for-loop), `While` (statement-level while-loop), `Break`, `Continue`, `Pass`
+- Function definitions: `FunctionDef`, `arguments`, `arg` — define helper functions to structure multi-pass evaluator logic.
 - Abstract operator base classes (matched via isinstance against concrete subclasses Add, Sub, Eq, And, Not, Load, Store, etc.): `boolop, cmpop, unaryop, expr_context, operator`
 - Module/Load markers: `Module, Load`
 
@@ -248,17 +246,21 @@ The sandbox accepts the following Python AST node types in evaluator code (every
 
 - Class definitions: `class`
 - Async function definitions: `async def`
+- Lambda expressions: `lambda`
 - Scope manipulation: `global`, `nonlocal`
 - Resource managers: `with`, `async with`
 - Async/await: `async`, `await`
 - Generators: `yield`, `yield from`
-- Non-whitelisted imports: any `import X` or `from X import Y` where X is not in `{re, collections, itertools, functools}` passes AST validation but raises `ImportError` at runtime
+- Exception handling: `try`, `except`, `raise`
+- All imports: `import X` and `from X import Y` (no imports of any kind are permitted)
+- Set comprehensions: `{x for x in ...}`
+- Dict comprehensions: `{k: v for k, v in ...}`
 
-**Safe builtins** (available in the exec environment, 34 total):
-`len, str, int, bool, list, tuple, dict, min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr, isinstance, type, set, frozenset, float, repr, print` plus exception types for `except` clauses: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`.
+**Safe builtins** (available in the exec environment, 8 total):
+`len, any, all, range, enumerate, sorted, min, max`.
 
 **Stripped builtins** (removed from the exec environment — referencing them raises NameError):
-`getattr, setattr, delattr, eval, exec, open, compile`. Note: `__import__` is replaced by a restricted import function that enforces the stdlib whitelist (raises `ImportError` for non-whitelisted modules rather than `NameError`).
+`getattr, setattr, delattr, __import__, eval, exec, open, compile`.
 
 **Dunder attribute blocklist** (Attribute and Subscript access to these names is rejected at AST validation time as sandbox escape vectors):
 
@@ -275,9 +277,9 @@ The sandbox accepts the following Python AST node types in evaluator code (every
 
 Any attribute name matching `__*__` is also blocked at Subscript level (e.g. `globals()['__import__']`).
 
-### Cookbook: 15 worked patterns (v10.4.0 contract)
+### Cookbook: 15 worked patterns
 
-Each example is a complete `evaluator_code` value. All patterns return the v10.4.0 dict shape `{"matches": [...], "value": ...}`. The lifted bans on `if`/`for`/`while`/`try` make many of these clearer than the comprehension-only equivalents.
+Each example is a complete `evaluator_code` value. All patterns return the dict shape `{"matches": [...], "value": ...}`. The lifted bans on `if`/`for`/`while` make many of these clearer than the comprehension-only equivalents.
 
 1. **Filter Phase 1 hits to those inside function bodies** (the most common ask):
    ```python
@@ -426,17 +428,13 @@ Each example is a complete `evaluator_code` value. All patterns return the v10.4
     return {"matches": matches, "value": None}
     ```
 
-11. **Calls without try/except guards** (audit risky operations) — uses `try`/`except` inside the evaluator itself for defensive node access:
+11. **Calls without try/except guards** (audit risky operations):
     ```python
     calls = node.descendants_of_type('call')
     unsafe = []
     for c in calls:
-        try:
-            if c.enclosing('try_statement') is None:
-                unsafe.append(c)
-        except AttributeError:
-            # Defensive: skip nodes that can't traverse parent chain
-            continue
+        if c.enclosing('try_statement') is None:
+            unsafe.append(c)
     matches = [{"line_number": c.start_point[0] + 1} for c in unsafe]
     return {"matches": matches, "value": {"unsafe_call_count": len(unsafe)}}
     ```
@@ -623,20 +621,9 @@ Other `InvalidEvaluatorReturn` messages: `"Evaluator dict missing required 'matc
 }
 ```
 
-Structured error fields (v10.5.0): `error_code` identifies the category (e.g. `node_not_allowed`, `import_not_whitelisted`, `dunder_attribute_blocked`), `offending_construct` names the specific construct (e.g. `ClassDef`, `os`, `__class__`), `offending_line` is the 1-based line number in evaluator_code.
+Structured error fields: `error_code` identifies the category (e.g. `node_not_allowed`, `dunder_attribute_blocked`), `offending_construct` names the specific construct (e.g. `ClassDef`, `Import`, `__class__`), `offending_line` is the 1-based line number in evaluator_code.
 
-Import validation example (non-whitelisted module):
-```json
-{
-  "error": "xray_evaluator_validation_failed",
-  "error_code": "import_not_whitelisted",
-  "offending_construct": "os",
-  "offending_line": 1,
-  "message": "Import of module 'os' is not allowed. Allowed stdlib modules: collections, functools, itertools, re."
-}
-```
-
-Other validation rejection messages name the offending node type (e.g. `'ClassDef' is not allowed in evaluator code.`, `'With' is not allowed in evaluator code.`, `'AsyncFunctionDef' is not allowed in evaluator code.`) and include the full whitelist in the message body. Dunder access produces `Attribute access to '__class__' blocked (sandbox escape vector)` or `Subscript access to '__import__' blocked (sandbox escape vector)`.
+Other validation rejection messages name the offending node type (e.g. `'ClassDef' is not allowed in evaluator code.`, `'Import' is not allowed in evaluator code.`, `'With' is not allowed in evaluator code.`, `'AsyncFunctionDef' is not allowed in evaluator code.`) and include the full whitelist in the message body. Dunder access produces `Attribute access to '__class__' blocked (sandbox escape vector)` or `Subscript access to '__import__' blocked (sandbox escape vector)`.
 
 **Generic exception types** (e.g. `IOError`, `UnicodeDecodeError`, `OSError`) — emitted by the catch-all in `_evaluate_file` when the file cannot be read or parsed. The `error_type` is the Python exception class name; `error_message` is `str(exc)`.
 

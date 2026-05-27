@@ -28,8 +28,29 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Path to xray-cli binary. __file__ is src/code_indexer/xray/rust_backend.py.
-_PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+_MAX_PARENT_TRAVERSAL_DEPTH = 10
+
+
+def _find_project_root() -> Path:
+    """Walk up from this file to find the project root (contains rust/ dir)."""
+    path = Path(__file__).resolve().parent
+    for _ in range(_MAX_PARENT_TRAVERSAL_DEPTH):
+        if (path / "rust").is_dir():
+            return path
+        parent = path.parent
+        if parent == path:
+            break
+        path = parent
+    logger.warning(
+        "RustNativeBackend: could not find rust/ directory within %d levels of %s;"
+        " falling back to hardcoded project root",
+        _MAX_PARENT_TRAVERSAL_DEPTH,
+        Path(__file__),
+    )
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+_PROJECT_ROOT = _find_project_root()
 _XRAY_CLI_DEFAULT = _PROJECT_ROOT / "rust" / "target" / "release" / "xray-cli"
 
 # Type alias for the run_batch return type.
@@ -150,11 +171,11 @@ class RustNativeBackend:
 
     def _transpile_to_rust(self, evaluator_code: str) -> Tuple[str, Optional[str]]:
         """Transpile Python evaluator to Rust. Returns (rust_code, error_msg)."""
-        try:
-            from code_indexer.xray.transpiler import transpile_evaluator  # noqa: PLC0415
+        from code_indexer.xray.transpiler import TranspileError, transpile_evaluator  # noqa: PLC0415
 
+        try:
             return transpile_evaluator(evaluator_code), None
-        except Exception as exc:  # noqa: BLE001
+        except (TranspileError, SyntaxError) as exc:
             msg = f"Transpilation failed: {exc}"
             logger.warning("RustNativeBackend: %s", msg)
             return "", msg

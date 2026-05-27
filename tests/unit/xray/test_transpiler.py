@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -301,6 +302,61 @@ def evaluate_node(node):
         rust = self.transpile(python_src)
         assert "has_descendant_of_kind" in rust
 
+    def test_descendants_of_kind_call(self):
+        """node.descendants_of_kind('X') transpiles to Rust method call."""
+        python_src = """
+def evaluate_node(node):
+    for c in node.descendants_of_kind("catch_clause"):
+        if c.kind == "catch_clause":
+            return []
+    return []
+"""
+        rust = self.transpile(python_src)
+        assert 'descendants_of_kind("catch_clause")' in rust
+
+    def test_descendants_of_kind_in_for_loop(self):
+        """for x in node.descendants_of_kind('kind') transpiles as for-loop iterator."""
+        python_src = """
+def evaluate_node(node):
+    findings = []
+    for ts in node.descendants_of_kind("try_statement"):
+        findings.append({"pattern": "try", "line": ts.start_line, "snippet": ts.text})
+    return findings
+"""
+        rust = self.transpile(python_src)
+        assert 'descendants_of_kind("try_statement")' in rust
+        assert "for ts in" in rust
+
+    def test_return_dict_with_matches_extracts_matches(self):
+        """return {'matches': X, 'value': Y} extracts X as the return value."""
+        python_src = """
+def evaluate_node(node):
+    matches = []
+    return {"matches": matches, "value": None}
+"""
+        rust = self.transpile(python_src)
+        assert "return matches;" in rust
+
+    def test_line_number_maps_to_line(self):
+        """line_number key in finding dict maps to line field in EvalFinding."""
+        python_src = """
+def evaluate_node(node):
+    return [{"pattern": "test", "line_number": node.start_line, "snippet": node.text}]
+"""
+        rust = self.transpile(python_src)
+        assert "EvalFinding" in rust
+        assert "line: node.start_line" in rust
+
+    def test_slice_no_ampersand(self):
+        """node.text[:N] in snippet should not produce & prefix in slice output."""
+        python_src = """
+def evaluate_node(node):
+    return [{"pattern": "test", "line": node.start_line, "snippet": node.text[:80]}]
+"""
+        rust = self.transpile(python_src)
+        # The snippet should use truncate_snippet, not &node.text[...]
+        assert "&node.text[" not in rust
+
     def test_break_statement(self):
         """break inside for loop transpiles"""
         python_src = """
@@ -372,7 +428,7 @@ class TestSpikePatterns:
             assert "EvalFinding" in rust, f"{name} missing EvalFinding"
 
     def test_all_patterns_produce_vec_return(self):
-        """All 3 patterns must return vec![] or vec![EvalFinding{...}]."""
+        """All 3 patterns must return Vec<EvalFinding> (via vec![] or Vec::new())."""
         for name in [
             "pattern1_catch_rethrow.py",
             "pattern2_allocation_in_try.py",
@@ -380,7 +436,9 @@ class TestSpikePatterns:
         ]:
             src = _read_spike_pattern(name)
             rust = self.transpile(src)
-            assert "vec!" in rust, f"{name} missing vec! macro"
+            assert "vec!" in rust or "Vec::new()" in rust, (
+                f"{name} missing vec! macro or Vec::new() constructor"
+            )
 
 
 # --------------------------------------------------------------------------
@@ -764,6 +822,66 @@ def evaluate_node(node):
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Return type inference tests (Finding H3)
+# --------------------------------------------------------------------------
+
+
+class TestReturnTypeInference:
+    """Tests that helper function return types are inferred from body analysis.
+
+    H3: ALL functions must NOT blindly get -> Vec<EvalFinding>.
+    Helpers returning bool/int/str must get the correct Rust return type.
+    """
+
+    def setup_method(self):
+        self.transpile = _import_transpiler()
+
+    def test_helper_returning_bool_gets_bool_return_type(self):
+        """H3: Helper function returning bool should get -> bool."""
+        import textwrap  # noqa: PLC0415
+
+        source = textwrap.dedent("""\
+            def is_try_block(node):
+                return node.kind == "try_statement"
+
+            def evaluate_node(node):
+                if is_try_block(node):
+                    return [{"pattern": "test", "line": node.start_line, "snippet": ""}]
+                return []
+        """)
+        rust = self.transpile(source)
+        assert "fn is_try_block" in rust
+        assert "-> bool" in rust  # Helper returns bool, not Vec<EvalFinding>
+
+    def test_helper_returning_usize_gets_usize_return_type(self):
+        """H3: Helper function returning int literal should get -> usize."""
+        import textwrap  # noqa: PLC0415
+
+        source = textwrap.dedent("""\
+            def count_children(node):
+                return 0
+
+            def evaluate_node(node):
+                return []
+        """)
+        rust = self.transpile(source)
+        assert "fn count_children" in rust
+        assert "-> usize" in rust
+
+    def test_evaluate_node_always_returns_vec_evalfinding(self):
+        """H3: evaluate_node must always return Vec<EvalFinding> regardless of body."""
+        import textwrap  # noqa: PLC0415
+
+        source = textwrap.dedent("""\
+            def evaluate_node(node):
+                return []
+        """)
+        rust = self.transpile(source)
+        assert "fn evaluate_node" in rust
+        assert "-> Vec<EvalFinding>" in rust
+
+
 class TestTranspilerErrors:
     """Tests that the transpiler raises clear errors for unsupported constructs."""
 
@@ -828,3 +946,125 @@ def evaluate_node(node):
         # The error must tell the user WHAT failed
         msg = str(exc_info.value)
         assert len(msg) > 10, "Error message too short to be helpful"
+
+
+# --------------------------------------------------------------------------
+# In/NotIn operator tests
+# --------------------------------------------------------------------------
+
+
+class TestInNotInOperators:
+    def setup_method(self):
+        self.transpile = _import_transpiler()
+
+    def test_in_tuple_literal(self):
+        code = textwrap.dedent("""\
+            def evaluate_node(node):
+                if node.kind in ("throw_statement", "raise_statement"):
+                    return [{"pattern": "found", "line": node.start_line, "snippet": node.text}]
+                return []
+        """)
+        rust = self.transpile(code)
+        assert "==" in rust
+        assert "||" in rust
+
+    def test_not_in_list_literal(self):
+        code = textwrap.dedent("""\
+            def evaluate_node(node):
+                if node.kind not in ["block", "comment"]:
+                    return [{"pattern": "found", "line": node.start_line, "snippet": node.text}]
+                return []
+        """)
+        rust = self.transpile(code)
+        assert "!" in rust
+
+    def test_in_variable_rhs_raises(self):
+        from code_indexer.xray.transpiler import TranspileError  # noqa: PLC0415
+
+        code = textwrap.dedent("""\
+            def evaluate_node(node):
+                kinds = ["a", "b"]
+                if node.kind in kinds:
+                    return []
+                return []
+        """)
+        with pytest.raises(TranspileError, match="literal tuple or list"):
+            self.transpile(code)
+
+
+# --------------------------------------------------------------------------
+# Slice transpilation tests
+# --------------------------------------------------------------------------
+
+
+class TestSliceTranspilation:
+    def setup_method(self):
+        self.transpile = _import_transpiler()
+
+    def test_slice_upper_only(self):
+        code = textwrap.dedent("""\
+            def evaluate_node(node):
+                snippet = node.text[:80]
+                return [{"pattern": "found", "line": node.start_line, "snippet": snippet}]
+        """)
+        rust = self.transpile(code)
+        assert "0..80" in rust
+
+    def test_slice_both_bounds(self):
+        code = textwrap.dedent("""\
+            def evaluate_node(node):
+                x = source[10:20]
+                return []
+        """)
+        rust = self.transpile(code)
+        assert "10..20" in rust
+
+
+# --------------------------------------------------------------------------
+# Range transpilation tests
+# --------------------------------------------------------------------------
+
+
+class TestRangeTranspilation:
+    def setup_method(self):
+        self.transpile = _import_transpiler()
+
+    def test_range_single_arg(self):
+        code = textwrap.dedent("""\
+            def evaluate_node(node):
+                for i in range(10):
+                    pass
+                return []
+        """)
+        rust = self.transpile(code)
+        assert "0..10" in rust
+
+    def test_range_two_args(self):
+        code = textwrap.dedent("""\
+            def evaluate_node(node):
+                for i in range(1, 5):
+                    pass
+                return []
+        """)
+        rust = self.transpile(code)
+        assert "1..5" in rust
+
+
+# --------------------------------------------------------------------------
+# Enumerate transpilation tests
+# --------------------------------------------------------------------------
+
+
+class TestEnumerateTranspilation:
+    def setup_method(self):
+        self.transpile = _import_transpiler()
+
+    def test_enumerate_children(self):
+        code = textwrap.dedent("""\
+            def evaluate_node(node):
+                for i, child in enumerate(node.children):
+                    pass
+                return []
+        """)
+        rust = self.transpile(code)
+        assert "enumerate" in rust

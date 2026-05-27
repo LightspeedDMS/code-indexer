@@ -164,6 +164,67 @@ fn main() {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_parse_args_files_stops_at_json_flag() {
+        let args = sv(&["--files", "a.rs", "b.rs", "--json"]);
+        let parsed = parse_args(&args);
+        assert_eq!(parsed.file_list, sv(&["a.rs", "b.rs"]));
+        assert!(parsed.json_output, "--json must be recognized after --files list");
+    }
+
+    #[test]
+    fn test_parse_args_files_stops_at_dynlib_flag() {
+        let args = sv(&["--files", "a.rs", "--dynlib", "eval.rs"]);
+        let parsed = parse_args(&args);
+        assert_eq!(parsed.file_list, sv(&["a.rs"]));
+        assert_eq!(parsed.dynlib_path, Some("eval.rs".to_string()));
+    }
+
+    #[test]
+    fn test_parse_args_files_with_double_dash_filename() {
+        // A filename starting with "--" that is NOT a known flag must be accepted
+        let args = sv(&["--files", "--weird.rs", "--json"]);
+        let parsed = parse_args(&args);
+        // With the fixed parser, "--weird.rs" is not a known flag so it is a file
+        assert!(
+            parsed.file_list.contains(&"--weird.rs".to_string()),
+            "file named --weird.rs must be in file_list, got: {:?}",
+            parsed.file_list
+        );
+        assert!(parsed.json_output);
+    }
+
+    #[test]
+    fn test_parse_args_json_flag() {
+        let parsed = parse_args(&sv(&["--json"]));
+        assert!(parsed.json_output);
+        assert!(parsed.file_list.is_empty());
+        assert!(parsed.dynlib_path.is_none());
+    }
+
+    #[test]
+    fn test_parse_args_remaining_target() {
+        let parsed = parse_args(&sv(&["/some/path"]));
+        assert_eq!(parsed.remaining_args, sv(&["/some/path"]));
+    }
+
+    #[test]
+    fn test_parse_args_empty() {
+        let parsed = parse_args(&sv(&[]));
+        assert!(parsed.file_list.is_empty());
+        assert!(!parsed.json_output);
+        assert!(parsed.dynlib_path.is_none());
+    }
+}
+
 fn parse_args(args: &[String]) -> ParsedArgs {
     let mut dynlib_path = None;
     let mut json_output = false;
@@ -188,8 +249,12 @@ fn parse_args(args: &[String]) -> ParsedArgs {
         }
         if args[i] == "--files" {
             i += 1;
-            // Consume all subsequent args that do not start with "--" as file paths
-            while i < args.len() && !args[i].starts_with("--") {
+            // Consume all subsequent args until we see a KNOWN flag.
+            // This allows filenames that start with "--" (e.g. "--weird.rs").
+            while i < args.len() {
+                if args[i] == "--json" || args[i] == "--dynlib" {
+                    break;
+                }
                 file_list.push(args[i].clone());
                 i += 1;
             }

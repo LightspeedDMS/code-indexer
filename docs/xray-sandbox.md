@@ -9,25 +9,21 @@ This document captures the X-Ray sandbox security boundary invariants extracted 
 2. Stripped exec() environment (Layer 2) — `STRIPPED_BUILTINS` removed from globals dict; only `SAFE_BUILTIN_NAMES` are available.
 3. `multiprocessing.Process` isolation (Layer 3) — SIGTERM at 5.0s, SIGKILL at +1.0s; side effects confined to child.
 
-**ALLOWED_NODES** (v10.4.0 grants statement-level control flow and exception handling):
-- Core expression nodes: `Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, List, Tuple, Dict, Return, Expr, Module, Load`.
+**ALLOWED_NODES**:
+- Core expression nodes: `Call, Name, Attribute, Constant, Subscript, Slice, Compare, BoolOp, UnaryOp, List, Tuple, Dict, Return, Expr, Module, Load`.
 - Abstract bases (matched via `isinstance()`): `boolop, cmpop, unaryop, expr_context, operator`.
 - Group A — local variable binding: `Assign`, `AugAssign`.
-- Group B — comprehensions and ternaries: `comprehension, GeneratorExp, ListComp, SetComp, DictComp, IfExp`.
-- Group C — statement-level control flow (lifted in v10.4.0): `If, For, While, Break, Continue, Pass`. Iteration is bounded by `HARD_TIMEOUT_SECONDS` — infinite loops surface as `EvaluatorTimeout`, not validation rejection.
-- Group D — structured exception handling (lifted in v10.4.0): `Try, ExceptHandler, Raise`.
-- Group E — arithmetic binary operations (lifted in v10.4.0): `BinOp` plus the `operator` abstract base (concrete subclasses Add, Sub, Mult, Div, Mod, etc. via isinstance).
-- Group F — imports (lifted in Story #993): `Import`, `ImportFrom`, `alias`. Only stdlib modules in `STDLIB_WHITELIST` (re, collections, itertools, functools) are permitted; importing anything outside the whitelist is rejected at validation time.
-- Group G — function definitions and lambdas (lifted in Story #993): `FunctionDef`, `Lambda`, `arguments`, `arg`. Allows evaluators to define helper functions and use lambda expressions.
+- Group B — comprehensions and ternaries: `comprehension, GeneratorExp, ListComp, IfExp`. Note: `SetComp` and `DictComp` are NOT allowed.
+- Group C — statement-level control flow: `If, For, While, Break, Continue, Pass`. Iteration is bounded by `HARD_TIMEOUT_SECONDS` — infinite loops surface as `EvaluatorTimeout`, not validation rejection.
+- Group E — arithmetic binary operations: `BinOp` plus the `operator` abstract base (concrete subclasses Add, Sub, Mult, Div, Mod, etc. via isinstance).
+- Group G — function definitions: `FunctionDef`, `arguments`, `arg`. Allows evaluators to define helper functions. Note: `Lambda` is NOT allowed.
 
-**STRIPPED_BUILTINS**: `getattr, setattr, delattr, __import__, eval, exec, open, compile`. Note: `hasattr` is intentionally in `SAFE_BUILTIN_NAMES`, not stripped — it has no escalation power beyond what the dunder blocklist already prevents.
+**STRIPPED_BUILTINS**: `getattr, setattr, delattr, __import__, eval, exec, open, compile`.
 
-**SAFE_BUILTIN_NAMES** (34 total):
-- 18 originals: `len, str, int, bool, list, tuple, dict, min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr`.
-- 9 exception types added in v10.4.0 for `except` clauses in Group D try/except blocks: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`. These are read-only references; none grant escalation power beyond what the dunder blocklist enforces.
-- 7 additional builtins added in Story #993: `isinstance, type, set, frozenset, float, repr, print`.
+**SAFE_BUILTIN_NAMES** (8 total):
+`len, any, all, range, enumerate, sorted, min, max`.
 
-**Still banned at validation time** (rejected before any subprocess is spawned): `class`, `async def`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`. Plus dunder Attribute and Subscript access (see `DUNDER_ATTR_BLOCKLIST` below).
+**Still banned at validation time** (rejected before any subprocess is spawned): `class`, `async def`, `lambda`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`, `try`/`except`/`raise` (Groups D — Try, ExceptHandler, Raise), all imports (Groups F — Import, ImportFrom, alias), set comprehensions (SetComp), dict comprehensions (DictComp). Plus dunder Attribute and Subscript access (see `DUNDER_ATTR_BLOCKLIST` below).
 
 **Timeout policy**: `HARD_TIMEOUT_SECONDS=5.0` (SIGTERM), `SIGKILL_GRACE_SECONDS=1.0` (SIGKILL if still alive). Pipe data is read BEFORE `is_alive()` check — under heavy concurrency `waitpid()` races can cause `is_alive()=True` after the child has sent valid data; pipe data takes precedence.
 

@@ -26,14 +26,20 @@ pub fn read_metadata(meta_path: &Path) -> Option<CacheMetadata> {
     parse_metadata(&content)
 }
 
-/// Serialises CacheMetadata and writes it to `meta_path`.
+/// Serialises CacheMetadata and writes it to `meta_path` atomically.
+///
+/// Writes to `{meta_path}.tmp` first, then renames to the final path so that
+/// concurrent readers never observe a partial write.
 /// Creates parent directories if needed.
-pub fn write_metadata(meta_path: &Path, meta: &CacheMetadata) {
+pub fn write_metadata(meta_path: &Path, meta: &CacheMetadata) -> Result<(), std::io::Error> {
     if let Some(parent) = meta_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
+    let tmp_path = meta_path.with_extension("meta.tmp");
     let content = format_metadata(meta);
-    let _ = std::fs::write(meta_path, content);
+    std::fs::write(&tmp_path, content)?;
+    std::fs::rename(&tmp_path, meta_path)?;
+    Ok(())
 }
 
 /// Returns the current rustc version string by running `rustc --version`.
@@ -84,10 +90,18 @@ pub fn evict_lru(cache_dir: &Path, max_entries: usize) {
 
     let to_remove = so_files.len() - max_entries;
     for (so_path, _) in so_files.iter().take(to_remove) {
-        let _ = std::fs::remove_file(so_path);
-        // Remove corresponding .meta file
+        if let Err(e) = std::fs::remove_file(so_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                // Best-effort eviction: log nothing, continue
+            }
+        }
+        // Remove corresponding .meta file — missing is fine (best-effort)
         let meta_path = so_path.with_extension("meta");
-        let _ = std::fs::remove_file(meta_path);
+        if let Err(e) = std::fs::remove_file(&meta_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                // Best-effort eviction: continue silently
+            }
+        }
     }
 }
 
@@ -149,9 +163,46 @@ mod tests {
             compiled_at: "2025-01-01T00:00:00Z".to_string(),
             compile_ms: 252,
         };
-        write_metadata(&meta_path, &meta);
+        write_metadata(&meta_path, &meta).expect("write_metadata must succeed");
         let read_back = read_metadata(&meta_path);
         assert_eq!(read_back, Some(meta));
+    }
+
+    #[test]
+    fn test_write_metadata_returns_result() {
+        let dir = TempDir::new().unwrap();
+        let meta_path = dir.path().join("result_test.meta");
+        let meta = CacheMetadata {
+            source_hash: "deadbeef".to_string(),
+            rustc_version: "rustc 1.91.0".to_string(),
+            compiled_at: "2025-01-01T00:00:00Z".to_string(),
+            compile_ms: 100,
+        };
+        let result: Result<(), std::io::Error> = write_metadata(&meta_path, &meta);
+        assert!(result.is_ok(), "write_metadata must return Ok on success");
+    }
+
+    #[test]
+    fn test_evict_lru_tolerates_missing_meta_file() {
+        // evict_lru must not panic when .so exists but .meta was already deleted
+        let dir = TempDir::new().unwrap();
+        for i in 0..4u32 {
+            std::fs::write(dir.path().join(format!("hash{}.so", i)), b"so").unwrap();
+            // Intentionally omit some .meta files
+            if i % 2 == 0 {
+                std::fs::write(dir.path().join(format!("hash{}.meta", i)), b"meta").unwrap();
+            }
+        }
+        // Must complete without panic even when some .meta files are absent
+        evict_lru(dir.path(), 2);
+        let so_count = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path().extension().and_then(|s| s.to_str()).map(|ext| ext == "so").unwrap_or(false)
+            })
+            .count();
+        assert_eq!(so_count, 2);
     }
 
     #[test]

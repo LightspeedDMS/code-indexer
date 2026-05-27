@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import List
+from typing import Any, List
 from unittest.mock import patch
 
 import pytest
@@ -41,7 +41,7 @@ def _mock_run_batch(
     repo_path=None,
 ):
     """Mock rust_backend.run_batch — return one match per file."""
-    batch = []
+    batch: list[Any] = []
     for spec in file_specs:
         fp = spec["file_path"]
         batch.append(

@@ -17,6 +17,7 @@ Only true external dependencies are mocked:
 """
 
 import logging
+import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -474,3 +475,164 @@ class TestTimeoutHandling:
             result = executor._build_xray_cli(rust_dir=rust_dir, env={})
 
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# M5: _install_rust_toolchain must NOT use shell=True
+# ---------------------------------------------------------------------------
+
+
+class TestNoShellTrueInInstall:
+    """M5: Rust installer must use two separate subprocess calls (curl + sh),
+    never shell=True with a pipeline string."""
+
+    def test_curl_called_as_list_not_shell_string(self, tmp_path: Path) -> None:
+        """First subprocess call must be curl with a list argument (no shell=True)."""
+        executor = _make_executor()
+
+        calls = []
+
+        def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append((args, kwargs))
+            p = MagicMock()
+            p.returncode = 0
+            p.stdout = b"fake installer"
+            p.stderr = b""
+            return p
+
+        with patch("subprocess.run", side_effect=recording_run):
+            executor._install_rust_toolchain(env={})
+
+        assert len(calls) >= 1, "Expected at least one subprocess call"
+        first_args, first_kwargs = calls[0]
+        # Must be a list (not a string)
+        assert isinstance(first_args, list), (
+            f"First subprocess call must use list args, got: {type(first_args)}"
+        )
+        # Must not use shell=True
+        assert not first_kwargs.get("shell", False), (
+            "First subprocess call must not use shell=True"
+        )
+        # Must be curl targeting rustup.rs
+        assert first_args[0] == "curl", (
+            f"Expected 'curl' as first arg, got {first_args[0]}"
+        )
+        assert any("rustup.rs" in str(a) for a in first_args), (
+            "Expected rustup.rs URL in curl args"
+        )
+
+    def test_sh_called_as_list_not_shell_string(self, tmp_path: Path) -> None:
+        """Second subprocess call (sh installer) must use list args (no shell=True)."""
+        executor = _make_executor()
+
+        calls = []
+
+        def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append((args, kwargs))
+            p = MagicMock()
+            p.returncode = 0
+            p.stdout = b""
+            p.stderr = b""
+            return p
+
+        with patch("subprocess.run", side_effect=recording_run):
+            executor._install_rust_toolchain(env={})
+
+        assert len(calls) >= 2, "Expected at least two subprocess calls (curl + sh)"
+        second_args, second_kwargs = calls[1]
+        assert isinstance(second_args, list), (
+            f"Second subprocess call must use list args, got: {type(second_args)}"
+        )
+        assert not second_kwargs.get("shell", False), (
+            "Second subprocess call must not use shell=True"
+        )
+        assert second_args[0] == "sh", (
+            f"Expected 'sh' as first arg of second call, got {second_args[0]}"
+        )
+
+    def test_installer_script_piped_as_input_bytes(self, tmp_path: Path) -> None:
+        """The downloaded curl output must be passed as input= to the sh call."""
+        executor = _make_executor()
+        fake_script = b"#!/bin/sh\necho 'fake rustup installer'"
+
+        call_inputs = []
+
+        def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
+            call_inputs.append(kwargs.get("input"))
+            p = MagicMock()
+            p.returncode = 0
+            p.stdout = fake_script if args[0] == "curl" else b""
+            p.stderr = b""
+            return p
+
+        with patch("subprocess.run", side_effect=recording_run):
+            executor._install_rust_toolchain(env={})
+
+        # The second call (sh) must receive the curl stdout as input
+        assert len(call_inputs) >= 2
+        assert call_inputs[1] == fake_script, (
+            "sh must receive the curl stdout as input= bytes"
+        )
+
+
+# ---------------------------------------------------------------------------
+# M6: PATH must not contain empty segment when env PATH is absent
+# ---------------------------------------------------------------------------
+
+
+class TestPathNoTrailingColon:
+    """M6: When PATH env var is not set, cargo_bin must be set as PATH without
+    a trailing colon (which would add CWD to PATH — a security risk)."""
+
+    def test_path_has_no_trailing_colon_when_env_path_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """PATH must not end with ':' when original PATH is empty/missing."""
+        executor = _make_executor()
+        # rust/ dir present so we get past the early-return
+        rust_dir = tmp_path / "rust"
+        rust_dir.mkdir()
+
+        observed_envs = []
+
+        def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
+            env = kwargs.get("env") or {}
+            observed_envs.append(dict(env))
+            p = MagicMock()
+            p.returncode = 0
+            p.stdout = b"rustc 1.78.0"
+            p.stderr = b""
+            return p
+
+        fake_file = str(
+            tmp_path
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "auto_update"
+            / "deployment_executor.py"
+        )
+
+        # Remove PATH from the environment copy that os.environ.copy() produces
+        original_environ = dict(os.environ)
+        original_environ.pop("PATH", None)
+
+        with (
+            patch(f"{_MODULE}.Path.home", return_value=tmp_path),
+            patch(f"{_MODULE}.__file__", fake_file, create=True),
+            patch(f"{_MODULE}.os.environ", original_environ),
+            patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+            patch("subprocess.run", side_effect=recording_run),
+        ):
+            executor._ensure_rust_toolchain()
+
+        # At least one subprocess call should have been made with env containing PATH
+        paths_seen = [e.get("PATH", "") for e in observed_envs if "PATH" in e]
+        assert paths_seen, "Expected at least one subprocess call with PATH env"
+        for path_val in paths_seen:
+            assert not path_val.endswith(":"), (
+                f"PATH must not end with ':' (empty segment = CWD in PATH), got: {path_val!r}"
+            )
+            assert "::" not in path_val, (
+                f"PATH must not contain '::' (empty segment), got: {path_val!r}"
+            )

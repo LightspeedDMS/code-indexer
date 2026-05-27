@@ -15,14 +15,22 @@ pub struct EvalFinding {
     pub snippet: String,
 }
 
-/// Collapse runs of whitespace in `s`, then truncate to `max_len` characters.
+/// Collapse runs of whitespace in `s`, then truncate to `max_len` bytes.
+/// Truncation always occurs on a UTF-8 char boundary so the result is valid UTF-8.
 /// If truncation occurs, append "..." to the result.
 pub fn truncate_snippet(s: &str, max_len: usize) -> String {
     let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.len() <= max_len {
         collapsed
     } else {
-        format!("{}...", &collapsed[..max_len])
+        // Find the largest byte index that is <= max_len AND is a char boundary.
+        let boundary = collapsed
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= max_len)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &collapsed[..boundary])
     }
 }
 
@@ -56,5 +64,22 @@ mod tests {
     #[test]
     fn test_truncate_snippet_empty() {
         assert_eq!(truncate_snippet("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_snippet_multibyte_utf8() {
+        // Each CJK character is 3 bytes. "中文测试" = 12 bytes, 4 chars.
+        // max_len=5 falls in the middle of a multibyte boundary — must not panic.
+        let result = truncate_snippet("中文测试", 5);
+        // The result must be valid UTF-8 (no panic) and end with "..."
+        assert!(result.ends_with("..."), "expected '...' suffix, got: {}", result);
+    }
+
+    #[test]
+    fn test_truncate_snippet_emoji() {
+        // "hello 🌍 world" — emoji is 4 bytes; max_len=8 cuts inside the emoji
+        let result = truncate_snippet("hello 🌍 world", 8);
+        // Must not panic, must end with "..."
+        assert!(result.ends_with("..."), "expected truncation with '...', got: {}", result);
     }
 }
