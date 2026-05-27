@@ -179,6 +179,7 @@ See: [Configuration Guide](docs/configuration.md)
 - [Server Deployment](docs/server-deployment.md) -- Deploy and operate CIDX Server
 - [Cluster Architecture](docs/cluster-architecture.md) -- Multi-node design and storage abstraction
 - [Cluster Setup](docs/cluster-setup.md) -- Install and operate a cluster with PostgreSQL
+- [CoW Storage Setup](docs/cow-storage-setup.md) -- Configure CoW Storage Daemon as shared cluster storage
 - [OIDC Setup](docs/oidc-setup-and-configuration.md) -- OpenID Connect SSO configuration
 - [TOTP Elevation](docs/totp-elevation.md) -- Step-up authentication for admin operations
 - [Auto-Update Guide](docs/auto-update.md) -- Job-aware updates with graceful drain mode
