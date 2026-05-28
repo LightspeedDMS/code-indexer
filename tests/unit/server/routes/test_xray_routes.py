@@ -29,7 +29,7 @@ from code_indexer.server.auth.user_manager import User, UserRole
 VALID_BODY: dict[str, Any] = {
     "repository_alias": "myrepo-global",
     "driver_regex": r"prepareStatement",
-    "evaluator_code": "return True",
+    "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    Vec::new()\n}\n",
     "search_target": "content",
 }
 
