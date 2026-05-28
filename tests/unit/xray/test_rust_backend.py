@@ -1,9 +1,9 @@
-"""Tests for RustNativeBackend — Story #1023.
+"""Tests for RustNativeBackend — Story #1023 / Epic #1019 (pure Rust xray engine).
 
 Covers:
 - run_batch() return format: list of (matches, errors, meta) tuples
-- Transpilation errors produce per-file error tuples with clear messages
-- Missing xray-cli binary produces error tuples with clear message
+- Validation errors (forbidden Rust constructs) produce per-file error tuples
+- Missing xray-cli binary produces error tuples with clear message (binary path, valid evaluator)
 - Subprocess JSON output is parsed and findings grouped by file
 - Match dicts contain required fields: line_number, file_path, language
 - Files with no findings return ([], [], None)
@@ -51,26 +51,29 @@ public class Foo {
 }
 """
 
-EVALUATOR_WITH_IMPORT = """\
-import os
-
-def evaluate_node(node):
-    return {"matches": [], "value": None}
+# Rust evaluator with forbidden construct — triggers ValidationError.
+EVALUATOR_WITH_UNSAFE = """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    unsafe {}
+    Vec::new()
+}
 """
 
+# Minimal valid Rust evaluator.
 VALID_EVALUATOR = """\
-def evaluate_node(node):
-    return {"matches": [], "value": None}
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
 """
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Transpilation error returns error tuples for all files
+# Test 1: Validation error returns error tuples for all files
 # ---------------------------------------------------------------------------
 
 
-def test_transpilation_error_returns_error_tuples_for_all_files():
-    """When evaluator_code has forbidden constructs (import), all files get error tuples."""
+def test_validation_error_returns_error_tuples_for_all_files():
+    """When evaluator_code has forbidden Rust constructs, all files get error tuples."""
     from code_indexer.xray.rust_backend import RustNativeBackend
 
     backend = RustNativeBackend()
@@ -79,7 +82,7 @@ def test_transpilation_error_returns_error_tuples_for_all_files():
         _spec("src/Bar.java", SIMPLE_JAVA, "java"),
     ]
     results = backend.run_batch(
-        evaluator_code=EVALUATOR_WITH_IMPORT,
+        evaluator_code=EVALUATOR_WITH_UNSAFE,
         file_specs=specs,
     )
 
@@ -88,9 +91,9 @@ def test_transpilation_error_returns_error_tuples_for_all_files():
         assert matches == []
         assert len(errors) == 1
         err = errors[0]
-        assert err["error_type"] == "TranspileError"
+        assert err["error_type"] == "ValidationError"
         msg = err["error_message"].lower()
-        assert "import" in msg or "transpil" in msg
+        assert "unsafe" in msg or "forbidden" in msg or "validation" in msg
         assert meta is None
 
 
@@ -113,6 +116,8 @@ def test_run_batch_empty_file_specs_returns_empty_list():
 
 # ---------------------------------------------------------------------------
 # Test 3: Missing binary returns one error tuple per file spec
+# Tests the binary-not-found path: valid evaluator passes validation,
+# then the binary check fails because the path does not exist.
 # ---------------------------------------------------------------------------
 
 
@@ -461,73 +466,6 @@ def test_snippet_field_preserved_in_match():
     assert len(matches) == 1
     assert matches[0]["snippet"] == "void bar() special-snippet"
     assert matches[0]["pattern"] == "some-pattern"
-
-
-# ---------------------------------------------------------------------------
-# Tests 11-14: _wrap_evaluator_snippet and auto-wrap integration
-# ---------------------------------------------------------------------------
-
-_RAW_SINGLE = (
-    'funcs = node.descendants_of_type("function_definition")\n'
-    'return {"matches": [{"line_number": f.start_point[0] + 1} for f in funcs], "value": None}\n'
-)
-
-_RAW_MULTI = 'x = 1\ny = x + 2\nreturn {"matches": [], "value": y}\n'
-
-_ALREADY_WRAPPED = (
-    "def evaluate_node(node):\n"
-    '    funcs = node.descendants_of_kind("function_definition")\n'
-    "    return []\n"
-)
-
-
-@pytest.mark.parametrize(
-    "raw_snippet",
-    [
-        pytest.param(_RAW_SINGLE, id="single-statement"),
-        pytest.param(_RAW_MULTI, id="multi-line"),
-    ],
-)
-def test_wrap_raw_snippet_structure_and_content(raw_snippet: str) -> None:
-    """Raw snippet is wrapped: first line is def evaluate_node(node):
-    and every original line appears indented by exactly 4 spaces in the body.
-
-    Covers both single-statement and multi-line snippets via parametrize
-    to avoid duplicated assertion logic.
-    """
-    from code_indexer.xray.rust_backend import _wrap_evaluator_snippet
-
-    result = _wrap_evaluator_snippet(raw_snippet)
-    lines = result.splitlines()
-
-    assert lines[0] == "def evaluate_node(node):"
-    for original, wrapped in zip(raw_snippet.splitlines(), lines[1:]):
-        assert wrapped == "    " + original, (
-            f"Expected '    {original}', got {wrapped!r}"
-        )
-
-
-def test_already_wrapped_passthrough() -> None:
-    """Code that already defines def evaluate_node(node): is returned unchanged."""
-    from code_indexer.xray.rust_backend import _wrap_evaluator_snippet
-
-    result = _wrap_evaluator_snippet(_ALREADY_WRAPPED)
-    assert result == _ALREADY_WRAPPED
-
-
-def test_transpile_wrapped_snippet_succeeds() -> None:
-    """A raw MCP-style snippet auto-wrapped by _transpile_to_rust transpiles without error.
-
-    Asserts only that no transpile error occurs and that non-empty Rust output
-    is produced. Does not assert Rust internals.
-    """
-    from code_indexer.xray.rust_backend import RustNativeBackend
-
-    backend = RustNativeBackend()
-    rust_code, error = backend._transpile_to_rust(_RAW_SINGLE)
-
-    assert error is None, f"Expected no transpile error, got: {error}"
-    assert rust_code.strip() != "", "Expected non-empty Rust code output"
 
 
 # ---------------------------------------------------------------------------

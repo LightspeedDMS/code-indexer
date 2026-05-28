@@ -4,14 +4,14 @@ Replaces PythonEvaluatorSandbox.run_batch() in the xray pipeline with a
 Rust-native scanner backend.
 
 Pipeline:
-1. Transpile Python evaluator code to Rust via transpile_evaluator()
-2. Write transpiled Rust to a temp file
+1. Validate Rust evaluator code via validate_rust_evaluator()
+2. Write validated Rust code to a temp file
 3. Invoke xray-cli subprocess with --dynlib, --json, --files flags
 4. Parse JSON output and group findings by file path
 5. Return List[(matches, errors, meta)] — one tuple per file spec
 
 Error contract:
-- TranspileError: all files get error tuples with error_type="TranspileError"
+- ValidationError: all files get error tuples with error_type="ValidationError"
 - Missing binary: all files get error tuples with error_type="BinaryNotFound"
 - JSON error field set: all files get error tuples with the error message
 - Subprocess non-zero exit + no parseable JSON: all files get error tuples
@@ -23,37 +23,12 @@ import json
 import logging
 import subprocess
 import tempfile
-import textwrap
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _MAX_PARENT_TRAVERSAL_DEPTH = 10
-
-
-def _wrap_evaluator_snippet(code: str) -> str:
-    """Wrap a raw evaluator snippet in ``def evaluate_node(node):`` if needed.
-
-    The MCP tool sends raw evaluator snippets (plain statements) while
-    ``transpile_evaluator()`` requires a top-level ``evaluate_node`` function.
-    This function detects whether the code already has that wrapper at the
-    start of a line and, if not, indents every line by 4 spaces and prepends
-    the function header.
-
-    Args:
-        code: Python evaluator code — either a raw snippet or one that already
-            defines ``def evaluate_node(node):``.
-
-    Returns:
-        Code guaranteed to contain a top-level ``def evaluate_node(node):``
-        function.
-    """
-    for line in code.splitlines():
-        if line.startswith("def evaluate_node("):
-            return code  # Already has the required wrapper at line start.
-    indented = textwrap.indent(code, "    ")
-    return f"def evaluate_node(node):\n{indented}"
 
 
 def _find_project_root() -> Path:
@@ -119,7 +94,7 @@ def _error_all(
 class RustNativeBackend:
     """Rust-native xray evaluator backend.
 
-    Transpiles Python evaluator code to Rust, compiles to a dynamic library,
+    Validates Rust evaluator code, compiles to a dynamic library,
     and runs the Rust xray scanner for parallel AST evaluation.
 
     Drop-in replacement for PythonEvaluatorSandbox.run_batch() in the
@@ -143,8 +118,8 @@ class RustNativeBackend:
         """Drop-in replacement for PythonEvaluatorSandbox.run_batch().
 
         Args:
-            evaluator_code: Python evaluator source code containing
-                ``evaluate_node(node)`` function.
+            evaluator_code: Rust evaluator source code containing
+                ``fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`` function.
             file_specs: List of dicts with file_path, source, lang,
                 match_positions.
             worker_threads: Ignored — Rust uses rayon auto-threading.
@@ -158,9 +133,9 @@ class RustNativeBackend:
         if not file_specs:
             return []
 
-        rust_code, transpile_error = self._transpile_to_rust(evaluator_code)
-        if transpile_error is not None:
-            return _error_all(file_specs, "TranspileError", transpile_error)
+        rust_code, validation_error = self._validate_rust_code(evaluator_code)
+        if validation_error is not None:
+            return _error_all(file_specs, "ValidationError", validation_error)
 
         if not self._xray_cli_path.exists():
             msg = (
@@ -194,22 +169,21 @@ class RustNativeBackend:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _transpile_to_rust(self, evaluator_code: str) -> Tuple[str, Optional[str]]:
-        """Transpile Python evaluator to Rust. Returns (rust_code, error_msg).
+    def _validate_rust_code(self, evaluator_code: str) -> Tuple[str, Optional[str]]:
+        """Validate Rust evaluator code. Returns (rust_code, error_msg).
 
-        Raw MCP evaluator snippets (plain statements without a wrapping
-        ``def evaluate_node(node):`` function) are auto-wrapped before
-        transpilation so they produce valid transpiler input.
+        The evaluator_code is expected to already be valid Rust.  This method
+        checks for required signature and forbidden constructs without any
+        transformation — if valid, returns the code unchanged.
         """
-        from code_indexer.xray.transpiler import TranspileError, transpile_evaluator  # noqa: PLC0415
+        from code_indexer.xray.sandbox import validate_rust_evaluator  # noqa: PLC0415
 
-        try:
-            wrapped = _wrap_evaluator_snippet(evaluator_code)
-            return transpile_evaluator(wrapped), None
-        except (TranspileError, SyntaxError) as exc:
-            msg = f"Transpilation failed: {exc}"
+        result = validate_rust_evaluator(evaluator_code)
+        if not result.ok:
+            msg = result.reason or "Rust validation failed"
             logger.warning("RustNativeBackend: %s", msg)
             return "", msg
+        return evaluator_code, None
 
     def _invoke_xray_cli(
         self,
@@ -236,26 +210,32 @@ class RustNativeBackend:
                 "--json",
             ]
 
-            if on_process_spawned is not None:
-                on_process_spawned()
-
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout_seconds,
             )
-            if proc.returncode != 0 and not proc.stdout.strip():
+
+            if on_process_spawned is not None:
+                on_process_spawned(proc)
+
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                msg = f"xray-cli timed out after {timeout_seconds}s"
+                logger.warning("RustNativeBackend: %s", msg)
+                return "", msg
+
+            if proc.returncode != 0 and not stdout.strip():
                 msg = (
-                    f"xray-cli exited with code {proc.returncode}: {proc.stderr[:200]}"
+                    f"xray-cli exited with code {proc.returncode}: {stderr[:200]}"
                 )
                 logger.warning("RustNativeBackend: %s", msg)
                 return "", msg
-            return proc.stdout or "", None
-        except subprocess.TimeoutExpired:
-            msg = f"xray-cli timed out after {timeout_seconds}s"
-            logger.warning("RustNativeBackend: %s", msg)
-            return "", msg
+            return stdout or "", None
         except FileNotFoundError as exc:
             msg = f"xray-cli could not be executed: {exc}"
             logger.error("RustNativeBackend: %s", msg)

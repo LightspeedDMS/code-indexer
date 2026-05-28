@@ -41,6 +41,7 @@ import ast
 import builtins
 import difflib
 import multiprocessing
+import re as _re
 import textwrap
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -1204,3 +1205,78 @@ def _run_driver_batch(
             for s in file_specs
         ]
     return results
+
+
+# ---------------------------------------------------------------------------
+# Rust evaluator pre-flight validator
+# ---------------------------------------------------------------------------
+
+# Ordered table of (error_code, offending_construct, regex_pattern) entries.
+# Entries are checked in order; the first match short-circuits.
+# Patterns are case-sensitive except where noted.
+_RUST_FORBIDDEN_PATTERNS: list[tuple[str, str, str]] = [
+    # Unsafe code — top priority
+    ("forbidden_unsafe", "unsafe", r"\bunsafe\b"),
+    # Forbidden std namespaces
+    ("forbidden_stdlib", "std::fs", r"\bstd::fs\b"),
+    ("forbidden_stdlib", "std::net", r"\bstd::net\b"),
+    ("forbidden_stdlib", "std::process", r"\bstd::process\b"),
+    ("forbidden_stdlib", "std::env", r"\bstd::env\b"),
+    ("forbidden_stdlib", "std::io", r"\bstd::io\b"),
+    # Raw pointer types
+    ("forbidden_raw_ptr", "*const", r"\*const\b"),
+    ("forbidden_raw_ptr", "*mut", r"\*mut\b"),
+    # Structural declarations
+    ("forbidden_extern", "extern", r"\bextern\b"),
+    ("forbidden_mod", "mod", r"\bmod\b"),
+    ("forbidden_static_mut", "static mut", r"\bstatic\s+mut\b"),
+    # Forbidden macros (macro invocation: name followed by !)
+    ("forbidden_macro", "include!", r"\binclude\s*!"),
+    ("forbidden_macro", "env!", r"\benv\s*!"),
+    ("forbidden_macro", "println!", r"\bprintln\s*!"),
+    ("forbidden_macro", "eprintln!", r"\beprintln\s*!"),
+    ("forbidden_macro", "panic!", r"\bpanic\s*!"),
+    ("forbidden_macro", "todo!", r"\btodo\s*!"),
+    ("forbidden_macro", "unimplemented!", r"\bunimplemented\s*!"),
+]
+
+# Pre-compiled pattern objects for performance.
+_RUST_COMPILED_PATTERNS: list[tuple[str, str, "_re.Pattern[str]"]] = [
+    (error_code, construct, _re.compile(pattern))
+    for error_code, construct, pattern in _RUST_FORBIDDEN_PATTERNS
+]
+
+
+def validate_rust_evaluator(code: str) -> ValidationResult:
+    """Statically validate Rust evaluator code for required signature and forbidden constructs.
+
+    Checks that the code contains ``fn evaluate_node`` and rejects any
+    forbidden Rust construct (unsafe, dangerous std namespaces, raw pointers,
+    extern blocks, mod declarations, static mut, forbidden macros).
+
+    Returns:
+        ValidationResult with ``ok=True`` when the code is acceptable, or
+        ``ok=False`` with ``error_code``, ``reason``, ``offending_construct``,
+        and ``offending_line`` describing the first violation found.
+    """
+    if not _re.search(r"\bfn\s+evaluate_node\b", code):
+        return ValidationResult(
+            ok=False,
+            reason="missing required 'fn evaluate_node' function signature",
+            error_code="missing_entry_point",
+            offending_construct="evaluate_node",
+            offending_line=None,
+        )
+
+    for lineno, line in enumerate(code.splitlines(), start=1):
+        for error_code, construct, pattern in _RUST_COMPILED_PATTERNS:
+            if pattern.search(line):
+                return ValidationResult(
+                    ok=False,
+                    reason=f"forbidden construct '{construct}' is not allowed in Rust evaluator code",
+                    error_code=error_code,
+                    offending_construct=construct,
+                    offending_line=lineno,
+                )
+
+    return ValidationResult(ok=True)

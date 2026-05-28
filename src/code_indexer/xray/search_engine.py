@@ -2,7 +2,7 @@
 
 Phase 1 (driver): regex-based candidate file selection via file walk + re.search.
 Phase 2 (evaluator): AST-based per-match evaluation via Rust native backend
-(RustNativeBackend), which transpiles Python evaluators to Rust, compiles to
+(RustNativeBackend), which validates Rust evaluator code, compiles to
 dynamic libraries, and executes with native speed and rayon parallelism.
 """
 
@@ -72,8 +72,8 @@ class XRaySearchEngine:
     Phase 1 (driver): regex match over file content or file paths to build a
     candidate list.
 
-    Phase 2 (evaluator): for each candidate file, transpile the Python evaluator
-    to Rust, compile to a dynamic library, and run the Rust xray scanner for
+    Phase 2 (evaluator): for each candidate file, validate the Rust evaluator
+    code, compile to a dynamic library, and run the Rust xray scanner for
     parallel AST evaluation via RustNativeBackend.
     """
 

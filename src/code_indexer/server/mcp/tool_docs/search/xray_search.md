@@ -2,8 +2,8 @@
 name: xray_search
 category: search
 required_permission: query_repos
-tl_dr: Two-phase AST-aware search — regex driver narrows candidate files, sandboxed evaluator inspects each file's AST and returns a list of matches with open-ended per-match metadata.
-slim_description: "Two-phase AST-aware code search: regex pattern narrows files, then sandboxed Python evaluator runs against each file's tree-sitter AST. Supports multi-repo, glob filters, and async polling."
+tl_dr: Two-phase AST-aware search -- regex driver narrows candidate files, Rust native evaluator inspects each file's AST and returns a list of findings with pattern name, line number, and code snippet.
+slim_description: "Two-phase AST-aware code search: regex pattern narrows files, then Rust native evaluator runs against each file's tree-sitter AST. Evaluator receives the root OwnedNode and returns Vec<EvalFinding>. Supports multi-repo, glob filters, and async polling."
 inputSchema:
   type: object
   properties:
@@ -19,13 +19,13 @@ inputSchema:
       description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files. Backed by RegexSearchService (ripgrep) for content. Renamed from driver_regex in v10.3.x.'
     evaluator_code:
       type: string
-      description: 'Python code snippet evaluated ONCE per candidate file in a sandboxed subprocess. Receives globals: node (file root XRayNode), root (alias for node), source (file UTF-8 text), lang (language name), file_path (absolute path), match_positions (list of dicts: one per Phase 1 hit, each with line_number/column/line_content/byte_offset/ast_node/context_before/context_after; ast_node is the XRayNode at the hit location; empty list in filename mode). Can define helper functions with def. MUST return a dict with shape {"matches": [...], "value": <any>} or {"skip": True} to bail out. Optional "file_role" key in return dict tags the file in file_metadata. Each match in the list is a dict requiring at minimum line_number; may carry any open keys. Server enriches every match with file_path, language, and (if omitted) line_content derived from source. Per-file value is collected into the response file_metadata list.'
+      description: 'Rust code defining fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>. The function receives the file root AST node (OwnedNode) and returns zero or more findings. Each EvalFinding has: pattern (String identifying the finding), line (usize, 1-based line number), snippet (String, code context). The OwnedNode and EvalFinding types are provided automatically by the compiler preamble -- do not define them yourself. Use node.descendants_of_kind("type_name") to walk the AST. Rust security whitelist enforced: no unsafe, no std::fs/net/process/env/io, no raw pointers, no extern blocks, no forbidden macros.'
     search_target:
       type: string
       enum:
         - content
         - filename
-      description: 'What pattern applies to: "content" matches file text (Phase 1 hits populate match_positions), "filename" matches relative file paths (match_positions is empty).'
+      description: 'What pattern applies to: "content" matches file text, "filename" matches relative file paths.'
     include_patterns:
       type: array
       items:
@@ -47,7 +47,7 @@ inputSchema:
       default: true
     context_lines:
       type: integer
-      description: 'Lines of context before/after each Phase 1 hit. Range 0..10. Surfaces in match_positions[].context_before/context_after when search_target=content. Default 0.'
+      description: 'Lines of context before/after each Phase 1 hit. Range 0..10. Default 0.'
       default: 0
       minimum: 0
       maximum: 10
@@ -97,17 +97,17 @@ outputSchema:
       description: 'Multi-repo: per-alias resolution failures (e.g. unknown alias). Batch continues for resolvable aliases.'
     matches:
       type: array
-      description: 'Inline match list when await_seconds resolves. Each entry has file_path, language, line_number, line_content, plus any open keys returned by the evaluator (and matched_node/ast_debug for xray_explore).'
+      description: 'Inline match list when await_seconds resolves. Each entry has file_path, language, line_number, line_content, pattern, and snippet from the Rust evaluator findings.'
       items:
         type: object
     file_metadata:
       type: array
-      description: 'Inline per-file metadata list when await_seconds resolves. One entry per file whose evaluator returned a non-None value or a file_role string. Shape: {file_path, value?, file_role?}.'
+      description: 'Inline per-file metadata list when await_seconds resolves. One entry per evaluated file. Shape: {file_path}.'
       items:
         type: object
     is_admin:
       type: boolean
-      description: 'Job-priority opt-in flag present in GET /api/jobs/{job_id} results. Always false for xray_search and xray_explore jobs — these handlers never request the admin priority lane. This field does NOT reflect whether the submitting user is an administrator; an admin user submitting xray_search will see is_admin=false.'
+      description: 'Job-priority opt-in flag present in GET /api/jobs/{job_id} results. Always false for xray_search and xray_explore jobs -- these handlers never request the admin priority lane. This field does NOT reflect whether the submitting user is an administrator; an admin user submitting xray_search will see is_admin=false.'
     error:
       type: string
       description: 'Error code when the request is rejected synchronously.'
@@ -120,7 +120,7 @@ Two-phase AST-aware code search.
 
 PHASE 1 (driver, regex): the `pattern` regex narrows the file set. For `search_target='content'`, RegexSearchService (ripgrep-backed) walks the repo and records every hit's line number, column, line content, and context lines. For `search_target='filename'`, an inline path walker matches relative file paths. Phase 1 honors `path`, `include_patterns`, `exclude_patterns`, `case_sensitive`, `multiline`, `pcre2`, and `context_lines`.
 
-PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs ONCE in a sandboxed subprocess with the file root AST node and the full list of Phase 1 hits for that file. The evaluator returns a dict carrying its own per-match list and an optional per-file value. The server enriches each match with `file_path`, `language`, and (when omitted) `line_content`.
+PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file once, then your `evaluator_code` runs as a Rust native evaluator (compiled to a dynamic library). The evaluator receives the file root AST node as an `OwnedNode` and returns `Vec<EvalFinding>` -- a list of findings, each with a pattern name, line number, and code snippet. The server enriches each finding with `file_path` and `language`.
 
 Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 120 seconds (v10.5.0).
 
@@ -130,13 +130,13 @@ Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately
 |-----------|------|----------|---------|-------------|
 | repository_alias | str OR list[str] | yes | -- | Single alias for single-repo search. Array (or JSON-encoded array string) for omni multi-repo search. Multi-repo returns one job id per resolved alias plus an `errors[]` list for unresolved aliases. |
 | pattern | str | yes | -- | Regular expression applied in Phase 1. Renamed from `driver_regex` in v10.3.x. |
-| evaluator_code | str | no | (default acceptor) | Python code snippet evaluated ONCE per file. Returns `{"matches": [...], "value": <any>}`. See "Evaluator API" below. When omitted, the server substitutes a default that echoes every Phase 1 hit as a match with `line_number` only and `value: null`. |
-| search_target | "content" or "filename" | yes | -- | "content" — Phase 1 regex applies to file text; `match_positions` is populated. "filename" — Phase 1 regex applies to relative paths; `match_positions` is empty. |
+| evaluator_code | str | no | (default acceptor) | Rust code defining `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`. See "Evaluator API" below. When omitted, the server substitutes a default that produces one finding per Phase 1 hit. |
+| search_target | "content" or "filename" | yes | -- | "content" -- Phase 1 regex applies to file text. "filename" -- Phase 1 regex applies to relative paths. |
 | include_patterns | list[str] | no | [] | Glob patterns for files to include. `*` matches a single path segment; use `**` for recursive matching. Empty means include all. |
 | exclude_patterns | list[str] | no | [] | Glob patterns for files to exclude. Empty means exclude none. |
 | path | str | no | null | Subdirectory restriction within the repo (relative). |
 | case_sensitive | bool | no | true | Phase 1 content driver case sensitivity. |
-| context_lines | int | no | 0 | Lines of context before/after each Phase 1 hit. Range 0..10. Surface in `match_positions[].context_before` / `context_after`. |
+| context_lines | int | no | 0 | Lines of context before/after each Phase 1 hit. Range 0..10. |
 | multiline | bool | no | false | Multi-line regex matching in the content driver. |
 | pcre2 | bool | no | false | PCRE2 engine for the content driver (lookahead/lookbehind). |
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap. Range 10..600. |
@@ -147,373 +147,409 @@ Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately
 
 ### File-as-unit contract
 
-The evaluator runs **ONCE per candidate file**, not per Phase 1 hit. It receives the file root AST node plus the entire list of Phase 1 hits for the file, and returns a dict carrying its own list of matches and an optional per-file value.
+The evaluator runs **ONCE per candidate file**, not per Phase 1 hit. It receives the file's root AST node as an `OwnedNode` and returns zero or more `EvalFinding` values describing what it found.
 
-```python
-# Minimum viable evaluator
-return {"matches": [], "value": None}
-```
-
-```python
-# Echo every Phase 1 hit as a match (no AST filtering)
-return {
-    "matches": [{"line_number": p["line_number"]} for p in match_positions],
-    "value": None,
+```rust
+// Minimum viable evaluator -- accepts every file, produces no findings
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
 }
 ```
 
-### Globals exposed to your evaluator
-
-| Name | Type | Semantics |
-|------|------|-----------|
-| `node` | `XRayNode` | The file's root XRayNode (tree-sitter parse tree root). Walk DOWN via `node.descendants_of_type(...)`. |
-| `root` | `XRayNode` | Alias for `node`. Same object. |
-| `source` | `str` | Full file content as a UTF-8 string. Equivalent to `node.text`. |
-| `lang` | `str` | tree-sitter language name. One of: `java`, `kotlin`, `go`, `python`, `typescript`, `javascript`, `bash`, `csharp`, `html`, `css` (and `terraform` when `tree_sitter_hcl` is installed). |
-| `file_path` | `str` | Absolute path of the file being evaluated. |
-| `match_positions` | `list[dict]` | List of every Phase 1 regex hit in this file. Each entry: `{"line_number": int, "column": int, "line_content": str, "byte_offset": int, "ast_node": XRayNode, "context_before": list[str], "context_after": list[str]}`. The `ast_node` field is the smallest named AST node whose byte range contains the hit's `byte_offset` — use it directly instead of manually scanning `descendants_of_type`. EMPTY LIST in `search_target='filename'` mode. |
-
-The legacy per-position globals `match_byte_offset`, `match_line_number`, `match_line_content` are still passed (always `None` under the file-as-unit contract) and SHOULD NOT be referenced by new evaluators. Use `match_positions` instead.
-
-### Return contract
-
-The evaluator MUST return a dict with the following shape:
-
-```python
-{
-    "matches": [
-        {"line_number": int, ...},   # required key per match: line_number
-        ...
-    ],
-    "value": <anything or None>,     # optional per-file metadata
+```rust
+// Report every function definition in the file
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let mut findings = Vec::new();
+    for f in node.descendants_of_kind("function_definition") {
+        findings.push(EvalFinding {
+            pattern: "function_def".to_string(),
+            line: f.start_line,
+            snippet: f.text.chars().take(80).collect(),
+        });
+    }
+    findings
 }
 ```
 
-- `matches` (required): list of dicts. Each match dict requires `line_number: int`. May carry any open keys: `column`, `line_content`, `context_before`, `context_after`, plus arbitrary application-specific fields (e.g. `complexity_score`, `severity`, `enclosing_function`, `notes`).
-- `value` (optional): an open-typed per-file payload. When non-None it is collected into the response `file_metadata[]` list as `{"file_path": ..., "value": <value>}`. Useful for whole-file metrics (line count, total complexity, list of imported modules).
-- `file_role` (optional): a string tag classifying the file (e.g. `"connection_factory"`, `"test_helper"`, `"config"`). When present, surfaced in `file_metadata[]` as `{"file_path": ..., "file_role": <str>}`. Use this to categorize files by their role without emitting matches.
-- `skip` (optional): when `True`, the file is skipped entirely — produces zero matches, no file_metadata entry, no errors. Use for early bail-out when the evaluator determines the file is irrelevant after inspecting the AST (e.g. file has no function definitions, wrong package declaration). Takes precedence over `matches` and `value` if both are present.
+### Function signature
 
-### Server enrichment
+```rust
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>
+```
 
-The server adds the following to every match dict before returning it in the response `matches[]`:
+The evaluator receives the file's root AST node. The `OwnedNode` and `EvalFinding` types are injected automatically by the compiler preamble -- do not define them in your evaluator code.
 
-- `file_path` (always added): absolute path of the file being evaluated. Overrides any value the evaluator put there.
-- `language` (always added): tree-sitter language name.
-- `line_content` (added only when the evaluator omitted it): derived from `source` using `line_number` (1-based). Empty string if `line_number` is out of range.
+- **Input**: `node: &OwnedNode` -- the root node of the file's tree-sitter parse tree. Access the full source text via `node.text`. Walk descendant nodes via `node.descendants_of_kind(...)`.
+- **Output**: `Vec<EvalFinding>` -- a list of zero or more findings. An empty Vec means the file matched Phase 1 but the evaluator found nothing noteworthy.
 
-For `xray_explore` only, server additionally adds `matched_node` (compact description of the file root) and `ast_debug` (BFS-serialised AST tree).
+### EvalFinding struct
 
-### XRayNode reference
+Each finding describes one result from the evaluator:
 
-The full public surface of any `XRayNode` reachable via `node`, `descendants_of_type`, `children`, `named_children`, `parent`, or `enclosing(...)`:
+```rust
+pub struct EvalFinding {
+    pub pattern: String,  // pattern name identifying the finding (e.g. "sql_injection", "missing_docstring")
+    pub line: usize,      // 1-based line number where the finding occurs
+    pub snippet: String,  // code snippet providing context (typically first 80-120 chars of the node text)
+}
+```
+
+- `pattern`: a short, descriptive label for the kind of finding. This surfaces in the response `matches[]` as the `pattern` field. Use consistent names across findings to allow grouping/filtering.
+- `line`: 1-based line number. Use `node.start_line` directly -- it is already 1-based.
+- `snippet`: code context for the finding. Typically the node's text truncated to a reasonable length: `node.text.chars().take(80).collect()`.
+
+### OwnedNode reference
+
+The full public surface of any `OwnedNode` reachable via `node`, `descendants_of_kind`, `children`, or `named_children()`:
 
 | Name | Type | Description |
 |------|------|-------------|
-| `node.type` | str | tree-sitter node type, e.g. `'function_definition'`, `'call'`, `'if_statement'` |
-| `node.parent` | XRayNode \| None | parent node; None for the file root |
-| `node.children` | list[XRayNode] | all child nodes including anonymous ones (punctuation, keywords) |
-| `node.named_children` | list[XRayNode] | only named children — usually what you want |
-| `node.start_byte` | int | byte offset where the node starts |
-| `node.end_byte` | int | byte offset where the node ends |
-| `node.start_point` | tuple[int, int] | (row, column), zero-indexed |
-| `node.end_point` | tuple[int, int] | (row, column), zero-indexed |
-| `node.text` | str | raw source text — equivalent to `source[node.start_byte:node.end_byte]` |
-| `node.is_descendant_of(type_name)` | bool | true if any ancestor matches `type_name` |
-| `node.descendants_of_type(type_name)` | list[XRayNode] | DFS pre-order; all descendants whose type matches `type_name` (excludes self) |
-| `node.count_descendants_of_type(type_name)` | int | fast count without materialising a list — use this when you only need a count |
-| `node.enclosing(type_name)` | XRayNode \| None | walks UP parent chain (inclusive of self) and returns first ancestor matching `type_name` |
-| `node.child_by_field_name(name)` | XRayNode \| None | child with a specific grammar field name (e.g. `"name"`, `"body"`, `"condition"`) |
-| `node.node_at_byte_offset(offset)` | XRayNode \| None | finds the smallest named AST node whose byte range contains `offset` — this is what populates `match_positions[i]["ast_node"]` |
-| `node.is_in_try_resources()` | bool | walks parent chain, returns True if inside a Java `try-with-resources` resource declaration (`resource_specification` or `try_with_resources_statement`) |
-| `node.enclosing_method_body()` | XRayNode \| None | walks parent chain, returns the body block of the enclosing method/function declaration (supports: `method_declaration`, `function_definition`, `function_declaration`, `constructor_declaration`, `lambda_expression`, `arrow_function`) |
+| `node.kind` | String | tree-sitter node type, e.g. `"function_definition"`, `"call"`, `"if_statement"` |
+| `node.children` | Vec\<OwnedNode\> | all child nodes including anonymous ones (punctuation, keywords) |
+| `node.named_children()` | Vec\<&OwnedNode\> | only named children -- usually what you want |
+| `node.start_byte` | usize | byte offset where the node starts |
+| `node.end_byte` | usize | byte offset where the node ends |
+| `node.start_line` | usize | 1-based line number where the node starts |
+| `node.is_named` | bool | true for named nodes (not anonymous punctuation/keywords) |
+| `node.text` | String | raw source text of this node |
+| `node.child_by_kind(kind)` | Option\<&OwnedNode\> | first child whose `kind` matches the given string |
+| `node.has_descendant_of_kind(kind)` | bool | true if any descendant matches `kind` -- use for fast existence checks without allocating |
+| `node.descendants_of_kind(kind)` | Vec\<&OwnedNode\> | DFS pre-order; all descendants whose kind matches (excludes self) |
 
-### Whitelisted node types
+**Not available in OwnedNode** (differs from the former Python XRayNode API):
 
-The sandbox accepts the following Python AST node types in evaluator code (everything else is rejected at validation time before any subprocess is spawned):
+- No `parent` field -- OwnedNode is a tree of owned children, no parent pointers
+- No `enclosing(type_name)` -- cannot walk UP the tree; structure your evaluator to walk DOWN from the root
+- No `child_by_field_name(name)` -- use `child_by_kind(kind)` or iterate `named_children()` manually
+- No `is_descendant_of(type_name)` -- check containment by walking DOWN from ancestors instead
+- No `count_descendants_of_type(name)` -- use `node.descendants_of_kind(name).len()`
+- No `start_point` / `end_point` tuples -- use `start_line` (already 1-based) and `start_byte` / `end_byte`
 
-- Expression core: `Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, BinOp, List, Tuple, Dict, Return, Expr`
-- Local binding: `Assign` (e.g. `x = node.named_children`), `AugAssign` (e.g. `count += 1`)
-- Comprehensions and ternary: `comprehension, GeneratorExp, ListComp, IfExp`
-- Statement-level control flow: `If` (statement-level if/elif/else), `For` (statement-level for-loop), `While` (statement-level while-loop), `Break`, `Continue`, `Pass`
-- Function definitions: `FunctionDef`, `arguments`, `arg` — define helper functions to structure multi-pass evaluator logic.
-- Abstract operator base classes (matched via isinstance against concrete subclasses Add, Sub, Eq, And, Not, Load, Store, etc.): `boolop, cmpop, unaryop, expr_context, operator`
-- Module/Load markers: `Module, Load`
+### Rust security whitelist
 
-> **Termination guarantee**: infinite loops and unbounded iteration in your evaluator do NOT cause validation rejection — they hit the subprocess hard timeout (HARD_TIMEOUT_SECONDS = 5.0 s, SIGTERM; SIGKILL_GRACE_SECONDS = 1.0 s grace) and surface as `EvaluatorTimeout` in `evaluation_errors[]`. The subprocess timeout is the authoritative termination boundary.
+The server validates evaluator code against a security whitelist before compilation. Forbidden constructs are rejected at validation time with a structured error response.
 
-**Still banned** (rejected at validation time):
+**Forbidden constructs** (rejected at validation time):
 
-- Class definitions: `class`
-- Async function definitions: `async def`
-- Lambda expressions: `lambda`
-- Scope manipulation: `global`, `nonlocal`
-- Resource managers: `with`, `async with`
-- Async/await: `async`, `await`
-- Generators: `yield`, `yield from`
-- Exception handling: `try`, `except`, `raise`
-- All imports: `import X` and `from X import Y` (no imports of any kind are permitted)
-- Set comprehensions: `{x for x in ...}`
-- Dict comprehensions: `{k: v for k, v in ...}`
+- `unsafe` blocks and `unsafe fn` declarations
+- Standard library I/O imports: `std::fs`, `std::net`, `std::process`, `std::env`, `std::io`
+- Raw pointers: `*const`, `*mut`
+- Foreign function interface: `extern` blocks, `extern "C" fn`
+- Module declarations: `mod`
+- Mutable statics: `static mut`
+- Forbidden macros: `include!`, `env!`, `println!`, `eprintln!`, `panic!`, `todo!`, `unimplemented!`
 
-**Safe builtins** (available in the exec environment, 8 total):
-`len, any, all, range, enumerate, sorted, min, max`.
+**Allowed constructs** (safe Rust subset):
 
-**Stripped builtins** (removed from the exec environment — referencing them raises NameError):
-`getattr, setattr, delattr, __import__, eval, exec, open, compile`.
+- Variable bindings: `let`, `let mut`
+- Control flow: `if`/`else`, `for`/`while`/`loop`, `match`, `break`, `continue`, `return`
+- Local function definitions: `fn` (helper functions within the evaluator)
+- String operations: `.to_string()`, `.clone()`, `.contains()`, `format!`
+- Vec operations: `Vec::new()`, `.push()`, `.len()`, `.iter()`, `.is_empty()`
+- Pattern matching, closures, iterators
+- The `OwnedNode` and `EvalFinding` types (provided by compiler preamble)
 
-**Dunder attribute blocklist** (Attribute and Subscript access to these names is rejected at AST validation time as sandbox escape vectors):
-
-- Class introspection: `__class__, __bases__, __base__, __mro__, __subclasses__`
-- Constructor/lifecycle: `__init__, __init_subclass__, __new__`
-- Module/globals access: `__globals__, __builtins__, __import__, __module__, __loader__, __spec__, __file__, __path__, __package__, __cached__`
-- Object internals: `__dict__, __getattribute__, __setattr__, __delattr__`
-- Reduce/pickling: `__reduce__, __reduce_ex__`
-- Function attrs: `__call__, __code__, __closure__, __func__, __defaults__, __kwdefaults__, __annotations__`
-- Naming: `__name__, __qualname__`
-- Modern features: `__type_params__`
-- Descriptor/metaclass: `__set_name__, __instancecheck__, __subclasscheck__, __prepare__`
-- Memory: `__weakref__`
-
-Any attribute name matching `__*__` is also blocked at Subscript level (e.g. `globals()['__import__']`).
+> **Termination guarantee**: infinite loops in your evaluator hit the sandbox hard timeout (HARD_TIMEOUT_SECONDS = 5.0 s) and surface as `EvaluatorTimeout` in `evaluation_errors[]`. The sandbox timeout is the authoritative termination boundary.
 
 ### Cookbook: 15 worked patterns
 
-Each example is a complete `evaluator_code` value. All patterns return the dict shape `{"matches": [...], "value": ...}`. The lifted bans on `if`/`for`/`while` make many of these clearer than the comprehension-only equivalents.
+Each example is a complete `evaluator_code` value. All patterns return `Vec<EvalFinding>`. Structure evaluators by walking DOWN from the root node using `descendants_of_kind`.
 
-1. **Filter Phase 1 hits to those inside function bodies** (the most common ask):
-   ```python
-   funcs = node.descendants_of_type('function_definition')
-   matches = []
-   for pos in match_positions:
-       offset = pos["byte_offset"]
-       for f in funcs:
-           if f.start_byte <= offset < f.end_byte:
-               matches.append({
-                   "line_number": pos["line_number"],
-                   "enclosing_function": f.named_children[0].text if f.named_children else "<anonymous>",
-               })
-               break
-   return {"matches": matches, "value": None}
+1. **Find all function definitions in each file**:
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       for f in node.descendants_of_kind("function_definition") {
+           findings.push(EvalFinding {
+               pattern: "function_def".to_string(),
+               line: f.start_line,
+               snippet: f.text.chars().take(80).collect(),
+           });
+       }
+       findings
+   }
    ```
 
-2. **Exclude hits inside comments or string literals**:
-   ```python
-   comments = node.descendants_of_type('comment')
-   strings  = node.descendants_of_type('string')
-   excluded = comments + strings
-   matches = []
-   for pos in match_positions:
-       offset = pos["byte_offset"]
-       inside = False
-       for n in excluded:
-           if n.start_byte <= offset < n.end_byte:
-               inside = True
-               break
-       if not inside:
-           matches.append({"line_number": pos["line_number"]})
-   return {"matches": matches, "value": None}
+2. **Find calls that are NOT inside comments or string literals** (whole-file scan, filters out noise):
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       let comments = node.descendants_of_kind("comment");
+       let strings = node.descendants_of_kind("string");
+       for call in node.descendants_of_kind("call") {
+           let in_excluded = comments.iter().any(|c| c.start_byte <= call.start_byte && call.end_byte <= c.end_byte)
+               || strings.iter().any(|s| s.start_byte <= call.start_byte && call.end_byte <= s.end_byte);
+           if !in_excluded {
+               findings.push(EvalFinding {
+                   pattern: "call_outside_comment_string".to_string(),
+                   line: call.start_line,
+                   snippet: call.text.chars().take(80).collect(),
+               });
+           }
+       }
+       findings
+   }
    ```
 
-3. **Find hits inside a function with a specific name**:
-   ```python
-   target_name = 'public_method'
-   funcs = node.descendants_of_type('function_definition')
-   matches = []
-   for pos in match_positions:
-       offset = pos["byte_offset"]
-       for f in funcs:
-           if f.start_byte <= offset < f.end_byte:
-               name_node = f.named_children[0] if f.named_children else None
-               if name_node is not None and name_node.text == target_name:
-                   matches.append({"line_number": pos["line_number"]})
-               break
-   return {"matches": matches, "value": None}
+3. **Find calls to a specific function name**:
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       let target_name = "public_method";
+       for call in node.descendants_of_kind("call") {
+           if call.text.contains(target_name) {
+               findings.push(EvalFinding {
+                   pattern: "target_call".to_string(),
+                   line: call.start_line,
+                   snippet: call.text.chars().take(80).collect(),
+               });
+           }
+       }
+       findings
+   }
    ```
 
-4. **Find functions with N+ elif clauses** (whole-file, ignores match_positions):
-   ```python
-   funcs = node.descendants_of_type('function_definition')
-   matches = []
-   for f in funcs:
-       elif_count = f.count_descendants_of_type('elif_clause')
-       if elif_count >= 5:
-           matches.append({
-               "line_number": f.start_point[0] + 1,
-               "elif_count": elif_count,
-           })
-   return {"matches": matches, "value": {"function_count": len(funcs)}}
+4. **Find functions with N+ elif clauses** (whole-file complexity scan):
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       for f in node.descendants_of_kind("function_definition") {
+           let elif_count = f.descendants_of_kind("elif_clause").len();
+           if elif_count >= 5 {
+               findings.push(EvalFinding {
+                   pattern: "high_elif_count".to_string(),
+                   line: f.start_line,
+                   snippet: format!("elif_count={}", elif_count),
+               });
+           }
+       }
+       findings
+   }
    ```
 
-5. **SQL-shaped string literals at the Phase 1 hit**:
-   ```python
-   strings = node.descendants_of_type('string')
-   matches = []
-   for pos in match_positions:
-       offset = pos["byte_offset"]
-       for s in strings:
-           if s.start_byte <= offset < s.end_byte and 'SELECT' in s.text.upper():
-               matches.append({
-                   "line_number": pos["line_number"],
-                   "string_preview": s.text[:80],
-               })
-               break
-   return {"matches": matches, "value": None}
+5. **SQL-shaped string literals** (find strings containing SELECT):
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       for s in node.descendants_of_kind("string") {
+           let upper = s.text.to_string();
+           if upper.contains("SELECT") || upper.contains("select") {
+               findings.push(EvalFinding {
+                   pattern: "sql_string".to_string(),
+                   line: s.start_line,
+                   snippet: s.text.chars().take(80).collect(),
+               });
+           }
+       }
+       findings
+   }
    ```
 
 6. **Functions with too many parameters** (whole-file metric):
-   ```python
-   funcs = node.descendants_of_type('function_definition')
-   matches = []
-   for f in funcs:
-       params = f.descendants_of_type('parameter')
-       if len(params) > 7:
-           matches.append({
-               "line_number": f.start_point[0] + 1,
-               "param_count": len(params),
-           })
-   return {"matches": matches, "value": None}
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       for f in node.descendants_of_kind("function_definition") {
+           if let Some(params) = f.child_by_kind("parameters") {
+               let param_count = params.named_children().len();
+               if param_count > 7 {
+                   findings.push(EvalFinding {
+                       pattern: "too_many_params".to_string(),
+                       line: f.start_line,
+                       snippet: format!("param_count={}", param_count),
+                   });
+               }
+           }
+       }
+       findings
+   }
    ```
 
-7. **Deep nesting detection** (whole-file score):
-   ```python
-   ifs    = node.count_descendants_of_type('if_statement')
-   fors   = node.count_descendants_of_type('for_statement')
-   whiles = node.count_descendants_of_type('while_statement')
-   total  = ifs + fors + whiles
-   matches = []
-   if total >= 10:
-       matches.append({
-           "line_number": 1,
-           "ifs": ifs,
-           "fors": fors,
-           "whiles": whiles,
-       })
-   return {"matches": matches, "value": {"branching_total": total}}
+7. **Deep nesting detection** (whole-file branching score):
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       let ifs = node.descendants_of_kind("if_statement").len();
+       let fors = node.descendants_of_kind("for_statement").len();
+       let whiles = node.descendants_of_kind("while_statement").len();
+       let total = ifs + fors + whiles;
+       if total >= 10 {
+           findings.push(EvalFinding {
+               pattern: "deep_nesting".to_string(),
+               line: 1,
+               snippet: format!("ifs={} fors={} whiles={} total={}", ifs, fors, whiles, total),
+           });
+       }
+       findings
+   }
    ```
 
-8. **List comprehension presence anywhere in the file**:
-   ```python
-   count = node.count_descendants_of_type('list_comprehension')
-   matches = []
-   if count >= 1:
-       matches.append({"line_number": 1, "list_comp_count": count})
-   return {"matches": matches, "value": {"list_comp_count": count}}
+8. **List comprehension presence anywhere in the file** (Python-specific):
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       let comps = node.descendants_of_kind("list_comprehension");
+       if !comps.is_empty() {
+           findings.push(EvalFinding {
+               pattern: "list_comprehension".to_string(),
+               line: comps[0].start_line,
+               snippet: format!("count={}", comps.len()),
+           });
+       }
+       findings
+   }
    ```
 
 9. **Functions with high cyclomatic complexity** (per-function score):
-   ```python
-   funcs = node.descendants_of_type('function_definition')
-   matches = []
-   for f in funcs:
-       complexity = (
-           f.count_descendants_of_type('if_statement') +
-           f.count_descendants_of_type('elif_clause')
-       )
-       if complexity >= 8:
-           matches.append({
-               "line_number": f.start_point[0] + 1,
-               "complexity": complexity,
-           })
-   return {"matches": matches, "value": None}
+   ```rust
+   fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+       let mut findings = Vec::new();
+       for f in node.descendants_of_kind("function_definition") {
+           let complexity = f.descendants_of_kind("if_statement").len()
+               + f.descendants_of_kind("elif_clause").len();
+           if complexity >= 8 {
+               findings.push(EvalFinding {
+                   pattern: "high_complexity".to_string(),
+                   line: f.start_line,
+                   snippet: format!("complexity={}", complexity),
+               });
+           }
+       }
+       findings
+   }
    ```
 
-10. **Returns inside `if` statements** (one match per offending return):
-    ```python
-    returns = node.descendants_of_type('return_statement')
-    matches = []
-    for r in returns:
-        if r.enclosing('if_statement') is not None:
-            matches.append({"line_number": r.start_point[0] + 1})
-    return {"matches": matches, "value": None}
+10. **Return statements inside if statements** (walk down from each function):
+    ```rust
+    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for if_stmt in node.descendants_of_kind("if_statement") {
+            for ret in if_stmt.descendants_of_kind("return_statement") {
+                findings.push(EvalFinding {
+                    pattern: "return_inside_if".to_string(),
+                    line: ret.start_line,
+                    snippet: ret.text.chars().take(80).collect(),
+                });
+            }
+        }
+        findings
+    }
     ```
 
-11. **Calls without try/except guards** (audit risky operations):
-    ```python
-    calls = node.descendants_of_type('call')
-    unsafe = []
-    for c in calls:
-        if c.enclosing('try_statement') is None:
-            unsafe.append(c)
-    matches = [{"line_number": c.start_point[0] + 1} for c in unsafe]
-    return {"matches": matches, "value": {"unsafe_call_count": len(unsafe)}}
+11. **Calls without try/except guards** (find calls not nested in try blocks):
+    ```rust
+    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        let try_blocks = node.descendants_of_kind("try_statement");
+        for call in node.descendants_of_kind("call") {
+            let in_try = try_blocks.iter().any(|t| {
+                t.start_byte <= call.start_byte && call.end_byte <= t.end_byte
+            });
+            if !in_try {
+                findings.push(EvalFinding {
+                    pattern: "unguarded_call".to_string(),
+                    line: call.start_line,
+                    snippet: call.text.chars().take(80).collect(),
+                });
+            }
+        }
+        findings
+    }
     ```
 
-12. **TODO/FIXME comments** (one match per comment):
-    ```python
-    comments = node.descendants_of_type('comment')
-    matches = []
-    for c in comments:
-        text = c.text
-        if 'TODO' in text or 'FIXME' in text:
-            matches.append({
-                "line_number": c.start_point[0] + 1,
-                "comment_text": text[:120],
-            })
-    return {"matches": matches, "value": {"todo_count": len(matches)}}
+12. **TODO/FIXME comments** (one finding per matching comment):
+    ```rust
+    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for c in node.descendants_of_kind("comment") {
+            if c.text.contains("TODO") || c.text.contains("FIXME") {
+                findings.push(EvalFinding {
+                    pattern: "todo_fixme".to_string(),
+                    line: c.start_line,
+                    snippet: c.text.chars().take(120).collect(),
+                });
+            }
+        }
+        findings
+    }
     ```
 
 13. **Public functions missing return-type annotations (Python)**:
-    ```python
-    funcs = node.descendants_of_type('function_definition')
-    matches = []
-    for f in funcs:
-        if not f.named_children:
-            continue
-        name_text = f.named_children[0].text
-        if name_text.startswith('_'):
-            continue
-        has_return_type = False
-        for c in f.named_children:
-            if c.type == 'type':
-                has_return_type = True
-                break
-        if not has_return_type:
-            matches.append({
-                "line_number": f.start_point[0] + 1,
-                "function_name": name_text,
-            })
-    return {"matches": matches, "value": None}
+    ```rust
+    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for f in node.descendants_of_kind("function_definition") {
+            let children = f.named_children();
+            if children.is_empty() {
+                continue;
+            }
+            let name_text = &children[0].text;
+            if name_text.starts_with("_") {
+                continue;
+            }
+            let has_return_type = children.iter().any(|c| c.kind == "type");
+            if !has_return_type {
+                findings.push(EvalFinding {
+                    pattern: "missing_return_type".to_string(),
+                    line: f.start_line,
+                    snippet: format!("function: {}", name_text),
+                });
+            }
+        }
+        findings
+    }
     ```
 
-14. **Bare `except:` clauses** (one match per bare except):
-    ```python
-    excepts = node.descendants_of_type('except_clause')
-    matches = []
-    for e in excepts:
-        is_typed = False
-        for c in e.named_children:
-            if c.type in ('identifier', 'attribute', 'tuple'):
-                is_typed = True
-                break
-        if not is_typed:
-            matches.append({"line_number": e.start_point[0] + 1})
-    return {"matches": matches, "value": None}
+14. **Bare `except:` clauses** (one finding per bare except):
+    ```rust
+    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for e in node.descendants_of_kind("except_clause") {
+            let is_typed = e.named_children().iter().any(|c| {
+                c.kind == "identifier" || c.kind == "attribute" || c.kind == "tuple"
+            });
+            if !is_typed {
+                findings.push(EvalFinding {
+                    pattern: "bare_except".to_string(),
+                    line: e.start_line,
+                    snippet: e.text.chars().take(80).collect(),
+                });
+            }
+        }
+        findings
+    }
     ```
 
-15. **Classes with no docstring** (one match per undocumented class):
-    ```python
-    classes = node.descendants_of_type('class_definition')
-    matches = []
-    for cls in classes:
-        bodies = [c for c in cls.named_children if c.type == 'block']
-        has_doc = False
-        if bodies:
-            block = bodies[0]
-            if block.named_children:
-                first = block.named_children[0]
-                if first.type == 'expression_statement':
-                    for c in first.named_children:
-                        if c.type == 'string':
-                            has_doc = True
-                            break
-        if not has_doc:
-            class_name = cls.named_children[0].text if cls.named_children else "<unnamed>"
-            matches.append({
-                "line_number": cls.start_point[0] + 1,
-                "class_name": class_name,
-            })
-    return {"matches": matches, "value": None}
+15. **Classes with no docstring** (one finding per undocumented class):
+    ```rust
+    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for cls in node.descendants_of_kind("class_definition") {
+            let children = cls.named_children();
+            let class_name = if !children.is_empty() {
+                children[0].text.clone()
+            } else {
+                "<unnamed>".to_string()
+            };
+            let has_doc = children.iter().any(|c| {
+                if c.kind == "block" {
+                    let block_children = c.named_children();
+                    if !block_children.is_empty() && block_children[0].kind == "expression_statement" {
+                        return block_children[0].has_descendant_of_kind("string");
+                    }
+                }
+                false
+            });
+            if !has_doc {
+                findings.push(EvalFinding {
+                    pattern: "class_no_docstring".to_string(),
+                    line: cls.start_line,
+                    snippet: format!("class: {}", class_name),
+                });
+            }
+        }
+        findings
+    }
     ```
 
 ### Common cross-language node type names
@@ -524,11 +560,11 @@ tree-sitter node type names differ between languages. Use this table as a starti
 |-----------|--------|------|-------------------------|-----|--------|-----|
 | Function definition | `function_definition` | `method_declaration` | `function_declaration` / `method_definition` | `function_declaration` | `function_declaration` | `method_declaration` |
 | Function call | `call` | `method_invocation` | `call_expression` | `call_expression` | `call_expression` | `invocation_expression` |
-| Class definition | `class_definition` | `class_declaration` | `class_declaration` | (no class — `type_declaration` for structs) | `class_declaration` | `class_declaration` |
+| Class definition | `class_definition` | `class_declaration` | `class_declaration` | (no class -- `type_declaration` for structs) | `class_declaration` | `class_declaration` |
 | If statement | `if_statement` | `if_statement` | `if_statement` | `if_statement` | `if_expression` | `if_statement` |
 | Else-if | `elif_clause` (Python-only) | `else if` chain inside `if_statement` | `else if` chain | `else if` chain | `else if` chain | `else if` chain |
 | For loop | `for_statement` | `enhanced_for_statement` / `for_statement` | `for_statement` / `for_in_statement` | `for_statement` | `for_statement` | `for_statement` |
-| Try block | `try_statement` | `try_statement` / `try_with_resources_statement` | `try_statement` | (no try — `defer`/`recover`) | `try_expression` | `try_statement` |
+| Try block | `try_statement` | `try_statement` / `try_with_resources_statement` | `try_statement` | (no try -- `defer`/`recover`) | `try_expression` | `try_statement` |
 | Variable declaration | `assignment` (no separate decl) | `local_variable_declaration` | `lexical_declaration` (`let`/`const`) / `variable_declaration` (`var`) | `var_declaration` / `short_var_declaration` | `property_declaration` | `local_declaration_statement` |
 | String literal | `string` | `string_literal` | `string` | `interpreted_string_literal` | `string_literal` | `string_literal` |
 | Comment | `comment` | `line_comment` / `block_comment` | `comment` | `comment` | `line_comment` / `block_comment` | `comment` |
@@ -540,18 +576,19 @@ The fastest way to discover the exact type names for a construct is to use `xray
 After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 - `matches[]`: list of enriched match dicts. Every entry contains:
-  - `file_path` (str, server-added) — absolute path
-  - `language` (str, server-added) — tree-sitter language name
-  - `line_number` (int, evaluator-supplied) — required field on every match dict the evaluator returns
-  - `line_content` (str, server-derived if evaluator omitted) — raw text of `line_number` from `source`
-  - any open keys the evaluator chose to include (e.g. `column`, `context_before`, `context_after`, `enclosing_function`, `complexity`, etc.)
-- `file_metadata[]`: list of per-file metadata entries. One entry per file whose evaluator returned a non-None `value` or a `file_role` string. Shape: `{"file_path": str, "value"?: <any>, "file_role"?: str}`. Files whose evaluator returned `value=None` AND no `file_role` are NOT in this list.
-- `evaluation_errors[]`: list of per-file failures. Each entry: `{file_path, line_number, error_type, error_message}`. `evaluation_errors` does NOT cause job failure — status remains COMPLETED.
+  - `file_path` (str, server-added) -- absolute path
+  - `language` (str, server-added) -- tree-sitter language name
+  - `line_number` (int, from EvalFinding.line) -- 1-based line number
+  - `line_content` (str, server-derived) -- raw text of `line_number` from the file source
+  - `pattern` (str, from EvalFinding.pattern) -- the pattern name identifying the finding
+  - `snippet` (str, from EvalFinding.snippet) -- code snippet context from the evaluator
+- `file_metadata[]`: list of per-file metadata entries. One entry per evaluated file. Shape: `{"file_path": str}`.
+- `evaluation_errors[]`: list of per-file failures. Each entry: `{file_path, line_number, error_type, error_message}`. `evaluation_errors` does NOT cause job failure -- status remains COMPLETED.
 - `files_processed` (int): number of candidate files evaluated.
 - `files_total` (int): total candidate files found by Phase 1.
 - `elapsed_seconds` (float)
 - `partial: true` (only on partial completion)
-- `timeout: true` (only when job-level timeout fired — takes precedence over `max_files_reached`)
+- `timeout: true` (only when job-level timeout fired -- takes precedence over `max_files_reached`)
 - `max_files_reached: true` (only when the `max_results` cap fired before timeout)
 - `warnings[]` (only when present): zero-match include_pattern hints
 
@@ -559,7 +596,7 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 Each `error_type` carries a distinct `error_message` shape:
 
-**EvaluatorTimeout** — sandbox 5s wall-clock budget exceeded; subprocess received SIGTERM (and SIGKILL after a 1.0s grace if still alive):
+**EvaluatorTimeout** -- sandbox 5s wall-clock budget exceeded:
 
 ```json
 {
@@ -570,35 +607,18 @@ Each `error_type` carries a distinct `error_message` shape:
 }
 ```
 
-**EvaluatorCrash** — subprocess died before returning a value. The `error_message` carries the failure detail in one of three forms:
-
-- `exitcode=<N>` — non-zero status (e.g. `exitcode=139` indicates SIGSEGV)
-- `no_pipe_data` — subprocess died without sending any data
-- `__exception__:<TypeName>:<message>` — subprocess raised a Python exception (e.g. NameError when a stripped builtin is referenced, AttributeError on a missing node attribute)
+**EvaluatorCrash** -- evaluator process died before returning a value. The `error_message` carries the failure detail:
 
 ```json
 {
   "file_path": "/srv/cidx/repo/src/code_indexer/cli.py",
   "line_number": 0,
   "error_type": "EvaluatorCrash",
-  "error_message": "__exception__:NameError:name 'getattr' is not defined"
+  "error_message": "evaluator process exited with non-zero status"
 }
 ```
 
-**InvalidEvaluatorReturn** — subprocess exited cleanly but the return value did not match the v10.4.0 dict contract:
-
-```json
-{
-  "file_path": "/srv/cidx/repo/src/code_indexer/server/handler.py",
-  "line_number": 0,
-  "error_type": "InvalidEvaluatorReturn",
-  "error_message": "Evaluator must return a dict {\"matches\": [...], \"value\": ...}, got 'bool'. Note: bool return (legacy contract) is no longer accepted."
-}
-```
-
-Other `InvalidEvaluatorReturn` messages: `"Evaluator dict missing required 'matches' key. Return: {\"matches\": [...], \"value\": ...}"`, `"'matches' must be a list, got 'dict'"`.
-
-**UnsupportedLanguage** — Phase 1 selected a candidate whose extension has no tree-sitter grammar:
+**UnsupportedLanguage** -- Phase 1 selected a candidate whose extension has no tree-sitter grammar:
 
 ```json
 {
@@ -609,34 +629,34 @@ Other `InvalidEvaluatorReturn` messages: `"Evaluator dict missing required 'matc
 }
 ```
 
-**ValidationFailed** — appears in `evaluation_errors[]` only as a defensive fallback. The handler validates `evaluator_code` synchronously BEFORE submitting the job and returns a sync error response with structured fields (v10.5.0):
+**ValidationFailed** -- appears in `evaluation_errors[]` only as a defensive fallback. The handler validates `evaluator_code` synchronously BEFORE submitting the job and returns a sync error response with structured fields:
 
 ```json
 {
   "error": "xray_evaluator_validation_failed",
-  "error_code": "node_not_allowed",
-  "offending_construct": "ClassDef",
+  "error_code": "forbidden_unsafe",
+  "offending_construct": "unsafe",
   "offending_line": 3,
-  "message": "'ClassDef' is not allowed in evaluator code. Class definitions are not allowed. ..."
+  "message": "forbidden construct 'unsafe' is not allowed in Rust evaluator code"
 }
 ```
 
-Structured error fields: `error_code` identifies the category (e.g. `node_not_allowed`, `dunder_attribute_blocked`), `offending_construct` names the specific construct (e.g. `ClassDef`, `Import`, `__class__`), `offending_line` is the 1-based line number in evaluator_code.
+Structured error fields: `error_code` identifies the category (e.g. `forbidden_unsafe`, `forbidden_import`, `forbidden_raw_pointer`, `forbidden_extern`, `forbidden_mod`, `forbidden_static_mut`, `forbidden_macro`), `offending_construct` names the specific construct (e.g. `unsafe`, `std::fs`, `*const`, `extern`, `mod`, `static mut`, `include!`), `offending_line` is the 1-based line number in evaluator_code.
 
-Other validation rejection messages name the offending node type (e.g. `'ClassDef' is not allowed in evaluator code.`, `'Import' is not allowed in evaluator code.`, `'With' is not allowed in evaluator code.`, `'AsyncFunctionDef' is not allowed in evaluator code.`) and include the full whitelist in the message body. Dunder access produces `Attribute access to '__class__' blocked (sandbox escape vector)` or `Subscript access to '__import__' blocked (sandbox escape vector)`.
+Other validation rejection messages name the offending construct and include a description. Examples: `"forbidden construct 'unsafe' is not allowed in Rust evaluator code"`, `"forbidden import 'std::fs' is not allowed in Rust evaluator code"`, `"forbidden raw pointer '*const' is not allowed in Rust evaluator code"`, `"forbidden macro 'println!' is not allowed in Rust evaluator code"`.
 
-**Generic exception types** (e.g. `IOError`, `UnicodeDecodeError`, `OSError`) — emitted by the catch-all in `_evaluate_file` when the file cannot be read or parsed. The `error_type` is the Python exception class name; `error_message` is `str(exc)`.
+**Generic exception types** (e.g. `IOError`, `UnicodeDecodeError`) -- emitted by the catch-all when the file cannot be read or parsed. The `error_type` is the exception class name; `error_message` is the error detail string.
 
 ### Large Result Paging
 
 For results larger than ~2000 chars (configurable via Web UI `payload_preview_size_chars`), the polled job result is truncated and stored in PayloadCache. Additional fields:
 
-- `truncated: true` — set when the matches+errors JSON exceeded the preview cap
-- `has_more: true` — synonym; set with `truncated`
-- `cache_handle: "<uuid>"` — opaque handle for paged retrieval
-- `total_size: <int>` — full payload byte size
-- `matches_and_errors_preview: "<first 2000 chars of JSON>"` — quick preview
-- `matches[]` and `evaluation_errors[]` — only the first 3 entries inline
+- `truncated: true` -- set when the matches+errors JSON exceeded the preview cap
+- `has_more: true` -- synonym; set with `truncated`
+- `cache_handle: "<uuid>"` -- opaque handle for paged retrieval
+- `total_size: <int>` -- full payload byte size
+- `matches_and_errors_preview: "<first 2000 chars of JSON>"` -- quick preview
+- `matches[]` and `evaluation_errors[]` -- only the first 3 entries inline
 
 To fetch the full content: `GET /api/cache/{cache_handle}` (paged via `?page=N`), or use the discoverable `cidx_fetch_cached_payload` MCP tool.
 
@@ -644,24 +664,25 @@ When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors
 
 ## Iterating on Your Evaluator
 
-1. Start with `max_results: 5` to test the evaluator on a small subset of candidate files. This prevents long waits during development and quickly reveals attribute mistakes.
-2. Use `xray_explore` first to discover the AST shape produced by tree-sitter for the language. The `ast_debug` field shows the available fields and child types so the evaluator can reference them correctly.
+1. Start with `max_results: 5` to test the evaluator on a small subset of candidate files. This prevents long waits during development and quickly reveals type or API mistakes.
+2. Use `xray_explore` first to discover the AST shape produced by tree-sitter for the language. The `ast_debug` field shows the available node kinds and child structure so the evaluator can reference them correctly.
 3. After each run, read `evaluation_errors` carefully:
-   - `__exception__:AttributeError:...` — the evaluator referenced a node attribute that does not exist. The error message includes a `Did you mean: ...?` hint when a similar attribute is in the public XRayNode surface.
-   - `EvaluatorTimeout` — the evaluator is too slow or has an unbounded loop. The 5s subprocess timeout fired.
-   - `InvalidEvaluatorReturn` — the evaluator returned the wrong shape. Confirm the return is a dict with `matches: [...]`.
+   - `EvaluatorCrash` -- the evaluator code has a runtime error (e.g. calling a method that does not exist on OwnedNode, index out of bounds).
+   - `EvaluatorTimeout` -- the evaluator is too slow or has an unbounded loop. The 5s sandbox timeout fired.
+   - `ValidationFailed` -- the evaluator used a forbidden Rust construct. Check the `offending_construct` field to see what was rejected.
 4. Once the evaluator runs cleanly on `max_results: 5`, remove the cap and run the full search.
+5. Remember: `node.kind` (not `node.type`), `node.named_children()` (method call, not property), `node.descendants_of_kind(...)` (not `descendants_of_type`), `node.start_line` (already 1-based, not `start_point[0] + 1`).
 
 ## Examples
 
-**Echo every prepareStatement Phase 1 hit as a match (no AST filtering)**:
+**Find all function definitions (no AST filtering beyond node kind)**:
 ```json
 {
   "repository_alias": "backend-global",
-  "pattern": "prepareStatement",
-  "evaluator_code": "return {\"matches\": [{\"line_number\": p[\"line_number\"]} for p in match_positions], \"value\": None}",
+  "pattern": "def ",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for f in node.descendants_of_kind(\"function_definition\") {\n        findings.push(EvalFinding {\n            pattern: \"function_def\".to_string(),\n            line: f.start_line,\n            snippet: f.text.chars().take(80).collect(),\n        });\n    }\n    findings\n}",
   "search_target": "content",
-  "include_patterns": ["*.java"]
+  "include_patterns": ["*.py"]
 }
 ```
 
@@ -670,59 +691,59 @@ When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors
 {
   "repository_alias": "backend-global",
   "pattern": "prepareStatement",
-  "evaluator_code": "return {\"matches\": [{\"line_number\": p[\"line_number\"]} for p in match_positions], \"value\": None}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for inv in node.descendants_of_kind(\"method_invocation\") {\n        if inv.text.contains(\"prepareStatement\") {\n            findings.push(EvalFinding {\n                pattern: \"prepare_statement\".to_string(),\n                line: inv.start_line,\n                snippet: inv.text.chars().take(80).collect(),\n            });\n        }\n    }\n    findings\n}",
   "search_target": "content",
   "max_results": 5
 }
 ```
 
-**Find Python test files by path pattern (filename target — match_positions is empty, so emit one match for the file)**:
+**Find Python test files by path pattern (filename target)**:
 ```json
 {
   "repository_alias": "backend-global",
   "pattern": "test_.*\\.py$",
-  "evaluator_code": "return {\"matches\": [{\"line_number\": 1}], \"value\": None}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    vec![EvalFinding {\n        pattern: \"test_file\".to_string(),\n        line: 1,\n        snippet: node.text.chars().take(80).collect(),\n    }]\n}",
   "search_target": "filename"
 }
 ```
 
-**Search with include and exclude patterns (source files only, skip vendored code)**:
+**Search with include and exclude patterns (TODO/FIXME comments, skip vendored code)**:
 ```json
 {
   "repository_alias": "backend-global",
   "pattern": "TODO|FIXME",
-  "evaluator_code": "comments = node.descendants_of_type('comment')\nmatches = []\nfor c in comments:\n    if 'TODO' in c.text or 'FIXME' in c.text:\n        matches.append({'line_number': c.start_point[0] + 1, 'comment_text': c.text[:120]})\nreturn {'matches': matches, 'value': {'todo_count': len(matches)}}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for c in node.descendants_of_kind(\"comment\") {\n        if c.text.contains(\"TODO\") || c.text.contains(\"FIXME\") {\n            findings.push(EvalFinding {\n                pattern: \"todo_fixme\".to_string(),\n                line: c.start_line,\n                snippet: c.text.chars().take(120).collect(),\n            });\n        }\n    }\n    findings\n}",
   "search_target": "content",
   "include_patterns": ["*.py", "*.java", "*.ts"],
   "exclude_patterns": ["*/vendor/*", "*/node_modules/*", "*/test/*"]
 }
 ```
 
-**Multi-repo (omni) search across two repos** — returns `{job_ids: [...], errors: [...]}`:
+**Multi-repo (omni) search across two repos** -- returns `{job_ids: [...], errors: [...]}`:
 ```json
 {
   "repository_alias": ["backend-global", "frontend-global"],
   "pattern": "TODO",
-  "evaluator_code": "return {\"matches\": [{\"line_number\": p[\"line_number\"]} for p in match_positions], \"value\": None}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for c in node.descendants_of_kind(\"comment\") {\n        if c.text.contains(\"TODO\") {\n            findings.push(EvalFinding {\n                pattern: \"todo\".to_string(),\n                line: c.start_line,\n                snippet: c.text.chars().take(80).collect(),\n            });\n        }\n    }\n    findings\n}",
   "search_target": "content"
 }
 ```
 
-### Example: detect SQL injection via per-file inspection (v10.4.0 contract)
+### Example: detect prepareStatement calls not in try-with-resources (Java)
 
-Find every `prepareStatement(...)` call that is NOT inside a try-with-resources statement (Java). Walk DOWN to find method invocations, scope each invocation to the Phase 1 hits via `byte_offset`, then verify the enclosing try-with-resources is absent.
+Find every `prepareStatement(...)` call that is NOT inside a try-with-resources statement. Walk DOWN from try-with-resources blocks and check whether each method invocation falls within one.
 
 ```json
 {
   "repository_alias": "myapp-global",
   "pattern": "prepareStatement",
   "search_target": "content",
-  "evaluator_code": "invs = node.descendants_of_type('method_invocation')\nmatches = []\nfor pos in match_positions:\n    offset = pos['byte_offset']\n    for inv in invs:\n        if inv.start_byte <= offset < inv.end_byte:\n            if inv.enclosing('try_with_resources_statement') is None:\n                matches.append({'line_number': pos['line_number'], 'risk': 'no_try_with_resources'})\n            break\nreturn {'matches': matches, 'value': None}",
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    let try_blocks = node.descendants_of_kind(\"try_with_resources_statement\");\n    for inv in node.descendants_of_kind(\"method_invocation\") {\n        if inv.text.contains(\"prepareStatement\") {\n            let in_try = try_blocks.iter().any(|t| {\n                t.start_byte <= inv.start_byte && inv.end_byte <= t.end_byte\n            });\n            if !in_try {\n                findings.push(EvalFinding {\n                    pattern: \"no_try_with_resources\".to_string(),\n                    line: inv.start_line,\n                    snippet: inv.text.chars().take(80).collect(),\n                });\n            }\n        }\n    }\n    findings\n}",
   "include_patterns": ["*.java"]
 }
 ```
 
-The evaluator iterates `match_positions` (every Phase 1 hit), finds the enclosing `method_invocation` for each offset, and filters out invocations that have a `try_with_resources_statement` ancestor — surfacing only unsafe statements. The `risk` field is an open per-match key the server preserves intact.
+The evaluator collects all `try_with_resources_statement` nodes first, then checks each `method_invocation` containing "prepareStatement" against those blocks by byte range. Invocations outside any try-with-resources block are reported as findings.
 
 ## Cancellation
 

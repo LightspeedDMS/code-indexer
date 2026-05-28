@@ -1,10 +1,9 @@
 """Real-world evaluator pattern integration tests for the xray Rust pipeline.
 
-Each test exercises the FULL pipeline: Python evaluator code -> transpile to
-Rust -> compile via xray-cli -> execute against real Java source -> verify
-findings.
+Each test exercises the FULL pipeline: Rust evaluator code -> validate ->
+compile via xray-cli -> execute against real Java source -> verify findings.
 
-No mocks, no fakes.  Real transpilation, real Rust compilation, real execution.
+No mocks, no fakes.  Real Rust compilation, real execution.
 """
 
 from __future__ import annotations
@@ -111,63 +110,69 @@ def _run_evaluator(
 # ---------------------------------------------------------------------------
 
 CATCH_RETHROW_EVALUATOR = """\
-def evaluate_node(node):
-    findings = []
-    for cc in node.descendants_of_kind("catch_clause"):
-        body = cc.child_by_kind("block")
-        if body is None:
-            continue
-        stmts = body.named_children()
-        if len(stmts) != 1:
-            continue
-        stmt = stmts[0]
-        if stmt.kind == "throw_statement":
-            findings.append({
-                "pattern": "catch-rethrow",
-                "line": cc.start_line,
-                "snippet": cc.text
-            })
-    return findings
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let mut findings = Vec::new();
+    for cc in node.descendants_of_kind("catch_clause") {
+        if let Some(body) = cc.child_by_kind("block") {
+            let stmts = body.named_children();
+            if stmts.len() == 1 {
+                if stmts[0].kind == "throw_statement" {
+                    findings.push(EvalFinding {
+                        pattern: "catch-rethrow".to_string(),
+                        line: cc.start_line,
+                        snippet: cc.text.clone(),
+                    });
+                }
+            }
+        }
+    }
+    findings
+}
 """
 
 ALLOCATION_IN_TRY_EVALUATOR = """\
-def evaluate_node(node):
-    findings = []
-    for ts in node.descendants_of_kind("try_statement"):
-        body = ts.child_by_kind("block")
-        if body is None:
-            continue
-        has_alloc = False
-        for child in body.named_children():
-            if child.has_descendant_of_kind("object_creation_expression"):
-                has_alloc = True
-        if has_alloc:
-            findings.append({
-                "pattern": "allocation-in-try",
-                "line": ts.start_line,
-                "snippet": ts.text
-            })
-    return findings
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let mut findings = Vec::new();
+    for ts in node.descendants_of_kind("try_statement") {
+        if let Some(body) = ts.child_by_kind("block") {
+            let mut has_alloc = false;
+            for child in body.named_children() {
+                if child.has_descendant_of_kind("object_creation_expression") {
+                    has_alloc = true;
+                }
+            }
+            if has_alloc {
+                findings.push(EvalFinding {
+                    pattern: "allocation-in-try".to_string(),
+                    line: ts.start_line,
+                    snippet: ts.text.clone(),
+                });
+            }
+        }
+    }
+    findings
+}
 """
 
 CATCH_RETHROW_WITH_DICT_RETURN = """\
-def evaluate_node(node):
-    matches = []
-    for cc in node.descendants_of_kind("catch_clause"):
-        body = cc.child_by_kind("block")
-        if body is None:
-            continue
-        stmts = body.named_children()
-        if len(stmts) != 1:
-            continue
-        stmt = stmts[0]
-        if stmt.kind == "throw_statement":
-            matches.append({
-                "pattern": "catch-rethrow",
-                "line": cc.start_line,
-                "snippet": cc.text
-            })
-    return {"matches": matches, "value": None}
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let mut findings = Vec::new();
+    for cc in node.descendants_of_kind("catch_clause") {
+        if let Some(body) = cc.child_by_kind("block") {
+            let stmts = body.named_children();
+            if stmts.len() == 1 {
+                if stmts[0].kind == "throw_statement" {
+                    findings.push(EvalFinding {
+                        pattern: "catch-rethrow".to_string(),
+                        line: cc.start_line,
+                        snippet: cc.text.clone(),
+                    });
+                }
+            }
+        }
+    }
+    findings
+}
 """
 
 
@@ -222,7 +227,7 @@ class TestRealEvaluatorPatterns:
         )
 
     def test_evaluator_with_dict_return_contract(self, tmp_path: Path):
-        """Evaluator using return {'matches': X, 'value': Y} works end-to-end."""
+        """Evaluator using standard Rust Vec<EvalFinding> return works end-to-end."""
         matches, errors, meta = _run_evaluator(
             CATCH_RETHROW_WITH_DICT_RETURN,
             JAVA_CATCH_RETHROW,
