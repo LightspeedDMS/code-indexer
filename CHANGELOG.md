@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.63.0 (2026-05-28) -- Rust Toolchain Install Location Fix
+
+### Fixed
+- Auto-updater now installs Rust toolchain to `/opt/rust` (system-wide) instead of `/root/.cargo`. The auto-updater runs as root so `Path.home()` resolved to `/root/`, but `cidx-server` runs as the `code-indexer` OS user which cannot access `/root/` (0550 permissions). This made `rustc` unreachable, breaking xray evaluator compilation.
+- Stale `/root/.cargo/bin` entries in systemd service PATH are automatically cleaned up during deployment via new `_remove_path_segment()` method.
+- `RUSTUP_HOME` and `CARGO_HOME` env vars explicitly set to `/opt/rust` and propagated to both `curl` and `sh` subprocess calls in `_install_rust_toolchain()`.
+
+### Changed
+- `_ensure_systemd_cargo_path` renamed to `_ensure_systemd_rust_path` to reflect the new system-wide install location.
+- MCP tool doc `xray_explore.md` fully rewritten from Python-era documentation to Rust native evaluator documentation (OwnedNode API, EvalFinding struct, Rust examples).
+
 ## v10.62.0 (2026-05-28) -- Xray Memory Waste Fix + Test Fixture Cleanup (Epic #1019)
 
 ### Fixed

@@ -203,7 +203,10 @@ class TestAutoUpdateSelfRestartDetection:
             mock_hash.return_value = "same_hash"  # Same hash before and after
 
             with patch.object(executor, "_restart_auto_update_service") as mock_restart:
-                result = executor.execute()
+                with patch.object(
+                    executor, "_ensure_rust_toolchain", return_value=True
+                ):
+                    result = executor.execute()
 
                 # Should NOT restart, should continue deployment
                 mock_restart.assert_not_called()

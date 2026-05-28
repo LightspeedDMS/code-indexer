@@ -504,6 +504,7 @@ class TestExecuteWiring:
                 executor, "_ensure_auto_updater_uses_server_python", return_value=True
             ),
             patch.object(executor, "ensure_ripgrep", return_value=True),
+            patch.object(executor, "_ensure_rust_toolchain", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", side_effect=mock_sudoers),
             patch.object(
                 executor,
@@ -553,6 +554,7 @@ class TestExecuteWiring:
                 executor, "_ensure_auto_updater_uses_server_python", return_value=True
             ),
             patch.object(executor, "ensure_ripgrep", return_value=True),
+            patch.object(executor, "_ensure_rust_toolchain", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             patch.object(
                 executor,
@@ -605,6 +607,7 @@ class TestExecuteWiring:
                 executor, "_ensure_auto_updater_uses_server_python", return_value=True
             ),
             patch.object(executor, "ensure_ripgrep", return_value=True),
+            patch.object(executor, "_ensure_rust_toolchain", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             patch.object(executor, "_ensure_memory_overcommit", return_value=False),
             patch.object(executor, "_ensure_swap_file", side_effect=mock_swap_file),
@@ -644,6 +647,7 @@ class TestExecuteWiring:
                 executor, "_ensure_auto_updater_uses_server_python", return_value=True
             ),
             patch.object(executor, "ensure_ripgrep", return_value=True),
+            patch.object(executor, "_ensure_rust_toolchain", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             patch.object(executor, "_ensure_memory_overcommit", return_value=True),
             patch.object(executor, "_ensure_swap_file", return_value=False),
