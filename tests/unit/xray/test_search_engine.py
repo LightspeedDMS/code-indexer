@@ -809,6 +809,66 @@ class TestXRaySearchEngineCoverageEdgeCases:
 
         assert any(e["error_type"] == "EvaluatorTimeout" for e in errors)
 
+    def test_timeout_with_no_results_adds_synthetic_evaluator_timeout_error(
+        self, search_engine, tmp_path
+    ):
+        """When run() hits the job-level timeout with 0 matches and 0 evaluation_errors,
+        a synthetic EvaluatorTimeout error must be added to evaluation_errors so the
+        caller knows why no results were returned (Issue 3).
+
+        Simulates timeout by patching time.monotonic so the elapsed check fires
+        immediately after the first file is processed.
+        """
+        import time as _time
+        from unittest.mock import patch
+
+        (tmp_path / "file.py").write_text("prepareStatement()\n")
+        # Batch returns no matches and no errors — only timeout causes no results.
+        batch_return: list = [([], [], None)]
+
+        # Make monotonic start at 0, then jump past timeout_seconds on first
+        # call after run() starts (simulates job timeout after first batch check).
+        monotonic_calls: list = []
+        _real_monotonic = _time.monotonic
+        start_value = _real_monotonic()
+
+        def _fake_monotonic() -> float:
+            monotonic_calls.append(1)
+            # First call: return start (used by `start = time.monotonic()`)
+            if len(monotonic_calls) == 1:
+                return start_value
+            # All subsequent calls: return a value 200s past start so _timed_out()=True
+            return start_value + 200.0
+
+        with patch.object(
+            search_engine.rust_backend, "run_batch", return_value=batch_return
+        ):
+            with patch(
+                "code_indexer.xray.search_engine.time.monotonic", _fake_monotonic
+            ):
+                result = search_engine.run(
+                    repo_path=tmp_path,
+                    driver_regex=r"prepareStatement",
+                    evaluator_code="Vec::new()",
+                    search_target="content",
+                    timeout_seconds=1,
+                )
+
+        assert result.get("timeout") is True, "result must have timeout=True"
+        assert result.get("partial") is True, "result must have partial=True"
+        errors = result.get("evaluation_errors", [])
+        timeout_errors = [e for e in errors if e["error_type"] == "EvaluatorTimeout"]
+        assert len(timeout_errors) == 1, (
+            f"Expected exactly 1 EvaluatorTimeout error when job times out with no results. "
+            f"Got evaluation_errors={errors!r}"
+        )
+        assert (
+            "infinite loop" in timeout_errors[0]["error_message"].lower()
+            or "timed out" in timeout_errors[0]["error_message"].lower()
+        ), (
+            f"EvaluatorTimeout message should mention timeout/loop. Got: {timeout_errors[0]['error_message']!r}"
+        )
+
     def test_file_read_exception_populates_evaluation_errors(
         self, search_engine, tmp_path
     ):

@@ -1229,7 +1229,7 @@ _RUST_FORBIDDEN_PATTERNS: list[tuple[str, str, str]] = [
     # Structural declarations
     ("forbidden_extern", "extern", r"\bextern\b"),
     ("forbidden_mod", "mod", r"\bmod\b"),
-    ("forbidden_static_mut", "static mut", r"\bstatic\s+mut\b"),
+    ("forbidden_static", "static", r"^\s*(pub\b[^;\"']*?)?\bstatic\b"),
     # Forbidden macros (macro invocation: name followed by !)
     ("forbidden_macro", "include!", r"\binclude\s*!"),
     ("forbidden_macro", "env!", r"\benv\s*!"),

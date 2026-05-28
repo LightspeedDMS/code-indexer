@@ -380,3 +380,60 @@ def test_offending_line_is_int_or_none() -> None:
     assert result.offending_line is None or (
         isinstance(result.offending_line, int) and result.offending_line > 0
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests: plain static declaration (Issue 1)
+# ---------------------------------------------------------------------------
+
+
+def test_static_declaration_rejected() -> None:
+    """Plain 'static' declaration (non-mut) must be rejected by pre-flight validator."""
+    code = """\
+static FOO: u64 = 0;
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"""
+    result = validate_rust_evaluator(code)
+    assert result.ok is False, "Plain static declaration should be rejected"
+    assert isinstance(result.error_code, str) and len(result.error_code) > 0
+    assert "static" in result.error_code.lower(), (
+        f"Expected error_code to contain 'static', got {result.error_code!r}"
+    )
+    combined = ((result.reason or "") + (result.offending_construct or "")).lower()
+    assert "static" in combined, (
+        f"Expected 'static' in reason/offending_construct. "
+        f"Got reason={result.reason!r}, offending_construct={result.offending_construct!r}"
+    )
+
+
+def test_static_mut_still_rejected() -> None:
+    """Regression: 'static mut' must still be rejected after adding plain static check."""
+    code = """\
+static mut COUNTER: u64 = 0;
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"""
+    result = validate_rust_evaluator(code)
+    assert result.ok is False, "static mut should still be rejected"
+    assert isinstance(result.error_code, str) and len(result.error_code) > 0
+    assert "static" in result.error_code.lower(), (
+        f"Expected error_code to contain 'static', got {result.error_code!r}"
+    )
+
+
+def test_static_in_string_not_rejected() -> None:
+    """The word 'static' inside a string literal must not trigger a false positive."""
+    code = """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let label = "static analysis result";
+    Vec::new()
+}
+"""
+    result = validate_rust_evaluator(code)
+    assert result.ok is True, (
+        f"'static' inside a string literal should NOT be rejected. "
+        f"Got ok={result.ok}, reason={result.reason!r}"
+    )
