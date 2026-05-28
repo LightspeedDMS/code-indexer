@@ -408,10 +408,14 @@ class TestEnsureSystemdRustPathUsesSystemDir:
         )
 
     def test_idempotent_when_rust_bin_already_present(self) -> None:
-        """If /opt/rust/bin is already in the PATH line, no subprocess call is made."""
+        """If /opt/rust/bin, RUSTUP_HOME, and CARGO_HOME are all already correct,
+        no subprocess call is made."""
         executor = _make_executor()
         original = (
-            f'[Service]\nEnvironment="PATH={RUST_BIN}:/usr/local/bin:/usr/bin"\n'
+            f"[Service]\n"
+            f'Environment="PATH={RUST_BIN}:/usr/local/bin:/usr/bin"\n'
+            f'Environment="RUSTUP_HOME=/opt/rust"\n'
+            f'Environment="CARGO_HOME=/opt/rust"\n'
             "ExecStart=/bin/app\n"
         )
 
@@ -540,6 +544,60 @@ class TestBuildUpdatedServiceContentUnchangedWhenRustBinPresent:
 # ---------------------------------------------------------------------------
 # Test 6: _remove_path_segment correctly strips a path segment.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# TestEnsureSystemdEnvVar: test the new static helper method
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureSystemdEnvVar:
+    """Tests for DeploymentExecutor._ensure_systemd_env_var static method."""
+
+    def test_adds_env_var_after_last_environment_line(self) -> None:
+        """No RUSTUP_HOME present -> inserts after last Environment= line."""
+        content = (
+            "[Service]\n"
+            'Environment="PATH=/opt/rust/bin:/usr/bin"\n'
+            'Environment="HOME=/root"\n'
+            "ExecStart=/bin/app\n"
+        )
+        result = DeploymentExecutor._ensure_systemd_env_var(
+            content, "RUSTUP_HOME", "/opt/rust"
+        )
+        assert 'Environment="RUSTUP_HOME=/opt/rust"' in result
+        # Must appear after the last Environment= line
+        last_env_pos = result.rfind('Environment="HOME=/root"')
+        new_var_pos = result.find('Environment="RUSTUP_HOME=/opt/rust"')
+        assert new_var_pos > last_env_pos, (
+            "New env var must be inserted after the last Environment= line"
+        )
+
+    def test_noop_when_value_already_correct(self) -> None:
+        """Already correct -> returns content unchanged."""
+        content = '[Service]\nEnvironment="RUSTUP_HOME=/opt/rust"\nExecStart=/bin/app\n'
+        result = DeploymentExecutor._ensure_systemd_env_var(
+            content, "RUSTUP_HOME", "/opt/rust"
+        )
+        assert result == content
+
+    def test_updates_wrong_value_in_place(self) -> None:
+        """Wrong value -> updated in place."""
+        content = '[Service]\nEnvironment="RUSTUP_HOME=/old/path"\nExecStart=/bin/app\n'
+        result = DeploymentExecutor._ensure_systemd_env_var(
+            content, "RUSTUP_HOME", "/opt/rust"
+        )
+        assert 'Environment="RUSTUP_HOME=/opt/rust"' in result
+        assert "/old/path" not in result
+
+    def test_appends_when_no_environment_lines_exist(self) -> None:
+        """No Environment= lines at all -> appends to end."""
+        content = "[Service]\nExecStart=/bin/app\n"
+        result = DeploymentExecutor._ensure_systemd_env_var(
+            content, "RUSTUP_HOME", "/opt/rust"
+        )
+        assert 'Environment="RUSTUP_HOME=/opt/rust"' in result
+        assert result.endswith("\n")
 
 
 class TestRemovePathSegment:

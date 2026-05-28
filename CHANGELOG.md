@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.64.0 (2026-05-28) -- RUSTUP_HOME Systemd Service Fix
+
+### Fixed
+- Auto-updater now adds `RUSTUP_HOME=/opt/rust` and `CARGO_HOME=/opt/rust` to the cidx-server systemd service file. The rustup proxy at `/opt/rust/bin/rustc` needs `RUSTUP_HOME` to find the installed toolchain; without it, rustup defaults to `$HOME/.rustup` which has no default toolchain configured, causing "no default toolchain" errors at runtime.
+
+### Added
+- New `_ensure_systemd_env_var()` static method for idempotent `Environment="KEY=VALUE"` management in systemd unit files.
+- `_line_parts()` helper to DRY indent/ending extraction from service file lines.
+
 ## v10.63.0 (2026-05-28) -- Rust Toolchain Install Location Fix
 
 ### Fixed
