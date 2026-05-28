@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.65.0 (2026-05-28) -- Non-root Auto-Updater Rust Toolchain Fix
+
+### Fixed
+- Auto-updater `_ensure_rust_toolchain()` now uses `sudo mkdir -p` and `sudo chown -R` to create `/opt/rust` instead of direct `Path.mkdir()`. The auto-updater runs as a non-root user on staging (e.g. `jsbattig`), so creating `/opt/rust` without sudo fails with `PermissionError: [Errno 13]`, crashing the entire deployment.
+
 ## v10.64.0 (2026-05-28) -- RUSTUP_HOME Systemd Service Fix
 
 ### Fixed

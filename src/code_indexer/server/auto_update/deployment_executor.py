@@ -4051,7 +4051,37 @@ class DeploymentExecutor:
         Returns False on install failure, missing C compiler, or build failure (FATAL).
         """
         rust_bin = RUST_SYSTEM_DIR / "bin"
-        RUST_SYSTEM_DIR.mkdir(parents=True, exist_ok=True)
+        mkdir_result = subprocess.run(
+            ["sudo", "mkdir", "-p", str(RUST_SYSTEM_DIR)],
+            capture_output=True,
+            text=True,
+        )
+        if mkdir_result.returncode != 0:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"sudo mkdir -p {RUST_SYSTEM_DIR} failed: "
+                    f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+        uid_gid = f"{os.getuid()}:{os.getgid()}"
+        chown_result = subprocess.run(
+            ["sudo", "chown", "-R", uid_gid, str(RUST_SYSTEM_DIR)],
+            capture_output=True,
+            text=True,
+        )
+        if chown_result.returncode != 0:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-172",
+                    f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} failed: "
+                    f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
         env = os.environ.copy()
         env["RUSTUP_HOME"] = str(RUST_SYSTEM_DIR)
         env["CARGO_HOME"] = str(RUST_SYSTEM_DIR)
