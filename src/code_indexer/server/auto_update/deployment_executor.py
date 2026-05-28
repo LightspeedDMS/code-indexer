@@ -3675,6 +3675,52 @@ class DeploymentExecutor:
             return "".join(lines)
         return content
 
+    @staticmethod
+    def _line_parts(line: str) -> tuple[str, str]:
+        """Return (indent, line_ending) for a line, preserving whitespace on both ends."""
+        indent = line[: len(line) - len(line.lstrip())]
+        ending = line[len(line.rstrip("\r\n")) :]
+        return indent, ending
+
+    @staticmethod
+    def _ensure_systemd_env_var(content: str, key: str, value: str) -> str:
+        """Ensure Environment="KEY=VALUE" exists in systemd unit content.
+
+        If key already has correct value, returns unchanged.
+        If key exists with wrong value, updates in place.
+        If key not found, inserts after the last Environment= line.
+        If no Environment= lines exist, appends to end of content.
+        """
+        target = f'Environment="{key}={value}"'
+        lines = content.splitlines(keepends=True)
+
+        last_env_idx = -1
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith(f'Environment="{key}='):
+                # Key exists — check value
+                if stripped == target:
+                    return content  # Already correct
+                # Wrong value — update in place
+                indent, ending = DeploymentExecutor._line_parts(line)
+                lines[i] = f"{indent}{target}{ending}"
+                return "".join(lines)
+            if stripped.startswith("Environment="):
+                last_env_idx = i
+
+        # Key not found — insert after last Environment= line
+        if last_env_idx >= 0:
+            ref_line = lines[last_env_idx]
+            indent, ending = DeploymentExecutor._line_parts(ref_line)
+            lines.insert(last_env_idx + 1, f"{indent}{target}{ending}")
+        else:
+            # No Environment= lines at all — append to end, ensuring trailing newline
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] = lines[-1] + "\n"
+            lines.append(f"{target}\n")
+
+        return "".join(lines)
+
     def _write_service_file_via_sudo(self, service_file: Path, content: str) -> bool:
         """Write content to a systemd service file via sudo tee. Returns True on success."""
         try:
@@ -3802,6 +3848,16 @@ class DeploymentExecutor:
 
         # Step 2: Prepend /opt/rust/bin if not already present
         updated = self._build_updated_service_content(updated, rust_bin)
+
+        # Step 3: Ensure RUSTUP_HOME so rustup proxy finds the toolchain
+        updated = self._ensure_systemd_env_var(
+            updated, "RUSTUP_HOME", str(RUST_SYSTEM_DIR)
+        )
+
+        # Step 4: Ensure CARGO_HOME for cargo binaries
+        updated = self._ensure_systemd_env_var(
+            updated, "CARGO_HOME", str(RUST_SYSTEM_DIR)
+        )
 
         if updated == original:
             logger.debug(
