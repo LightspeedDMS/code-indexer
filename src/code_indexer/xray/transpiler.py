@@ -540,7 +540,10 @@ class _RustEmitter:
                 ):
                     obj = f"{obj}.unwrap()"
                 return f"{obj}.named_children()"
-            if isinstance(func, ast.Attribute) and func.attr == "descendants_of_kind":
+            if isinstance(func, ast.Attribute) and func.attr in (
+                "descendants_of_kind",
+                "descendants_of_type",
+            ):
                 obj = self._emit_expr(func.value)
                 if (
                     isinstance(func.value, ast.Name)
@@ -715,11 +718,19 @@ class _RustEmitter:
                     return f"{obj}.has_descendant_of_kind({self._emit_expr(args[0])})"
                 return f'{obj}.has_descendant_of_kind("")'
 
-            # .descendants_of_kind(x) — pass through
-            if method == "descendants_of_kind":
+            # .descendants_of_kind(x) / .descendants_of_type(x) — Rust API is descendants_of_kind
+            if method in ("descendants_of_kind", "descendants_of_type"):
                 if args:
                     return f"{obj}.descendants_of_kind({self._emit_expr(args[0])})"
                 return f'{obj}.descendants_of_kind("")'
+
+            # .count_descendants_of_type(x) → descendants_of_kind(x).len()
+            if method == "count_descendants_of_type":
+                if args:
+                    return (
+                        f"{obj}.descendants_of_kind({self._emit_expr(args[0])}).len()"
+                    )
+                return f'{obj}.descendants_of_kind("").len()'
 
             # .iter().take(n) chaining
             if method == "take":

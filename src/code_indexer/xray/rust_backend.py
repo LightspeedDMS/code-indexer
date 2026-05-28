@@ -23,12 +23,37 @@ import json
 import logging
 import subprocess
 import tempfile
+import textwrap
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _MAX_PARENT_TRAVERSAL_DEPTH = 10
+
+
+def _wrap_evaluator_snippet(code: str) -> str:
+    """Wrap a raw evaluator snippet in ``def evaluate_node(node):`` if needed.
+
+    The MCP tool sends raw evaluator snippets (plain statements) while
+    ``transpile_evaluator()`` requires a top-level ``evaluate_node`` function.
+    This function detects whether the code already has that wrapper at the
+    start of a line and, if not, indents every line by 4 spaces and prepends
+    the function header.
+
+    Args:
+        code: Python evaluator code — either a raw snippet or one that already
+            defines ``def evaluate_node(node):``.
+
+    Returns:
+        Code guaranteed to contain a top-level ``def evaluate_node(node):``
+        function.
+    """
+    for line in code.splitlines():
+        if line.startswith("def evaluate_node("):
+            return code  # Already has the required wrapper at line start.
+    indented = textwrap.indent(code, "    ")
+    return f"def evaluate_node(node):\n{indented}"
 
 
 def _find_project_root() -> Path:
@@ -170,11 +195,17 @@ class RustNativeBackend:
     # ------------------------------------------------------------------
 
     def _transpile_to_rust(self, evaluator_code: str) -> Tuple[str, Optional[str]]:
-        """Transpile Python evaluator to Rust. Returns (rust_code, error_msg)."""
+        """Transpile Python evaluator to Rust. Returns (rust_code, error_msg).
+
+        Raw MCP evaluator snippets (plain statements without a wrapping
+        ``def evaluate_node(node):`` function) are auto-wrapped before
+        transpilation so they produce valid transpiler input.
+        """
         from code_indexer.xray.transpiler import TranspileError, transpile_evaluator  # noqa: PLC0415
 
         try:
-            return transpile_evaluator(evaluator_code), None
+            wrapped = _wrap_evaluator_snippet(evaluator_code)
+            return transpile_evaluator(wrapped), None
         except (TranspileError, SyntaxError) as exc:
             msg = f"Transpilation failed: {exc}"
             logger.warning("RustNativeBackend: %s", msg)

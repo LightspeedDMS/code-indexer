@@ -464,6 +464,73 @@ def test_snippet_field_preserved_in_match():
 
 
 # ---------------------------------------------------------------------------
+# Tests 11-14: _wrap_evaluator_snippet and auto-wrap integration
+# ---------------------------------------------------------------------------
+
+_RAW_SINGLE = (
+    'funcs = node.descendants_of_type("function_definition")\n'
+    'return {"matches": [{"line_number": f.start_point[0] + 1} for f in funcs], "value": None}\n'
+)
+
+_RAW_MULTI = 'x = 1\ny = x + 2\nreturn {"matches": [], "value": y}\n'
+
+_ALREADY_WRAPPED = (
+    "def evaluate_node(node):\n"
+    '    funcs = node.descendants_of_kind("function_definition")\n'
+    "    return []\n"
+)
+
+
+@pytest.mark.parametrize(
+    "raw_snippet",
+    [
+        pytest.param(_RAW_SINGLE, id="single-statement"),
+        pytest.param(_RAW_MULTI, id="multi-line"),
+    ],
+)
+def test_wrap_raw_snippet_structure_and_content(raw_snippet: str) -> None:
+    """Raw snippet is wrapped: first line is def evaluate_node(node):
+    and every original line appears indented by exactly 4 spaces in the body.
+
+    Covers both single-statement and multi-line snippets via parametrize
+    to avoid duplicated assertion logic.
+    """
+    from code_indexer.xray.rust_backend import _wrap_evaluator_snippet
+
+    result = _wrap_evaluator_snippet(raw_snippet)
+    lines = result.splitlines()
+
+    assert lines[0] == "def evaluate_node(node):"
+    for original, wrapped in zip(raw_snippet.splitlines(), lines[1:]):
+        assert wrapped == "    " + original, (
+            f"Expected '    {original}', got {wrapped!r}"
+        )
+
+
+def test_already_wrapped_passthrough() -> None:
+    """Code that already defines def evaluate_node(node): is returned unchanged."""
+    from code_indexer.xray.rust_backend import _wrap_evaluator_snippet
+
+    result = _wrap_evaluator_snippet(_ALREADY_WRAPPED)
+    assert result == _ALREADY_WRAPPED
+
+
+def test_transpile_wrapped_snippet_succeeds() -> None:
+    """A raw MCP-style snippet auto-wrapped by _transpile_to_rust transpiles without error.
+
+    Asserts only that no transpile error occurs and that non-empty Rust output
+    is produced. Does not assert Rust internals.
+    """
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    rust_code, error = backend._transpile_to_rust(_RAW_SINGLE)
+
+    assert error is None, f"Expected no transpile error, got: {error}"
+    assert rust_code.strip() != "", "Expected non-empty Rust code output"
+
+
+# ---------------------------------------------------------------------------
 # Test 10: XRaySearchEngine.__init__ creates rust_backend attribute
 # ---------------------------------------------------------------------------
 

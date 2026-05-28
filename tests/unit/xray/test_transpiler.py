@@ -327,6 +327,44 @@ def evaluate_node(node):
         assert 'descendants_of_kind("try_statement")' in rust
         assert "for ts in" in rust
 
+    def test_descendants_of_type_call(self):
+        """node.descendants_of_type('X') is an alias — transpiles to descendants_of_kind."""
+        python_src = """
+def evaluate_node(node):
+    for c in node.descendants_of_type("function_definition"):
+        if c.kind == "function_definition":
+            return []
+    return []
+"""
+        rust = self.transpile(python_src)
+        assert 'descendants_of_kind("function_definition")' in rust
+        assert "descendants_of_type" not in rust
+
+    def test_descendants_of_type_in_for_loop(self):
+        """for x in node.descendants_of_type('kind') transpiles as for-loop iterator."""
+        python_src = """
+def evaluate_node(node):
+    findings = []
+    for f in node.descendants_of_type("if_statement"):
+        findings.append({"pattern": "if", "line": f.start_line, "snippet": f.text})
+    return findings
+"""
+        rust = self.transpile(python_src)
+        assert 'descendants_of_kind("if_statement")' in rust
+        assert "for f in" in rust
+        assert "descendants_of_type" not in rust
+
+    def test_count_descendants_of_type_call(self):
+        """count_descendants_of_type('X') transpiles to descendants_of_kind('X').len()."""
+        python_src = """
+def evaluate_node(node):
+    n = node.count_descendants_of_type("class_definition")
+    return []
+"""
+        rust = self.transpile(python_src)
+        assert 'descendants_of_kind("class_definition").len()' in rust
+        assert "count_descendants_of_type" not in rust
+
     def test_return_dict_with_matches_extracts_matches(self):
         """return {'matches': X, 'value': Y} extracts X as the return value."""
         python_src = """
