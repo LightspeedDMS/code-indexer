@@ -13,8 +13,19 @@ pub struct CacheMetadata {
     pub compile_ms: u128,
 }
 
-/// Returns the cache directory: ~/.cidx-server/xray-cache/
+/// Returns the cache directory: $CIDX_DATA_DIR/xray-cache/ when CIDX_DATA_DIR is set
+/// (absolute path required), otherwise ~/.cidx-server/xray-cache/.
+///
+/// Must match Python's _get_cache_dir() in rust_backend.py (Bug #879).
 pub fn get_cache_dir() -> PathBuf {
+    // CIDX_DATA_DIR is the server-level override for all data paths (Bug #879).
+    // Must match Python's _get_cache_dir() in rust_backend.py.
+    if let Ok(data_dir) = std::env::var("CIDX_DATA_DIR") {
+        let p = PathBuf::from(&data_dir);
+        if p.is_absolute() {
+            return p.join("xray-cache");
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".cidx-server").join("xray-cache")
 }
@@ -54,6 +65,32 @@ pub fn get_rustc_version() -> String {
         }
         _ => "unknown".to_string(),
     }
+}
+
+/// TTL for local cached .so files (seconds).
+pub const LOCAL_CACHE_TTL_SECS: u64 = 300;
+
+/// Check whether the `compiled_at` timestamp is within `ttl_secs` of now.
+/// `compiled_at` format: "{epoch}s-since-epoch" (written by `chrono_now_iso()`).
+/// Returns false if the format is unrecognised (forces recompile — safe default).
+///
+/// Boundary: entries aged exactly `ttl_secs` seconds are considered stale (strict `<`).
+pub fn is_fresh(compiled_at: &str, ttl_secs: u64) -> bool {
+    let epoch_str = match compiled_at.strip_suffix("s-since-epoch") {
+        Some(s) if !s.is_empty() => s,
+        _ => return false, // unrecognised format → stale → recompile
+    };
+    let compiled_epoch: u64 = match epoch_str.parse() {
+        Ok(v) => v,
+        Err(_) => return false, // non-numeric → stale
+    };
+    // If system clock is before UNIX_EPOCH, treat as stale (safe default: force recompile).
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(_) => return false, // clock error → stale → recompile
+    };
+    // Strict <: entries aged exactly ttl_secs are considered stale.
+    now.saturating_sub(compiled_epoch) < ttl_secs
 }
 
 /// Evicts oldest entries from `cache_dir` (by mtime) keeping at most
@@ -145,12 +182,112 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // ---- is_fresh() tests ----
+
+    #[test]
+    fn test_is_fresh_within_ttl() {
+        // compiled 10s ago, TTL 300 — must be fresh
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let compiled_epoch = now - 10;
+        let compiled_at = format!("{}s-since-epoch", compiled_epoch);
+        assert!(is_fresh(&compiled_at, 300), "10s-old entry with TTL=300 must be fresh");
+    }
+
+    #[test]
+    fn test_is_fresh_expired() {
+        // compiled 600s ago, TTL 300 — must be stale
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let compiled_epoch = now - 600;
+        let compiled_at = format!("{}s-since-epoch", compiled_epoch);
+        assert!(!is_fresh(&compiled_at, 300), "600s-old entry with TTL=300 must be stale");
+    }
+
+    #[test]
+    fn test_is_fresh_invalid_format() {
+        // unrecognised format → safe default (stale → recompile)
+        assert!(!is_fresh("not-a-timestamp", 300), "invalid format must return false");
+        assert!(!is_fresh("garbage", 300), "garbage string must return false");
+        assert!(!is_fresh("", 300), "empty string must return false");
+        assert!(!is_fresh("2025-01-01T00:00:00Z", 300), "ISO 8601 format must return false (wrong suffix)");
+    }
+
+    #[test]
+    fn test_is_fresh_boundary() {
+        // compiled exactly at TTL — must be stale (strict <, not <=)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let compiled_epoch = now - 300; // exactly at boundary
+        let compiled_at = format!("{}s-since-epoch", compiled_epoch);
+        assert!(!is_fresh(&compiled_at, 300), "entry at exact TTL boundary must be stale (strict <)");
+    }
+
+    // ---- get_cache_dir() tests ----
+
+    // Mutex to serialize all tests that touch CIDX_DATA_DIR.
+    // std::env is process-global mutable state; Rust runs tests in parallel by
+    // default, so this mutex makes isolation explicit and safe regardless of
+    // --test-threads setting.
+    static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    fn env_mutex() -> &'static std::sync::Mutex<()> {
+        ENV_MUTEX.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// RAII guard: saves the previous CIDX_DATA_DIR value on construction,
+    /// restores it on drop (or removes the var if it was absent).
+    /// Guarantees restoration even when the test panics.
+    struct CidxDataDirGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+    impl CidxDataDirGuard {
+        fn new() -> Self {
+            Self {
+                previous: std::env::var_os("CIDX_DATA_DIR"),
+            }
+        }
+    }
+    impl Drop for CidxDataDirGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var("CIDX_DATA_DIR", v),
+                None => std::env::remove_var("CIDX_DATA_DIR"),
+            }
+        }
+    }
+
     #[test]
     fn test_get_cache_dir_contains_expected_path() {
+        // Serialize against other tests that set CIDX_DATA_DIR.
+        let _lock = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CidxDataDirGuard::new();
+        // Ensure the var is absent so we exercise the default path.
+        std::env::remove_var("CIDX_DATA_DIR");
         let dir = get_cache_dir();
         let s = dir.to_string_lossy();
         assert!(s.contains(".cidx-server"), "expected .cidx-server in {}", s);
         assert!(s.contains("xray-cache"), "expected xray-cache in {}", s);
+    }
+
+    #[test]
+    fn test_get_cache_dir_respects_cidx_data_dir() {
+        // Serialize against other tests that touch CIDX_DATA_DIR.
+        let _lock = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CidxDataDirGuard::new();
+        let base = std::env::temp_dir().join("cidx-test-data");
+        // Pass path directly as OsStr — no UTF-8 assumption.
+        std::env::set_var("CIDX_DATA_DIR", &base);
+        let dir = get_cache_dir();
+        // Assert before drop so the failure message is meaningful.
+        assert_eq!(dir, base.join("xray-cache"));
+        // _guard restores previous CIDX_DATA_DIR state on drop.
     }
 
     #[test]

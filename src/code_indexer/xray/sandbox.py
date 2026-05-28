@@ -1238,6 +1238,11 @@ _RUST_FORBIDDEN_PATTERNS: list[tuple[str, str, str]] = [
     ("forbidden_macro", "panic!", r"\bpanic\s*!"),
     ("forbidden_macro", "todo!", r"\btodo\s*!"),
     ("forbidden_macro", "unimplemented!", r"\bunimplemented\s*!"),
+    ("forbidden_macro", "include_str!", r"\binclude_str\s*!"),
+    ("forbidden_macro", "include_bytes!", r"\binclude_bytes\s*!"),
+    ("forbidden_macro", "option_env!", r"\boption_env\s*!"),
+    ("forbidden_macro", "print!", r"\bprint\s*!"),
+    ("forbidden_macro", "eprint!", r"\beprint\s*!"),
 ]
 
 # Pre-compiled pattern objects for performance.

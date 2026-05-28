@@ -73,6 +73,7 @@ def _rust_env(tmp_path: Path) -> Iterator[MagicMock]:
     with (
         patch(f"{_MODULE}.Path.home", return_value=tmp_path),
         patch(f"{_MODULE}.__file__", fake_file, create=True),
+        patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
         patch("subprocess.run") as mock_run,
     ):
         yield mock_run
@@ -228,8 +229,12 @@ class TestFreshRustInstallSucceeds:
         )
         assert found, "Expected 'rustup default stable' call not found"
 
-    def test_returns_true_even_when_pin_stable_fails(self, tmp_path: Path) -> None:
-        """'rustup default stable' failing is non-fatal; method continues and returns True."""
+    def test_returns_true_after_fresh_install_when_stable_baked_into_sh(
+        self, tmp_path: Path
+    ) -> None:
+        """Stable toolchain pinning uses --default-toolchain stable baked into RUSTUP_SH_ARGS,
+        so there is no separate 'rustup default stable' subprocess call.
+        Fresh install path: rustc missing -> curl ok -> sh ok -> cargo build ok -> True."""
         executor = _make_executor()
         rust_dir = tmp_path / "rust"
         rust_dir.mkdir()
@@ -237,9 +242,9 @@ class TestFreshRustInstallSucceeds:
         with _rust_env(tmp_path) as mock_run:
             mock_run.side_effect = [
                 FileNotFoundError("rustc not found"),  # rustc --version -> missing
-                _proc(0),  # rustup install -> ok
-                _proc(1, stderr="toolchain error"),  # rustup default stable -> FAIL
-                _proc(0),  # cargo build
+                _proc(0),  # curl: download installer script -> ok
+                _proc(0),  # sh: run installer with --default-toolchain stable -> ok
+                _proc(0),  # cargo build -> ok
             ]
             with patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"):
                 result = executor._ensure_rust_toolchain()

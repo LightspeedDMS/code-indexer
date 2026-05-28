@@ -19,16 +19,55 @@ Error contract:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+class XrayCacheBackend(Protocol):
+    """Structural interface for cluster-aware evaluator cache backends.
+
+    Implementations must support fetch (cache lookup) and store (cache write).
+    All methods must be exception-safe — callers assume they never raise.
+    """
+
+    def fetch(self, source_hash: str, rustc_version: str) -> Optional[bytes]:
+        """Return cached .so bytes if fresh and rustc_version matches, else None."""
+        ...
+
+    def store(
+        self,
+        source_hash: str,
+        rustc_version: str,
+        so_bytes: bytes,
+        compile_ms: int = 0,
+    ) -> None:
+        """Upsert compiled .so bytes into the cache."""
+        ...
+
+
 _MAX_PARENT_TRAVERSAL_DEPTH = 10
+
+# Timeout for `rustc --version` subprocess call.
+_RUSTC_VERSION_TIMEOUT_SECS = 10
+
+# Maximum stderr bytes to include in the rustc failure log message.
+_RUSTC_STDERR_LOG_LIMIT = 200
+
+# Environment variable that overrides the CIDX data directory root.
+# When set, the xray cache lives at $CIDX_DATA_DIR/xray-cache instead of
+# ~/.cidx-server/xray-cache, matching the server's IPC path alignment (Bug #879).
+_XRAY_CACHE_DIR_ENV = "CIDX_DATA_DIR"
+
+# Named path segments — must match Rust's get_cache_dir() in cache.rs exactly.
+_CIDX_SERVER_DIR_NAME = ".cidx-server"
+_XRAY_CACHE_DIR_NAME = "xray-cache"
 
 
 def _find_project_root() -> Path:
@@ -101,9 +140,74 @@ class RustNativeBackend:
     XRaySearchEngine pipeline.
     """
 
-    def __init__(self) -> None:
-        """Initialise backend with default xray-cli path."""
+    def __init__(self, xray_cache_backend: Optional[XrayCacheBackend] = None) -> None:
+        """Initialise backend with default xray-cli path and optional cluster cache.
+
+        Args:
+            xray_cache_backend: Optional cluster cache backend (XrayCacheBackend).
+                Pass None (default) for solo-mode deployments.
+        """
         self._xray_cli_path: Path = _XRAY_CLI_DEFAULT
+        self._xray_cache: Optional[XrayCacheBackend] = xray_cache_backend
+        self._rustc_version: Optional[str] = None
+
+    @staticmethod
+    def _sha256_hex(text: str) -> str:
+        """SHA-256 hex digest of text — matches Rust's sha256_hex() byte-for-byte."""
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def _get_rustc_version(self) -> str:
+        """Get rustc version string, cached for the process lifetime."""
+        if self._rustc_version is None:
+            try:
+                result = subprocess.run(
+                    ["rustc", "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=_RUSTC_VERSION_TIMEOUT_SECS,
+                )
+                if result.returncode == 0:
+                    self._rustc_version = result.stdout.strip()
+                else:
+                    logger.warning(
+                        "RustNativeBackend: rustc --version exited %d; stderr=%r",
+                        result.returncode,
+                        result.stderr[:_RUSTC_STDERR_LOG_LIMIT],
+                    )
+                    self._rustc_version = "unknown"
+            except Exception as exc:
+                logger.warning("RustNativeBackend: rustc --version failed: %s", exc)
+                self._rustc_version = "unknown"
+        return self._rustc_version
+
+    @staticmethod
+    def _get_cache_dir() -> Path:
+        """Return the local xray cache directory.
+
+        CIDX_DATA_DIR is a server-level administrative config (same env var used
+        in Bug #879 for IPC path alignment). It is set by the system operator or
+        the auto-updater — NOT user-supplied input. Validation rejects non-absolute
+        paths (after expanduser) to prevent directory traversal.
+
+        Falls back to ~/.cidx-server/xray-cache when unset or invalid.
+        Both branches are normalized via resolve().
+
+        MUST produce the same path as Rust's get_cache_dir() in cache.rs so that
+        Python-written pre-fill .so files are visible to the Rust compiler cache.
+        """
+        import os  # noqa: PLC0415 — stdlib, lazy import to keep startup clean
+
+        raw = os.environ.get(_XRAY_CACHE_DIR_ENV, "").strip()
+        if raw:
+            expanded = Path(raw).expanduser()
+            if expanded.is_absolute():
+                return expanded.resolve() / _XRAY_CACHE_DIR_NAME
+            logger.warning(
+                "RustNativeBackend: %s=%r is not absolute after expanduser; using default",
+                _XRAY_CACHE_DIR_ENV,
+                raw,
+            )
+        return (Path.home() / _CIDX_SERVER_DIR_NAME / _XRAY_CACHE_DIR_NAME).resolve()
 
     def run_batch(
         self,
@@ -163,11 +267,53 @@ class RustNativeBackend:
             logger.warning("RustNativeBackend: xray-cli error: %s", cli_error)
             return _error_all(file_specs, "XRayCliError", cli_error)
 
+        # Cluster post-fill: upload a freshly compiled .so to PG so other nodes
+        # can skip compilation. Only fires when: cache is configured, the compile
+        # was NOT a cache hit (cached=false), and the compile took real time.
+        if (
+            self._xray_cache is not None
+            and output.get("cached") is False
+            and output.get("compile_ms", 0) > 0
+        ):
+            self._try_post_fill(rust_code, output.get("compile_ms", 0))
+
         return self._build_results(file_specs, abs_paths, output.get("findings", []))
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _try_post_fill(self, rust_code: str, compile_ms: int) -> None:
+        """Upload freshly compiled .so to cluster cache after a successful compile.
+
+        Reads the local .so (written by Rust's compile_evaluator) and calls
+        cache.store(). All exceptions are caught and logged at WARNING — the .so
+        exists locally so functionality is unimpaired even if upload fails.
+        """
+        try:
+            if self._xray_cache is None:
+                logger.warning(
+                    "XrayCache: post-fill called with no cache backend — skipping"
+                )
+                return
+            source_hash = self._sha256_hex(rust_code)
+            cache_dir = self._get_cache_dir()
+            local_so = cache_dir / f"{source_hash}.so"
+            if not local_so.exists():
+                logger.warning(
+                    "XrayCache: post-fill skipped — .so not found at %s", local_so
+                )
+                return
+            so_bytes = local_so.read_bytes()
+            rustc_ver = self._get_rustc_version()
+            self._xray_cache.store(source_hash, rustc_ver, so_bytes, compile_ms)
+            logger.info(
+                "XrayCache: uploaded %s to cluster cache (%d bytes)",
+                source_hash[:12],
+                len(so_bytes),
+            )
+        except Exception as exc:
+            logger.warning("XrayCache: post-fill failed: %s", exc)
 
     def _validate_rust_code(self, evaluator_code: str) -> Tuple[str, Optional[str]]:
         """Validate Rust evaluator code. Returns (rust_code, error_msg).
@@ -185,6 +331,52 @@ class RustNativeBackend:
             return "", msg
         return evaluator_code, None
 
+    def _try_pre_fill(self, rust_code: str) -> None:
+        """Fetch .so from cluster cache and write locally so Rust skips recompile.
+
+        Writes .meta BEFORE .so to avoid partial state: if meta write fails, .so
+        is never written. On .so write failure, .meta is deleted to prevent orphan
+        metadata. All exceptions are logged at WARNING — a failed pre-fill is
+        non-fatal; Rust will simply compile from scratch.
+
+        Early-returns when BOTH .so and .meta already exist for the hash.
+        The epoch format '{epoch}s-since-epoch' matches Rust's is_fresh() contract.
+        """
+        import time  # noqa: PLC0415 — stdlib, lazy import
+
+        assert self._xray_cache is not None, (
+            "_try_pre_fill requires non-None _xray_cache"
+        )
+        try:
+            source_hash = self._sha256_hex(rust_code)
+            cache_dir = self._get_cache_dir()
+            local_so = cache_dir / f"{source_hash}.so"
+            meta_path = cache_dir / f"{source_hash}.meta"
+            if local_so.exists() and meta_path.exists():
+                return  # both artifacts present — no fetch needed
+            rustc_ver = self._get_rustc_version()
+            blob = self._xray_cache.fetch(source_hash, rustc_ver)
+            if blob is None:
+                return  # cluster miss — Rust will compile fresh
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            epoch = int(time.time())
+            # Write .meta first so Rust's TTL check sees a valid timestamp.
+            # If this fails, .so is never written — no partial cache state.
+            meta_path.write_text(
+                f"source_hash={source_hash}\n"
+                f"rustc_version={rustc_ver}\n"
+                f"compiled_at={epoch}s-since-epoch\n"
+                f"compile_ms=0\n"
+            )
+            try:
+                local_so.write_bytes(blob)
+            except Exception:
+                meta_path.unlink(missing_ok=True)  # roll back meta to avoid orphan
+                raise
+            logger.info("XrayCache: pre-filled %s from cluster cache", source_hash[:12])
+        except Exception as exc:
+            logger.warning("XrayCache: pre-fill failed: %s", exc)
+
     def _invoke_xray_cli(
         self,
         rust_code: str,
@@ -200,6 +392,11 @@ class RustNativeBackend:
             tmp_file.write(rust_code)
             tmp_file.close()
             tmp_path = tmp_file.name
+
+            # Cluster pre-fill: if PG has a fresh blob, write it locally so Rust
+            # sees a local cache hit and skips compilation entirely.
+            if self._xray_cache is not None:
+                self._try_pre_fill(rust_code)
 
             cmd = [
                 str(self._xray_cli_path),
@@ -230,9 +427,7 @@ class RustNativeBackend:
                 return "", msg
 
             if proc.returncode != 0 and not stdout.strip():
-                msg = (
-                    f"xray-cli exited with code {proc.returncode}: {stderr[:200]}"
-                )
+                msg = f"xray-cli exited with code {proc.returncode}: {stderr[:200]}"
                 logger.warning("RustNativeBackend: %s", msg)
                 return "", msg
             return stdout or "", None

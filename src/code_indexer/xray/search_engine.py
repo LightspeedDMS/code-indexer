@@ -15,7 +15,10 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from code_indexer.xray.rust_backend import XrayCacheBackend
 
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
@@ -24,6 +27,79 @@ from code_indexer.global_repos.regex_search import (
 from code_indexer.xray.sandbox import _line_to_byte_offset_bytes as _line_to_byte_offset
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton for cluster cache backend.
+# Created once on first successful/definitive initialization, reused thereafter.
+# _cluster_cache_lock serializes initialization; double-checked locking avoids
+# acquiring the lock on every call once the singleton is established.
+_cluster_cache_singleton: Optional["XrayCacheBackend"] = None
+_cluster_cache_initialized: bool = False
+_cluster_cache_lock: threading.Lock = threading.Lock()
+
+
+def _get_cluster_cache() -> Optional["XrayCacheBackend"]:
+    """Return a shared XrayCachePostgresBackend when in cluster (postgres) mode.
+
+    Singleton with double-checked locking: initialized once on the first
+    definitive outcome, then returns the cached result without acquiring the
+    lock on every subsequent call.
+
+    Definitive outcomes (set _cluster_cache_initialized = True):
+    - Non-postgres storage mode: returns None permanently.
+    - Missing postgres DSN: returns None permanently.
+    - Successful backend creation: returns the backend permanently.
+
+    Transient failures (exception from config/import/pool): leaves
+    _cluster_cache_initialized = False so the next call retries.  This
+    prevents a one-time startup blip from permanently disabling the cache.
+
+    Returns None in solo mode or on transient errors (graceful degradation).
+    """
+    global _cluster_cache_singleton, _cluster_cache_initialized
+    # Fast path: already initialized (no lock needed).
+    if _cluster_cache_initialized:
+        return _cluster_cache_singleton
+    with _cluster_cache_lock:
+        # Slow path: re-check inside the lock to handle concurrent first callers.
+        if _cluster_cache_initialized:
+            return _cluster_cache_singleton
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
+            storage_mode = getattr(config, "storage_mode", "")
+            if storage_mode != "postgres":
+                # Definitive: not a postgres deployment — cache the None result.
+                _cluster_cache_initialized = True
+                return None
+            postgres_dsn = getattr(config, "postgres_dsn", "")
+            if not postgres_dsn:
+                # Definitive: misconfigured postgres — cache the None result.
+                logger.warning(
+                    "XRaySearchEngine: postgres mode but no DSN — cluster cache disabled"
+                )
+                _cluster_cache_initialized = True
+                return None
+            from code_indexer.server.storage.postgres.connection_pool import (
+                ConnectionPool,
+            )
+            from code_indexer.server.storage.postgres.xray_cache_backend import (
+                XrayCachePostgresBackend,
+            )
+
+            pool = ConnectionPool(postgres_dsn)
+            _cluster_cache_singleton = XrayCachePostgresBackend(pool)
+            # Definitive: backend created successfully — cache the result.
+            _cluster_cache_initialized = True
+            logger.info("XRaySearchEngine: cluster evaluator cache enabled (postgres)")
+            return _cluster_cache_singleton
+        except Exception as exc:
+            # Transient failure: leave _cluster_cache_initialized = False so the
+            # next XRaySearchEngine instantiation retries.
+            logger.warning(
+                "XRaySearchEngine: cluster cache setup failed — solo mode: %s", exc
+            )
+            return None
 
 
 def _run_async_in_sync(coro: Any) -> Any:
@@ -84,7 +160,7 @@ class XRaySearchEngine:
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
         self.ast_engine = AstSearchEngine()
-        self.rust_backend = RustNativeBackend()
+        self.rust_backend = RustNativeBackend(xray_cache_backend=_get_cluster_cache())
         self.sandbox = PythonEvaluatorSandbox()
 
     @staticmethod

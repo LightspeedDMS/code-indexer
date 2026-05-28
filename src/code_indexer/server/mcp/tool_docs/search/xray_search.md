@@ -236,18 +236,22 @@ The server validates evaluator code against a security whitelist before compilat
 - Raw pointers: `*const`, `*mut`
 - Foreign function interface: `extern` blocks, `extern "C" fn`
 - Module declarations: `mod`
-- Mutable statics: `static mut`
-- Forbidden macros: `include!`, `env!`, `println!`, `eprintln!`, `panic!`, `todo!`, `unimplemented!`
+- Static declarations: `static` and `static mut` (use `const` instead)
+- Forbidden macros: `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!`, `println!`, `eprintln!`, `print!`, `eprint!`, `panic!`, `todo!`, `unimplemented!`
 
 **Allowed constructs** (safe Rust subset):
 
-- Variable bindings: `let`, `let mut`
+- Variable bindings: `let`, `let mut`, `const`
 - Control flow: `if`/`else`, `for`/`while`/`loop`, `match`, `break`, `continue`, `return`
 - Local function definitions: `fn` (helper functions within the evaluator)
-- String operations: `.to_string()`, `.clone()`, `.contains()`, `format!`
-- Vec operations: `Vec::new()`, `.push()`, `.len()`, `.iter()`, `.is_empty()`
-- Pattern matching, closures, iterators
+- String operations: `.to_string()`, `.clone()`, `.contains()`, `.starts_with()`, `.ends_with()`, `.to_uppercase()`, `.to_lowercase()`, `.split()`, `.trim()`, `format!`
+- Vec operations: `Vec::new()`, `vec![]`, `.push()`, `.len()`, `.iter()`, `.is_empty()`
+- Standard library collections: `std::collections::HashMap`, `HashSet`, `BTreeMap`, `BTreeSet` (import with `use`)
+- Iterator chains: `.filter()`, `.map()`, `.any()`, `.all()`, `.count()`, `.flat_map()`, `.enumerate()`, `.collect()`
+- Pattern matching, closures, `Option`/`Result` combinators (`.unwrap_or()`, `.map()`, `.and_then()`)
+- Safe macros: `format!`, `vec![]`, `assert!`, `assert_eq!`, `assert_ne!`
 - The `OwnedNode` and `EvalFinding` types (provided by compiler preamble)
+- The `truncate_snippet(s: &str, max_len: usize) -> String` utility (provided by compiler preamble) -- collapses whitespace and truncates to `max_len` bytes on a UTF-8 boundary, appending "..." if truncated
 
 > **Termination guarantee**: infinite loops in your evaluator hit the sandbox hard timeout (HARD_TIMEOUT_SECONDS = 5.0 s) and surface as `EvaluatorTimeout` in `evaluation_errors[]`. The sandbox timeout is the authoritative termination boundary.
 
@@ -332,8 +336,8 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
        let mut findings = Vec::new();
        for s in node.descendants_of_kind("string") {
-           let upper = s.text.to_string();
-           if upper.contains("SELECT") || upper.contains("select") {
+           let text = s.text.to_string();
+           if text.contains("SELECT") || text.contains("select") {
                findings.push(EvalFinding {
                    pattern: "sql_string".to_string(),
                    line: s.start_line,
@@ -554,7 +558,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
 
 ### Common cross-language node type names
 
-tree-sitter node type names differ between languages. Use this table as a starting reference for the 10 mandatory languages.
+tree-sitter node type names differ between languages. Use this table as a starting reference for the 7 general-purpose mandatory languages. Bash, HTML, and CSS are also supported but have limited overlap with the constructs below -- use `xray_dump_ast` to discover their node types.
 
 | Construct | Python | Java | TypeScript / JavaScript | Go | Kotlin | C# |
 |-----------|--------|------|-------------------------|-----|--------|-----|
@@ -641,7 +645,7 @@ Each `error_type` carries a distinct `error_message` shape:
 }
 ```
 
-Structured error fields: `error_code` identifies the category (e.g. `forbidden_unsafe`, `forbidden_import`, `forbidden_raw_pointer`, `forbidden_extern`, `forbidden_mod`, `forbidden_static_mut`, `forbidden_macro`), `offending_construct` names the specific construct (e.g. `unsafe`, `std::fs`, `*const`, `extern`, `mod`, `static mut`, `include!`), `offending_line` is the 1-based line number in evaluator_code.
+Structured error fields: `error_code` identifies the category (e.g. `forbidden_unsafe`, `forbidden_import`, `forbidden_raw_pointer`, `forbidden_extern`, `forbidden_mod`, `forbidden_static`, `forbidden_macro`), `offending_construct` names the specific construct (e.g. `unsafe`, `std::fs`, `*const`, `extern`, `mod`, `static`, `include!`), `offending_line` is the 1-based line number in evaluator_code.
 
 Other validation rejection messages name the offending construct and include a description. Examples: `"forbidden construct 'unsafe' is not allowed in Rust evaluator code"`, `"forbidden import 'std::fs' is not allowed in Rust evaluator code"`, `"forbidden raw pointer '*const' is not allowed in Rust evaluator code"`, `"forbidden macro 'println!' is not allowed in Rust evaluator code"`.
 

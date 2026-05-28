@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.59.0 (2026-05-28) -- Cluster-Aware Evaluator Cache + TTL (Epic #1019)
+
+### Added
+- Cluster-aware evaluator compilation cache: compiled .so blobs shared across cluster nodes via PostgreSQL (`xray_evaluator_cache` table). Solo mode uses local filesystem cache as before.
+- 5-minute TTL for cached evaluator .so files: Rust-side `is_fresh()` rejects stale local cache entries, PostgreSQL-side `fetch()` filters by `compiled_at` timestamp. Lazy cleanup on `store()`.
+- `XrayCacheBackend` Protocol in `rust_backend.py` for structural typing of cache backends.
+- Module-level singleton for cluster cache backend in `search_engine.py` -- shared across all per-request `XRaySearchEngine` instances.
+- `CIDX_DATA_DIR` support in Rust `get_cache_dir()` -- parity with Python for deployments using custom data directories (Bug #879).
+- 3 new forbidden macros in Rust validator: `panic!`, `todo!`, `unimplemented!` (defense-in-depth, both Python and Rust layers).
+- 5 new forbidden macros in Python pre-flight validator: `include_str!`, `include_bytes!`, `option_env!`, `print!`, `eprint!`.
+- `_ensure_systemd_cargo_path()` in DeploymentExecutor: ensures `~/.cargo/bin` in systemd PATH for Rust toolchain (mirrors `_ensure_systemd_claude_path()`).
+
+### Changed
+- Evaluator cache check now requires TTL freshness in addition to hash and rustc version match.
+- `RustNativeBackend.__init__()` accepts optional `xray_cache_backend` parameter for cluster cache injection.
+- `install-cidx-server.sh`: Cargo bin directory added to systemd PATH line.
+
+### Fixed
+- 6 corrections in xray_search MCP documentation: `static mut` -> `static` in forbidden list, expanded allowed macros/constructs, fixed variable name in cookbook pattern 5, corrected language count, fixed error code name.
+- Removed redundant `rustup default stable` subprocess call from `_install_rust_toolchain()` (already baked into RUSTUP_SH_ARGS).
+- Fixed bytes/str stderr handling in curl and sh error paths in deployment executor.
+
 ## v10.58.0 (2026-05-27) -- Pure Rust Evaluators, Transpiler Removed (Epic #1019)
 
 ### Removed

@@ -3747,6 +3747,46 @@ class DeploymentExecutor:
         )
         return True
 
+    def _ensure_systemd_cargo_path(self) -> bool:
+        """Ensure the cidx-server systemd service unit has ~/.cargo/bin in PATH.
+
+        Non-fatal: returns False with WARNING when the service file is missing
+        or any subprocess call fails.
+        """
+        service_file = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+        if not service_file.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-168",
+                    f"Systemd service file not found: {service_file}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+        cargo_bin = str(Path.home() / ".cargo" / "bin")
+        original = service_file.read_text()
+        updated = self._build_updated_service_content(original, cargo_bin)
+
+        if updated == original:
+            logger.debug(
+                f"PATH already contains {cargo_bin} in {service_file}, skipping",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        if not self._write_service_file_via_sudo(service_file, updated):
+            return False
+
+        if not self._reload_systemd_daemon():
+            return False
+
+        logger.info(
+            f"Updated PATH in {service_file} to include {cargo_bin}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return True
+
     # ------------------------------------------------------------------
     # Story #1024: Rust toolchain + xray-cli build helpers
     # ------------------------------------------------------------------
@@ -3773,9 +3813,10 @@ class DeploymentExecutor:
         return False
 
     def _install_rust_toolchain(self, env: dict) -> bool:
-        """Download and run the rustup installer, then pin stable.
+        """Download and run the rustup installer (curl + sh, no shell=True).
 
         Returns True on success, False on any failure.
+        Pin stable is handled separately by the caller (_ensure_rust_toolchain).
         """
         logger.info(
             "rustc not found — installing Rust toolchain via rustup",
@@ -3799,11 +3840,16 @@ class DeploymentExecutor:
             )
             return False
         if curl_result.returncode != 0:
+            stderr_text = (
+                curl_result.stderr.decode()
+                if isinstance(curl_result.stderr, bytes)
+                else curl_result.stderr
+            )
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
                     f"Rust toolchain install failed (curl): "
-                    f"{curl_result.stderr[:MAX_ERROR_SNIPPET_LENGTH].decode()}",
+                    f"{stderr_text[:MAX_ERROR_SNIPPET_LENGTH]}",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -3827,41 +3873,23 @@ class DeploymentExecutor:
             )
             return False
         if install_result.returncode != 0:
+            stderr_text = (
+                install_result.stderr.decode()
+                if isinstance(install_result.stderr, bytes)
+                else install_result.stderr
+            )
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
                     f"Rust toolchain install failed (sh): "
-                    f"{install_result.stderr[:MAX_ERROR_SNIPPET_LENGTH].decode()}",
+                    f"{stderr_text[:MAX_ERROR_SNIPPET_LENGTH]}",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
             return False
 
-        # Pin stable toolchain (best-effort: non-fatal if it fails)
-        try:
-            pin_result = subprocess.run(
-                ["rustup", "default", "stable"],
-                capture_output=True,
-                text=True,
-                timeout=RUSTUP_CMD_TIMEOUT_SECONDS,
-                env=env,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-            logger.warning(
-                "Failed to pin stable toolchain (non-fatal): %s",
-                exc,
-                extra={"correlation_id": get_correlation_id()},
-            )
-            pin_result = None
-        if pin_result is not None and pin_result.returncode != 0:
-            logger.warning(
-                "Failed to pin stable toolchain (non-fatal): %s",
-                pin_result.stderr[:MAX_ERROR_SNIPPET_LENGTH],
-                extra={"correlation_id": get_correlation_id()},
-            )
-
         logger.info(
-            "Rust toolchain installed and pinned to stable",
+            "Rust toolchain installed successfully",
             extra={"correlation_id": get_correlation_id()},
         )
         return True
@@ -3934,6 +3962,7 @@ class DeploymentExecutor:
             env["PATH"] = f"{cargo_bin}:{current_path}"
         else:
             env["PATH"] = str(cargo_bin)
+        self._ensure_systemd_cargo_path()
 
         if not self._check_rustc_installed(env):
             if not self._install_rust_toolchain(env):

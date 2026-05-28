@@ -182,6 +182,9 @@ impl<'ast> Visit<'ast> for ForbiddenConstructVisitor {
                     | "eprintln"
                     | "print"
                     | "eprint"
+                    | "panic"
+                    | "todo"
+                    | "unimplemented"
             ) {
                 let line = Self::span_line(node.path.segments.first().unwrap().ident.span());
                 self.add_error(

@@ -245,6 +245,56 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 }
 """,
     ),
+    (
+        "macro_include_str",
+        "include_str",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _s = include_str!("dummy.txt");
+    Vec::new()
+}
+""",
+    ),
+    (
+        "macro_include_bytes",
+        "include_bytes",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _b = include_bytes!("dummy.bin");
+    Vec::new()
+}
+""",
+    ),
+    (
+        "macro_option_env",
+        "option_env",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let _v = option_env!("DUMMY_VAR");
+    Vec::new()
+}
+""",
+    ),
+    (
+        "macro_print",
+        "print",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    print!("hello");
+    Vec::new()
+}
+""",
+    ),
+    (
+        "macro_eprint",
+        "eprint",
+        """\
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    eprint!("oops");
+    Vec::new()
+}
+""",
+    ),
 ]
 
 

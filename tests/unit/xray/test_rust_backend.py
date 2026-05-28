@@ -484,3 +484,282 @@ def test_search_engine_init_has_rust_backend_attribute():
         "XRaySearchEngine must have a rust_backend attribute after __init__"
     )
     assert isinstance(engine.rust_backend, RustNativeBackend)
+
+
+# ---------------------------------------------------------------------------
+# Sentinel cache — raises if any cache method is called
+# ---------------------------------------------------------------------------
+
+
+class _NoCacheAllowed:
+    """Sentinel: raises AssertionError if fetch() or store() are called."""
+
+    def fetch(self, *args, **kwargs):
+        raise AssertionError("fetch() must not be called in this test scenario")
+
+    def store(self, *args, **kwargs):
+        raise AssertionError("store() must not be called in this test scenario")
+
+
+# ---------------------------------------------------------------------------
+# Test 11: Solo mode — binary missing before cache code runs → no cache calls
+# ---------------------------------------------------------------------------
+
+
+def test_run_batch_solo_no_cache_calls():
+    """When _xray_cache is replaced by a sentinel, empty file_specs must not call it.
+
+    run_batch() returns [] immediately for empty file_specs, before any cache code
+    runs. If the sentinel _NoCacheAllowed.fetch() or .store() are called,
+    AssertionError is raised and the test fails, proving cache is skipped.
+    """
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    assert backend._xray_cache is None
+
+    # _xray_cache is typed Optional[object]; _NoCacheAllowed is a valid object.
+    # Sentinel raises if any cache method is accidentally called.
+    backend._xray_cache = _NoCacheAllowed()
+
+    # Empty file_specs → immediate [] return, no cache interaction
+    results = backend.run_batch(
+        evaluator_code=VALID_EVALUATOR,
+        file_specs=[],
+    )
+    assert results == [], "empty file_specs must return [] without calling cache"
+
+
+# ---------------------------------------------------------------------------
+# Test 12: _sha256_hex matches Python hashlib SHA-256
+# ---------------------------------------------------------------------------
+
+
+def test_sha256_hex_matches_rust_algorithm():
+    """RustNativeBackend._sha256_hex() must produce the same output as hashlib.sha256()."""
+    import hashlib
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend(xray_cache_backend=None)
+    for text in [VALID_EVALUATOR, "", "hello world"]:
+        expected = hashlib.sha256(text.encode()).hexdigest()
+        actual = backend._sha256_hex(text)
+        assert actual == expected, f"SHA-256 mismatch for {text!r}"
+        assert len(actual) == 64
+
+
+# ---------------------------------------------------------------------------
+# Test 13: pre-fill — .so+.meta exist before subprocess is spawned
+# ---------------------------------------------------------------------------
+
+
+def test_pre_fill_from_cache(tmp_path):
+    """When cluster cache has a fresh .so, pre-fill writes .so + .meta before subprocess."""
+    import hashlib
+    import json
+    from unittest.mock import MagicMock
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    fake_so_bytes = b"\x7fELF prefill test"
+    mock_cache = MagicMock()
+    mock_cache.fetch.return_value = fake_so_bytes
+    backend = RustNativeBackend(xray_cache_backend=mock_cache)
+
+    source_hash = hashlib.sha256(VALID_EVALUATOR.encode()).hexdigest()
+    expected_so = tmp_path / f"{source_hash}.so"
+    expected_meta = tmp_path / f"{source_hash}.meta"
+    popen_saw_so: list = []
+    popen_saw_meta: list = []
+    fake_json = json.dumps(
+        {"findings": [], "compile_ms": 0, "cached": True, "error": None}
+    )
+
+    def _popen_side_effect(cmd, **kwargs):
+        mock_proc = MagicMock()
+        if "rustc" in str(cmd[0]):
+            # rustc --version call from _get_rustc_version()
+            mock_proc.communicate.return_value = ("rustc 1.91.0\n", "")
+            mock_proc.returncode = 0
+            return mock_proc
+        # xray-cli invocation — assert pre-fill files exist at this point
+        popen_saw_so.append(expected_so.exists())
+        popen_saw_meta.append(expected_meta.exists())
+        mock_proc.communicate.return_value = (fake_json, "")
+        mock_proc.returncode = 0
+        return mock_proc
+
+    with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
+        with patch("subprocess.Popen", side_effect=_popen_side_effect):
+            backend.run_batch(
+                evaluator_code=VALID_EVALUATOR,
+                file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
+                repo_path=str(REPO_ROOT),
+            )
+
+    mock_cache.fetch.assert_called_once()
+    assert popen_saw_so == [True], ".so must exist before subprocess is spawned"
+    assert popen_saw_meta == [True], ".meta must exist before subprocess is spawned"
+    assert expected_so.read_bytes() == fake_so_bytes
+
+
+# ---------------------------------------------------------------------------
+# Test 14: no post-fill on cache hit (cached=true in JSON output)
+# ---------------------------------------------------------------------------
+
+
+def test_no_post_fill_on_cache_hit():
+    """When JSON output has cached=true, cache.store() must NOT be called."""
+    import json
+    from unittest.mock import MagicMock
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    mock_cache = MagicMock()
+    mock_cache.fetch.return_value = None
+    backend = RustNativeBackend(xray_cache_backend=mock_cache)
+    fake_json = json.dumps(
+        {"findings": [], "compile_ms": 0, "cached": True, "error": None}
+    )
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (fake_json, "")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        backend.run_batch(
+            evaluator_code=VALID_EVALUATOR,
+            file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
+            repo_path=str(REPO_ROOT),
+        )
+
+    mock_cache.store.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 15: post-fill — fresh compile uploads bytes + compile_ms to cluster cache
+# ---------------------------------------------------------------------------
+
+
+def test_post_fill_after_fresh_compile(tmp_path):
+    """When JSON output has cached=false and compile_ms=350, cache.store() is called
+    with the .so bytes and compile_ms=350."""
+    import hashlib
+    import json
+    from unittest.mock import MagicMock
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    mock_cache = MagicMock()
+    mock_cache.fetch.return_value = None
+    backend = RustNativeBackend(xray_cache_backend=mock_cache)
+
+    source_hash = hashlib.sha256(VALID_EVALUATOR.encode()).hexdigest()
+    fake_so = tmp_path / f"{source_hash}.so"
+    fake_so_bytes = b"\x7fELF postfill test"
+    fake_so.write_bytes(fake_so_bytes)
+
+    fake_json = json.dumps(
+        {
+            "findings": [],
+            "compile_ms": 350,
+            "cached": False,
+            "error": None,
+        }
+    )
+
+    with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.communicate.return_value = (fake_json, "")
+            mock_proc.returncode = 0
+            mock_popen.return_value = mock_proc
+            backend.run_batch(
+                evaluator_code=VALID_EVALUATOR,
+                file_specs=[_spec("src/Foo.java", SIMPLE_JAVA, "java")],
+                repo_path=str(REPO_ROOT),
+            )
+
+    mock_cache.store.assert_called_once()
+    store_args, store_kwargs = mock_cache.store.call_args
+    all_args = list(store_args) + list(store_kwargs.values())
+    assert fake_so_bytes in all_args, "store() must receive the .so bytes"
+    assert 350 in all_args, "store() must receive compile_ms=350"
+
+
+# ---------------------------------------------------------------------------
+# Test 16: XRaySearchEngine wires cluster cache in postgres mode
+# ---------------------------------------------------------------------------
+
+# Sentinel DSN — clearly fake, never points at real infrastructure
+_FAKE_POSTGRES_DSN = "postgresql://cidx-test-sentinel:unused@test-sentinel/cidxdb"
+
+
+def test_search_engine_passes_cache_to_rust_backend():
+    """In postgres mode, XRaySearchEngine must pass a non-None xray_cache_backend
+    to RustNativeBackend.__init__().
+
+    Resets the module-level singleton state before the test so that
+    _get_cluster_cache() runs through the full initialization path inside the
+    patched context, regardless of what earlier tests may have triggered.
+
+    Patches `code_indexer.xray.search_engine.RustNativeBackend` — the name as it
+    is looked up inside XRaySearchEngine.__init__ — so the patch is stable
+    regardless of whether the module was already imported earlier in the session.
+    """
+    pytest.importorskip("tree_sitter_languages", reason="xray extras not installed")
+
+    from unittest.mock import MagicMock, patch
+    import code_indexer.xray.search_engine as _se
+
+    captured: dict = {}
+
+    class _CapturingBackend:
+        """Pretend RustNativeBackend; records xray_cache_backend kwarg."""
+
+        def __init__(self, xray_cache_backend=None):
+            captured["xray_cache_backend"] = xray_cache_backend
+
+    mock_config = MagicMock()
+    mock_config.storage_mode = "postgres"
+    mock_config.postgres_dsn = _FAKE_POSTGRES_DSN
+    mock_config_service = MagicMock()
+    mock_config_service.get_config.return_value = mock_config
+
+    mock_pg_backend = MagicMock()
+
+    # Save and reset the module-level singleton so _get_cluster_cache() runs
+    # its full initialization path inside the patched context.
+    saved_initialized = _se._cluster_cache_initialized
+    saved_singleton = _se._cluster_cache_singleton
+    _se._cluster_cache_initialized = False
+    _se._cluster_cache_singleton = None
+    try:
+        with (
+            # Patch the class on the already-cached module. The local import inside
+            # XRaySearchEngine.__init__ (`from code_indexer.xray.rust_backend import
+            # RustNativeBackend`) resolves from sys.modules cache and picks up the
+            # patched class.  Stable regardless of prior test imports.
+            patch(
+                "code_indexer.xray.rust_backend.RustNativeBackend",
+                new=_CapturingBackend,
+            ),
+            patch(
+                "code_indexer.server.services.config_service.get_config_service",
+                return_value=mock_config_service,
+            ),
+            patch(
+                "code_indexer.server.storage.postgres.xray_cache_backend.XrayCachePostgresBackend",
+                return_value=mock_pg_backend,
+            ),
+        ):
+            from code_indexer.xray.search_engine import XRaySearchEngine
+
+            XRaySearchEngine()  # construction side-effect populates `captured`
+    finally:
+        # Restore singleton state so other tests in the session are unaffected.
+        _se._cluster_cache_initialized = saved_initialized
+        _se._cluster_cache_singleton = saved_singleton
+
+    assert captured.get("xray_cache_backend") is not None, (
+        "XRaySearchEngine must pass a non-None xray_cache_backend to "
+        "RustNativeBackend in postgres mode"
+    )

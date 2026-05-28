@@ -156,11 +156,14 @@ pub fn compile_evaluator(user_code: &str, cache_dir: &Path) -> Result<CompileRes
     let meta_path = cache_dir.join(format!("{}.meta", hash));
     let rs_path = cache_dir.join(format!("{}.rs", hash));
 
-    // Step 4: Cache check
+    // Step 4: Cache check (version + hash + TTL freshness)
     let rustc_version = cache::get_rustc_version();
     if so_path.exists() {
         if let Some(meta) = cache::read_metadata(&meta_path) {
-            if meta.rustc_version == rustc_version && meta.source_hash == hash {
+            if meta.rustc_version == rustc_version
+                && meta.source_hash == hash
+                && cache::is_fresh(&meta.compiled_at, cache::LOCAL_CACHE_TTL_SECS)
+            {
                 return Ok(CompileResult {
                     so_path,
                     compile_ms: 0,
@@ -449,6 +452,43 @@ fn helper() -> &'static str { "fn evaluate_node" }
             "error must mention evaluate_node: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn test_compile_cache_respects_ttl() {
+        // Compile once, then backdate compiled_at to 600s ago (beyond TTL=300).
+        // Second compile must NOT return cached=true.
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        // First compile
+        let first = compile_evaluator(user_code, dir.path())
+            .expect("first compile must succeed");
+        assert!(!first.cached, "first compile must not be cached");
+
+        // Backdate compiled_at in the .meta file to simulate a stale entry
+        let hash = sha256_hex(user_code);
+        let meta_path = dir.path().join(format!("{}.meta", hash));
+        let old_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 600; // 600s ago — beyond TTL of 300
+        let stale_meta = cache::CacheMetadata {
+            source_hash: hash.clone(),
+            rustc_version: cache::get_rustc_version(),
+            compiled_at: format!("{}s-since-epoch", old_epoch),
+            compile_ms: 100,
+        };
+        cache::write_metadata(&meta_path, &stale_meta).expect("must write stale meta");
+
+        // Second compile — stale meta must trigger recompile (cached=false)
+        let second = compile_evaluator(user_code, dir.path())
+            .expect("second compile must succeed");
+        assert!(!second.cached, "stale cache entry must trigger recompile, not return cached=true");
     }
 
     #[test]
