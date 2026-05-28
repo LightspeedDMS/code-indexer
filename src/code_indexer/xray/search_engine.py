@@ -471,6 +471,20 @@ class XRaySearchEngine:
         if timeout_hit:
             result["partial"] = True
             result["timeout"] = True
+            # When the job timed out with no results and no errors, surface a
+            # synthetic error so the caller knows why the job returned nothing.
+            if not matches and not evaluation_errors:
+                evaluation_errors.append(
+                    {
+                        "file_path": "",
+                        "line_number": 0,
+                        "error_type": "EvaluatorTimeout",
+                        "error_message": (
+                            "Job timed out with no results. The evaluator may "
+                            "contain an infinite loop or be too slow for the file set."
+                        ),
+                    }
+                )
         elif cap_hit:
             result["partial"] = True
             result["max_files_reached"] = True

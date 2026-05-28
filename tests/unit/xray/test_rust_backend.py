@@ -273,7 +273,11 @@ def test_match_dicts_have_required_fields():
 
 
 def test_json_error_field_returns_error_tuples_for_all_files():
-    """When JSON output has non-null 'error' field, all files get error tuples."""
+    """When JSON output has non-null 'error' field, a single deduplicated error
+    tuple is returned (not one per file). Uses subprocess.Popen — the correct
+    mock target for _invoke_xray_cli. Error message with /home/ path proves
+    sanitization runs on this code path.
+    """
     from code_indexer.xray.rust_backend import RustNativeBackend
 
     backend = RustNativeBackend()
@@ -290,32 +294,107 @@ def test_json_error_field_returns_error_tuples_for_all_files():
             "parse_scan_ms": 0,
             "compile_ms": 0,
             "cached": False,
-            "error": "compilation failed: unknown function",
+            "error": "compilation failed: unknown function at /home/user/project/evaluator.rs",
         }
     )
 
-    mock_result = MagicMock()
-    mock_result.returncode = 1
-    mock_result.stdout = fake_json
-    mock_result.stderr = ""
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (fake_json, "")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
 
-    with patch("subprocess.run", return_value=mock_result):
         results = backend.run_batch(
             evaluator_code=VALID_EVALUATOR,
             file_specs=specs,
             repo_path=str(REPO_ROOT),
         )
 
-    assert len(results) == 2
-    for matches, errors, meta in results:
-        assert matches == []
-        assert len(errors) == 1
-        err = errors[0]
-        assert (
-            "compilation failed" in err["error_message"]
-            or "unknown function" in err["error_message"]
+    # Deduplication: cli_error is per-evaluator, not per-file — one entry total.
+    assert len(results) == 1, (
+        f"Expected 1 deduplicated error result for JSON error field, got {len(results)}"
+    )
+    matches, errors, meta = results[0]
+    assert matches == []
+    assert len(errors) == 1
+    err = errors[0]
+    assert (
+        "compilation failed" in err["error_message"]
+        or "unknown function" in err["error_message"]
+    )
+    # Path must be sanitized — /home/ must not appear in the returned message.
+    assert "/home/" not in err["error_message"], (
+        f"/home/ path must be sanitized from error message. Got: {err['error_message']!r}"
+    )
+    assert meta is None
+
+
+# ---------------------------------------------------------------------------
+# Test 20: JSON error field paths are sanitized (xray-cache path → evaluator.rs)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_error_json_field_paths_are_sanitized():
+    """Compiler errors in the JSON 'error' field must have xray-cache paths replaced
+    with 'evaluator.rs' and /home/ paths stripped before returning to callers.
+    Verifies sanitization on the cli_error code path (Issue 3).
+    """
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    specs = [
+        _spec("src/Foo.java", SIMPLE_JAVA, "java"),
+        _spec("src/Bar.java", SIMPLE_JAVA, "java"),
+    ]
+
+    raw_error = (
+        "error[E0308]: mismatched types"
+        " --> /home/user/.cidx-server/xray-cache/abc123def456789.rs:5:10"
+    )
+    fake_json = json.dumps(
+        {
+            "findings": [],
+            "files_parsed": 0,
+            "files_errored": 0,
+            "parse_scan_ms": 0,
+            "compile_ms": 0,
+            "cached": False,
+            "error": raw_error,
+        }
+    )
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (fake_json, "")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        results = backend.run_batch(
+            evaluator_code=VALID_EVALUATOR,
+            file_specs=specs,
+            repo_path=str(REPO_ROOT),
         )
-        assert meta is None
+
+    # Deduplication: exactly one entry regardless of number of file specs.
+    assert len(results) == 1, (
+        f"Expected 1 deduplicated result for cli_error path, got {len(results)}"
+    )
+    matches, errors, meta = results[0]
+    assert matches == []
+    assert len(errors) == 1
+    msg = errors[0]["error_message"]
+
+    # xray-cache path must be replaced with evaluator.rs.
+    assert "/home/" not in msg, (
+        f"/home/ path must be sanitized from error_message. Got: {msg!r}"
+    )
+    assert "xray-cache" not in msg, (
+        f"xray-cache path must be sanitized from error_message. Got: {msg!r}"
+    )
+    assert "evaluator.rs" in msg, (
+        f"Expected 'evaluator.rs' substitution in error_message. Got: {msg!r}"
+    )
+    assert meta is None
 
 
 # ---------------------------------------------------------------------------
@@ -763,3 +842,151 @@ def test_search_engine_passes_cache_to_rust_backend():
         "XRaySearchEngine must pass a non-None xray_cache_backend to "
         "RustNativeBackend in postgres mode"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 18: error messages must not leak server-internal xray-cache paths
+# ---------------------------------------------------------------------------
+
+
+def test_error_message_sanitizes_xray_cache_paths():
+    """Server-internal xray-cache paths in error messages must be replaced with
+    'evaluator.rs'. Prevents leaking /home/user/.cidx-server/xray-cache/hash.rs
+    to API callers (Issues 4 and 5).
+    """
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    specs = [_spec("src/Foo.java", SIMPLE_JAVA, "java")]
+
+    raw_stderr = (
+        "error[E0425]: cannot find value `x` in this scope\n"
+        " --> /home/jsbattig/.cidx-server/xray-cache/59d0fc1a2b3c4d.rs:3:5\n"
+        "  |\n"
+        "3 |     x + 1\n"
+        "  |     ^ not found in this scope"
+    )
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = ("", raw_stderr)
+        mock_proc.returncode = 1
+        mock_popen.return_value = mock_proc
+
+        results = backend.run_batch(
+            evaluator_code=VALID_EVALUATOR,
+            file_specs=specs,
+            repo_path=str(REPO_ROOT),
+        )
+
+    assert len(results) >= 1
+    _matches, errors, _meta = results[0]
+    assert len(errors) == 1
+    msg = errors[0]["error_message"]
+    assert "/home/jsbattig/.cidx-server/xray-cache/" not in msg, (
+        f"xray-cache path must be sanitized from error message. Got: {msg!r}"
+    )
+    assert "evaluator.rs" in msg, (
+        f"Expected 'evaluator.rs' substitution in message. Got: {msg!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 19: error messages must not leak other absolute server paths (/home, /root, /tmp)
+# ---------------------------------------------------------------------------
+
+
+def test_error_message_sanitizes_home_paths():
+    """Absolute /home/, /root/, /tmp/ paths (non-cache) in error messages must be
+    replaced with '<server-path>' (Issues 4 and 5 — general path leakage).
+
+    Uses a non-xray-cache path so this test validates the general sanitizer,
+    not the xray-cache-specific rule.
+    """
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+
+    # --- /home/ non-cache path ---
+    for raw_path in [
+        "/home/jsbattig/project/evaluator_custom.rs",
+        "/root/tmp/evaluator_build.rs",
+        "/tmp/evaluator_work.rs",
+    ]:
+        specs = [_spec("src/Foo.java", SIMPLE_JAVA, "java")]
+        raw_stderr = f"thread 'main' panicked at {raw_path}:10:5\nnote: backtrace"
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.communicate.return_value = ("", raw_stderr)
+            mock_proc.returncode = 1
+            mock_popen.return_value = mock_proc
+
+            results = backend.run_batch(
+                evaluator_code=VALID_EVALUATOR,
+                file_specs=specs,
+                repo_path=str(REPO_ROOT),
+            )
+
+        assert len(results) >= 1
+        _matches, errors, _meta = results[0]
+        assert len(errors) == 1
+        msg = errors[0]["error_message"]
+        assert raw_path not in msg, (
+            f"{raw_path!r} must be sanitized from error message. Got: {msg!r}"
+        )
+        assert "<server-path>" in msg, (
+            f"Expected '<server-path>' in sanitized message for {raw_path!r}. Got: {msg!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 17: compile error returns single error entry, not one per file
+# ---------------------------------------------------------------------------
+
+
+def test_compile_error_returns_single_error_not_per_file():
+    """When xray-cli fails to compile (non-zero exit, no JSON), run_batch() must return
+    exactly ONE error entry total, not one per file spec (Issue 2 deduplication).
+
+    Uses subprocess.Popen (the correct mock target for _invoke_xray_cli).
+    """
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    specs = [
+        _spec("src/A.java", SIMPLE_JAVA, "java"),
+        _spec("src/B.java", SIMPLE_JAVA, "java"),
+        _spec("src/C.java", SIMPLE_JAVA, "java"),
+        _spec("src/D.java", SIMPLE_JAVA, "java"),
+    ]
+
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = (
+            "",
+            "Evaluator compilation failed: expected identifier",
+        )
+        mock_proc.returncode = 1
+        mock_popen.return_value = mock_proc
+
+        results = backend.run_batch(
+            evaluator_code=VALID_EVALUATOR,
+            file_specs=specs,
+            repo_path=str(REPO_ROOT),
+        )
+
+    # Must deduplicate: exactly ONE error entry total (not 4 per file)
+    assert len(results) == 1, (
+        f"Expected 1 deduplicated error result for compile failure, got {len(results)}"
+    )
+    matches, errors, meta = results[0]
+    assert matches == []
+    assert len(errors) == 1
+    err = errors[0]
+    assert err["error_type"] == "XRayCliError"
+    assert (
+        "compilation" in err["error_message"].lower()
+        or "xray-cli" in err["error_message"].lower()
+    )
+    assert meta is None

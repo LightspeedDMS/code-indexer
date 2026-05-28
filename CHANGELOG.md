@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.61.0 (2026-05-28) -- Xray Error Handling Hardening (Epic #1019)
+
+### Fixed
+- Pre-flight validator now catches `static` declarations (not just `static mut`). Previously slipped through to Rust compiler producing N duplicate errors per file.
+- Compiler/invocation errors deduplicated: single error entry returned instead of one per file spec. Compile failures are per-evaluator, not per-file.
+- Silent timeout on infinite-loop evaluators now produces synthetic `EvaluatorTimeout` error with diagnostic guidance instead of empty results.
+- Server filesystem paths fully sanitized from all error messages returned to API callers. Six error return paths in `rust_backend.py` now apply `_sanitize_error_message()`: BinaryNotFound, JSON parse error, CLI JSON error field, subprocess timeout, non-zero exit stderr, FileNotFoundError. Server logs retain raw paths for debugging.
+- Stale test (`test_json_error_field_returns_error_tuples_for_all_files`) fixed: was mocking `subprocess.run` but code uses `subprocess.Popen`, and was expecting per-file errors instead of deduplicated single entry.
+
+### Added
+- `_sanitize_error_message()` in `rust_backend.py`: two-rule regex sanitizer strips xray-cache paths (to `evaluator.rs`) and general server paths (to `<server-path>`).
+- New unit tests: Rust pre-flight `static` validation (57 lines), backend sanitization and deduplication (145 lines), search engine timeout detection (56 lines), CLI error path sanitization (Test 20).
+
 ## v10.60.0 (2026-05-28) -- REST Xray Validator Fix (Epic #1019)
 
 ### Fixed

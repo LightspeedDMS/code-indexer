@@ -22,12 +22,33 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Sanitize server-internal paths out of error messages so they are never
+# exposed to API callers.
+# Rule 1: xray-cache paths — replaced with the generic name "evaluator.rs".
+_RE_XRAY_CACHE_PATH = re.compile(r"/[^\s\"']+/xray-cache/[a-f0-9]+\.rs")
+# Rule 2: other absolute paths under /home/, /root/, /tmp/ — replaced with a
+# redaction token so callers know a path was present but cannot reconstruct it.
+_RE_SERVER_PATH = re.compile(r"/(?:home|root|tmp)/[^\s\"':,\])\}]+")
+
+
+def _sanitize_error_message(msg: str) -> str:
+    """Replace server-internal file paths in error messages.
+
+    Applied in order:
+    1. xray-cache paths (/…/xray-cache/<hexhash>.rs) → "evaluator.rs"
+    2. Remaining /home/, /root/, /tmp/ paths → "<server-path>"
+    """
+    msg = _RE_XRAY_CACHE_PATH.sub("evaluator.rs", msg)
+    msg = _RE_SERVER_PATH.sub("<server-path>", msg)
+    return msg
 
 
 class XrayCacheBackend(Protocol):
@@ -247,7 +268,9 @@ class RustNativeBackend:
                 "Run: cd rust && cargo build --release"
             )
             logger.error("RustNativeBackend: %s", msg)
-            return _error_all(file_specs, "BinaryNotFound", msg)
+            return _error_all(
+                file_specs, "BinaryNotFound", _sanitize_error_message(msg)
+            )
 
         base = Path(repo_path) if repo_path else Path.cwd()
         abs_paths = [str(base / spec.get("file_path", "")) for spec in file_specs]
@@ -256,16 +279,24 @@ class RustNativeBackend:
             rust_code, abs_paths, timeout_seconds, on_process_spawned
         )
         if invoke_error is not None:
-            return _error_all(file_specs, "XRayCliError", invoke_error)
+            # Compilation/invocation errors are per-evaluator, not per-file.
+            # Return a single deduplicated error entry instead of one per file.
+            return [_error_tuple("", "XRayCliError", invoke_error)]
 
         output, parse_error = self._parse_json_output(stdout)
         if parse_error is not None:
-            return _error_all(file_specs, "XRayCliError", parse_error)
+            # JSON parse failure is a per-evaluator error — deduplicate to one entry.
+            return [
+                _error_tuple("", "XRayCliError", _sanitize_error_message(parse_error))
+            ]
 
         cli_error = output.get("error")
         if cli_error:
+            # Top-level CLI error (e.g. compilation failed) — deduplicate to one entry.
             logger.warning("RustNativeBackend: xray-cli error: %s", cli_error)
-            return _error_all(file_specs, "XRayCliError", cli_error)
+            return [
+                _error_tuple("", "XRayCliError", _sanitize_error_message(cli_error))
+            ]
 
         # Cluster post-fill: upload a freshly compiled .so to PG so other nodes
         # can skip compilation. Only fires when: cache is configured, the compile
@@ -424,17 +455,17 @@ class RustNativeBackend:
                 proc.wait()
                 msg = f"xray-cli timed out after {timeout_seconds}s"
                 logger.warning("RustNativeBackend: %s", msg)
-                return "", msg
+                return "", _sanitize_error_message(msg)
 
             if proc.returncode != 0 and not stdout.strip():
-                msg = f"xray-cli exited with code {proc.returncode}: {stderr[:200]}"
-                logger.warning("RustNativeBackend: %s", msg)
-                return "", msg
+                raw_msg = f"xray-cli exited with code {proc.returncode}: {stderr[:200]}"
+                logger.warning("RustNativeBackend: %s", raw_msg)
+                return "", _sanitize_error_message(raw_msg)
             return stdout or "", None
         except FileNotFoundError as exc:
             msg = f"xray-cli could not be executed: {exc}"
             logger.error("RustNativeBackend: %s", msg)
-            return "", msg
+            return "", _sanitize_error_message(msg)
         finally:
             Path(tmp_file.name).unlink(missing_ok=True)
 
