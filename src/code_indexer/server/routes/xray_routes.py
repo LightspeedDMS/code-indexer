@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
-from code_indexer.xray.search_engine import XRaySearchEngine
+from code_indexer.xray.sandbox import validate_rust_evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -176,9 +176,7 @@ def xray_search(
     # ------------------------------------------------------------------
     # 4. Pre-flight evaluator validation
     # ------------------------------------------------------------------
-    engine = XRaySearchEngine()
-
-    validation = engine.sandbox.validate(body.evaluator_code)
+    validation = validate_rust_evaluator(body.evaluator_code)
     if not validation.ok:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

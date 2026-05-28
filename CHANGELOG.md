@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.60.0 (2026-05-28) -- REST Xray Validator Fix (Epic #1019)
+
+### Fixed
+- REST `POST /api/xray/search` pre-flight validation was still calling the Python AST validator (`sandbox.validate()`) instead of `validate_rust_evaluator()`. Rust evaluator code submitted via REST API was rejected with `syntax_error: invalid syntax`. MCP handler was already correct; REST route was missed during the Rust-only migration.
+
+### Changed
+- `xray_routes.py` no longer instantiates `XRaySearchEngine` for pre-flight validation -- uses the lightweight `validate_rust_evaluator()` function directly (same as MCP handler).
+
 ## v10.59.0 (2026-05-28) -- Cluster-Aware Evaluator Cache + TTL (Epic #1019)
 
 ### Added
