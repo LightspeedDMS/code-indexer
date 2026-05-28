@@ -60,7 +60,9 @@ def _has_level(caplog: pytest.LogCaptureFixture, level: int) -> bool:
 def _rust_env(tmp_path: Path) -> Iterator[MagicMock]:
     """Context manager that patches Path.home and __file__ for _ensure_rust_toolchain tests.
 
-    Yields the mock_run MagicMock so callers can configure side_effects.
+    Yields a MagicMock whose side_effect callers configure with expected
+    subprocess results.  sudo mkdir/chown calls (directory provisioning)
+    are auto-succeeded so they don't consume entries from that list.
     """
     fake_file = str(
         tmp_path
@@ -70,14 +72,25 @@ def _rust_env(tmp_path: Path) -> Iterator[MagicMock]:
         / "auto_update"
         / "deployment_executor.py"
     )
+    inner_mock = MagicMock()
+
+    def _filtering_run(args, **kwargs):  # type: ignore[no-untyped-def]
+        if (
+            isinstance(args, (list, tuple))
+            and len(args) >= 2
+            and args[0] == "sudo"
+            and args[1] in ("mkdir", "chown")
+        ):
+            return _proc(0)
+        return inner_mock(args, **kwargs)
+
     with (
         patch(f"{_MODULE}.Path.home", return_value=tmp_path),
         patch(f"{_MODULE}.__file__", fake_file, create=True),
         patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
-        patch("subprocess.run") as mock_run,
-        patch("pathlib.Path.mkdir"),
+        patch("subprocess.run", side_effect=_filtering_run),
     ):
-        yield mock_run
+        yield inner_mock
 
 
 @contextmanager

@@ -99,8 +99,9 @@ class TestEnsureRustToolchainUsesOptRust:
         observed_envs: list[dict] = []
 
         def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
-            env = kwargs.get("env") or {}
-            observed_envs.append(dict(env))
+            env = kwargs.get("env")
+            if env is not None:
+                observed_envs.append(dict(env))
             p = MagicMock()
             p.returncode = 0
             p.stdout = "rustc 1.78.0"
@@ -112,7 +113,6 @@ class TestEnsureRustToolchainUsesOptRust:
             patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
             patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
             patch("subprocess.run", side_effect=recording_run),
-            patch("pathlib.Path.mkdir"),
         ):
             executor._ensure_rust_toolchain()
 
@@ -139,8 +139,9 @@ class TestEnsureRustToolchainUsesOptRust:
         observed_envs: list[dict] = []
 
         def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
-            env = kwargs.get("env") or {}
-            observed_envs.append(dict(env))
+            env = kwargs.get("env")
+            if env is not None:
+                observed_envs.append(dict(env))
             p = MagicMock()
             p.returncode = 0
             p.stdout = "rustc 1.78.0"
@@ -152,7 +153,6 @@ class TestEnsureRustToolchainUsesOptRust:
             patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
             patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
             patch("subprocess.run", side_effect=recording_run),
-            patch("pathlib.Path.mkdir"),
         ):
             executor._ensure_rust_toolchain()
 
@@ -179,8 +179,9 @@ class TestEnsureRustToolchainUsesOptRust:
         observed_envs: list[dict] = []
 
         def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
-            env = kwargs.get("env") or {}
-            observed_envs.append(dict(env))
+            env = kwargs.get("env")
+            if env is not None:
+                observed_envs.append(dict(env))
             p = MagicMock()
             p.returncode = 0
             p.stdout = "rustc 1.78.0"
@@ -192,7 +193,6 @@ class TestEnsureRustToolchainUsesOptRust:
             patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
             patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
             patch("subprocess.run", side_effect=recording_run),
-            patch("pathlib.Path.mkdir"),
         ):
             executor._ensure_rust_toolchain()
 
@@ -220,8 +220,9 @@ class TestEnsureRustToolchainUsesOptRust:
         observed_envs: list[dict] = []
 
         def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
-            env = kwargs.get("env") or {}
-            observed_envs.append(dict(env))
+            env = kwargs.get("env")
+            if env is not None:
+                observed_envs.append(dict(env))
             p = MagicMock()
             p.returncode = 0
             p.stdout = "rustc 1.78.0"
@@ -233,7 +234,6 @@ class TestEnsureRustToolchainUsesOptRust:
             patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
             patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
             patch("subprocess.run", side_effect=recording_run),
-            patch("pathlib.Path.mkdir"),
         ):
             executor._ensure_rust_toolchain()
 
@@ -598,6 +598,157 @@ class TestEnsureSystemdEnvVar:
         )
         assert 'Environment="RUSTUP_HOME=/opt/rust"' in result
         assert result.endswith("\n")
+
+
+# ---------------------------------------------------------------------------
+# Test: _ensure_rust_toolchain uses subprocess (sudo mkdir + sudo chown)
+#       instead of Path.mkdir() so it works when running as non-root.
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureRustToolchainMkdirUsesSudo:
+    """_ensure_rust_toolchain must use 'sudo mkdir -p' and 'sudo chown'
+    (subprocess.run) to create /opt/rust, not Path.mkdir(), so it works
+    when the auto-updater runs as a non-root user."""
+
+    def test_sudo_mkdir_called_for_rust_system_dir(self, tmp_path: Path) -> None:
+        """subprocess.run must be called with ['sudo', 'mkdir', '-p', '/opt/rust']."""
+        executor = _make_executor()
+        fake_file = str(
+            tmp_path
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "auto_update"
+            / "deployment_executor.py"
+        )
+        mkdir_calls: list[list] = []
+
+        def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
+            if "mkdir" in args:
+                mkdir_calls.append(list(args))
+            p = MagicMock()
+            p.returncode = 0
+            p.stdout = "rustc 1.78.0"
+            p.stderr = ""
+            return p
+
+        with (
+            patch(f"{_MODULE}.__file__", fake_file, create=True),
+            patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
+            patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+            patch("subprocess.run", side_effect=recording_run),
+        ):
+            executor._ensure_rust_toolchain()
+
+        assert mkdir_calls, "Expected at least one subprocess call with 'mkdir'"
+        assert any(args[:3] == ["sudo", "mkdir", "-p"] for args in mkdir_calls), (
+            f"Expected ['sudo', 'mkdir', '-p', ...] in subprocess calls, got: {mkdir_calls}"
+        )
+
+    def test_sudo_chown_called_for_rust_system_dir(self, tmp_path: Path) -> None:
+        """subprocess.run must be called with ['sudo', 'chown', '-R', 'uid:gid', '/opt/rust']
+        so the current user owns the directory after creation."""
+        executor = _make_executor()
+        fake_file = str(
+            tmp_path
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "auto_update"
+            / "deployment_executor.py"
+        )
+        chown_calls: list[list] = []
+
+        def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
+            if "chown" in args:
+                chown_calls.append(list(args))
+            p = MagicMock()
+            p.returncode = 0
+            p.stdout = "rustc 1.78.0"
+            p.stderr = ""
+            return p
+
+        with (
+            patch(f"{_MODULE}.__file__", fake_file, create=True),
+            patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
+            patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+            patch("subprocess.run", side_effect=recording_run),
+        ):
+            executor._ensure_rust_toolchain()
+
+        assert chown_calls, "Expected at least one subprocess call with 'chown'"
+        assert any(args[:3] == ["sudo", "chown", "-R"] for args in chown_calls), (
+            f"Expected ['sudo', 'chown', '-R', ...] in subprocess calls, got: {chown_calls}"
+        )
+
+    def test_path_mkdir_not_called(self, tmp_path: Path) -> None:
+        """Path.mkdir() must NOT be called — directory creation must go through subprocess."""
+        executor = _make_executor()
+        fake_file = str(
+            tmp_path
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "auto_update"
+            / "deployment_executor.py"
+        )
+
+        def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
+            p = MagicMock()
+            p.returncode = 0
+            p.stdout = "rustc 1.78.0"
+            p.stderr = ""
+            return p
+
+        with (
+            patch(f"{_MODULE}.__file__", fake_file, create=True),
+            patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
+            patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+            patch("subprocess.run", side_effect=recording_run),
+            patch("pathlib.Path.mkdir") as mock_mkdir,
+        ):
+            executor._ensure_rust_toolchain()
+
+        mock_mkdir.assert_not_called()
+
+    def test_returns_false_when_sudo_mkdir_fails(self, tmp_path: Path) -> None:
+        """If 'sudo mkdir -p /opt/rust' returns non-zero, _ensure_rust_toolchain
+        must return False (FATAL — same as other subprocess failures)."""
+        executor = _make_executor()
+        fake_file = str(
+            tmp_path
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "auto_update"
+            / "deployment_executor.py"
+        )
+        call_count = 0
+
+        def failing_mkdir(args, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal call_count
+            call_count += 1
+            p = MagicMock()
+            if "mkdir" in args:
+                p.returncode = 1
+                p.stdout = ""
+                p.stderr = "Permission denied: /opt/rust"
+            else:
+                p.returncode = 0
+                p.stdout = ""
+                p.stderr = ""
+            return p
+
+        with (
+            patch(f"{_MODULE}.__file__", fake_file, create=True),
+            patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
+            patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+            patch("subprocess.run", side_effect=failing_mkdir),
+        ):
+            result = executor._ensure_rust_toolchain()
+
+        assert result is False, "Expected False when sudo mkdir fails, got True"
 
 
 class TestRemovePathSegment:
