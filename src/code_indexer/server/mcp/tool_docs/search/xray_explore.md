@@ -19,7 +19,7 @@ inputSchema:
       description: 'Regular expression applied in Phase 1 to file content (search_target=content) or relative file paths (search_target=filename) to identify candidate files. Backed by RegexSearchService (ripgrep) for content. Renamed from driver_regex in v10.3.x.'
     evaluator_code:
       type: string
-      description: 'Optional. Python code snippet evaluated ONCE per candidate file in a sandboxed subprocess. Receives globals: node (file root XRayNode), root (alias), source (file UTF-8 text), lang (language name), file_path (absolute path), match_positions (list of dicts: one per Phase 1 hit, each with line_number/column/line_content/byte_offset/ast_node/context_before/context_after; ast_node is the XRayNode at the hit location; empty list in filename mode). Can use import re/collections/itertools/functools and define helper functions with def/lambda. MUST return a dict with shape {"matches": [...], "value": <any>} or {"skip": True} to bail out. Optional "file_role" key tags the file in file_metadata. Defaults to a snippet that emits one match per Phase 1 hit (or a single file-level match in filename mode), accepting all candidate files for AST exploration without requiring the caller to write their own evaluator. Each match in the list is a dict requiring at minimum line_number; may carry any open keys.'
+      description: 'Optional. Python code snippet evaluated ONCE per candidate file in a sandboxed subprocess. Receives globals: node (file root XRayNode), root (alias), source (file UTF-8 text), lang (language name), file_path (absolute path), match_positions (list of dicts: one per Phase 1 hit, each with line_number/column/line_content/byte_offset/ast_node/context_before/context_after; ast_node is the XRayNode at the hit location; empty list in filename mode). Can define helper functions with def. MUST return a dict with shape {"matches": [...], "value": <any>} or {"skip": True} to bail out. Optional "file_role" key tags the file in file_metadata. Defaults to a snippet that emits one match per Phase 1 hit (or a single file-level match in filename mode), accepting all candidate files for AST exploration without requiring the caller to write their own evaluator. Each match in the list is a dict requiring at minimum line_number; may carry any open keys.'
     search_target:
       type: string
       enum:
@@ -201,25 +201,21 @@ The sandbox accepts the following Python AST node types in evaluator code (every
 
 - Expression core: `Call, Name, Attribute, Constant, Subscript, Compare, BoolOp, UnaryOp, BinOp, List, Tuple, Dict, Return, Expr`
 - Local binding: `Assign`, `AugAssign`
-- Comprehensions and ternary: `comprehension, GeneratorExp, ListComp, SetComp, DictComp, IfExp`
-- Statement-level control flow (v10.4.0): `If, For, While, Break, Continue, Pass`
-- Structured exception handling (v10.4.0): `Try, ExceptHandler, Raise`
+- Comprehensions and ternary: `comprehension, GeneratorExp, ListComp, IfExp`
+- Statement-level control flow: `If, For, While, Break, Continue, Pass`
+- Function definitions: `FunctionDef`, `arguments`, `arg` — define helper functions to structure multi-pass evaluator logic.
 - Abstract operator base classes (matched via isinstance against concrete subclasses Add, Sub, Eq, And, Not, Load, Store, etc.): `boolop, cmpop, unaryop, expr_context, operator`
 - Module/Load markers: `Module, Load`
 
 > **Termination guarantee**: infinite loops and unbounded iteration in your evaluator do NOT cause validation rejection — they hit the subprocess hard timeout (HARD_TIMEOUT_SECONDS = 5.0 s, SIGTERM; SIGKILL_GRACE_SECONDS = 1.0 s grace) and surface as `EvaluatorTimeout` in `evaluation_errors[]`.
 
-**Now allowed (v10.5.0)**:
-- `def`, `lambda` — define helper functions to structure multi-pass evaluator logic
-- `import`, `from ... import` — ONLY for whitelisted stdlib modules: `re`, `collections`, `itertools`, `functools`. Non-whitelisted imports raise `ImportError` at runtime.
+**Still banned** (rejected at validation time): `class`, `async def`, `lambda`, `global`, `nonlocal`, `with`, `async with`, `async`, `await`, `yield`, `yield from`, `try`/`except`/`raise`, all imports (`import X` and `from X import Y`), set comprehensions (`{x for ...}`), dict comprehensions (`{k: v for ...}`).
 
-**Still banned**: `class`, `async def`, `global`, `nonlocal`, `with`, `async with`, `async`, `await`, `yield`, `yield from`.
-
-**Safe builtins** (34 total, available in the exec environment):
-`len, str, int, bool, list, tuple, dict, min, max, sum, any, all, range, enumerate, zip, sorted, reversed, hasattr, isinstance, type, set, frozenset, float, repr, print` plus exception types for `except` clauses: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`.
+**Safe builtins** (available in the exec environment, 8 total):
+`len, any, all, range, enumerate, sorted, min, max`.
 
 **Stripped builtins** (removed from the exec environment — referencing them raises NameError):
-`getattr, setattr, delattr, eval, exec, open, compile`. Note: `__import__` is replaced by a restricted import function that enforces the stdlib whitelist.
+`getattr, setattr, delattr, __import__, eval, exec, open, compile`.
 
 **Dunder attribute blocklist** (Attribute and Subscript access to these names is rejected at AST validation time as sandbox escape vectors):
 

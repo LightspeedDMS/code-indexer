@@ -44,7 +44,10 @@ HAProxy or any HTTP load balancer that distributes requests across the node IP a
 
 ### Shared Storage
 
-Golden repositories (source code clones) must be accessible at the same filesystem path on each node. A common approach is NFS. The install script installs `nfs-utils` (RHEL/Rocky) or `nfs-common` (Ubuntu/Debian) as a system dependency.
+Golden repositories (source code clones) must be accessible at the same filesystem path on each node. Two approaches are supported:
+
+- **NFS** (simple): Export a directory from one node, mount on all others. The install script installs `nfs-utils` (RHEL/Rocky) or `nfs-common` (Ubuntu/Debian) as a system dependency.
+- **CoW Storage Daemon** (recommended for non-production): Provides FlexClone-equivalent functionality using filesystem reflinks, with a REST API for clone lifecycle management and NFS for file access. See [CoW Storage Setup Guide](cow-storage-setup.md) for full instructions.
 
 ---
 

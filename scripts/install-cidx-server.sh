@@ -206,7 +206,7 @@ Type=simple
 User=$(whoami)
 WorkingDirectory=$INSTALL_DIR
 
-Environment="PATH=${HOME}/.local/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
+Environment="PATH=${HOME}/.cargo/bin:${HOME}/.local/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
 Environment="PYTHONPATH=$INSTALL_DIR/src"
 Environment="CIDX_SERVER_MODE=1"
 Environment="CIDX_ISSUER_URL=http://localhost:$PORT"

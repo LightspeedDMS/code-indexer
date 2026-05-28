@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 from click.testing import CliRunner, Result
 
@@ -30,6 +32,35 @@ from click.testing import CliRunner, Result
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _mock_run_batch(
+    evaluator_code,
+    file_specs,
+    worker_threads=4,
+    timeout_seconds=120,
+    on_process_spawned=None,
+    repo_path=None,
+):
+    """Mock rust_backend.run_batch — return one match per file."""
+    batch: list[Any] = []
+    for spec in file_specs:
+        fp = spec["file_path"]
+        batch.append(
+            (
+                [
+                    {
+                        "file_path": fp,
+                        "line_number": 1,
+                        "evaluator_decision": True,
+                        "language": "python",
+                    }
+                ],
+                [],
+                None,
+            )
+        )
+    return batch
 
 
 def invoke_xray_explore(runner: CliRunner, args: list) -> Result:
@@ -271,18 +302,22 @@ def test_xray_explore_json_output(tmp_path: Path):
         {"main.py": "password = 'secret'\n"},
     )
     runner = CliRunner()
-    result = invoke_xray_explore(
-        runner,
-        [
-            "--repo",
-            str(repo_dir),
-            "--regex",
-            "password",
-            "--eval",
-            "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
-            "--json",
-        ],
-    )
+    with patch(
+        "code_indexer.xray.rust_backend.RustNativeBackend.run_batch",
+        side_effect=_mock_run_batch,
+    ):
+        result = invoke_xray_explore(
+            runner,
+            [
+                "--repo",
+                str(repo_dir),
+                "--regex",
+                "password",
+                "--eval",
+                "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
+                "--json",
+            ],
+        )
     assert result.exit_code == 0, f"Output: {result.output}"
     data = json.loads(result.output)
 
@@ -366,17 +401,21 @@ def test_xray_explore_ast_renderer_hierarchical(tmp_path: Path):
         {"sample.py": "def foo():\n    return 42\n"},
     )
     runner = CliRunner()
-    result = invoke_xray_explore(
-        runner,
-        [
-            "--repo",
-            str(repo_dir),
-            "--regex",
-            "foo",
-            "--eval",
-            "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
-        ],
-    )
+    with patch(
+        "code_indexer.xray.rust_backend.RustNativeBackend.run_batch",
+        side_effect=_mock_run_batch,
+    ):
+        result = invoke_xray_explore(
+            runner,
+            [
+                "--repo",
+                str(repo_dir),
+                "--regex",
+                "foo",
+                "--eval",
+                "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
+            ],
+        )
     assert result.exit_code == 0, f"Output: {result.output}"
     # AST output should include node types (Python tree-sitter uses 'module', 'function_definition', etc.)
     output = result.output
@@ -393,19 +432,23 @@ def test_xray_explore_ast_renderer_shows_truncated_sentinel(tmp_path: Path):
         {"main.py": "x = 1 + 2 + 3\n"},
     )
     runner = CliRunner()
-    result = invoke_xray_explore(
-        runner,
-        [
-            "--repo",
-            str(repo_dir),
-            "--regex",
-            "x",
-            "--eval",
-            "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
-            "--max-debug-nodes",
-            "1",
-        ],
-    )
+    with patch(
+        "code_indexer.xray.rust_backend.RustNativeBackend.run_batch",
+        side_effect=_mock_run_batch,
+    ):
+        result = invoke_xray_explore(
+            runner,
+            [
+                "--repo",
+                str(repo_dir),
+                "--regex",
+                "x",
+                "--eval",
+                "return {'matches': [{'line_number': mp['line_number']} for mp in match_positions]}",
+                "--max-debug-nodes",
+                "1",
+            ],
+        )
     assert result.exit_code == 0, f"Output: {result.output}"
     # With only 1 allowed node, truncated sentinel must appear
     assert "truncated" in result.output.lower(), (

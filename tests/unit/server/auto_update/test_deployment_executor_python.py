@@ -367,8 +367,10 @@ class TestExecuteCallsEnsureAutoUpdater:
         DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash"
     )
     @patch.object(DeploymentExecutor, "git_pull", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
     def test_execute_calls_ensure_auto_updater(
         self,
+        mock_ensure_rust,
         mock_git_pull,
         mock_calc_hash,
         mock_git_submodule,
@@ -403,8 +405,10 @@ class TestExecuteCallsEnsureAutoUpdater:
         DeploymentExecutor, "_calculate_auto_update_hash", return_value="same_hash"
     )
     @patch.object(DeploymentExecutor, "git_pull", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_rust_toolchain", return_value=True)
     def test_execute_continues_on_ensure_auto_updater_failure(
         self,
+        mock_ensure_rust,
         mock_git_pull,
         mock_calc_hash,
         mock_git_submodule,

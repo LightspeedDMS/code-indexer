@@ -61,12 +61,15 @@ Tool docs: `src/code_indexer/server/mcp/tool_docs/search/xray_search.md`, `src/c
 
 **Files**: `src/code_indexer/xray/search_engine.py`, `src/code_indexer/xray/sandbox.py`, `src/code_indexer/server/mcp/handlers/xray.py`. Tests: `tests/unit/xray/test_search_engine.py`, `tests/unit/xray/test_sandbox*.py`, `tests/unit/server/mcp/test_xray_search_handler.py`.
 
-## Sandbox: lifted bans (v10.4.0)
+## Sandbox: current allowed nodes
 
-The `PythonEvaluatorSandbox.ALLOWED_NODES` whitelist was extended in v10.4.0 to admit statement-level control flow and structured exception handling — previously these were rejected at validation time and evaluators had to be expressed as comprehension-only chains. The lifted bans:
+The `PythonEvaluatorSandbox.ALLOWED_NODES` whitelist admits statement-level control flow, arithmetic, list comprehensions, and function definitions. The allowed groups:
 
 - **Group C — statement-level control flow**: `If` (statement-level if/elif/else), `For` (statement-level for-loop), `While` (statement-level while-loop), `Break`, `Continue`, `Pass`. Iteration is bounded by the subprocess HARD_TIMEOUT_SECONDS (5.0 s) — infinite loops surface as `EvaluatorTimeout`, not validation rejection.
-- **Group D — structured exception handling**: `Try` (try/except/finally blocks), `ExceptHandler` (except clauses, bare and typed), `Raise`. Common exception types are present in `SAFE_BUILTIN_NAMES` for `except` clauses: `Exception, ValueError, TypeError, RuntimeError, AttributeError, KeyError, IndexError, NameError, StopIteration`.
 - **Group E — arithmetic binary ops**: `BinOp` plus `operator` abstract base (covers Add, Sub, Mult, Div, Mod, etc.).
+- **Group G — function definitions**: `FunctionDef`, `arguments`, `arg`. Lambda is NOT allowed.
+- **Group B — comprehensions**: `comprehension, GeneratorExp, ListComp, IfExp`. SetComp and DictComp are NOT allowed.
 
-Still banned at validation time (rejected before any subprocess is spawned): `class`, `async def`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`. Plus dunder Attribute and Subscript access (`__class__`, `__globals__`, `__import__`, etc. — see `DUNDER_ATTR_BLOCKLIST` in `sandbox.py`).
+**SAFE_BUILTIN_NAMES** (8 total): `len, any, all, range, enumerate, sorted, min, max`. Type constructors (str, int, bool, list, dict, etc.), introspection (isinstance, hasattr, type), and exception types are NOT available.
+
+Still banned at validation time (rejected before any subprocess is spawned): `class`, `async def`, `lambda`, `with`, `async with`, `global`, `nonlocal`, `async`, `await`, `yield`, `yield from`, `try`/`except`/`raise`, all imports (`import X`, `from X import Y`), `SetComp`, `DictComp`. Plus dunder Attribute and Subscript access (`__class__`, `__globals__`, `__import__`, etc. — see `DUNDER_ATTR_BLOCKLIST` in `sandbox.py`).

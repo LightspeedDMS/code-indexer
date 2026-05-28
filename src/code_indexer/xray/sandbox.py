@@ -5,9 +5,7 @@ Three defense layers:
      allowed set before any subprocess is spawned.
   2. Stripped exec() environment — removes dangerous builtins (getattr,
      setattr, delattr, __import__, eval, exec, open, compile) from
-     the globals dict passed to exec().  Note: ``hasattr`` is in
-     SAFE_BUILTIN_NAMES (not stripped) because it has no escalation
-     power beyond what the dunder blocklist already prevents.
+     the globals dict passed to exec().
   3. multiprocessing.Process isolation with hard 5.0 s SIGTERM + 1.0 s
      SIGKILL escalation — protects the parent against infinite loops,
      C-level crashes, and unbounded resource consumption.
@@ -43,11 +41,12 @@ import ast
 import builtins
 import difflib
 import multiprocessing
+import re as _re
 import textwrap
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from code_indexer.xray.xray_node import XRayNode
@@ -102,47 +101,13 @@ class EvalResult:
 SAFE_BUILTIN_NAMES: frozenset[str] = frozenset(
     {
         "len",
-        "str",
-        "int",
-        "bool",
-        "list",
-        # Exception types — needed for ``except Exception:`` / ``except ValueError:``
-        # in try/except blocks (Group D, v10.4.0).  These are read-only references;
-        # none grant escalation power beyond what the dunder blocklist prevents.
-        "Exception",
-        "ValueError",
-        "TypeError",
-        "RuntimeError",
-        "AttributeError",
-        "KeyError",
-        "IndexError",
-        "NameError",
-        "StopIteration",
-        "tuple",
-        "dict",
-        "min",
-        "max",
-        "sum",
         "any",
         "all",
         "range",
         "enumerate",
-        "zip",
         "sorted",
-        "reversed",
-        # hasattr is safe: it is equivalent to try/getattr/except AttributeError
-        # and has no escalation power beyond the dunder blocklist already enforced
-        # at AST validation time (M1 Codex review finding).
-        "hasattr",
-        # Story #993 additions — common introspection / type helpers that have no
-        # escalation power beyond what the dunder blocklist already prevents.
-        "isinstance",  # type checking in evaluator logic
-        "type",  # inspect node type objects
-        "set",  # mutable set literals
-        "frozenset",  # immutable set for membership tests
-        "float",  # numeric coercion
-        "repr",  # debugging output inside evaluators
-        "print",  # debugging output; subprocess stdout is not visible to callers
+        "min",
+        "max",
     }
 )
 
@@ -245,29 +210,6 @@ def _run_evaluator(
             for k, v in all_builtins.items()
             if k in SAFE_BUILTIN_NAMES and k not in stripped
         }
-
-        # Restricted __import__ that only permits whitelisted stdlib modules.
-        # The real __import__ is captured here (in the parent before exec) and
-        # called only when the top-level name is in STDLIB_WHITELIST.
-        _real_import = builtins.__import__
-        _whitelist = PythonEvaluatorSandbox.STDLIB_WHITELIST
-
-        def _restricted_import(
-            name: str,
-            globals: Any = None,
-            locals: Any = None,
-            fromlist: Any = (),
-            level: int = 0,
-        ) -> Any:
-            top = name.split(".")[0]
-            if top not in _whitelist:
-                raise ImportError(
-                    f"Import of '{top}' is blocked by the evaluator sandbox. "
-                    f"Allowed: {', '.join(sorted(_whitelist))}."
-                )
-            return _real_import(name, globals, locals, fromlist, level)
-
-        safe["__import__"] = _restricted_import
 
         globals_dict: dict[str, Any] = {
             "__builtins__": safe,
@@ -388,8 +330,6 @@ class PythonEvaluatorSandbox:
         # Comprehension expression forms — all share the same clause node
         ast.GeneratorExp,  # (x for x in items)
         ast.ListComp,  # [x for x in items]
-        ast.SetComp,  # {x for x in items}
-        ast.DictComp,  # {k: v for k, v in items}
         # IfExp: ternary expression — ``a if cond else b``
         ast.IfExp,
         # Group C — statement-level control flow
@@ -401,25 +341,13 @@ class PythonEvaluatorSandbox:
         ast.Break,  # early loop exit
         ast.Continue,  # skip current iteration
         ast.Pass,  # empty body placeholder: if cond: pass
-        # Group D — structured exception handling (Directive D, v10.4.0)
-        # try/except/finally lets evaluators handle per-node errors gracefully.
-        # raise lets evaluators surface clean errors — produces EvaluatorCrash,
-        # not validation_failed.
-        ast.Try,  # try/except/finally blocks
-        ast.ExceptHandler,  # except clauses (bare and typed)
-        ast.Raise,  # raise statements
         # Group E — arithmetic binary operations
         # BinOp allows x + n, x - n, x * n etc. in evaluator code.
         # ast.operator covers concrete subclasses Add, Sub, Mult, Div etc.
         # via isinstance() — already included in Group A above.
         ast.BinOp,  # binary arithmetic: x + y, x * y, etc.
-        # Group F — import statements (Story #993)
-        ast.Import,
-        ast.ImportFrom,
-        ast.alias,  # name alias node inside Import/ImportFrom
-        # Group G — function definitions and lambdas (Story #993)
+        # Group G — function definitions (transpilable subset)
         ast.FunctionDef,
-        ast.Lambda,
         ast.arguments,
         ast.arg,
     )
@@ -474,8 +402,6 @@ class PythonEvaluatorSandbox:
     )
 
     # Builtins removed from the exec() environment.
-    # Note: hasattr is in SAFE_BUILTIN_NAMES (not here) — see M1 rationale
-    # in module docstring and SAFE_BUILTIN_NAMES comment above.
     STRIPPED_BUILTINS: frozenset[str] = frozenset(
         {
             "getattr",
@@ -489,36 +415,9 @@ class PythonEvaluatorSandbox:
         }
     )
 
-    # Stdlib modules allowed in evaluator import statements (Story #993 Group F).
-    # Only the top-level module name is checked (e.g. "os.path" → "os").
-    # Non-whitelisted imports are rejected in validate() with a descriptive error.
-    STDLIB_WHITELIST: frozenset[str] = frozenset(
-        {"re", "collections", "itertools", "functools"}
-    )
-
     # ---------------------------------------------------------------------------
     # Internal class helpers
     # ---------------------------------------------------------------------------
-
-    @classmethod
-    def _import_top_level_modules(
-        cls, node: "Union[ast.Import, ast.ImportFrom]"
-    ) -> list[str]:
-        """Return the top-level module name(s) from an import statement node.
-
-        For ``ast.Import`` (``import re, os``): one entry per alias name.
-        For ``ast.ImportFrom`` (``from re import search``): one entry for the module.
-        Raises TypeError for any other node type (caller must gate with isinstance).
-        """
-        if isinstance(node, ast.Import):
-            return [alias.name.split(".")[0] for alias in node.names]
-        if isinstance(node, ast.ImportFrom):
-            top = (node.module or "").split(".")[0]
-            return [top] if top else []
-        raise TypeError(
-            f"_import_top_level_modules expects ast.Import or ast.ImportFrom, "
-            f"got {type(node).__name__}"
-        )
 
     @classmethod
     def _allowed_node_names(cls) -> list[str]:
@@ -597,23 +496,6 @@ class PythonEvaluatorSandbox:
                     offending_construct=type(node).__name__,
                     offending_line=getattr(node, "lineno", None),
                 )
-
-            # Secondary whitelist check for import statements (Group F).
-            # Runs only for nodes that already passed the ALLOWED_NODES isinstance check.
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                for top in self._import_top_level_modules(node):
-                    if top not in self.STDLIB_WHITELIST:
-                        return ValidationResult(
-                            ok=False,
-                            reason=(
-                                f"Import of '{top}' is not allowed. "
-                                f"Only whitelisted stdlib modules may be imported: "
-                                f"{', '.join(sorted(self.STDLIB_WHITELIST))}."
-                            ),
-                            error_code="import_not_whitelisted",
-                            offending_construct=top,
-                            offending_line=getattr(node, "lineno", None),
-                        )
 
             # Block Attribute access to dunder names (Python sandbox escape vector).
             # e.g. node.__class__, ''.join.__globals__, dict.__base__
@@ -1323,3 +1205,83 @@ def _run_driver_batch(
             for s in file_specs
         ]
     return results
+
+
+# ---------------------------------------------------------------------------
+# Rust evaluator pre-flight validator
+# ---------------------------------------------------------------------------
+
+# Ordered table of (error_code, offending_construct, regex_pattern) entries.
+# Entries are checked in order; the first match short-circuits.
+# Patterns are case-sensitive except where noted.
+_RUST_FORBIDDEN_PATTERNS: list[tuple[str, str, str]] = [
+    # Unsafe code — top priority
+    ("forbidden_unsafe", "unsafe", r"\bunsafe\b"),
+    # Forbidden std namespaces
+    ("forbidden_stdlib", "std::fs", r"\bstd::fs\b"),
+    ("forbidden_stdlib", "std::net", r"\bstd::net\b"),
+    ("forbidden_stdlib", "std::process", r"\bstd::process\b"),
+    ("forbidden_stdlib", "std::env", r"\bstd::env\b"),
+    ("forbidden_stdlib", "std::io", r"\bstd::io\b"),
+    # Raw pointer types
+    ("forbidden_raw_ptr", "*const", r"\*const\b"),
+    ("forbidden_raw_ptr", "*mut", r"\*mut\b"),
+    # Structural declarations
+    ("forbidden_extern", "extern", r"\bextern\b"),
+    ("forbidden_mod", "mod", r"\bmod\b"),
+    ("forbidden_static_mut", "static mut", r"\bstatic\s+mut\b"),
+    # Forbidden macros (macro invocation: name followed by !)
+    ("forbidden_macro", "include!", r"\binclude\s*!"),
+    ("forbidden_macro", "env!", r"\benv\s*!"),
+    ("forbidden_macro", "println!", r"\bprintln\s*!"),
+    ("forbidden_macro", "eprintln!", r"\beprintln\s*!"),
+    ("forbidden_macro", "panic!", r"\bpanic\s*!"),
+    ("forbidden_macro", "todo!", r"\btodo\s*!"),
+    ("forbidden_macro", "unimplemented!", r"\bunimplemented\s*!"),
+    ("forbidden_macro", "include_str!", r"\binclude_str\s*!"),
+    ("forbidden_macro", "include_bytes!", r"\binclude_bytes\s*!"),
+    ("forbidden_macro", "option_env!", r"\boption_env\s*!"),
+    ("forbidden_macro", "print!", r"\bprint\s*!"),
+    ("forbidden_macro", "eprint!", r"\beprint\s*!"),
+]
+
+# Pre-compiled pattern objects for performance.
+_RUST_COMPILED_PATTERNS: list[tuple[str, str, "_re.Pattern[str]"]] = [
+    (error_code, construct, _re.compile(pattern))
+    for error_code, construct, pattern in _RUST_FORBIDDEN_PATTERNS
+]
+
+
+def validate_rust_evaluator(code: str) -> ValidationResult:
+    """Statically validate Rust evaluator code for required signature and forbidden constructs.
+
+    Checks that the code contains ``fn evaluate_node`` and rejects any
+    forbidden Rust construct (unsafe, dangerous std namespaces, raw pointers,
+    extern blocks, mod declarations, static mut, forbidden macros).
+
+    Returns:
+        ValidationResult with ``ok=True`` when the code is acceptable, or
+        ``ok=False`` with ``error_code``, ``reason``, ``offending_construct``,
+        and ``offending_line`` describing the first violation found.
+    """
+    if not _re.search(r"\bfn\s+evaluate_node\b", code):
+        return ValidationResult(
+            ok=False,
+            reason="missing required 'fn evaluate_node' function signature",
+            error_code="missing_entry_point",
+            offending_construct="evaluate_node",
+            offending_line=None,
+        )
+
+    for lineno, line in enumerate(code.splitlines(), start=1):
+        for error_code, construct, pattern in _RUST_COMPILED_PATTERNS:
+            if pattern.search(line):
+                return ValidationResult(
+                    ok=False,
+                    reason=f"forbidden construct '{construct}' is not allowed in Rust evaluator code",
+                    error_code=error_code,
+                    offending_construct=construct,
+                    offending_line=lineno,
+                )
+
+    return ValidationResult(ok=True)

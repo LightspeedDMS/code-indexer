@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.xray.sandbox import validate_rust_evaluator
 from code_indexer.xray.search_engine import XRaySearchEngine
 
 from . import _utils
@@ -294,8 +295,7 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # ------------------------------------------------------------------
         # 5. Pre-flight evaluator validation (multi-repo path)
         # ------------------------------------------------------------------
-        engine_multi = XRaySearchEngine()
-        validation_multi = engine_multi.sandbox.validate(evaluator_code)
+        validation_multi = validate_rust_evaluator(evaluator_code)
         if not validation_multi.ok:
             return _mcp_response(
                 {
@@ -404,9 +404,7 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # 5. Pre-flight evaluator validation
     # ------------------------------------------------------------------
-    engine = XRaySearchEngine()
-
-    validation = engine.sandbox.validate(evaluator_code)
+    validation = validate_rust_evaluator(evaluator_code)
     if not validation.ok:
         return _mcp_response(
             {
@@ -790,7 +788,7 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # 5. Pre-flight evaluator validation  (shared — runs before alias branch)
     # ------------------------------------------------------------------
-    validation = XRaySearchEngine().sandbox.validate(evaluator_code)
+    validation = validate_rust_evaluator(evaluator_code)
     if not validation.ok:
         return _mcp_response(
             {

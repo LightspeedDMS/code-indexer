@@ -83,7 +83,11 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         def claude_side_effect(*args, **kwargs):
             return True
 
-    with (
+    # Use ExitStack to avoid Python 3.9 "too many statically nested blocks" limit
+    # when combining more than ~20 context managers in a single with (...) expression.
+    from contextlib import ExitStack
+
+    patches = [
         patch.object(executor, "git_pull", return_value=True),
         patch.object(executor, "git_submodule_update", return_value=True),
         patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
@@ -107,8 +111,12 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         patch.object(executor, "_ensure_claude_cli_installed", return_value=True),
         patch.object(executor, "_ensure_nfs_research_symlinks", return_value=True),
         patch.object(executor, "_ensure_systemd_claude_path", return_value=True),
+        patch.object(executor, "_ensure_rust_toolchain", return_value=True),
         patch.object(executor, "_calculate_auto_update_hash", return_value="abc123"),
-    ):
+    ]
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         yield
 
 

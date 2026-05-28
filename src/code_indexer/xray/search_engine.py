@@ -1,10 +1,9 @@
 """XRaySearchEngine: orchestrates two-phase X-Ray search.
 
 Phase 1 (driver): regex-based candidate file selection via file walk + re.search.
-Phase 2 (evaluator): AST-based per-match evaluation via PythonEvaluatorSandbox,
-executed in parallel via ThreadPoolExecutor with wall-clock timeout enforcement.
-
-Story #978 adds ThreadPoolExecutor parallelism and COMPLETED_PARTIAL contract.
+Phase 2 (evaluator): AST-based per-match evaluation via Rust native backend
+(RustNativeBackend), which validates Rust evaluator code, compiles to
+dynamic libraries, and executes with native speed and rayon parallelism.
 """
 
 from __future__ import annotations
@@ -16,7 +15,10 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from code_indexer.xray.rust_backend import XrayCacheBackend
 
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
@@ -25,6 +27,79 @@ from code_indexer.global_repos.regex_search import (
 from code_indexer.xray.sandbox import _line_to_byte_offset_bytes as _line_to_byte_offset
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton for cluster cache backend.
+# Created once on first successful/definitive initialization, reused thereafter.
+# _cluster_cache_lock serializes initialization; double-checked locking avoids
+# acquiring the lock on every call once the singleton is established.
+_cluster_cache_singleton: Optional["XrayCacheBackend"] = None
+_cluster_cache_initialized: bool = False
+_cluster_cache_lock: threading.Lock = threading.Lock()
+
+
+def _get_cluster_cache() -> Optional["XrayCacheBackend"]:
+    """Return a shared XrayCachePostgresBackend when in cluster (postgres) mode.
+
+    Singleton with double-checked locking: initialized once on the first
+    definitive outcome, then returns the cached result without acquiring the
+    lock on every subsequent call.
+
+    Definitive outcomes (set _cluster_cache_initialized = True):
+    - Non-postgres storage mode: returns None permanently.
+    - Missing postgres DSN: returns None permanently.
+    - Successful backend creation: returns the backend permanently.
+
+    Transient failures (exception from config/import/pool): leaves
+    _cluster_cache_initialized = False so the next call retries.  This
+    prevents a one-time startup blip from permanently disabling the cache.
+
+    Returns None in solo mode or on transient errors (graceful degradation).
+    """
+    global _cluster_cache_singleton, _cluster_cache_initialized
+    # Fast path: already initialized (no lock needed).
+    if _cluster_cache_initialized:
+        return _cluster_cache_singleton
+    with _cluster_cache_lock:
+        # Slow path: re-check inside the lock to handle concurrent first callers.
+        if _cluster_cache_initialized:
+            return _cluster_cache_singleton
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
+            storage_mode = getattr(config, "storage_mode", "")
+            if storage_mode != "postgres":
+                # Definitive: not a postgres deployment — cache the None result.
+                _cluster_cache_initialized = True
+                return None
+            postgres_dsn = getattr(config, "postgres_dsn", "")
+            if not postgres_dsn:
+                # Definitive: misconfigured postgres — cache the None result.
+                logger.warning(
+                    "XRaySearchEngine: postgres mode but no DSN — cluster cache disabled"
+                )
+                _cluster_cache_initialized = True
+                return None
+            from code_indexer.server.storage.postgres.connection_pool import (
+                ConnectionPool,
+            )
+            from code_indexer.server.storage.postgres.xray_cache_backend import (
+                XrayCachePostgresBackend,
+            )
+
+            pool = ConnectionPool(postgres_dsn)
+            _cluster_cache_singleton = XrayCachePostgresBackend(pool)
+            # Definitive: backend created successfully — cache the result.
+            _cluster_cache_initialized = True
+            logger.info("XRaySearchEngine: cluster evaluator cache enabled (postgres)")
+            return _cluster_cache_singleton
+        except Exception as exc:
+            # Transient failure: leave _cluster_cache_initialized = False so the
+            # next XRaySearchEngine instantiation retries.
+            logger.warning(
+                "XRaySearchEngine: cluster cache setup failed — solo mode: %s", exc
+            )
+            return None
 
 
 def _run_async_in_sync(coro: Any) -> Any:
@@ -73,18 +148,19 @@ class XRaySearchEngine:
     Phase 1 (driver): regex match over file content or file paths to build a
     candidate list.
 
-    Phase 2 (evaluator): for each candidate file, parse it with tree-sitter and
-    run the caller-supplied Python evaluator code in the sandbox.
-
-    Story #978 will add ThreadPoolExecutor parallelism and job-level timeout.
+    Phase 2 (evaluator): for each candidate file, validate the Rust evaluator
+    code, compile to a dynamic library, and run the Rust xray scanner for
+    parallel AST evaluation via RustNativeBackend.
     """
 
     def __init__(self) -> None:
         """Initialise the engine, importing tree-sitter at this point."""
         from code_indexer.xray.ast_engine import AstSearchEngine
+        from code_indexer.xray.rust_backend import RustNativeBackend
         from code_indexer.xray.sandbox import PythonEvaluatorSandbox
 
         self.ast_engine = AstSearchEngine()
+        self.rust_backend = RustNativeBackend(xray_cache_backend=_get_cluster_cache())
         self.sandbox = PythonEvaluatorSandbox()
 
     @staticmethod
@@ -323,12 +399,13 @@ class XRaySearchEngine:
 
         if file_specs:
             remaining = max(1, timeout_seconds - int(_elapsed()))
-            batch_results = self.sandbox.run_batch(
+            batch_results = self.rust_backend.run_batch(
                 evaluator_code=evaluator_code,
                 file_specs=file_specs,
                 worker_threads=worker_threads,
                 timeout_seconds=remaining,
                 on_process_spawned=on_process_spawned,
+                repo_path=str(repo_path),
             )
             for file_matches, file_errors, file_meta in batch_results:
                 if _timed_out():
@@ -437,50 +514,27 @@ class XRaySearchEngine:
         source: Optional[str] = None,
         context_lines: int = 0,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Evaluate a candidate file ONCE with the file-as-unit contract (v10.4.0).
+        """Evaluate a candidate file via RustNativeBackend (Rust-only path).
 
-        Parses the file once, then calls sandbox.run ONCE with the full
-        ``match_positions`` list (all Phase 1 hits for this file).  The
-        evaluator receives:
-          - ``node`` / ``root``: file root AST node
-          - ``source``: raw file text
-          - ``lang``: language string
-          - ``file_path``: file path (relative to repo root via run(); absolute when called directly)
-          - ``match_positions``: list of dicts, one per Phase 1 hit:
-              {line_number, line_content, column, byte_offset,
-               context_before, context_after}
-            Empty list in filename-target mode.
-
-        Evaluator MUST return a dict with shape:
-          ``{"matches": [{"line_number": int, ...}, ...], "value": <any>}``
-
-        Optional evaluator extensions (ignored if absent):
-          - ``"skip": True`` — signals the evaluator wants this file skipped
-            entirely; returns ([], [], None) immediately.
-          - ``"file_role": str`` — per-file tag surfaced in file_metadata.
-
-        Server enriches each match with server-provided fields:
-          - ``file_path`` (always — evaluator sees one file)
-          - ``language`` (always)
-          - ``line_content`` (derived from source if evaluator omits it)
+        Routes evaluation through self.rust_backend.run_batch() with a single
+        file_spec built from the supplied parameters.  The ast_debug enrichment
+        (re-parse + matched_node / ast_debug fields) is performed here when
+        include_ast_debug is True, since the Rust backend does not produce AST
+        debug payloads.
 
         Args:
-            lang: Language string override.  When provided, bypasses
-                ``ast_engine.detect_language``; used by unit tests and callers
-                that already know the language.
-            source: Source text override.  When provided, bypasses file I/O;
-                the file is still used for ``file_path`` in results.
-            context_lines: Reserved for future context expansion; accepted but
-                not used at this layer (context is already embedded in
-                ``match_positions`` by Phase 1).
+            file_path: Path to the candidate file.
+            evaluator_code: Python evaluator source forwarded to run_batch.
+            include_ast_debug: When True, re-parse and add ast_debug/matched_node.
+            max_debug_nodes: Cap for BFS AST serialisation nodes.
+            match_positions: Phase 1 hit positions for this file.
+            lang: Language override; bypasses detect_language when supplied.
+            source: Source text override; bypasses file I/O when supplied.
+            context_lines: Accepted for API compatibility; unused at this layer.
 
         Returns:
-            Tuple of (matches, errors, file_meta_or_none) where:
-            - matches: list of enriched match dicts
-            - errors: list of error dicts
-            - file_meta_or_none: {"file_path": ..., "value": ...} or None
+            Tuple of (matches, errors, file_meta_or_none).
         """
-        # Allow callers to supply lang/source directly (e.g. unit tests).
         if lang is None:
             lang = self.ast_engine.detect_language(file_path)
         if lang is None:
@@ -499,247 +553,7 @@ class XRaySearchEngine:
 
         try:
             if source is None:
-                source_bytes = file_path.read_bytes()
-                source = source_bytes.decode("utf-8", errors="replace")
-            else:
-                source_bytes = source.encode("utf-8")
-            root = self.ast_engine.parse(source_bytes, lang)
-
-            # Normalize match_positions to list of dicts (file-as-unit contract).
-            # In filename-target mode, match_positions is None → empty list.
-            positions: List[Dict[str, Any]] = match_positions if match_positions else []
-
-            # Enrich each position with byte_offset derived from source.
-            # _run_phase1_content stored 0 as a sentinel; re-derive here.
-            for pos in positions:
-                ln = pos.get("line_number", 1) or 1
-                pos["byte_offset"] = _line_to_byte_offset(source, ln)
-
-            # Enrich each position with ast_node (smallest named AST node at byte_offset).
-            for pos in positions:
-                byte_off = pos.get("byte_offset")
-                if byte_off is not None:
-                    pos["ast_node"] = root.node_at_byte_offset(byte_off)
-                else:
-                    pos["ast_node"] = None
-
-            # Call evaluator ONCE per file with the full positions list.
-            eval_result = self.sandbox.run(
-                evaluator_code,
-                node=root,
-                root=root,
-                source=source,
-                lang=lang,
-                file_path=str(file_path),
-                match_positions=positions,
-            )
-
-            if eval_result.failure == "evaluator_timeout":
-                return (
-                    [],
-                    [
-                        {
-                            "file_path": str(file_path),
-                            "line_number": 0,
-                            "error_type": "EvaluatorTimeout",
-                            "error_message": "evaluator exceeded 5s sandbox limit",
-                        }
-                    ],
-                    None,
-                )
-
-            if eval_result.failure == "evaluator_subprocess_died":
-                return (
-                    [],
-                    [
-                        {
-                            "file_path": str(file_path),
-                            "line_number": 0,
-                            "error_type": "EvaluatorCrash",
-                            "error_message": eval_result.detail or "Subprocess died",
-                        }
-                    ],
-                    None,
-                )
-
-            if eval_result.failure == "validation_failed":
-                return (
-                    [],
-                    [
-                        {
-                            "file_path": str(file_path),
-                            "line_number": 0,
-                            "error_type": "ValidationFailed",
-                            "error_message": eval_result.detail
-                            or "Evaluator validation failed",
-                        }
-                    ],
-                    None,
-                )
-
-            if eval_result.failure is not None:
-                return (
-                    [],
-                    [
-                        {
-                            "file_path": str(file_path),
-                            "line_number": 0,
-                            "error_type": "EvaluatorCrash",
-                            "error_message": eval_result.detail or eval_result.failure,
-                        }
-                    ],
-                    None,
-                )
-
-            # Validate dict return contract.
-            raw_value = eval_result.value
-            if not isinstance(raw_value, dict):
-                return (
-                    [],
-                    [
-                        {
-                            "file_path": str(file_path),
-                            "line_number": 0,
-                            "error_type": "InvalidEvaluatorReturn",
-                            "error_message": (
-                                f"Evaluator must return a dict "
-                                f'{{"matches": [...], "value": ...}}, '
-                                f"got {type(raw_value).__name__!r}. "
-                                f"Note: bool return (legacy contract) is no longer accepted."
-                            ),
-                        }
-                    ],
-                    None,
-                )
-
-            # Early bail-out: evaluator signals "skip this file".
-            if raw_value.get("skip") is True:
-                return ([], [], None)
-
-            if "matches" not in raw_value:
-                return (
-                    [],
-                    [
-                        {
-                            "file_path": str(file_path),
-                            "line_number": 0,
-                            "error_type": "InvalidEvaluatorReturn",
-                            "error_message": (
-                                "Evaluator dict missing required 'matches' key. "
-                                'Return: {"matches": [...], "value": ...}'
-                            ),
-                        }
-                    ],
-                    None,
-                )
-
-            evaluator_matches = raw_value["matches"]
-            per_file_value = raw_value.get("value", None)
-
-            if not isinstance(evaluator_matches, list):
-                return (
-                    [],
-                    [
-                        {
-                            "file_path": str(file_path),
-                            "line_number": 0,
-                            "error_type": "InvalidEvaluatorReturn",
-                            "error_message": (
-                                f"'matches' must be a list, got {type(evaluator_matches).__name__!r}"
-                            ),
-                        }
-                    ],
-                    None,
-                )
-
-            # Build source lines once for line_content derivation.
-            source_lines = source.splitlines()
-
-            matches: List[Dict[str, Any]] = []
-            for em in evaluator_matches:
-                if not isinstance(em, dict):
-                    continue  # Skip malformed entries silently
-
-                # Finding 3.3: line_number is required in every match dict.
-                if "line_number" not in em:
-                    return (
-                        [],
-                        [
-                            {
-                                "file_path": str(file_path),
-                                "line_number": 0,
-                                "error_type": "InvalidEvaluatorReturn",
-                                "error_message": (
-                                    "each match must contain 'line_number'; "
-                                    f"got keys: {list(em.keys())!r}"
-                                ),
-                            }
-                        ],
-                        None,
-                    )
-
-                match_entry: Dict[str, Any] = dict(em)  # copy evaluator fields
-
-                # Finding 3.4: coerce line_number to int; non-numeric → InvalidEvaluatorReturn.
-                ln_raw = match_entry["line_number"]
-                try:
-                    ln = int(ln_raw)
-                except (TypeError, ValueError):
-                    return (
-                        [],
-                        [
-                            {
-                                "file_path": str(file_path),
-                                "line_number": 0,
-                                "error_type": "InvalidEvaluatorReturn",
-                                "error_message": (
-                                    f"line_number must be an int, got {ln_raw!r}"
-                                ),
-                            }
-                        ],
-                        None,
-                    )
-                match_entry["line_number"] = ln
-
-                # Server always provides file_path and language.
-                match_entry["file_path"] = str(file_path)
-                match_entry["language"] = lang
-
-                # Server derives line_content from source if evaluator omits it.
-                if "line_content" not in match_entry:
-                    idx = ln - 1  # 1-based → 0-based
-                    if 0 <= idx < len(source_lines):
-                        match_entry["line_content"] = source_lines[idx]
-                    else:
-                        match_entry["line_content"] = ""
-
-                if include_ast_debug:
-                    raw_root = getattr(root, "_node", root)
-                    match_entry["matched_node"] = {
-                        "type": raw_root.type,
-                        "start_byte": raw_root.start_byte,
-                        "end_byte": raw_root.end_byte,
-                        "start_point": list(raw_root.start_point),
-                        "end_point": list(raw_root.end_point),
-                    }
-                    match_entry["ast_debug"] = self._serialize_ast(
-                        root, max_debug_nodes
-                    )
-
-                matches.append(match_entry)
-
-            # Build file_metadata entry (value and/or file_role, when present).
-            per_file_role = raw_value.get("file_role", None)
-            file_meta: Optional[Dict[str, Any]] = None
-            if per_file_value is not None or per_file_role is not None:
-                file_meta = {"file_path": str(file_path)}
-                if per_file_value is not None:
-                    file_meta["value"] = per_file_value
-                if per_file_role is not None:
-                    file_meta["file_role"] = per_file_role
-
-            return matches, [], file_meta
-
+                source = file_path.read_bytes().decode("utf-8", errors="replace")
         except Exception as exc:  # noqa: BLE001
             return (
                 [],
@@ -753,6 +567,52 @@ class XRaySearchEngine:
                 ],
                 None,
             )
+
+        positions: List[Dict[str, Any]] = match_positions if match_positions else []
+        clean_positions = [
+            {k: v for k, v in p.items() if k != "ast_node"} for p in positions
+        ]
+
+        file_spec: Dict[str, Any] = {
+            "file_path": str(file_path),
+            "source": source,
+            "lang": lang,
+            "match_positions": clean_positions,
+        }
+
+        batch_results = self.rust_backend.run_batch(
+            evaluator_code=evaluator_code,
+            file_specs=[file_spec],
+            repo_path=str(file_path.parent),
+        )
+
+        if not batch_results:
+            return ([], [], None)
+
+        matches, errors, meta = batch_results[0]
+
+        if include_ast_debug and matches:
+            try:
+                root = self.ast_engine.parse(source.encode("utf-8"), lang)
+                raw_root = getattr(root, "_node", root)
+                for match in matches:
+                    match["matched_node"] = {
+                        "type": raw_root.type,
+                        "start_byte": raw_root.start_byte,
+                        "end_byte": raw_root.end_byte,
+                        "start_point": list(raw_root.start_point),
+                        "end_point": list(raw_root.end_point),
+                    }
+                    match["ast_debug"] = self._serialize_ast(root, max_debug_nodes)
+            except Exception as exc:  # noqa: BLE001
+                # ast_debug enrichment is optional; log and continue with unenriched matches.
+                logger.debug(
+                    "_evaluate_file: ast_debug enrichment failed for %s: %s",
+                    file_path,
+                    exc,
+                )
+
+        return (matches, errors, meta)
 
     @staticmethod
     def _check_zero_match_patterns(

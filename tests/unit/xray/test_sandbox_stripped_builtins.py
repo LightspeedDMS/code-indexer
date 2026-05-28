@@ -112,26 +112,17 @@ def test_stripped_builtin_causes_subprocess_died(builtin_name: str, code: str) -
         f"got: failure={result.failure!r}, detail={result.detail!r}"
     )
 
-    # Step 3: detail must reference the expected error AND mention the builtin name.
-    # __import__ is replaced by _restricted_import (Story #993), which raises
-    # ImportError rather than NameError — all other stripped builtins still produce NameError.
+    # Step 3: detail must reference NameError and mention the builtin name.
     assert result.detail is not None, (
         f"Expected detail to be set for stripped builtin '{builtin_name}'"
     )
-    if builtin_name == "__import__":
-        assert "ImportError" in result.detail, (
-            f"Expected 'ImportError' in detail for __import__ (replaced by "
-            f"_restricted_import in Story #993), got: {result.detail!r}"
-        )
-    else:
-        assert "NameError" in result.detail, (
-            f"Expected 'NameError' in detail for stripped builtin '{builtin_name}', "
-            f"got: {result.detail!r}"
-        )
-    if builtin_name != "__import__":
-        assert builtin_name in result.detail, (
-            f"Expected builtin name '{builtin_name}' in detail, got: {result.detail!r}"
-        )
+    assert "NameError" in result.detail, (
+        f"Expected 'NameError' in detail for stripped builtin '{builtin_name}', "
+        f"got: {result.detail!r}"
+    )
+    assert builtin_name in result.detail, (
+        f"Expected builtin name '{builtin_name}' in detail, got: {result.detail!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +174,7 @@ def test_stripped_import_does_not_pollute_sys_modules() -> None:
     engine = AstSearchEngine()
     node = engine.parse("x=1", "python")
     # __import__ as a Call node IS whitelisted at AST validation time.
-    # Story #993 replaced __import__ with _restricted_import in the exec env,
-    # which raises ImportError (not NameError) for non-stdlib-whitelist modules.
+    # __import__ is absent from the exec env — produces NameError at runtime.
     result = sb.run(
         "return __import__('os.path') is None",
         node=node,
@@ -200,9 +190,9 @@ def test_stripped_import_does_not_pollute_sys_modules() -> None:
     assert result.failure == "evaluator_subprocess_died", (
         f"Expected evaluator_subprocess_died, got {result.failure!r}"
     )
-    assert "NameError" in (result.detail or "") or "ImportError" in (
-        result.detail or ""
-    ), f"Expected NameError or ImportError in detail, got {result.detail!r}"
+    assert "NameError" in (result.detail or ""), (
+        f"Expected NameError in detail, got {result.detail!r}"
+    )
     assert not new_modules, (
         f"sys.modules polluted by stripped __import__: {new_modules}"
     )
