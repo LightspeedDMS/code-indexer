@@ -75,6 +75,7 @@ def _rust_env(tmp_path: Path) -> Iterator[MagicMock]:
         patch(f"{_MODULE}.__file__", fake_file, create=True),
         patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
         patch("subprocess.run") as mock_run,
+        patch("pathlib.Path.mkdir"),
     ):
         yield mock_run
 
@@ -628,6 +629,7 @@ class TestPathNoTrailingColon:
             patch(f"{_MODULE}.os.environ", original_environ),
             patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
             patch("subprocess.run", side_effect=recording_run),
+            patch("pathlib.Path.mkdir"),
         ):
             executor._ensure_rust_toolchain()
 

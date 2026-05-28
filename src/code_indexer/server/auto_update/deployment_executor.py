@@ -102,6 +102,11 @@ RUSTUP_CMD_TIMEOUT_SECONDS = 30  # rustup default stable; quick
 CARGO_BUILD_TIMEOUT_SECONDS = 600  # 10 min for first-time xray-cli build
 RUSTC_VERSION_TIMEOUT_SECONDS = 10  # quick binary probe
 
+# System-wide Rust installation directory — accessible by all OS users.
+# The auto-updater runs as root but cidx-server runs as code-indexer;
+# /root/.cargo is unreachable (0550), so we install to /opt/rust.
+RUST_SYSTEM_DIR = Path("/opt/rust")
+
 # Maximum bytes of subprocess stderr captured in warning log messages.
 MAX_ERROR_SNIPPET_LENGTH = 200
 
@@ -3648,6 +3653,28 @@ class DeploymentExecutor:
             content + f'Environment="PATH={local_bin}:{SYSTEMD_DEFAULT_PATH_SUFFIX}"\n'
         )
 
+    @staticmethod
+    def _remove_path_segment(content: str, segment: str) -> str:
+        """Remove a specific PATH segment from Environment="PATH=..." line.
+
+        Returns content unchanged if the segment is not present.
+        """
+        lines = content.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith('Environment="PATH='):
+                continue
+            path_value = stripped[len('Environment="PATH=') : -1]
+            segments = path_value.split(":")
+            if segment not in segments:
+                return content
+            segments = [s for s in segments if s != segment]
+            indent = line[: len(line) - len(line.lstrip())]
+            ending = line[len(line.rstrip("\r\n")) :]
+            lines[i] = f'{indent}Environment="PATH={":".join(segments)}"{ending}'
+            return "".join(lines)
+        return content
+
     def _write_service_file_via_sudo(self, service_file: Path, content: str) -> bool:
         """Write content to a systemd service file via sudo tee. Returns True on success."""
         try:
@@ -3747,9 +3774,10 @@ class DeploymentExecutor:
         )
         return True
 
-    def _ensure_systemd_cargo_path(self) -> bool:
-        """Ensure the cidx-server systemd service unit has ~/.cargo/bin in PATH.
+    def _ensure_systemd_rust_path(self) -> bool:
+        """Ensure the cidx-server systemd service unit has /opt/rust/bin in PATH.
 
+        Also removes stale /root/.cargo/bin entries from prior deployments.
         Non-fatal: returns False with WARNING when the service file is missing
         or any subprocess call fails.
         """
@@ -3764,13 +3792,20 @@ class DeploymentExecutor:
             )
             return False
 
-        cargo_bin = str(Path.home() / ".cargo" / "bin")
+        rust_bin = str(RUST_SYSTEM_DIR / "bin")
         original = service_file.read_text()
-        updated = self._build_updated_service_content(original, cargo_bin)
+
+        # Step 1: Remove stale /root/.cargo/bin if present
+        updated = self._remove_path_segment(
+            original, str(Path("/root") / ".cargo" / "bin")
+        )
+
+        # Step 2: Prepend /opt/rust/bin if not already present
+        updated = self._build_updated_service_content(updated, rust_bin)
 
         if updated == original:
             logger.debug(
-                f"PATH already contains {cargo_bin} in {service_file}, skipping",
+                f"PATH already contains {rust_bin} in {service_file}, skipping",
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
@@ -3782,7 +3817,7 @@ class DeploymentExecutor:
             return False
 
         logger.info(
-            f"Updated PATH in {service_file} to include {cargo_bin}",
+            f"Updated PATH in {service_file} to include {rust_bin}",
             extra={"correlation_id": get_correlation_id()},
         )
         return True
@@ -3829,6 +3864,7 @@ class DeploymentExecutor:
                 RUSTUP_CURL_ARGS,
                 capture_output=True,
                 timeout=RUSTUP_INSTALL_TIMEOUT_SECONDS,
+                env=env,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             logger.error(
@@ -3862,6 +3898,7 @@ class DeploymentExecutor:
                 input=curl_result.stdout,
                 capture_output=True,
                 timeout=RUSTUP_INSTALL_TIMEOUT_SECONDS,
+                env=env,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             logger.error(
@@ -3950,19 +3987,24 @@ class DeploymentExecutor:
     def _ensure_rust_toolchain(self) -> bool:
         """Story #1024: Ensure Rust toolchain is installed and xray-cli binary is built.
 
+        Installs to RUST_SYSTEM_DIR (/opt/rust) so the toolchain is accessible
+        to the cidx-server service user (not just root).
+
         Idempotent: skips install when rustc is already on PATH.
         Returns True on success or when rust/ dir is absent (non-fatal skip).
         Returns False on install failure, missing C compiler, or build failure (FATAL).
         """
-        cargo_bin = Path.home() / ".cargo" / "bin"
+        rust_bin = RUST_SYSTEM_DIR / "bin"
+        RUST_SYSTEM_DIR.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
-        # M6: Avoid trailing colon (empty segment = CWD on PATH — security risk).
+        env["RUSTUP_HOME"] = str(RUST_SYSTEM_DIR)
+        env["CARGO_HOME"] = str(RUST_SYSTEM_DIR)
         current_path = env.get("PATH", "")
         if current_path:
-            env["PATH"] = f"{cargo_bin}:{current_path}"
+            env["PATH"] = f"{rust_bin}:{current_path}"
         else:
-            env["PATH"] = str(cargo_bin)
-        self._ensure_systemd_cargo_path()
+            env["PATH"] = str(rust_bin)
+        self._ensure_systemd_rust_path()
 
         if not self._check_rustc_installed(env):
             if not self._install_rust_toolchain(env):
