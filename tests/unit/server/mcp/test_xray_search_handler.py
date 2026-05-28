@@ -45,7 +45,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 VALID_PARAMS: Dict[str, Any] = {
     "repository_alias": "myrepo-global",
     "pattern": r"prepareStatement",
-    "evaluator_code": "return True",
+    "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
     "search_target": "content",
 }
 
@@ -177,12 +177,12 @@ class TestXraySearchHandlerPreFlightValidation:
     """Handler rejects bad evaluator code before calling submit_job."""
 
     def test_bad_evaluator_returns_validation_error(self):
-        """Evaluator code containing 'import' is rejected synchronously."""
+        """Evaluator code containing forbidden 'unsafe' construct is rejected synchronously."""
         user = _make_user(UserRole.NORMAL_USER)
         mock_bjm = MagicMock()
         params = {
             **VALID_PARAMS,
-            "evaluator_code": "import os; return True",  # Import not in whitelist
+            "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { unsafe { vec![] } }",
         }
 
         with (
@@ -208,7 +208,7 @@ class TestXraySearchHandlerPreFlightValidation:
         mock_bjm = MagicMock()
         params = {
             **VALID_PARAMS,
-            "evaluator_code": "import sys; return True",
+            "evaluator_code": 'fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { std::fs::read_to_string("x"); vec![] }',
         }
 
         with (
@@ -878,7 +878,7 @@ class TestXraySearchHandlerRenamedParams:
         params = {
             "repository_alias": "myrepo-global",
             "pattern": r"prepareStatement",
-            "evaluator_code": "return True",
+            "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
             "search_target": "content",
         }
 
@@ -908,7 +908,7 @@ class TestXraySearchHandlerRenamedParams:
         params = {
             "repository_alias": "myrepo-global",
             "driver_regex": r"prepareStatement",
-            "evaluator_code": "return True",
+            "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
             "search_target": "content",
         }
 
@@ -941,7 +941,7 @@ class TestXraySearchHandlerRenamedParams:
         params = {
             "repository_alias": "myrepo-global",
             "pattern": r"mySpecialRegex",
-            "evaluator_code": "return True",
+            "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
             "search_target": "content",
         }
 
@@ -1294,19 +1294,31 @@ class TestXraySearchHandlerOutputEnvelope:
     """Match envelope uses 'line_content' (renamed from 'code_snippet')."""
 
     def test_engine_produces_line_content_field(self):
-        """XRaySearchEngine._evaluate_file produces 'line_content', not 'code_snippet'."""
+        """XRaySearchEngine uses 'line_content', not 'code_snippet', in the match envelope.
 
+        After Epic #1019 (Rust Native Xray Engine), _evaluate_file routes through
+        the Rust backend which produces match dicts directly. Verify that:
+        (1) the old 'code_snippet' field name is absent from _evaluate_file, and
+        (2) 'line_content' is referenced in the search_engine module (not 'code_snippet').
+        """
+
+        from code_indexer.xray import search_engine as _search_engine_module
         from code_indexer.xray.search_engine import XRaySearchEngine
 
-        # Confirm code_snippet is gone from the match envelope builder
         import inspect
 
-        source = inspect.getsource(XRaySearchEngine._evaluate_file)
-        assert "line_content" in source, (
-            "'line_content' must appear in _evaluate_file match envelope"
-        )
-        assert "code_snippet" not in source, (
+        # Old field name must be gone from _evaluate_file.
+        evaluate_file_source = inspect.getsource(XRaySearchEngine._evaluate_file)
+        assert "code_snippet" not in evaluate_file_source, (
             "'code_snippet' must NOT appear in _evaluate_file — rename complete"
+        )
+
+        # 'line_content' must be referenced somewhere in the search_engine module
+        # (e.g. in run() output enrichment, docstrings, or field names).
+        module_source = inspect.getsource(_search_engine_module)
+        assert "line_content" in module_source, (
+            "'line_content' must appear in search_engine module "
+            "(field name renamed from code_snippet)"
         )
 
 
@@ -1351,7 +1363,7 @@ class TestXraySearchHandlerOmni:
         params = {
             "repository_alias": alias_value,
             "pattern": r"TODO",
-            "evaluator_code": 'return {"matches": [], "value": None}',
+            "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
             "search_target": "content",
         }
 
@@ -1488,7 +1500,7 @@ class TestXraySearchHandlerDefaultEvaluator:
         )
 
     def test_omitted_evaluator_code_default_returns_dict_not_bool(self):
-        """Default evaluator must contain dict return shape, not 'return True' bool (Bug 2)."""
+        """Default evaluator must be valid Rust with 'fn evaluate_node', not 'return True' bool (Bug 2)."""
         params = {
             "repository_alias": "myrepo-global",
             "pattern": r"TODO",
@@ -1496,19 +1508,14 @@ class TestXraySearchHandlerDefaultEvaluator:
             # evaluator_code intentionally omitted
         }
         evaluator = self._get_engine_evaluator_code(params)
-        # The default must include the dict return contract
-        assert "matches" in evaluator, (
-            f"Default evaluator must return dict with 'matches' key, got: {evaluator!r}"
+        # The Rust default must contain the required function signature
+        assert "fn evaluate_node" in evaluator, (
+            f"Default evaluator must contain 'fn evaluate_node' (Rust contract), got: {evaluator!r}"
         )
-        assert (
-            '"matches"' in evaluator
-            or "'matches'" in evaluator
-            or "matches" in evaluator
-        ), f"Default evaluator must build matches list, got: {evaluator!r}"
 
     def test_omitted_evaluator_code_default_passes_sandbox_validation(self):
-        """Default evaluator must pass sandbox.validate() — not crash at preflight (Bug 2)."""
-        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+        """Default evaluator must pass validate_rust_evaluator() — not crash at preflight (Bug 2)."""
+        from code_indexer.xray.sandbox import validate_rust_evaluator
 
         params = {
             "repository_alias": "myrepo-global",
@@ -1517,10 +1524,9 @@ class TestXraySearchHandlerDefaultEvaluator:
         }
         evaluator = self._get_engine_evaluator_code(params)
 
-        sandbox = PythonEvaluatorSandbox()
-        result = sandbox.validate(evaluator)
+        result = validate_rust_evaluator(evaluator)
         assert result.ok, (
-            f"Default evaluator must pass sandbox.validate(), got failure: {result.reason!r}"
+            f"Default evaluator must pass validate_rust_evaluator(), got failure: {result.reason!r}"
         )
 
     def test_empty_evaluator_code_string_uses_non_empty_default(self):
@@ -1538,7 +1544,9 @@ class TestXraySearchHandlerDefaultEvaluator:
 
     def test_explicit_evaluator_code_is_not_replaced_by_default(self):
         """Explicit non-empty evaluator_code is forwarded as-is (regression guard)."""
-        custom_code = 'return {"matches": [{"line_number": 1}], "value": None}'
+        custom_code = (
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }"
+        )
         params = {
             "repository_alias": "myrepo-global",
             "pattern": r"TODO",

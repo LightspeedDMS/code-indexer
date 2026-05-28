@@ -185,12 +185,11 @@ def test_findings_grouped_by_file_from_json_output():
         }
     )
 
-    mock_result = MagicMock()
-    mock_result.returncode = 0
-    mock_result.stdout = fake_json
-    mock_result.stderr = ""
+    mock_proc = MagicMock()
+    mock_proc.communicate.return_value = (fake_json, "")
+    mock_proc.returncode = 0
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_proc):
         results = backend.run_batch(
             evaluator_code=VALID_EVALUATOR,
             file_specs=specs,
@@ -243,12 +242,11 @@ def test_match_dicts_have_required_fields():
         }
     )
 
-    mock_result = MagicMock()
-    mock_result.returncode = 0
-    mock_result.stdout = fake_json
-    mock_result.stderr = ""
+    mock_proc = MagicMock()
+    mock_proc.communicate.return_value = (fake_json, "")
+    mock_proc.returncode = 0
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_proc):
         results = backend.run_batch(
             evaluator_code=VALID_EVALUATOR,
             file_specs=specs,
@@ -448,22 +446,28 @@ def test_files_with_no_findings_get_empty_tuples():
 # ---------------------------------------------------------------------------
 
 
-def test_match_gets_line_content_from_source():
-    """line_content is derived from source when finding line is available."""
+def test_match_gets_line_content_from_source(tmp_path):
+    """line_content is derived from file on disk when finding line is available."""
     from code_indexer.xray.rust_backend import RustNativeBackend
 
     backend = RustNativeBackend()
+
+    # Create real file so _build_matches can read line_content from disk
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    java_file = src_dir / "Foo.java"
+    java_file.write_text(SIMPLE_JAVA)
+
     specs = [
         _spec("src/Foo.java", SIMPLE_JAVA, "java"),
     ]
 
-    # Line 3 of SIMPLE_JAVA (1-indexed) is the third line
     fake_json = json.dumps(
         {
             "findings": [
                 {
                     "pattern": "some-pattern",
-                    "file": str(REPO_ROOT / "src/Foo.java"),
+                    "file": str(tmp_path / "src/Foo.java"),
                     "line": 3,
                     "snippet": "void bar",
                 },
@@ -477,16 +481,15 @@ def test_match_gets_line_content_from_source():
         }
     )
 
-    mock_result = MagicMock()
-    mock_result.returncode = 0
-    mock_result.stdout = fake_json
-    mock_result.stderr = ""
+    mock_proc = MagicMock()
+    mock_proc.communicate.return_value = (fake_json, "")
+    mock_proc.returncode = 0
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_proc):
         results = backend.run_batch(
             evaluator_code=VALID_EVALUATOR,
             file_specs=specs,
-            repo_path=str(REPO_ROOT),
+            repo_path=str(tmp_path),
         )
 
     matches, errors, meta = results[0]
@@ -529,12 +532,11 @@ def test_snippet_field_preserved_in_match():
         }
     )
 
-    mock_result = MagicMock()
-    mock_result.returncode = 0
-    mock_result.stdout = fake_json
-    mock_result.stderr = ""
+    mock_proc = MagicMock()
+    mock_proc.communicate.return_value = (fake_json, "")
+    mock_proc.returncode = 0
 
-    with patch("subprocess.run", return_value=mock_result):
+    with patch("subprocess.Popen", return_value=mock_proc):
         results = backend.run_batch(
             evaluator_code=VALID_EVALUATOR,
             file_specs=specs,
@@ -990,3 +992,122 @@ def test_compile_error_returns_single_error_not_per_file():
         or "xray-cli" in err["error_message"].lower()
     )
     assert meta is None
+
+
+# ---------------------------------------------------------------------------
+# Test C1-a: _build_matches reads line_content from abs_path (not from spec source)
+# ---------------------------------------------------------------------------
+
+
+def test_build_matches_reads_from_abs_path(tmp_path):
+    """_build_matches must read the file at abs_path to populate line_content.
+
+    After Fix C1, _build_matches accepts abs_path: str instead of reading
+    source from spec. It reads the file on-demand only when there are findings.
+    """
+    from code_indexer.xray.rust_backend import _build_matches
+
+    content = "public class Foo {\n    void bar() {}\n    int x = 1;\n}\n"
+    src_file = tmp_path / "Foo.java"
+    src_file.write_text(content)
+
+    spec = {
+        "file_path": "src/Foo.java",
+        "lang": "java",
+        "match_positions": [],
+    }
+    findings = [{"pattern": "alloc", "line": 3, "snippet": "int x"}]
+
+    matches = _build_matches(spec, findings, abs_path=str(src_file))
+
+    assert len(matches) == 1
+    m = matches[0]
+    assert m["line_number"] == 3
+    assert m["line_content"] == "    int x = 1;"
+    assert m["snippet"] == "int x"
+    assert m["language"] == "java"
+    assert m["file_path"] == "src/Foo.java"
+
+
+# ---------------------------------------------------------------------------
+# Test C1-b: _build_matches uses empty line_content when file is missing
+# ---------------------------------------------------------------------------
+
+
+def test_build_matches_missing_file_uses_empty_line_content():
+    """When the file at abs_path does not exist, _build_matches must not crash.
+
+    line_content must be empty string for all findings; a warning is logged
+    but no exception propagates.
+    """
+    from code_indexer.xray.rust_backend import _build_matches
+
+    spec = {
+        "file_path": "src/Ghost.java",
+        "lang": "java",
+        "match_positions": [],
+    }
+    findings = [{"pattern": "alloc", "line": 1, "snippet": ""}]
+
+    matches = _build_matches(spec, findings, abs_path="/nonexistent/path/Ghost.java")
+
+    assert len(matches) == 1
+    assert matches[0]["line_content"] == ""
+    assert matches[0]["line_number"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Test M1: _DEFAULT_EVALUATOR_CODE must be valid Rust (passes validate_rust_evaluator)
+# ---------------------------------------------------------------------------
+
+
+def test_default_evaluator_code_passes_rust_validation():
+    """_DEFAULT_EVALUATOR_CODE in xray handler must pass validate_rust_evaluator().
+
+    After Fix M1, the default is Rust (not Python), so the validator must
+    accept it without errors.
+    """
+    from code_indexer.xray.sandbox import validate_rust_evaluator
+    from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
+
+    result = validate_rust_evaluator(_DEFAULT_EVALUATOR_CODE)
+    assert result.ok, (
+        f"_DEFAULT_EVALUATOR_CODE failed Rust validation: "
+        f"{result.reason!r} (construct={result.offending_construct!r})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test C3: _try_pre_fill writes .so atomically via temp file + rename
+# ---------------------------------------------------------------------------
+
+
+def test_try_pre_fill_atomic_write_via_temp_file(tmp_path):
+    """_try_pre_fill must write .so atomically: write to .tmp file first, then rename.
+
+    After Fix C3, no partial .so can exist if a concurrent worker races on the
+    same hash. The temp file must not exist after a successful pre-fill, and
+    the final .so must contain the correct bytes.
+    """
+    import hashlib
+    from unittest.mock import MagicMock, patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    fake_so_bytes = b"\x7fELF atomic-write-test"
+    mock_cache = MagicMock()
+    mock_cache.fetch.return_value = fake_so_bytes
+    backend = RustNativeBackend(xray_cache_backend=mock_cache)
+
+    source_hash = hashlib.sha256(VALID_EVALUATOR.encode()).hexdigest()
+    expected_so = tmp_path / f"{source_hash}.so"
+    pid_tmp = tmp_path / f"{source_hash}.so.tmp.{__import__('os').getpid()}"
+
+    with patch.object(backend, "_get_cache_dir", return_value=tmp_path):
+        with patch.object(backend, "_get_rustc_version", return_value="rustc 1.91.0"):
+            backend._try_pre_fill(VALID_EVALUATOR)
+
+    # Final .so must exist with correct bytes.
+    assert expected_so.exists(), ".so must exist after successful pre-fill"
+    assert expected_so.read_bytes() == fake_so_bytes, ".so must contain cache bytes"
+    # Temp file must not remain after atomic rename.
+    assert not pid_tmp.exists(), "temp .so.tmp file must be cleaned up after rename"

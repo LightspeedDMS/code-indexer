@@ -39,14 +39,17 @@ def _make_rust_batch_result(
     file_specs: List[Dict[str, Any]],
     matches_per_file: Optional[List[List[Dict[str, Any]]]] = None,
     meta_per_file: Optional[List[Optional[Dict[str, Any]]]] = None,
+    repo_path: Optional[str] = None,
 ) -> List[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]]:
     """Build a rust_backend.run_batch return value for mocking.
 
     Args:
-        file_specs: The file_specs list passed to run_batch (provides file_path, source, lang).
+        file_specs: The file_specs list passed to run_batch (provides file_path, lang).
         matches_per_file: List of match lists, one per file spec. Defaults to one match
             with line_number=1 per file.
         meta_per_file: List of optional meta dicts, one per file spec. Defaults to None.
+        repo_path: Absolute path to repo root; used to read line_content from disk
+            when source is absent from spec (matches real RustNativeBackend behaviour).
 
     Returns:
         List of (matches, [], meta) tuples compatible with run_batch contract.
@@ -58,6 +61,16 @@ def _make_rust_batch_result(
         rel_path = spec.get("file_path", "")
         source = spec.get("source", "")
         lang = spec.get("lang", "")
+
+        # When source is absent from the spec, read the file from disk so that
+        # line_content can be populated — mirrors the real RustNativeBackend.
+        if not source and repo_path and rel_path:
+            abs_path = Path(repo_path) / rel_path
+            try:
+                source = abs_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                source = ""
+
         source_lines = source.splitlines()
 
         if matches_per_file is not None and i < len(matches_per_file):
@@ -93,7 +106,8 @@ def _rust_batch_side_effect(
     """Return a callable suitable for use as side_effect on rust_backend.run_batch mock.
 
     The returned function ignores evaluator_code and uses the real file_specs passed
-    to run_batch to build realistic result tuples.
+    to run_batch to build realistic result tuples.  repo_path is forwarded so that
+    _make_rust_batch_result can read line_content from disk when source is absent.
     """
     outer_matches = matches_per_file
     outer_meta = meta_per_file
@@ -107,7 +121,9 @@ def _rust_batch_side_effect(
         on_process_spawned: Any = None,
         repo_path: Optional[str] = None,
     ) -> List[Tuple]:
-        return _make_rust_batch_result(file_specs, outer_matches, outer_meta)
+        return _make_rust_batch_result(
+            file_specs, outer_matches, outer_meta, repo_path=repo_path
+        )
 
     return _bound
 
