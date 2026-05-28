@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.62.0 (2026-05-28) -- Xray Memory Waste Fix + Test Fixture Cleanup (Epic #1019)
+
+### Fixed
+- Xray search engine no longer pre-loads ALL candidate file source code into memory (~170MB for 17K-file repos). The Rust subprocess reads files itself; Python-side `line_content` enrichment now reads on-demand per file with findings.
+- `_DEFAULT_EVALUATOR_CODE` in MCP handlers changed from Python to Rust. The old Python code was silently rejected by `validate_rust_evaluator()` when evaluator_code was omitted.
+- Atomic `.so` cache writes in `_try_pre_fill()`: writes to `{hash}.so.tmp.{pid}` then renames, preventing corruption from concurrent workers.
+- `ast_debug` enrichment reads file bytes from disk instead of deleted `spec["source"]` key.
+- 75 pre-existing test failures from Rust migration (commit 839e935): updated evaluator fixtures from Python `"return True"` to valid Rust `fn evaluate_node` across 4 test files.
+
+### Changed
+- `_build_matches()` now accepts `abs_path` parameter for on-demand file reading instead of relying on pre-loaded source.
+- MCP tool doc `xray_explore.md` updated to reflect Rust evaluator validation (forbidden constructs section).
+
 ## v10.61.0 (2026-05-28) -- Xray Error Handling Hardening (Epic #1019)
 
 ### Fixed

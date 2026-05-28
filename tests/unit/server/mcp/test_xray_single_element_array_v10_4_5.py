@@ -36,7 +36,7 @@ _FAKE_JOB_ID = "test-job-123"
 
 _BASE_PARAMS: Dict[str, Any] = {
     "pattern": r"prepareStatement",
-    "evaluator_code": "return True",
+    "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
     "search_target": "content",
 }
 

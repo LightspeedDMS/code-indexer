@@ -32,14 +32,17 @@ _DUMP_AST_MAX_NODES_DEFAULT = 500
 _DUMP_AST_MAX_NODES_MIN = 1
 _DUMP_AST_MAX_NODES_MAX = 2000
 
-# Default evaluator used when the caller omits evaluator_code.
-# Returns the v10.4.0 dict contract: echoes every Phase 1 hit as a match entry.
-# For search_target='filename', match_positions is empty so matches is [].
-# Semantically equivalent to the legacy "return True" (accept all files), but
-# satisfies the dict return contract introduced in v10.4.0.
+# Default Rust evaluator used when the caller omits evaluator_code.
+# Returns one finding per file at the root node's start line.
+# Semantically equivalent to the legacy "accept all Phase 1 hits" behavior.
 _DEFAULT_EVALUATOR_CODE = (
-    'matches = [{"line_number": mp["line_number"]} for mp in match_positions]\n'
-    'return {"matches": matches, "value": None}'
+    "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n"
+    "    vec![EvalFinding {\n"
+    '        pattern: "match".to_string(),\n'
+    "        line: node.start_line,\n"
+    "        snippet: String::new(),\n"
+    "    }]\n"
+    "}"
 )
 
 # Default timeout when the caller omits timeout_seconds.

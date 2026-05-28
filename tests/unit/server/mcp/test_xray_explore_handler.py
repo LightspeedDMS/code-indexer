@@ -45,7 +45,7 @@ def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
 VALID_PARAMS: Dict[str, Any] = {
     "repository_alias": "myrepo-global",
     "pattern": r"prepareStatement",
-    "evaluator_code": "return True",
+    "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
     "search_target": "content",
 }
 
@@ -427,12 +427,12 @@ class TestXrayExploreHandlerPreFlightValidation:
     """Handler rejects bad evaluator code before calling submit_job."""
 
     def test_bad_evaluator_returns_validation_error(self):
-        """Evaluator code containing 'import' is rejected synchronously."""
+        """Evaluator code containing forbidden 'unsafe' construct is rejected synchronously."""
         user = _make_user(UserRole.NORMAL_USER)
         mock_bjm = MagicMock()
         params = {
             **VALID_PARAMS,
-            "evaluator_code": "import os; return True",
+            "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { unsafe { vec![] } }",
         }
 
         with (
@@ -1169,7 +1169,7 @@ class TestXrayExploreHandlerRenamedParams:
         params = {
             "repository_alias": "myrepo-global",
             "pattern": r"prepareStatement",
-            "evaluator_code": "return True",
+            "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
             "search_target": "content",
         }
 
@@ -1198,7 +1198,7 @@ class TestXrayExploreHandlerRenamedParams:
         params = {
             "repository_alias": "myrepo-global",
             "driver_regex": r"prepareStatement",
-            "evaluator_code": "return True",
+            "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
             "search_target": "content",
         }
 
@@ -1595,7 +1595,7 @@ class TestXrayExploreHandlerDefaultEvaluator:
         )
 
     def test_omitted_evaluator_code_default_returns_dict_not_bool(self):
-        """Default evaluator must contain dict return shape, not 'return True' bool (Bug 2)."""
+        """Default evaluator must be valid Rust with 'fn evaluate_node', not 'return True' bool (Bug 2)."""
         params = {
             "repository_alias": "myrepo-global",
             "pattern": r"TODO",
@@ -1603,14 +1603,14 @@ class TestXrayExploreHandlerDefaultEvaluator:
             # evaluator_code intentionally omitted
         }
         evaluator = self._get_engine_evaluator_code(params)
-        # The default must include the dict return contract
-        assert "matches" in evaluator, (
-            f"Default evaluator must return dict with 'matches' key, got: {evaluator!r}"
+        # The Rust default must contain the required function signature
+        assert "fn evaluate_node" in evaluator, (
+            f"Default evaluator must contain 'fn evaluate_node' (Rust contract), got: {evaluator!r}"
         )
 
     def test_omitted_evaluator_code_default_passes_sandbox_validation(self):
-        """Default evaluator must pass sandbox.validate() — not crash at preflight (Bug 2)."""
-        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+        """Default evaluator must pass validate_rust_evaluator() — not crash at preflight (Bug 2)."""
+        from code_indexer.xray.sandbox import validate_rust_evaluator
 
         params = {
             "repository_alias": "myrepo-global",
@@ -1619,10 +1619,9 @@ class TestXrayExploreHandlerDefaultEvaluator:
         }
         evaluator = self._get_engine_evaluator_code(params)
 
-        sandbox = PythonEvaluatorSandbox()
-        result = sandbox.validate(evaluator)
+        result = validate_rust_evaluator(evaluator)
         assert result.ok, (
-            f"Default evaluator must pass sandbox.validate(), got failure: {result.reason!r}"
+            f"Default evaluator must pass validate_rust_evaluator(), got failure: {result.reason!r}"
         )
 
     def test_empty_evaluator_code_string_uses_non_empty_default(self):
@@ -1640,7 +1639,9 @@ class TestXrayExploreHandlerDefaultEvaluator:
 
     def test_explicit_evaluator_code_is_not_replaced_by_default(self):
         """Explicit non-empty evaluator_code is forwarded as-is (regression guard)."""
-        custom_code = 'return {"matches": [{"line_number": 1}], "value": None}'
+        custom_code = (
+            "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }"
+        )
         params = {
             "repository_alias": "myrepo-global",
             "pattern": r"TODO",
@@ -1652,63 +1653,29 @@ class TestXrayExploreHandlerDefaultEvaluator:
             f"Explicit evaluator_code must not be replaced by default, got: {evaluator!r}"
         )
 
-    def test_default_evaluator_n_hits_produce_n_matches(self):
-        """Omitting evaluator_code → N regex hits produce N matches[], no InvalidEvaluatorReturn.
+    def test_default_evaluator_is_valid_rust_and_passes_validation(self):
+        """_DEFAULT_EVALUATOR_CODE is valid Rust with fn evaluate_node signature (Bug 2 regression).
 
-        Bug 2 regression test (v10.4.1): the old 'return True' bool default triggered
-        InvalidEvaluatorReturn for every file under the v10.4.0 dict contract.
-        _DEFAULT_EVALUATOR_CODE must echo each match_position entry as a match dict.
+        Bug 2 regression test (v10.4.1): the old 'return True' bool default was Python and
+        triggered InvalidEvaluatorReturn for every file. Since Epic #1019 (Rust Native Xray
+        Engine), _DEFAULT_EVALUATOR_CODE is Rust and must pass validate_rust_evaluator().
         """
         from code_indexer.server.mcp.handlers.xray import _DEFAULT_EVALUATOR_CODE
-        from code_indexer.xray.sandbox import PythonEvaluatorSandbox
+        from code_indexer.xray.sandbox import validate_rust_evaluator
 
-        # Simulate 3 Phase 1 regex hits on a single candidate file.
-        n_hits = 3
-        match_positions = [
-            {
-                "line_number": i + 1,
-                "line_content": f"TODO item {i + 1}",
-                "column": 0,
-                "byte_offset": i * 20,
-                "context_before": [],
-                "context_after": [],
-            }
-            for i in range(n_hits)
-        ]
-
-        # The sandbox needs a real XRayNode; use a minimal Python file parse.
-        from code_indexer.xray.ast_engine import AstSearchEngine
-
-        engine = AstSearchEngine()
-        source = "x = 1\n" * n_hits
-        root = engine.parse(source.encode(), "python")
-
-        sandbox = PythonEvaluatorSandbox()
-        result = sandbox.run(
-            _DEFAULT_EVALUATOR_CODE,
-            node=root,
-            root=root,
-            source=source,
-            lang="python",
-            file_path="/fake/file.py",
-            match_positions=match_positions,
+        # Must be non-empty.
+        assert _DEFAULT_EVALUATOR_CODE, (
+            "Default evaluator must be non-empty (Bug 2 regression)"
         )
 
-        # Must not fail — no InvalidEvaluatorReturn.
-        assert result.failure is None, (
-            f"Default evaluator must not fail (failure={result.failure!r}, "
-            f"detail={result.detail!r}). This is the Bug 2 regression."
+        # Must contain the required Rust entry point signature.
+        assert "fn evaluate_node" in _DEFAULT_EVALUATOR_CODE, (
+            f"Default evaluator must contain 'fn evaluate_node', got: {_DEFAULT_EVALUATOR_CODE!r}"
         )
-        assert isinstance(result.value, dict), (
-            f"Default evaluator must return a dict, got {type(result.value).__name__!r}"
+
+        # Must pass Rust static validation without errors.
+        result = validate_rust_evaluator(_DEFAULT_EVALUATOR_CODE)
+        assert result.ok, (
+            f"Default evaluator must not fail (failure={result.error_code!r}, "
+            f"reason={result.reason!r}). This is the Bug 2 regression."
         )
-        matches = result.value.get("matches", [])
-        assert len(matches) == n_hits, (
-            f"Expected {n_hits} matches for {n_hits} Phase 1 hits, got {len(matches)}. "
-            f"matches={matches!r}"
-        )
-        # Each match must carry the line_number from the corresponding hit.
-        for i, match in enumerate(matches):
-            assert match.get("line_number") == i + 1, (
-                f"Match {i} must have line_number={i + 1}, got {match!r}"
-            )

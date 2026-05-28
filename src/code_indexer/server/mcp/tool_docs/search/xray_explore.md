@@ -215,7 +215,7 @@ The sandbox accepts the following Python AST node types in evaluator code (every
 `len, any, all, range, enumerate, sorted, min, max`.
 
 **Stripped builtins** (removed from the exec environment — referencing them raises NameError):
-`getattr, setattr, delattr, __import__, eval, exec, open, compile`.
+`getattr, setattr, delattr, hasattr, __import__, eval, exec, open, compile`.
 
 **Dunder attribute blocklist** (Attribute and Subscript access to these names is rejected at AST validation time as sandbox escape vectors):
 
@@ -358,7 +358,7 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 Other validation rejection messages name the offending node type (e.g. `'Import' is not allowed in evaluator code.`, `'ClassDef' is not allowed in evaluator code.`, `'With' is not allowed in evaluator code.`) and include the full whitelist in the message body. Dunder access produces `Attribute access to '__class__' blocked (sandbox escape vector)` or `Subscript access to '__import__' blocked (sandbox escape vector)`.
 
-**Generic exception types** (e.g. `IOError`, `UnicodeDecodeError`, `OSError`, `PermissionError`) — emitted by the catch-all in `_evaluate_file` when the file cannot be read or parsed. The `error_type` is the Python exception class name; `error_message` is `str(exc)`.
+**Generic exception types** (e.g. `AttributeError`, `IOError`, `UnicodeDecodeError`, `OSError`, `PermissionError`) — emitted by the catch-all in `_evaluate_file` when the evaluator raises an unexpected exception or the file cannot be read or parsed. The `error_type` is the Python exception class name; `error_message` is `str(exc)`.
 
 ### Large Result Paging
 

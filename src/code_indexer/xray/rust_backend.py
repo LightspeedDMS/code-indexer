@@ -399,10 +399,15 @@ class RustNativeBackend:
                 f"compiled_at={epoch}s-since-epoch\n"
                 f"compile_ms=0\n"
             )
+            import os  # noqa: PLC0415 — stdlib, lazy import
+
+            tmp_so = cache_dir / f"{source_hash}.so.tmp.{os.getpid()}"
             try:
-                local_so.write_bytes(blob)
+                tmp_so.write_bytes(blob)
+                tmp_so.rename(local_so)
             except Exception:
-                meta_path.unlink(missing_ok=True)  # roll back meta to avoid orphan
+                tmp_so.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
                 raise
             logger.info("XrayCache: pre-filled %s from cluster cache", source_hash[:12])
         except Exception as exc:
@@ -498,7 +503,7 @@ class RustNativeBackend:
             if not spec_findings:
                 results.append(([], [], None))
                 continue
-            matches = _build_matches(spec, spec_findings)
+            matches = _build_matches(spec, spec_findings, abs_path=abs_path)
             results.append((matches, [], None))
 
         return results
@@ -507,12 +512,20 @@ class RustNativeBackend:
 def _build_matches(
     spec: Dict[str, Any],
     spec_findings: List[Dict[str, Any]],
+    abs_path: str = "",
 ) -> List[Dict[str, Any]]:
     """Convert xray-cli findings to match dicts for one file spec."""
-    source = spec.get("source", "")
     lang = spec.get("lang", "")
     rel_path = spec.get("file_path", "")
-    source_lines = source.splitlines()
+    source_lines: List[str] = []
+    if abs_path:
+        try:
+            source = Path(abs_path).read_bytes().decode("utf-8", errors="replace")
+            source_lines = source.splitlines()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to read %s for line_content enrichment: %s", abs_path, exc
+            )
 
     matches: List[Dict[str, Any]] = []
     for finding in spec_findings:

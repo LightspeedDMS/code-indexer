@@ -371,19 +371,6 @@ class XRaySearchEngine:
                 )
                 files_processed += 1
                 continue
-            try:
-                fp_source = fp.read_bytes().decode("utf-8", errors="replace")
-            except Exception as exc:  # noqa: BLE001
-                evaluation_errors.append(
-                    {
-                        "file_path": str(fp.relative_to(repo_path)),
-                        "line_number": 0,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    }
-                )
-                files_processed += 1
-                continue
             positions = self._last_phase1_positions.get(fp, [])
             clean_positions = [
                 {k: v for k, v in p.items() if k != "ast_node"} for p in positions
@@ -391,7 +378,6 @@ class XRaySearchEngine:
             file_specs.append(
                 {
                     "file_path": str(fp.relative_to(repo_path)),
-                    "source": fp_source,
                     "lang": fp_lang,
                     "match_positions": clean_positions,
                 }
@@ -431,9 +417,8 @@ class XRaySearchEngine:
                     spec = spec_by_path.get(fp_str)
                     if spec is not None:
                         try:
-                            root = self.ast_engine.parse(
-                                spec["source"].encode("utf-8"), spec["lang"]
-                            )
+                            file_bytes = (repo_path / fp_str).read_bytes()
+                            root = self.ast_engine.parse(file_bytes, spec["lang"])
                             parsed_roots[fp_str] = root
                         except Exception as exc:  # noqa: BLE001
                             logger.warning(
