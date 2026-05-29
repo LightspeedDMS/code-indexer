@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.71.0 (2026-05-29) -- Xray Pattern Library: Path Security + Doc Improvements
+
+### Fixed
+- Security: `store_xray_pattern` response now returns relative path (e.g. `xray-patterns/__any__/name.yaml`) instead of absolute server filesystem path, preventing internal path disclosure.
+- MCP docs: `xray_search` and `xray_explore` output schema corrected from "absolute path" to "relative path from repository root" (matches actual code behavior since v10.70.0).
+- MCP docs: Error examples in `xray_search` and `xray_explore` updated to use relative paths instead of absolute paths.
+- Pre-existing mypy type-ignore code mismatch in `xray_pattern_service.py` (`return-value` corrected to `no-any-return`).
+- Pre-existing Rust compilation failures in `test_real_evaluator_patterns.py`: evaluator code used `node.text` (field access) instead of `node.text()` (method call) per OwnedNode API.
+
+### Added
+- Pattern Library Best Practices section in `store_xray_pattern` MCP docs advising clients to save laborious evaluators for reuse.
+- Pattern Library section in `xray_search` and `xray_explore` MCP docs with discoverability guidance (`browse_directory`/`directory_tree` on cidx-meta).
+- Test `test_store_pattern_returns_relative_path` verifying no absolute path disclosure.
+
 ## v10.70.0 (2026-05-29) -- Persistent Xray Evaluator Pattern Library
 
 ### Added

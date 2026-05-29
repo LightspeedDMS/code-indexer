@@ -38,7 +38,7 @@ outputSchema:
       description: 'true on successful store.'
     path:
       type: string
-      description: 'Absolute path where the pattern YAML was written inside cidx-meta.'
+      description: 'Relative path (within cidx-meta) where the pattern YAML was written (e.g. xray-patterns/__any__/catch-rethrow.yaml).'
     error:
       type: string
       description: 'Error code when the request fails.'
@@ -156,6 +156,24 @@ Store in `__any__` scope for patterns that apply to any codebase. Store in a rep
   "pattern_yaml": "name: check-api-usage\ndescription: \"Check API usage patterns specific to myapp\"\nlanguage: java\nevaluator_code: |\n  fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }\n"
 }
 ```
+
+## Pattern Library Best Practices
+
+Evaluator patterns that are complex, tuned through iteration, or laborious to produce should be stored for reuse via this tool rather than passed inline each time. Benefits:
+
+- **Reuse across sessions**: Stored patterns persist in cidx-meta (git-versioned) and survive server restarts.
+- **Share across users**: All authenticated users with query_repos permission can reference stored patterns.
+- **Parameterize once, override per-call**: Declare typed parameters with defaults; callers override via pattern_params without editing evaluator code.
+
+### Discovering Stored Patterns
+
+Use the `browse_directory` or `directory_tree` tools on the cidx-meta repository to list available patterns:
+
+- `browse_directory('cidx-meta-global', path='xray-patterns')` -- lists all scopes
+- `browse_directory('cidx-meta-global', path='xray-patterns/__any__')` -- lists cross-repo patterns
+- `directory_tree('cidx-meta-global', path='xray-patterns')` -- visual tree of all patterns
+
+To read a specific pattern's YAML (including its evaluator_code and parameters), use `get_file_content('cidx-meta-global', path='xray-patterns/__any__/catch-rethrow.yaml')`.
 
 ## Related
 

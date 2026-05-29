@@ -120,7 +120,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
                     findings.push(EvalFinding {
                         pattern: "catch-rethrow".to_string(),
                         line: cc.start_line,
-                        snippet: cc.text.clone(),
+                        snippet: cc.text().to_string(),
                     });
                 }
             }
@@ -145,7 +145,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
                 findings.push(EvalFinding {
                     pattern: "allocation-in-try".to_string(),
                     line: ts.start_line,
-                    snippet: ts.text.clone(),
+                    snippet: ts.text().to_string(),
                 });
             }
         }
@@ -165,7 +165,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
                     findings.push(EvalFinding {
                         pattern: "catch-rethrow".to_string(),
                         line: cc.start_line,
-                        snippet: cc.text.clone(),
+                        snippet: cc.text().to_string(),
                     });
                 }
             }
