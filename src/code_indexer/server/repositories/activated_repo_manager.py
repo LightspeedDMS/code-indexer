@@ -325,6 +325,7 @@ class ActivatedRepoManager:
                     user_alias = repo_data.get("user_alias", "")
                     repo_dir = os.path.join(user_dir, user_alias)
                     if os.path.exists(repo_dir):
+                        repo_data.setdefault("username", username)
                         repos.append(repo_data)
                 except (json.JSONDecodeError, KeyError, IOError) as e:
                     self.logger.warning(
@@ -1731,6 +1732,7 @@ class ActivatedRepoManager:
             update_progress(88, "Creating repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
             metadata = {
+                "username": username,
                 "user_alias": user_alias,
                 "golden_repo_alias": golden_repo_alias,
                 "current_branch": branch_name,

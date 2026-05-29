@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.66.0 (2026-05-28) -- Activation Metadata + Cache Page Index Fixes
+
+### Fixed
+- Bug #1026: Single-repo activation metadata now includes `username` field. The `_do_activate_repository()` metadata dict was missing the username key, causing reaper CRITICAL errors when accessing `metadata["username"]`. Also backfills the field for pre-existing metadata files via `setdefault()` in `_list_user_repos_fs()`.
+- Bug #1027: `cidx_fetch_cached_payload` MCP handler now uses 1-indexed pages at the API boundary (was 0-indexed). Callers sending `page=1` for the first page no longer get "Page 1 out of range" errors on single-page results. Internal `PayloadCache.retrieve()` remains 0-indexed; translation happens at the handler boundary.
+
 ## v10.65.0 (2026-05-28) -- Non-root Auto-Updater Rust Toolchain Fix
 
 ### Fixed
