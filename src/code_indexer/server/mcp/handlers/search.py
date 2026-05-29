@@ -796,7 +796,7 @@ def _search_global_repo(
                 "results": response_results,
                 "total_results": len(response_results),
                 "query_metadata": {
-                    "query_text": params["query_text"],
+                    "query_text": params.get("query_text", ""),
                     "execution_time_ms": execution_time_ms,
                     "repositories_searched": 1,
                     "timeout_occurred": timeout_occurred,
@@ -919,6 +919,18 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             f"query_text={_query_log!r}",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # Bug #1029: validate query_text before routing to sub-handlers.
+        # Hard dict access in _build_search_kwargs causes KeyError when missing.
+        _query_text = params.get("query_text")
+        if not isinstance(_query_text, str) or not _query_text.strip():
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": "Missing required parameter: query_text",
+                    "results": [],
+                }
+            )
 
         if isinstance(repository_alias, list):
             _result = _omni_search_code(params, user)

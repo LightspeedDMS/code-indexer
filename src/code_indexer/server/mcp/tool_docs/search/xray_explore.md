@@ -254,7 +254,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 | `node.has_descendant_of_kind(kind)` | bool | true if any descendant matches `kind` -- use for fast existence checks without allocating |
 | `node.descendants_of_kind(kind)` | Vec\<&OwnedNode\> | DFS pre-order; all descendants whose kind matches (excludes self) |
 
-For the full 15-pattern cookbook of worked evaluator examples and a cross-language node type table covering the 10 mandatory languages, see the corresponding sections in `xray_search`. The same evaluator API and `OwnedNode` surface apply to both tools.
+For the full 15-pattern cookbook of worked evaluator examples and a cross-language node type table covering the 15 mandatory languages (java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy), see the corresponding sections in `xray_search`. The same evaluator API and `OwnedNode` surface apply to both tools.
 
 ### Globals available in evaluator context
 

@@ -2,11 +2,21 @@ use crate::finding::{EvalFinding, Finding};
 use crate::languages;
 use crate::owned_node::OwnedNode;
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tree_sitter::Parser;
 use walkdir::WalkDir;
+
+/// Per-thread cached Parser.
+///
+/// Parser is !Send so it cannot be shared across rayon threads, but it CAN
+/// be reused within the same thread. Using thread_local! avoids the cost of
+/// Parser::new() (and its internal allocations) for every file processed.
+thread_local! {
+    static THREAD_PARSER: RefCell<Parser> = RefCell::new(Parser::new());
+}
 
 /// Evaluators examine a single OwnedNode and return zero or more findings.
 ///
@@ -70,10 +80,12 @@ pub fn parse_file(path: &Path) -> Option<OwnedNode> {
 
     let source = std::fs::read(path).ok()?;
 
-    let mut parser = Parser::new();
-    parser.set_language(&language).ok()?;
+    let tree = THREAD_PARSER.with(|p| {
+        let mut parser = p.borrow_mut();
+        parser.set_language(&language).ok()?;
+        parser.parse(&source, None)
+    })?;
 
-    let tree = parser.parse(&source, None)?;
     Some(OwnedNode::build_from_ts_node(tree.root_node(), &source))
 }
 
@@ -109,9 +121,13 @@ fn process_file(
     let ext = path.extension().and_then(|s| s.to_str())?.to_string();
     let language = languages::language_for_extension(&ext)?;
     let source = std::fs::read(path).ok()?;
-    let mut parser = Parser::new();
-    parser.set_language(&language).ok()?;
-    let tree = parser.parse(&source, None)?;
+
+    let tree = THREAD_PARSER.with(|p| {
+        let mut parser = p.borrow_mut();
+        parser.set_language(&language).ok()?;
+        parser.parse(&source, None)
+    })?;
+
     let root = OwnedNode::build_from_ts_node(tree.root_node(), &source);
     let file_str = path.to_string_lossy().to_string();
     let mut findings = Vec::new();
@@ -123,8 +139,9 @@ fn process_file(
 /// Scan `files` in parallel using rayon, applying `evaluators` to each file's
 /// root node.
 ///
-/// Each rayon thread creates its own Parser (Parser is !Send), so there is no
-/// cross-thread sharing of mutable parser state.
+/// Each rayon thread reuses its thread-local Parser (Parser is !Send), so there
+/// is no cross-thread sharing of mutable parser state, and no allocation cost
+/// for Parser::new() on every file.
 pub fn scan_files_parallel(files: &[PathBuf], evaluators: &[Box<dyn Evaluator>]) -> ScanResult {
     let files_parsed = AtomicUsize::new(0);
     let files_errored = AtomicUsize::new(0);

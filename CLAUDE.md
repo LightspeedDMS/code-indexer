@@ -141,8 +141,8 @@ Query capability is the core product value. NEVER remove or break: query functio
 
 **Key invariants**:
 - Raw `tree_sitter.Node` NEVER exposed to evaluator code -- always wrapped in `XRayNode` (`__slots__ = ("_node",)`, normal assignment, NO `object.__setattr__`).
-- `supported_languages`/`extension_map` are INSTANCE-level (conditional `terraform`/`.tf` when HCL grammar present).
-- 10 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css. Terraform optional 11th.
+- `supported_languages`/`extension_map` are INSTANCE-level (conditional `terraform`/`.tf` when HCL grammar present in Python; mandatory in Rust).
+- 15 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy. Python xray supports 10 (hcl conditional via `_hcl_available()`). Extensions mjs/cjs map to the javascript grammar.
 - **Dependency**: `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` -- CORE deps since v10.2.1.
 
 ### X-Ray Sandbox Security Boundary (Epic #968 / Story #970)
@@ -174,6 +174,25 @@ Two-phase pipeline: Phase 1 regex walk -> Phase 2 sandboxed evaluator over `XRay
 - Results pipe back as `List[Tuple[matches, errors, meta]]`.
 - `_evaluate_file()` kept as lower-level test API -- existing unit tests call it directly.
 - `_run_inline_batch()` path still exists (activated by passing `ast_engine` to `run_batch`) -- reserved for in-process testing.
+
+### Rust Xray Native Engine (Epic #1019)
+
+Rust replacement for the Python xray evaluator pipeline. Located at `rust/xray-core/` (library), `rust/xray-cli/` (CLI binary), `rust/xray-benchmarks/` (benchmark suite).
+
+**Key architecture**:
+- `OwnedNode` (owned_node.rs): Heap-allocated AST node tree. Shares file source text via `Arc<str>` -- all nodes in a file hold a clone of one Arc, slicing via `(start_byte, end_byte)` through the `text()` method. Eliminates O(N) per-node String allocations.
+- `scanner.rs`: rayon `par_iter` parallelism with `thread_local!` Parser reuse (Parser is !Send but reusable within a thread).
+- `compiler.rs`: Compiles user evaluator Rust code to `.so` via `rustc --crate-type cdylib`. PREAMBLE defines the OwnedNode/EvalFinding types visible to evaluator code. `XRAY_ABI_VERSION` must match between PREAMBLE and dynlib.rs loader.
+- `dynlib.rs`: Loads compiled `.so` via libloading. ABI version check before trusting function pointers.
+- `evaluators.rs`: Built-in evaluators (catch_rethrow, deep_nesting, etc.).
+- `validator.rs`: AST whitelist -- no unsafe, no std::fs/net/process, no raw pointers in evaluator code.
+
+**Allocator constraint**: Custom allocators (jemalloc, mimalloc) are INCOMPATIBLE with the dynlib architecture. The host process and compiled evaluator `.so` use different allocators, causing segfaults when owned types cross the boundary. System malloc only.
+
+**Benchmark evaluators** (`rust/xray-benchmarks/`):
+- `bench.sh <target-dir> [evaluator]`: Runs COLD/WARM/WARM2 cycles per evaluator. Purges cache for cold run. Passes target directory to xray-cli (which walks via `collect_files()`).
+- 4 evaluators: `catch_rethrow.rs`, `deep_nesting.rs`, `long_method.rs`, `method_census.rs`.
+- Baseline (19K files): ~5.7-6.4s per evaluator. Optimized (Arc<str> + thread_local Parser): ~4.9-5.4s (~15% improvement).
 
 ### TOTP Step-Up Elevation (Epic #922 / Story #923)
 

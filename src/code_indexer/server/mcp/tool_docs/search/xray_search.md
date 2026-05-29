@@ -612,7 +612,7 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
 
 ### Common cross-language node type names
 
-tree-sitter node type names differ between languages. Use this table as a starting reference for the 7 general-purpose mandatory languages. Bash, HTML, and CSS are also supported but have limited overlap with the constructs below -- use `xray_dump_ast` to discover their node types.
+tree-sitter node type names differ between languages. Use this table as a starting reference for the general-purpose languages. Bash, HTML, CSS, HCL/Terraform, YAML, SQL, XML, and Groovy are also supported but have limited overlap with the constructs below -- use `xray_dump_ast` to discover their node types.
 
 | Construct | Python | Java | TypeScript / JavaScript | Go | Kotlin | C# |
 |-----------|--------|------|-------------------------|-----|--------|-----|
