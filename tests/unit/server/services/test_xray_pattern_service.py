@@ -166,6 +166,30 @@ class TestPatternStorage:
         pattern_file = cidx_meta / "xray-patterns" / "my-repo" / "my-pattern.yaml"
         assert pattern_file.exists()
 
+    def test_store_pattern_returns_relative_path(self, tmp_path: Path) -> None:
+        """Security: store_xray_pattern must return a relative path, not an absolute
+        server filesystem path, to avoid internal path disclosure."""
+        XrayPatternService = _import_service()
+        cidx_meta = _make_cidx_meta(tmp_path)
+        service = XrayPatternService(cidx_meta)
+
+        with patch.object(service, "_git_commit"):
+            result = service.store_xray_pattern(
+                scope="__any__",
+                pattern_yaml=MINIMAL_PATTERN_YAML,
+                overwrite=False,
+            )
+
+        assert result["success"] is True
+        returned_path = result["path"]
+        assert not returned_path.startswith("/"), (
+            f"path must be relative, got absolute: {returned_path}"
+        )
+        assert returned_path.startswith("xray-patterns/"), (
+            f"path must start with 'xray-patterns/', got: {returned_path}"
+        )
+        assert returned_path == "xray-patterns/__any__/my-pattern.yaml"
+
 
 # ---------------------------------------------------------------------------
 # AC2 — Cross-Repo Patterns: __any__ scope found for any repo

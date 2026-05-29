@@ -642,7 +642,7 @@ The fastest way to discover the exact type names for a construct is to use `xray
 After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 - `matches[]`: list of enriched match dicts. Every entry contains:
-  - `file_path` (str, server-added) -- absolute path
+  - `file_path` (str, server-added) -- relative path from the repository root
   - `language` (str, server-added) -- tree-sitter language name
   - `line_number` (int, from EvalFinding.line) -- 1-based line number
   - `line_content` (str, server-derived) -- raw text of `line_number` from the file source
@@ -666,7 +666,7 @@ Each `error_type` carries a distinct `error_message` shape:
 
 ```json
 {
-  "file_path": "/srv/cidx/repo/src/code_indexer/server/services/very_large_module.py",
+  "file_path": "src/code_indexer/server/services/very_large_module.py",
   "line_number": 0,
   "error_type": "EvaluatorTimeout",
   "error_message": "evaluator exceeded 5s sandbox limit"
@@ -677,7 +677,7 @@ Each `error_type` carries a distinct `error_message` shape:
 
 ```json
 {
-  "file_path": "/srv/cidx/repo/src/code_indexer/cli.py",
+  "file_path": "src/code_indexer/cli.py",
   "line_number": 0,
   "error_type": "EvaluatorCrash",
   "error_message": "evaluator process exited with non-zero status"
@@ -688,7 +688,7 @@ Each `error_type` carries a distinct `error_message` shape:
 
 ```json
 {
-  "file_path": "/srv/cidx/repo/docs/architecture.md",
+  "file_path": "docs/architecture.md",
   "line_number": 0,
   "error_type": "UnsupportedLanguage",
   "error_message": "No grammar for extension '.md'"
@@ -738,6 +738,24 @@ When `truncated: false` (or absent), the full `matches[]` and `evaluation_errors
    - `ValidationFailed` -- the evaluator used a forbidden Rust construct. Check the `offending_construct` field to see what was rejected.
 4. Once the evaluator runs cleanly on `max_results: 5`, remove the cap and run the full search.
 5. Remember: `node.kind` (not `node.type`), `node.named_children()` (method call, not property), `node.descendants_of_kind(...)` (not `descendants_of_type`), `node.start_line` (already 1-based, not `start_point[0] + 1`).
+
+## Pattern Library
+
+When an evaluator pattern is complex, tuned through iteration, or costly to produce, save it via `store_xray_pattern` for reuse. Stored patterns:
+
+- Are referenced by name via the `pattern_name` parameter (mutually exclusive with `evaluator_code`).
+- Support typed parameters with defaults, overridable per-call via `pattern_params`.
+- Persist in cidx-meta (git-versioned) across sessions and server restarts.
+
+**Recommendation**: If you have spent significant effort developing and testing an evaluator, store it rather than discarding it. Future searches can reference the pattern by name without reconstructing the evaluator logic.
+
+### Discovering Available Patterns
+
+List stored patterns using standard cidx-meta browsing tools:
+
+- `browse_directory('cidx-meta-global', path='xray-patterns/__any__')` -- cross-repo patterns
+- `browse_directory('cidx-meta-global', path='xray-patterns/{repo-alias}')` -- repo-specific patterns
+- `get_file_content('cidx-meta-global', path='xray-patterns/__any__/{name}.yaml')` -- read pattern source
 
 ## Examples
 

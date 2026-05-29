@@ -348,7 +348,7 @@ The sandbox enforces security at two stages:
 After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 - `matches[]`: list of enriched match dicts. Every entry contains:
-  - `file_path` (str, server-added) -- absolute path
+  - `file_path` (str, server-added) -- relative path from the repository root
   - `language` (str, server-added) -- tree-sitter language name
   - `line_number` (int, from EvalFinding.line) -- 1-based line number
   - `line_content` (str, server-derived) -- raw text of `line_number` from the file source
@@ -374,7 +374,7 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 ```json
 {
-  "file_path": "/srv/cidx/repo/src/code_indexer/server/services/very_large_module.py",
+  "file_path": "src/code_indexer/server/services/very_large_module.py",
   "line_number": 0,
   "error_type": "EvaluatorTimeout",
   "error_message": "evaluator exceeded 5s sandbox limit"
@@ -385,7 +385,7 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 ```json
 {
-  "file_path": "/srv/cidx/repo/src/code_indexer/handlers/edge_case.py",
+  "file_path": "src/code_indexer/handlers/edge_case.py",
   "line_number": 0,
   "error_type": "EvaluatorCrash",
   "error_message": "evaluator process exited with non-zero status"
@@ -396,7 +396,7 @@ After polling `GET /api/jobs/{job_id}` to COMPLETED status, `result` contains:
 
 ```json
 {
-  "file_path": "/srv/cidx/repo/docs/architecture.md",
+  "file_path": "docs/architecture.md",
   "line_number": 0,
   "error_type": "UnsupportedLanguage",
   "error_message": "No grammar for extension '.md'"
@@ -474,6 +474,24 @@ To fetch the full content: `GET /api/cache/{cache_handle}` (paged via `?page=N`)
   "max_debug_nodes": 20
 }
 ```
+
+## Pattern Library
+
+When an evaluator pattern is complex, tuned through iteration, or costly to produce, save it via `store_xray_pattern` for reuse. Stored patterns:
+
+- Are referenced by name via the `pattern_name` parameter (mutually exclusive with `evaluator_code`).
+- Support typed parameters with defaults, overridable per-call via `pattern_params`.
+- Persist in cidx-meta (git-versioned) across sessions and server restarts.
+
+**Recommendation**: If you have spent significant effort developing and testing an evaluator with `xray_explore`, store it rather than discarding it. Future searches (via `xray_explore` or `xray_search`) can reference the pattern by name without reconstructing the evaluator logic.
+
+### Discovering Available Patterns
+
+List stored patterns using standard cidx-meta browsing tools:
+
+- `browse_directory('cidx-meta-global', path='xray-patterns/__any__')` -- cross-repo patterns
+- `browse_directory('cidx-meta-global', path='xray-patterns/{repo-alias}')` -- repo-specific patterns
+- `get_file_content('cidx-meta-global', path='xray-patterns/__any__/{name}.yaml')` -- read pattern source
 
 ## Cancellation
 

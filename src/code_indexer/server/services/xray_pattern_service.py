@@ -326,7 +326,7 @@ class XrayPatternService:
             message=f"xray-patterns: {action} {scope}/{name}",
         )
 
-        return {"success": True, "path": str(target_path)}
+        return {"success": True, "path": str(target_path.relative_to(self._cidx_meta))}
 
     def resolve_and_prepare_pattern(
         self,
@@ -460,7 +460,7 @@ class XrayPatternService:
         for path in candidates:
             if path.is_file():
                 try:
-                    return yaml.safe_load(path.read_text(encoding="utf-8"))  # type: ignore[return-value]
+                    return yaml.safe_load(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
                 except yaml.YAMLError:
                     logger.warning("xray_pattern_service: failed to parse %s", path)
         return None
