@@ -10,7 +10,7 @@ type DrainDebugLogFn = fn() -> Vec<String>;
 
 /// Must match `XRAY_ABI_VERSION` in compiler.rs PREAMBLE.
 /// Increment both when OwnedNode or EvalFinding layout changes.
-const EXPECTED_ABI_VERSION: u64 = 1;
+const EXPECTED_ABI_VERSION: u64 = 2;
 
 pub struct DynlibEvaluator {
     _lib: Library,
@@ -110,6 +110,7 @@ unsafe impl Sync for DynlibEvaluator {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_load_nonexistent_so_returns_error() {
@@ -165,14 +166,15 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         assert!(evaluator.is_ok(), "load failed: {:?}", evaluator.err());
         let evaluator = evaluator.unwrap();
 
+        let source: Arc<str> = Arc::from("test");
         let node = OwnedNode {
             kind: "test_node".to_string(),
             start_line: 42,
             start_byte: 0,
-            end_byte: 10,
+            end_byte: 4,
             children: vec![],
             is_named: true,
-            text: "test".to_string(),
+            source,
         };
         let findings = evaluator.evaluate_node(&node);
         assert_eq!(findings.len(), 1);
@@ -201,14 +203,15 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("load must succeed");
 
+        let source: Arc<str> = Arc::from("x");
         let node = OwnedNode {
             kind: "some_node".to_string(),
             start_line: 1,
             start_byte: 0,
-            end_byte: 5,
+            end_byte: 1,
             children: vec![],
             is_named: true,
-            text: "x".to_string(),
+            source,
         };
         evaluator.evaluate_node(&node);
         let messages = evaluator.drain_debug_log();
@@ -234,6 +237,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("load must succeed");
 
+        let source: Arc<str> = Arc::from("");
         let node = OwnedNode {
             kind: "root".to_string(),
             start_line: 1,
@@ -241,7 +245,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             end_byte: 0,
             children: vec![],
             is_named: true,
-            text: String::new(),
+            source,
         };
         evaluator.evaluate_node(&node);
         let messages = evaluator.drain_debug_log();
@@ -267,6 +271,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("load must succeed");
 
+        let source: Arc<str> = Arc::from("");
         let node = OwnedNode {
             kind: "root".to_string(),
             start_line: 1,
@@ -274,7 +279,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             end_byte: 0,
             children: vec![],
             is_named: true,
-            text: String::new(),
+            source,
         };
 
         // Call through trait reference — this is how scanner.rs uses evaluators.

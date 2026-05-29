@@ -30,7 +30,7 @@ impl Evaluator for AllocationInTryEvaluator {
                     findings.push(EvalFinding {
                         pattern: "allocation-in-try".to_string(),
                         line: stmt.start_line,
-                        snippet: crate::finding::truncate_snippet(&stmt.text, 80),
+                        snippet: crate::finding::truncate_snippet(stmt.text(), 80),
                     });
                     break;
                 }
@@ -67,7 +67,7 @@ impl Evaluator for CatchRethrowEvaluator {
                 .filter(|c| c.kind == "identifier")
                 .last()
             {
-                Some(id) => id.text.clone(),
+                Some(id) => id.text().to_string(),
                 None => continue,
             };
 
@@ -93,11 +93,11 @@ impl Evaluator for CatchRethrowEvaluator {
             }
 
             let expr = expr_named[0];
-            if expr.kind == "identifier" && expr.text == param_name {
+            if expr.kind == "identifier" && expr.text() == param_name {
                 findings.push(EvalFinding {
                     pattern: "catch-rethrow".to_string(),
                     line: stmt.start_line,
-                    snippet: crate::finding::truncate_snippet(&stmt.text, 80),
+                    snippet: crate::finding::truncate_snippet(stmt.text(), 80),
                 });
             }
         }
@@ -108,9 +108,11 @@ impl Evaluator for CatchRethrowEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::owned_node::OwnedNode;
 
     fn leaf(kind: &str, text: &str, is_named: bool) -> OwnedNode {
+        let source: Arc<str> = Arc::from(text);
         OwnedNode {
             kind: kind.to_string(),
             start_line: 1,
@@ -118,23 +120,25 @@ mod tests {
             end_byte: text.len(),
             children: vec![],
             is_named,
-            text: text.to_string(),
+            source,
         }
     }
 
     fn node(kind: &str, children: Vec<OwnedNode>) -> OwnedNode {
+        let source: Arc<str> = Arc::from("");
         OwnedNode {
             kind: kind.to_string(),
             start_line: 1,
             start_byte: 0,
-            end_byte: 100,
+            end_byte: 0,
             children,
             is_named: true,
-            text: String::new(),
+            source,
         }
     }
 
     fn node_with_text(kind: &str, text: &str, children: Vec<OwnedNode>) -> OwnedNode {
+        let source: Arc<str> = Arc::from(text);
         OwnedNode {
             kind: kind.to_string(),
             start_line: 5,
@@ -142,7 +146,7 @@ mod tests {
             end_byte: text.len(),
             children,
             is_named: true,
-            text: text.to_string(),
+            source,
         }
     }
 
@@ -218,17 +222,18 @@ mod tests {
             param_name_id,
         ]);
         let thrown_id = leaf("identifier", "e", true);
+        let source: Arc<str> = Arc::from("throw e;");
         let throw_stmt = OwnedNode {
             kind: "throw_statement".to_string(),
             start_line: 10,
             start_byte: 0,
-            end_byte: 10,
+            end_byte: 8,
             children: vec![
                 leaf("throw", "throw", false),
                 thrown_id,
             ],
             is_named: true,
-            text: "throw e;".to_string(),
+            source,
         };
         let body = node("block", vec![throw_stmt]);
         let catch_node = node("catch_clause", vec![catch_param, body]);
@@ -251,14 +256,15 @@ mod tests {
         ]);
         // Throws "ex" but caught "e" — not a plain rethrow
         let thrown_id = leaf("identifier", "ex", true);
+        let source: Arc<str> = Arc::from("throw ex;");
         let throw_stmt = OwnedNode {
             kind: "throw_statement".to_string(),
             start_line: 10,
             start_byte: 0,
-            end_byte: 10,
+            end_byte: 9,
             children: vec![leaf("throw", "throw", false), thrown_id],
             is_named: true,
-            text: "throw ex;".to_string(),
+            source,
         };
         let body = node("block", vec![throw_stmt]);
         let catch_node = node("catch_clause", vec![catch_param, body]);
@@ -278,14 +284,15 @@ mod tests {
             param_name_id,
         ]);
         let thrown_id = leaf("identifier", "e", true);
+        let source: Arc<str> = Arc::from("throw e;");
         let throw_stmt = OwnedNode {
             kind: "throw_statement".to_string(),
             start_line: 10,
             start_byte: 0,
-            end_byte: 10,
+            end_byte: 8,
             children: vec![leaf("throw", "throw", false), thrown_id],
             is_named: true,
-            text: "throw e;".to_string(),
+            source,
         };
         // Body has 2 statements — not a plain rethrow
         let log_stmt = node("expression_statement", vec![]);

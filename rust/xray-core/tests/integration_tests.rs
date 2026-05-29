@@ -1,6 +1,7 @@
 /// Integration tests for xray-core.
 /// These tests cover OwnedNode construction, helpers, language detection,
 /// Finding struct, and the built-in evaluators.
+use std::sync::Arc;
 use xray_core::owned_node::OwnedNode;
 
 // ---------------------------------------------------------------------------
@@ -8,6 +9,7 @@ use xray_core::owned_node::OwnedNode;
 // ---------------------------------------------------------------------------
 
 fn make_leaf(kind: &str, text: &str, start_line: usize, is_named: bool) -> OwnedNode {
+    let source: Arc<str> = Arc::from(text);
     OwnedNode {
         kind: kind.to_string(),
         start_line,
@@ -15,19 +17,20 @@ fn make_leaf(kind: &str, text: &str, start_line: usize, is_named: bool) -> Owned
         end_byte: text.len(),
         children: vec![],
         is_named,
-        text: text.to_string(),
+        source,
     }
 }
 
 fn make_node(kind: &str, children: Vec<OwnedNode>) -> OwnedNode {
+    let source: Arc<str> = Arc::from("");
     OwnedNode {
         kind: kind.to_string(),
         start_line: 1,
         start_byte: 0,
-        end_byte: 100,
+        end_byte: 0,
         children,
         is_named: true,
-        text: String::new(),
+        source,
     }
 }
 
@@ -35,7 +38,7 @@ fn make_node(kind: &str, children: Vec<OwnedNode>) -> OwnedNode {
 fn test_owned_node_construction() {
     let node = make_leaf("identifier", "foo", 5, true);
     assert_eq!(node.kind, "identifier");
-    assert_eq!(node.text, "foo");
+    assert_eq!(node.text(), "foo");
     assert_eq!(node.start_line, 5);
     assert!(node.is_named);
     assert!(node.children.is_empty());
@@ -54,8 +57,8 @@ fn test_named_children_filters_unnamed() {
     );
     let named = parent.named_children();
     assert_eq!(named.len(), 2);
-    assert_eq!(named[0].text, "x");
-    assert_eq!(named[1].text, "y");
+    assert_eq!(named[0].text(), "x");
+    assert_eq!(named[1].text(), "y");
 }
 
 #[test]
@@ -110,7 +113,7 @@ fn test_child_by_kind_returns_first() {
         ],
     );
     let found = parent.child_by_kind("identifier");
-    assert_eq!(found.unwrap().text, "first");
+    assert_eq!(found.unwrap().text(), "first");
 }
 
 #[test]

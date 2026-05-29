@@ -42,7 +42,9 @@ impl std::fmt::Display for CompileError {
 /// was built with a compatible type layout before calling the evaluate function.
 const PREAMBLE: &str = r#"
 /// ABI version sentinel — must match EXPECTED_ABI_VERSION in dynlib.rs.
-const XRAY_ABI_VERSION: u64 = 1;
+const XRAY_ABI_VERSION: u64 = 2;
+
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct OwnedNode {
@@ -52,10 +54,13 @@ pub struct OwnedNode {
     pub end_byte: usize,
     pub children: Vec<OwnedNode>,
     pub is_named: bool,
-    pub text: String,
+    source: Arc<str>,
 }
 
 impl OwnedNode {
+    pub fn text(&self) -> &str {
+        self.source.get(self.start_byte..self.end_byte).unwrap_or("")
+    }
     pub fn named_children(&self) -> Vec<&OwnedNode> {
         self.children.iter().filter(|c| c.is_named).collect()
     }
@@ -324,6 +329,7 @@ fn chrono_now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -531,7 +537,9 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         assert!(PREAMBLE.contains("pub end_byte: usize"), "OwnedNode.end_byte missing");
         assert!(PREAMBLE.contains("pub children: Vec<OwnedNode>"), "OwnedNode.children missing");
         assert!(PREAMBLE.contains("pub is_named: bool"), "OwnedNode.is_named missing");
-        assert!(PREAMBLE.contains("pub text: String"), "OwnedNode.text missing");
+        // ABI v2: text is now a method, not a field
+        assert!(PREAMBLE.contains("pub fn text("), "OwnedNode.text() method missing from preamble");
+        assert!(PREAMBLE.contains("source: Arc<str>"), "OwnedNode.source field missing from preamble");
         assert!(PREAMBLE.contains("pub pattern: String"), "EvalFinding.pattern missing");
         assert!(PREAMBLE.contains("pub line: usize"), "EvalFinding.line missing");
         assert!(PREAMBLE.contains("pub snippet: String"), "EvalFinding.snippet missing");
@@ -635,6 +643,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("compiled .so must load successfully");
 
+        let source: Arc<str> = Arc::from("");
         let node = OwnedNode {
             kind: "root".to_string(),
             start_line: 1,
@@ -642,7 +651,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             end_byte: 0,
             children: vec![],
             is_named: true,
-            text: String::new(),
+            source,
         };
 
         evaluator.evaluate_node(&node);
@@ -691,6 +700,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         let evaluator = DynlibEvaluator::load(&cr.so_path)
             .expect("compiled .so must load successfully");
 
+        let source: Arc<str> = Arc::from("");
         let node = OwnedNode {
             kind: "root".to_string(),
             start_line: 1,
@@ -698,7 +708,7 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             end_byte: 0,
             children: vec![],
             is_named: true,
-            text: String::new(),
+            source,
         };
 
         evaluator.evaluate_node(&node);
