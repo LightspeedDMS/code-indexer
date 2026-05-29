@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.72.0 (2026-05-29) -- directory_tree Absolute Path Disclosure Fix
+
+### Fixed
+- Security: `directory_tree` MCP tool no longer discloses the absolute server filesystem path in its `root_path` response field. It now returns the relative requested path (empty string for repo root), consistent with `tree_string` and `root.path`. Discovered during v10.71.0 staging E2E testing when verifying pattern-library discoverability via `directory_tree` on cidx-meta.
+
 ## v10.71.0 (2026-05-29) -- Xray Pattern Library: Path Security + Doc Improvements
 
 ### Fixed

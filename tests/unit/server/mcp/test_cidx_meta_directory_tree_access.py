@@ -169,3 +169,56 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
         assert data["success"] is True
         child_names = [c["name"] for c in data["root"]["children"]]
         assert len(child_names) == 2
+
+
+class TestDirectoryTreeRootPathNotAbsolute:
+    """Security: root_path in MCP response must not disclose absolute server paths."""
+
+    def _call_handle(self, args: dict, user: object) -> dict:
+        """Call handle_directory_tree with filesystem mocked out."""
+        fake_tree = _make_tree_result(["file.md"])
+        mock_explorer = MagicMock()
+        mock_explorer.generate_tree.return_value = fake_tree
+        with patch(
+            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+            return_value="/home/server/.cidx-server/data/golden-repos",
+        ):
+            with patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value="/home/server/.cidx-server/data/golden-repos/cidx-meta",
+            ):
+                with patch(
+                    "code_indexer.global_repos.directory_explorer.DirectoryExplorerService",
+                    return_value=mock_explorer,
+                ):
+                    with patch(
+                        "code_indexer.server.mcp.handlers._get_access_filtering_service",
+                        return_value=None,
+                    ):
+                        return handle_directory_tree(args, user)  # type: ignore[no-any-return]
+
+    def test_root_path_is_empty_string_when_no_path_arg(self, regular_user):
+        """When no 'path' arg is given, root_path must be '' (repo root), not an absolute path."""
+        result = self._call_handle({"repository_alias": "cidx-meta"}, regular_user)
+        data = extract_mcp_data(result)
+        assert data["success"] is True
+        assert not data["root_path"].startswith("/"), (
+            f"root_path must not be absolute; got: {data['root_path']!r}"
+        )
+        assert data["root_path"] == "", (
+            f"root_path must be '' when no path arg; got: {data['root_path']!r}"
+        )
+
+    def test_root_path_equals_relative_client_path_arg(self, regular_user):
+        """When client passes 'path'='xray-patterns', root_path must be that relative path."""
+        result = self._call_handle(
+            {"repository_alias": "cidx-meta", "path": "xray-patterns"}, regular_user
+        )
+        data = extract_mcp_data(result)
+        assert data["success"] is True
+        assert not data["root_path"].startswith("/"), (
+            f"root_path must not be absolute; got: {data['root_path']!r}"
+        )
+        assert data["root_path"] == "xray-patterns", (
+            f"root_path must equal the requested subpath; got: {data['root_path']!r}"
+        )

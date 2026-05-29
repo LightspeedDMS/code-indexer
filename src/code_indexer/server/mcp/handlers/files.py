@@ -1203,7 +1203,7 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "total_directories": result.total_directories,
                 "total_files": result.total_files,
                 "max_depth_reached": result.max_depth_reached,
-                "root_path": result.root_path,
+                "root_path": args.get("path") or "",
             }
         )
     except ValueError as e:
