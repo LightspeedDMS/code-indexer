@@ -1017,7 +1017,7 @@ def handle_cidx_fetch_cached_payload(
 
     Inputs:
         cache_handle (str): Opaque handle returned in a truncated result.
-        page (int, optional): 0-indexed page number. Defaults to 0.
+        page (int, optional): 1-indexed page number. Defaults to 1.
 
     Output:
         {success: True, content: str, page: int, total_pages: int, has_more: bool}
@@ -1033,7 +1033,7 @@ def handle_cidx_fetch_cached_payload(
         return _mcp_response({"error": "auth_required"})
 
     cache_handle: str = params.get("cache_handle", "")
-    page: int = max(0, int(params.get("page", 0) or 0))
+    page: int = max(1, int(params.get("page", 1) or 1))
 
     if not cache_handle:
         return _mcp_response(
@@ -1055,12 +1055,12 @@ def handle_cidx_fetch_cached_payload(
         )
 
     try:
-        result = payload_cache.retrieve(cache_handle, page=page)
+        result = payload_cache.retrieve(cache_handle, page=page - 1)
         return _mcp_response(
             {
                 "success": True,
                 "content": result.content,
-                "page": result.page,
+                "page": result.page + 1,
                 "total_pages": result.total_pages,
                 "has_more": result.has_more,
             }
