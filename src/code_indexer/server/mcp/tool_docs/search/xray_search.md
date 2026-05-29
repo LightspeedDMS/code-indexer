@@ -75,6 +75,12 @@ inputSchema:
       minimum: 0
       maximum: 120.0
       default: 0
+    pattern_name:
+      type: string
+      description: 'Name of a stored xray evaluator pattern to use (from the cidx-meta pattern library). Mutually exclusive with evaluator_code — provide one or the other, not both. When provided, the server loads the pattern YAML, resolves typed parameter defaults, applies any pattern_params overrides, and uses the resulting evaluator code. Seed patterns catch-rethrow and deep-nesting are created automatically in __any__/ scope on first use. Use store_xray_pattern to add custom patterns.'
+    pattern_params:
+      type: object
+      description: 'JSON object of parameter overrides for the resolved pattern. Only valid when pattern_name is provided. Keys must match parameter names declared in the pattern YAML (UPPER_SNAKE_CASE). Values must be compatible with the declared parameter type (usize, i64, f64, bool, or str). Unknown keys return invalid_parameter error; type-incompatible values return invalid_parameter_type error.'
   required:
     - repository_alias
     - pattern
@@ -169,6 +175,8 @@ Key points:
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap. Range 10..600. |
 | max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. Renamed from `max_files` in v10.3.x. |
 | await_seconds | float | no | 0 | Server-side inline-wait window. 0 = return job id immediately. Range 0.0..120.0 (v10.5.0). Values > 30.0 emit a server warning. |
+| pattern_name | str | no | null | Name of a stored xray evaluator pattern (from the cidx-meta library). Mutually exclusive with `evaluator_code`. When provided, the server loads and resolves the pattern, applying `pattern_params` overrides. Error `mutually_exclusive_params` if both are provided. |
+| pattern_params | object | no | null | Parameter overrides for the resolved pattern. Only valid when `pattern_name` is provided. Keys must match declared parameter names (UPPER_SNAKE_CASE); values must be type-compatible. |
 
 > **REST API field names differ**: The REST endpoint `POST /api/xray/search` uses `driver_regex` (not `pattern`) and `max_files` (not `max_results`). The MCP tool uses the renamed fields shown above. When calling the REST API directly, use the original field names.
 
