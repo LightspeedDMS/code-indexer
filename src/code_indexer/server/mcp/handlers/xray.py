@@ -23,6 +23,23 @@ from ._utils import _mcp_response, _parse_json_string_array
 
 logger = logging.getLogger(__name__)
 
+
+def _get_cidx_meta_path() -> Path:
+    """Return the mutable cidx-meta base path derived from the golden_repo_manager.
+
+    Extracted as a module-level function so tests can patch it directly.
+
+    Raises:
+        RuntimeError: If golden_repo_manager is not configured in the app module.
+    """
+    grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    if grm is None:
+        raise RuntimeError(
+            "cidx-meta path not available: golden_repo_manager not configured in app module"
+        )
+    return Path(grm.golden_repos_dir) / "cidx-meta"
+
+
 # Timeout range enforced by the handler (seconds).
 _TIMEOUT_MIN = 10
 _TIMEOUT_MAX = 600
@@ -48,6 +65,74 @@ _DEFAULT_EVALUATOR_CODE = (
 # Default timeout when the caller omits timeout_seconds.
 _DEFAULT_TIMEOUT_SECONDS = 120
 
+# Guard so ensure_seed_patterns() is called at most once per process lifetime.
+_seeds_ensured = False
+
+
+def _resolve_evaluator_code(
+    params: Dict[str, Any],
+    repo_alias: str,
+    default_evaluator: str = _DEFAULT_EVALUATOR_CODE,
+) -> "tuple[str, Optional[Dict[str, Any]]]":
+    """Resolve evaluator_code from pattern_name or raw evaluator_code.
+
+    Returns ``(evaluator_code, None)`` on success, or
+    ``("", error_response)`` where *error_response* is a complete
+    ``_mcp_response`` dict that the caller must return immediately.
+    """
+    global _seeds_ensured
+
+    raw_evaluator_code: str = params.get("evaluator_code") or ""
+    pattern_name: Optional[str] = params.get("pattern_name") or None
+    pattern_params: Optional[Dict[str, Any]] = params.get("pattern_params") or None
+
+    if pattern_name and raw_evaluator_code.strip():
+        return (
+            "",
+            _mcp_response(
+                {
+                    "error": "mutually_exclusive_params",
+                    "message": (
+                        "pattern_name and evaluator_code are mutually exclusive — "
+                        "provide one or the other, not both"
+                    ),
+                }
+            ),
+        )
+
+    if pattern_name:
+        from code_indexer.server.services.xray_pattern_service import XrayPatternService
+
+        cidx_meta = _get_cidx_meta_path()
+        svc = XrayPatternService(cidx_meta)
+        if not _seeds_ensured:
+            svc.ensure_seed_patterns()
+            _seeds_ensured = True
+        try:
+            evaluator_code, _ = svc.resolve_and_prepare_pattern(
+                repo_alias=repo_alias,
+                pattern_name=pattern_name,
+                pattern_params=pattern_params,
+            )
+        except ValueError as exc:
+            error_key = str(exc).split(":")[0]
+            return (
+                "",
+                _mcp_response(
+                    {
+                        "error": error_key,
+                        "message": str(exc),
+                    }
+                ),
+            )
+        return (evaluator_code, None)
+
+    evaluator_code = (
+        raw_evaluator_code if raw_evaluator_code.strip() else default_evaluator
+    )
+    return (evaluator_code, None)
+
+
 # await_seconds range and poll interval.
 # _AWAIT_SECONDS_MAX lowered from 30 to 10 in v10.3.2 (Task #39): FastAPI sync
 # handlers run in a finite threadpool (default ~40 threads). With await_seconds=30
@@ -61,6 +146,53 @@ _AWAIT_SECONDS_MIN: float = 0.0
 _AWAIT_SECONDS_MAX: float = 120.0
 _AWAIT_SECONDS_WARN_THRESHOLD: float = 30.0
 _AWAIT_POLL_INTERVAL = 0.05
+
+
+def handle_store_xray_pattern(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """MCP handler for the store_xray_pattern tool.
+
+    Stores a reusable xray evaluator pattern in the cidx-meta pattern library.
+
+    Error codes:
+        auth_required            — unauthenticated or missing query_repos.
+        scope_required           — scope parameter missing or empty.
+        pattern_yaml_required    — pattern_yaml parameter missing or empty.
+        invalid_yaml             — pattern_yaml cannot be parsed as YAML.
+        missing_required_field   — required field absent from pattern YAML.
+        xray_evaluator_validation_failed — evaluator code fails Rust whitelist.
+        pattern_already_exists   — pattern exists and overwrite=false.
+        invalid_parameter        — unknown parameter name declared.
+        invalid_parameter_type   — parameter type not in allowed set.
+    """
+    if user is None or not user.has_permission("query_repos"):
+        return _mcp_response({"error": "auth_required"})
+
+    scope: str = params.get("scope", "")
+    pattern_yaml: str = params.get("pattern_yaml", "")
+    overwrite: bool = bool(params.get("overwrite", False))
+
+    if not scope:
+        return _mcp_response(
+            {"error": "scope_required", "message": "scope parameter is required"}
+        )
+    if not pattern_yaml:
+        return _mcp_response(
+            {
+                "error": "pattern_yaml_required",
+                "message": "pattern_yaml parameter is required",
+            }
+        )
+
+    from code_indexer.server.services.xray_pattern_service import XrayPatternService
+
+    cidx_meta = _get_cidx_meta_path()
+    svc = XrayPatternService(cidx_meta)
+    result = svc.store_xray_pattern(
+        scope=scope,
+        pattern_yaml=pattern_yaml,
+        overwrite=overwrite,
+    )
+    return _mcp_response(result)
 
 
 def _resolve_repo_path(alias: str) -> Optional[str]:
@@ -139,14 +271,9 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     repo_alias: str = params.get("repository_alias", "")
     # 'pattern' is the regex_search-aligned name (was 'driver_regex')
     driver_regex: str = params.get("pattern", "")
-    # evaluator_code is optional; default to _DEFAULT_EVALUATOR_CODE when
-    # omitted or empty so the engine receives a valid v10.4.0 dict-contract
-    # evaluator (Bug 2 fix: empty string produced InvalidEvaluatorReturn for
-    # every candidate file).
-    raw_evaluator_code: str = params.get("evaluator_code") or ""
-    evaluator_code: str = (
-        raw_evaluator_code if raw_evaluator_code.strip() else _DEFAULT_EVALUATOR_CODE
-    )
+    evaluator_code, err_resp = _resolve_evaluator_code(params, repo_alias)
+    if err_resp is not None:
+        return err_resp
     search_target: str = params.get("search_target", "")
     include_patterns = params.get("include_patterns") or []
     exclude_patterns = params.get("exclude_patterns") or []
@@ -631,13 +758,9 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     repo_alias: str = params.get("repository_alias", "")
     # 'pattern' is the regex_search-aligned name (was 'driver_regex')
     driver_regex: str = params.get("pattern", "")
-    # evaluator_code is optional for xray_explore; default emits one match per
-    # Phase 1 regex hit so AST debug output attaches to each. v10.4.0 dict-return
-    # contract — see _DEFAULT_EVALUATOR_CODE near the top of this file.
-    raw_evaluator_code: str = params.get("evaluator_code") or ""
-    evaluator_code: str = (
-        raw_evaluator_code if raw_evaluator_code.strip() else _DEFAULT_EVALUATOR_CODE
-    )
+    evaluator_code, err_resp = _resolve_evaluator_code(params, repo_alias)
+    if err_resp is not None:
+        return err_resp
     search_target: str = params.get("search_target", "")
     include_patterns = params.get("include_patterns") or []
     exclude_patterns = params.get("exclude_patterns") or []
@@ -1174,3 +1297,4 @@ def _register(registry: Dict[str, Any]) -> None:
     registry["xray_dump_ast"] = handle_xray_dump_ast
     registry["cidx_fetch_cached_payload"] = handle_cidx_fetch_cached_payload
     registry["cancel_job"] = handle_cancel_job
+    registry["store_xray_pattern"] = handle_store_xray_pattern

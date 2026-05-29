@@ -194,6 +194,19 @@ Rust replacement for the Python xray evaluator pipeline. Located at `rust/xray-c
 - 4 evaluators: `catch_rethrow.rs`, `deep_nesting.rs`, `long_method.rs`, `method_census.rs`.
 - Baseline (19K files): ~5.7-6.4s per evaluator. Optimized (Arc<str> + thread_local Parser): ~4.9-5.4s (~15% improvement).
 
+### X-Ray Pattern Library (Story #1031)
+
+Persistent storage of reusable Rust evaluator patterns in cidx-meta under `xray-patterns/`. Service: `XrayPatternService` in `server/services/xray_pattern_service.py`.
+
+**Key invariants**:
+- Storage layout: `cidx-meta/xray-patterns/{scope}/{name}.yaml`. `__any__/` for cross-repo, `{repo-alias}/` for repo-specific.
+- Resolution order: repo-specific first, then `__any__/` fallback. NEVER reverse this.
+- Path traversal protection: scope and name reject `/`, `\`, `..` characters before any filesystem access.
+- Const injection: parameters declared in YAML become typed `const NAME: type = value;` lines prepended to evaluator code before Rust compilation. Supported types: usize, i64, f64, bool, str.
+- `pattern_name` in xray_search/xray_explore is mutually exclusive with `evaluator_code`. Handler helper: `_resolve_evaluator_code()` in `handlers/xray.py`.
+- `_seeds_ensured` module-level flag: seed patterns (catch-rethrow, deep-nesting) checked once per process lifetime.
+- `store_xray_pattern` MCP tool: overwrite defaults to false. Evaluator code validated via `validate_rust_evaluator()` before storage.
+
 ### TOTP Step-Up Elevation (Epic #922 / Story #923)
 
 **Essential invariants** -- NEVER refactor these:

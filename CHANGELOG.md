@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.70.0 (2026-05-29) -- Persistent Xray Evaluator Pattern Library
+
+### Added
+- Story #1031: Persistent xray evaluator pattern library with parametrization. Store reusable Rust evaluator patterns in cidx-meta (`xray-patterns/` folder), resolve by name in `xray_search` and `xray_explore` via `pattern_name` parameter, override pattern defaults via `pattern_params`.
+- `store_xray_pattern` MCP tool for storing/updating patterns with overwrite protection.
+- Const injection engine: pattern parameters become typed `const` lines (usize, i64, f64, bool, str) prepended to evaluator code before Rust compilation.
+- Seed patterns: `catch-rethrow` and `deep-nesting` auto-created in `__any__/` scope on first use.
+- Path traversal protection on scope and pattern name parameters.
+- Pattern resolution: repo-specific scope first, then `__any__/` cross-repo fallback.
+- `pattern_name` and `pattern_params` parameters added to `xray_search` and `xray_explore` tool schemas and documentation.
+
 ## v10.69.0 (2026-05-29) -- Bug Fixes: search_code Crash + Reaper Deactivation Loop
 
 ### Fixed
