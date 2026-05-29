@@ -12,6 +12,9 @@ struct JsonOutput {
     compile_ms: u128,
     cached: bool,
     error: Option<String>,
+    /// Debug messages emitted by debug_log() calls in the evaluator.
+    /// Empty list when no debug_log() calls were made (zero overhead).
+    debug_messages: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -95,6 +98,7 @@ fn main() {
                     compile_ms: 0,
                     cached: false,
                     error: Some(err_msg),
+                    debug_messages: vec![],
                 };
                 println!("{}", serde_json::to_string(&out).unwrap());
             }
@@ -124,6 +128,7 @@ fn main() {
                     compile_ms,
                     cached,
                     error: None,
+                    debug_messages: result.debug_messages,
                 };
                 println!("{}", serde_json::to_string(&out).unwrap());
             } else {
@@ -170,6 +175,55 @@ mod tests {
 
     fn sv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- AC2/AC3: debug_messages field in JSON output ---
+
+    #[test]
+    fn test_json_output_has_debug_messages_field() {
+        // AC2: JsonOutput must include debug_messages field in serialized JSON.
+        let out = JsonOutput {
+            findings: vec![],
+            files_parsed: 0,
+            files_errored: 0,
+            parse_scan_ms: 0,
+            compile_ms: 0,
+            cached: false,
+            error: None,
+            debug_messages: vec!["hello".to_string(), "world".to_string()],
+        };
+        let json = serde_json::to_string(&out).expect("must serialize");
+        assert!(
+            json.contains("debug_messages"),
+            "serialized JSON must contain debug_messages key: {}",
+            json
+        );
+        assert!(
+            json.contains("hello"),
+            "serialized JSON must contain debug message content: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_json_output_debug_messages_empty_by_default() {
+        // AC6: debug_messages must serialize as empty array (not absent) when empty.
+        let out = JsonOutput {
+            findings: vec![],
+            files_parsed: 0,
+            files_errored: 0,
+            parse_scan_ms: 0,
+            compile_ms: 0,
+            cached: false,
+            error: None,
+            debug_messages: vec![],
+        };
+        let json = serde_json::to_string(&out).expect("must serialize");
+        assert!(
+            json.contains("\"debug_messages\":[]"),
+            "empty debug_messages must serialize as empty array: {}",
+            json
+        );
     }
 
     #[test]

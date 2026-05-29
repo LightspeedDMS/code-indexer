@@ -171,6 +171,9 @@ class RustNativeBackend:
         self._xray_cli_path: Path = _XRAY_CLI_DEFAULT
         self._xray_cache: Optional[XrayCacheBackend] = xray_cache_backend
         self._rustc_version: Optional[str] = None
+        # Side-channel populated by run_batch() — debug_log() messages from xray-cli JSON.
+        # Read by XRaySearchEngine.run() to surface in result dict as debug_output[].
+        self._last_debug_messages: List[str] = []
 
     @staticmethod
     def _sha256_hex(text: str) -> str:
@@ -308,6 +311,9 @@ class RustNativeBackend:
         ):
             self._try_post_fill(rust_code, output.get("compile_ms", 0))
 
+        # Capture debug_log() messages as a side-channel before returning.
+        # XRaySearchEngine.run() reads _last_debug_messages to surface in debug_output[].
+        self._last_debug_messages = output.get("debug_messages", [])
         return self._build_results(file_specs, abs_paths, output.get("findings", []))
 
     # ------------------------------------------------------------------

@@ -1111,3 +1111,104 @@ def test_try_pre_fill_atomic_write_via_temp_file(tmp_path):
     assert expected_so.read_bytes() == fake_so_bytes, ".so must contain cache bytes"
     # Temp file must not remain after atomic rename.
     assert not pid_tmp.exists(), "temp .so.tmp file must be cleaned up after rename"
+
+
+# ---------------------------------------------------------------------------
+# AC3: _last_debug_messages populated from xray-cli JSON output
+# ---------------------------------------------------------------------------
+
+
+def test_last_debug_messages_populated_from_json_output(tmp_path):
+    """After run_batch, _last_debug_messages holds debug_messages from JSON output."""
+    import json
+    from unittest.mock import patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    fake_json = json.dumps(
+        {
+            "findings": [],
+            "files_parsed": 1,
+            "files_errored": 0,
+            "parse_scan_ms": 5,
+            "compile_ms": 100,
+            "cached": False,
+            "error": None,
+            "debug_messages": ["first message", "second message"],
+        }
+    )
+
+    # Create a real file so the binary-existence check passes.
+    fake_file = tmp_path / "test.java"
+    fake_file.write_text("class T {}")
+    spec = {
+        "file_path": str(fake_file),
+        "source": "class T {}",
+        "lang": "java",
+        "match_positions": [],
+    }
+
+    with patch.object(backend, "_invoke_xray_cli", return_value=(fake_json, None)):
+        with patch.object(
+            backend, "_validate_rust_code", return_value=(VALID_EVALUATOR, None)
+        ):
+            # Patch exists() check on the binary path.
+            with patch.object(
+                type(backend._xray_cli_path), "exists", return_value=True
+            ):
+                backend.run_batch(evaluator_code=VALID_EVALUATOR, file_specs=[spec])
+
+    messages = getattr(backend, "_last_debug_messages", None)
+    assert messages is not None, (
+        "_last_debug_messages attribute must be set after run_batch"
+    )
+    assert messages == ["first message", "second message"], (
+        f"_last_debug_messages must match JSON output: {messages}"
+    )
+
+
+def test_last_debug_messages_empty_when_no_debug_output(tmp_path):
+    """When JSON output has no debug_messages key, _last_debug_messages is empty list."""
+    import json
+    from unittest.mock import patch
+    from code_indexer.xray.rust_backend import RustNativeBackend
+
+    backend = RustNativeBackend()
+    # JSON without debug_messages field (old binary compatibility).
+    fake_json = json.dumps(
+        {
+            "findings": [],
+            "files_parsed": 1,
+            "files_errored": 0,
+            "parse_scan_ms": 5,
+            "compile_ms": 0,
+            "cached": True,
+            "error": None,
+        }
+    )
+
+    fake_file = tmp_path / "test.java"
+    fake_file.write_text("class T {}")
+    spec = {
+        "file_path": str(fake_file),
+        "source": "class T {}",
+        "lang": "java",
+        "match_positions": [],
+    }
+
+    with patch.object(backend, "_invoke_xray_cli", return_value=(fake_json, None)):
+        with patch.object(
+            backend, "_validate_rust_code", return_value=(VALID_EVALUATOR, None)
+        ):
+            with patch.object(
+                type(backend._xray_cli_path), "exists", return_value=True
+            ):
+                backend.run_batch(evaluator_code=VALID_EVALUATOR, file_specs=[spec])
+
+    messages = getattr(backend, "_last_debug_messages", None)
+    assert messages is not None, (
+        "_last_debug_messages must be set even when absent from JSON"
+    )
+    assert messages == [], (
+        f"_last_debug_messages must be empty list when not in JSON: {messages}"
+    )

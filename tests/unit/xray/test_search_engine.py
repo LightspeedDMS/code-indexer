@@ -1358,3 +1358,53 @@ class TestXRaySearchEngineRelativePaths:
             assert not fp.startswith("/"), (
                 f"file_metadata file_path must be relative, got absolute: {fp!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# AC3: debug_output field in XRaySearchEngine.run() result
+# ---------------------------------------------------------------------------
+
+
+class TestXRaySearchEngineDebugOutput:
+    """debug_output must appear in the run() result dict (AC3/AC6)."""
+
+    def test_run_result_contains_debug_output_field(self, search_engine, tmp_path):
+        """run() result must always include a debug_output key (even when empty)."""
+        (tmp_path / "hello.py").write_text("x = 1\n")
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            return_value=[],
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"x = 1",
+                evaluator_code="fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
+                search_target="content",
+            )
+        assert "debug_output" in result, (
+            f"run() result must contain debug_output key, got keys: {list(result.keys())}"
+        )
+
+    def test_run_result_debug_output_from_backend(self, search_engine, tmp_path):
+        """debug_output in run() result must reflect rust_backend._last_debug_messages."""
+        (tmp_path / "hello.py").write_text("x = 1\n")
+        # Inject debug messages into the backend side-channel before run() reads them.
+        search_engine.rust_backend._last_debug_messages = [
+            "evaluator step 1",
+            "evaluator step 2",
+        ]
+        with patch.object(
+            search_engine.rust_backend,
+            "run_batch",
+            return_value=[],
+        ):
+            result = search_engine.run(
+                repo_path=tmp_path,
+                driver_regex=r"x = 1",
+                evaluator_code="fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }",
+                search_target="content",
+            )
+        assert result.get("debug_output") == ["evaluator step 1", "evaluator step 2"], (
+            f"debug_output must propagate from _last_debug_messages: {result.get('debug_output')}"
+        )

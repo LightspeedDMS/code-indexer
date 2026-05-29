@@ -14,6 +14,17 @@ use walkdir::WalkDir;
 /// threads without per-thread cloning.
 pub trait Evaluator: Send + Sync {
     fn evaluate_node(&self, node: &OwnedNode) -> Vec<EvalFinding>;
+
+    /// Drain accumulated debug_log() messages from the evaluator's thread-local buffer.
+    ///
+    /// The default implementation returns an empty vec (zero overhead) for all
+    /// built-in evaluators that do not use debug_log().  DynlibEvaluator overrides
+    /// this to call the compiled evaluator's xray_drain_debug_log export.
+    ///
+    /// Must be called on the SAME thread as evaluate_node (thread_local! storage).
+    fn drain_debug_log(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 /// Aggregate result returned by scan_files_parallel.
@@ -23,6 +34,10 @@ pub struct ScanResult {
     pub files_errored: usize,
     /// Wall time for the parse + scan phase in milliseconds.
     pub parse_scan_ms: u128,
+    /// Debug messages emitted by debug_log() calls across all evaluated files.
+    /// Empty when no evaluator called debug_log(). Capped at 100 messages and 10KB
+    /// in the preamble — the scanner accumulates all messages from all files.
+    pub debug_messages: Vec<String>,
 }
 
 /// Collect all files under `dir` whose extension is in supported_extensions().
@@ -81,6 +96,30 @@ fn evaluate_file(
     }
 }
 
+/// Parse, evaluate, and drain debug messages for a single file.
+///
+/// Returns `None` when the file cannot be parsed (unsupported extension, I/O error,
+/// parser failure).  Returns `Some((findings, debug_msgs))` on success; either vec
+/// may be empty.  Must be called on the same rayon thread that will call
+/// `drain_debug_log` — thread_local! storage must not cross thread boundaries.
+fn process_file(
+    path: &PathBuf,
+    evaluators: &[Box<dyn Evaluator>],
+) -> Option<(Vec<Finding>, Vec<String>)> {
+    let ext = path.extension().and_then(|s| s.to_str())?.to_string();
+    let language = languages::language_for_extension(&ext)?;
+    let source = std::fs::read(path).ok()?;
+    let mut parser = Parser::new();
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(&source, None)?;
+    let root = OwnedNode::build_from_ts_node(tree.root_node(), &source);
+    let file_str = path.to_string_lossy().to_string();
+    let mut findings = Vec::new();
+    evaluate_file(&root, evaluators, &file_str, &mut findings);
+    let debug_msgs: Vec<String> = evaluators.iter().flat_map(|e| e.drain_debug_log()).collect();
+    Some((findings, debug_msgs))
+}
+
 /// Scan `files` in parallel using rayon, applying `evaluators` to each file's
 /// root node.
 ///
@@ -90,68 +129,25 @@ pub fn scan_files_parallel(files: &[PathBuf], evaluators: &[Box<dyn Evaluator>])
     let files_parsed = AtomicUsize::new(0);
     let files_errored = AtomicUsize::new(0);
     let all_findings: Mutex<Vec<Finding>> = Mutex::new(Vec::new());
-
+    let all_debug_messages: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let start = std::time::Instant::now();
 
-    files.par_iter().for_each(|path| {
-        // Determine language from extension — skip unsupported files
-        let ext = match path.extension().and_then(|s| s.to_str()) {
-            Some(e) => e.to_string(),
-            None => {
-                files_errored.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-        let language = match languages::language_for_extension(&ext) {
-            Some(l) => l,
-            None => return, // not an error, just unsupported
-        };
-
-        // Read file bytes
-        let source = match std::fs::read(path) {
-            Ok(s) => s,
-            Err(_) => {
-                files_errored.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-
-        // Create a thread-local parser (Parser is !Send, so we cannot share one)
-        let mut parser = Parser::new();
-        if parser.set_language(&language).is_err() {
-            files_errored.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-
-        let tree = match parser.parse(&source, None) {
-            Some(t) => t,
-            None => {
-                files_errored.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-
-        let root = OwnedNode::build_from_ts_node(tree.root_node(), &source);
-        let file_str = path.to_string_lossy().to_string();
-
-        let mut local_findings = Vec::new();
-        evaluate_file(&root, evaluators, &file_str, &mut local_findings);
-
-        files_parsed.fetch_add(1, Ordering::Relaxed);
-
-        if !local_findings.is_empty() {
-            let mut lock = all_findings.lock().unwrap();
-            lock.extend(local_findings);
+    files.par_iter().for_each(|path| match process_file(path, evaluators) {
+        None => { files_errored.fetch_add(1, Ordering::Relaxed); }
+        Some((findings, debug_msgs)) => {
+            files_parsed.fetch_add(1, Ordering::Relaxed);
+            if !findings.is_empty() { all_findings.lock().unwrap().extend(findings); }
+            if !debug_msgs.is_empty() { all_debug_messages.lock().unwrap().extend(debug_msgs); }
         }
     });
 
     let parse_scan_ms = start.elapsed().as_millis();
-
     ScanResult {
         findings: all_findings.into_inner().unwrap(),
         files_parsed: files_parsed.load(Ordering::Relaxed),
         files_errored: files_errored.load(Ordering::Relaxed),
         parse_scan_ms,
+        debug_messages: all_debug_messages.into_inner().unwrap(),
     }
 }
 
@@ -238,5 +234,52 @@ mod tests {
         assert_eq!(result.files_parsed, 0);
         assert_eq!(result.files_errored, 0);
         assert!(result.findings.is_empty());
+    }
+
+    // --- AC2/AC6: debug_messages in ScanResult ---
+
+    struct DebugLoggingEvaluator;
+
+    impl Evaluator for DebugLoggingEvaluator {
+        fn evaluate_node(&self, _node: &OwnedNode) -> Vec<EvalFinding> {
+            vec![]
+        }
+        fn drain_debug_log(&self) -> Vec<String> {
+            vec!["test debug message".to_string()]
+        }
+    }
+
+    #[test]
+    fn test_scan_result_collects_debug_messages() {
+        // AC2: debug messages from evaluators must appear in ScanResult.debug_messages.
+        let dir = TempDir::new().unwrap();
+        write_temp_file(&dir, "A.java", "class A {}");
+        let files = collect_files(dir.path());
+        let evaluators: Vec<Box<dyn Evaluator>> = vec![Box::new(DebugLoggingEvaluator)];
+        let result = scan_files_parallel(&files, &evaluators);
+        assert!(
+            !result.debug_messages.is_empty(),
+            "ScanResult must contain debug messages when evaluator produces them"
+        );
+        assert!(
+            result.debug_messages.contains(&"test debug message".to_string()),
+            "debug messages must include the evaluator's output: {:?}",
+            result.debug_messages
+        );
+    }
+
+    #[test]
+    fn test_scan_result_empty_debug_messages_when_none() {
+        // AC6: zero overhead — debug_messages empty when evaluator produces none.
+        let dir = TempDir::new().unwrap();
+        write_temp_file(&dir, "B.java", "class B {}");
+        let files = collect_files(dir.path());
+        let evaluators: Vec<Box<dyn Evaluator>> = vec![Box::new(AlwaysFindsEvaluator)];
+        let result = scan_files_parallel(&files, &evaluators);
+        assert!(
+            result.debug_messages.is_empty(),
+            "debug_messages must be empty when evaluator makes no debug_log calls: {:?}",
+            result.debug_messages
+        );
     }
 }
