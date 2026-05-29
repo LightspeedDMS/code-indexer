@@ -139,6 +139,43 @@ PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file o
 
 Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 120 seconds (v10.5.0).
 
+## Quick Start
+
+Discover AST node types for Java files -- omit `evaluator_code` to accept all Phase 1 hits and get their full AST structure:
+
+```json
+{
+  "repository_alias": "my-repo-global",
+  "pattern": "prepareStatement",
+  "search_target": "content",
+  "include_patterns": ["*.java"],
+  "max_results": 2,
+  "max_debug_nodes": 30,
+  "await_seconds": 10
+}
+```
+
+Then use the `ast_debug` payload in each match to identify node type names (e.g. `method_invocation`, `try_with_resources_statement`) and write a targeted evaluator for `xray_search`. Use `debug_log()` to trace evaluator logic during development:
+
+```json
+{
+  "repository_alias": "my-repo-global",
+  "pattern": "def ",
+  "search_target": "content",
+  "include_patterns": ["*.py"],
+  "max_results": 3,
+  "max_debug_nodes": 20,
+  "await_seconds": 10,
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    debug_log(&format!(\"root kind: {}\", node.kind));\n    let funcs = node.descendants_of_kind(\"function_definition\");\n    debug_log(&format!(\"found {} functions\", funcs.len()));\n    funcs.iter().map(|f| EvalFinding {\n        pattern: \"func\".to_string(),\n        line: f.start_line,\n        snippet: truncate_snippet(&f.text, 80),\n    }).collect()\n}"
+}
+```
+
+Key points:
+- **Evaluator code is Rust**, not Python. Signature: `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`.
+- `OwnedNode`, `EvalFinding`, `truncate_snippet`, and `debug_log` are provided automatically.
+- Omit `evaluator_code` to explore AST structure without writing any Rust -- the default evaluator accepts all files.
+- Keep `max_results` and `max_debug_nodes` small while iterating -- AST payloads are large.
+
 ## Parameters
 
 | Parameter | Type | Required | Default | Description |
@@ -251,7 +288,8 @@ The server validates evaluator code against a security whitelist before compilat
 - Pattern matching, closures, `Option`/`Result` combinators (`.unwrap_or()`, `.map()`, `.and_then()`)
 - Safe macros: `format!`, `vec![]`, `assert!`, `assert_eq!`, `assert_ne!`
 - The `OwnedNode` and `EvalFinding` types (provided by compiler preamble)
-- The `truncate_snippet(s: &str, max_len: usize) -> String` utility (provided by compiler preamble)
+- `debug_log(msg: &str)` -- trace evaluator execution; messages returned in `debug_output[]` (provided by compiler preamble, see "debug_log() function" section)
+- `truncate_snippet(s: &str, max_len: usize) -> String` -- collapse whitespace and truncate to `max_len` bytes on a UTF-8 boundary, appending "..." if truncated (provided by compiler preamble)
 
 ### ast_debug Payload
 

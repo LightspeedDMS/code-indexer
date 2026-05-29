@@ -129,6 +129,28 @@ PHASE 2 (evaluator, AST): for each candidate file, tree-sitter parses the file o
 
 Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately; poll `GET /api/jobs/{job_id}` for results, or set `await_seconds > 0` to inline-wait up to 120 seconds (v10.5.0).
 
+## Quick Start
+
+Minimal working example -- find all function definitions in Python files:
+
+```json
+{
+  "repository_alias": "my-repo-global",
+  "pattern": "def ",
+  "search_target": "content",
+  "include_patterns": ["*.py"],
+  "max_results": 5,
+  "await_seconds": 10,
+  "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {\n    let mut findings = Vec::new();\n    for f in node.descendants_of_kind(\"function_definition\") {\n        findings.push(EvalFinding {\n            pattern: \"function_def\".to_string(),\n            line: f.start_line,\n            snippet: truncate_snippet(&f.text, 80),\n        });\n    }\n    findings\n}"
+}
+```
+
+Key points:
+- **Evaluator code is Rust**, not Python. The function signature is always `fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding>`.
+- `OwnedNode`, `EvalFinding`, `truncate_snippet`, and `debug_log` are provided automatically -- do not define them.
+- Walk the AST downward: `node.descendants_of_kind("node_type")` finds all matching descendants. Use `xray_explore` or `xray_dump_ast` to discover node type names for your language.
+- Start with `max_results: 5` to test your evaluator on a small file set before running the full search.
+
 ## Parameters
 
 | Parameter | Type | Required | Default | Description |
@@ -147,6 +169,8 @@ Returns `{job_id}` (single repo) or `{job_ids, errors}` (multi-repo) immediately
 | timeout_seconds | int | no | 120 | Per-job wall-clock cap. Range 10..600. |
 | max_results | int | no | null | Cap on candidate files evaluated. When hit: `partial=true`, `max_files_reached=true`. Renamed from `max_files` in v10.3.x. |
 | await_seconds | float | no | 0 | Server-side inline-wait window. 0 = return job id immediately. Range 0.0..120.0 (v10.5.0). Values > 30.0 emit a server warning. |
+
+> **REST API field names differ**: The REST endpoint `POST /api/xray/search` uses `driver_regex` (not `pattern`) and `max_files` (not `max_results`). The MCP tool uses the renamed fields shown above. When calling the REST API directly, use the original field names.
 
 ## Evaluator API
 
@@ -280,7 +304,8 @@ The server validates evaluator code against a security whitelist before compilat
 - Pattern matching, closures, `Option`/`Result` combinators (`.unwrap_or()`, `.map()`, `.and_then()`)
 - Safe macros: `format!`, `vec![]`, `assert!`, `assert_eq!`, `assert_ne!`
 - The `OwnedNode` and `EvalFinding` types (provided by compiler preamble)
-- The `truncate_snippet(s: &str, max_len: usize) -> String` utility (provided by compiler preamble) -- collapses whitespace and truncates to `max_len` bytes on a UTF-8 boundary, appending "..." if truncated
+- `debug_log(msg: &str)` -- trace evaluator execution; messages returned in `debug_output[]` (provided by compiler preamble, see "debug_log() function" section)
+- `truncate_snippet(s: &str, max_len: usize) -> String` -- collapse whitespace and truncate to `max_len` bytes on a UTF-8 boundary, appending "..." if truncated (provided by compiler preamble)
 
 > **Termination guarantee**: infinite loops in your evaluator hit the sandbox hard timeout (HARD_TIMEOUT_SECONDS = 5.0 s) and surface as `EvaluatorTimeout` in `evaluation_errors[]`. The sandbox timeout is the authoritative termination boundary.
 
