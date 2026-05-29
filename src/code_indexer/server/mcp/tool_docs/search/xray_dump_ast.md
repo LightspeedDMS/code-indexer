@@ -105,12 +105,12 @@ Fields per node:
 | invalid_file_path | file_path is empty or otherwise malformed. |
 | path_traversal_rejected | file_path contains ../ sequences that would escape the repository root. |
 | file_not_found | The file does not exist inside the repository. |
-| unsupported_language | The file extension has no registered tree-sitter grammar. Supported extensions correspond to: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css (terraform when tree_sitter_hcl is installed). |
+| unsupported_language | The file extension has no registered tree-sitter grammar. Supported extensions correspond to: java, kotlin, go, python, typescript, javascript (including .mjs/.cjs), bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy/gradle. |
 | xray_extras_not_installed | The xray extras package (tree-sitter-languages) is not installed on this server. Install via: pip install code-indexer[xray]. |
 
 ## Supported Languages
 
-The 10 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css. Terraform is the optional 11th when tree_sitter_hcl is importable.
+The 15 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript (including .mjs/.cjs extensions), bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy (including .gradle extension).
 
 ## Examples
 

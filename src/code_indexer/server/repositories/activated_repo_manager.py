@@ -1796,9 +1796,44 @@ class ActivatedRepoManager:
             metadata = self._load_metadata(username, user_alias)
 
             if metadata is None:
-                raise ActivatedRepoError(
-                    f"Metadata not found for repository '{user_alias}'"
+                # Orphan cleanup: repo has no metadata but may have a leftover
+                # directory.  Treat as "already deactivated" — clean up any
+                # remaining artifacts and return success so the reaper does not
+                # reschedule this job every cycle (Bug #1030).
+                repo_dir = os.path.join(self.activated_repos_dir, username, user_alias)
+                if os.path.exists(repo_dir):
+                    try:
+                        shutil.rmtree(repo_dir)
+                    except (OSError, IOError) as e:
+                        self.logger.warning(
+                            "Bug #1030 orphan cleanup: failed to remove repo dir %s: %s",
+                            repo_dir,
+                            str(e),
+                        )
+                # _delete_metadata is safe to call when metadata is absent
+                try:
+                    self._delete_metadata(username, user_alias)
+                except Exception as e:
+                    self.logger.warning(
+                        "Bug #1030 orphan cleanup: _delete_metadata error for %s/%s: %s",
+                        username,
+                        user_alias,
+                        str(e),
+                    )
+                self.logger.warning(
+                    "Bug #1030 orphan cleanup: repository '%s' for user '%s' had no "
+                    "metadata — treating as already deactivated",
+                    user_alias,
+                    username,
                 )
+                return {
+                    "success": True,
+                    "message": (
+                        f"Repository '{user_alias}' already deactivated "
+                        f"(no metadata found) — orphan artifacts cleaned up"
+                    ),
+                    "user_alias": user_alias,
+                }
 
             # Route to appropriate deactivation method
             if metadata.get("is_composite", False):

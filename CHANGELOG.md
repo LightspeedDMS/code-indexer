@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.69.0 (2026-05-29) -- Bug Fixes: search_code Crash + Reaper Deactivation Loop
+
+### Fixed
+- Bug #1029: `search_code()` KeyError crash when `query_text` parameter missing (130 crashes/24h in production). Early validation in `search_code()` returns clean error response for missing, empty, whitespace-only, or non-string `query_text`. Defense-in-depth: hard dict access `params["query_text"]` changed to `params.get("query_text", "")` in response metadata builder.
+- Bug #1030: Activated reaper deactivation infinite loop for phantom repositories (69 failed jobs/24h). Two-layer fix: (1) idempotent deactivation in `_do_deactivate_repository()` — when metadata is None, clean up orphan artifacts (rm repo dir + delete metadata) and return success instead of raising `ActivatedRepoError`; (2) reaper skip guard in `run_reap_cycle()` skips repos with empty username or user_alias.
+
+### Added
+- Rust xray-core: HCL/Terraform, YAML, XML, Groovy, and SQL language support (tree-sitter grammars).
+- Xray tool doc updates referencing new supported languages.
+
 ## v10.68.0 (2026-05-28) -- Xray Tool Doc Improvements + Runtime Truncation Tests
 
 ### Added
