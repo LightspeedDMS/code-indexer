@@ -114,6 +114,11 @@ outputSchema:
     is_admin:
       type: boolean
       description: 'Job-priority opt-in flag present in GET /api/jobs/{job_id} results. Always false for xray_explore and xray_search jobs -- these handlers never request the admin priority lane. This field does NOT reflect whether the submitting user is an administrator; an admin user submitting xray_explore will see is_admin=false.'
+    debug_output:
+      type: array
+      items:
+        type: string
+      description: 'Debug messages emitted by debug_log() calls in the evaluator. Empty list when no debug_log() calls were made (zero overhead). Present in inline results when await_seconds > 0 resolves; also available in polled job results.'
     error:
       type: string
       description: 'Error code when the request is rejected synchronously.'
@@ -182,6 +187,19 @@ pub struct EvalFinding {
 ```
 
 The server enriches each finding additionally with `matched_node` and `ast_debug` for `xray_explore`.
+
+### debug_log() function
+
+Use `debug_log(msg: &str)` inside your evaluator to trace execution. Debug messages appear in `debug_output[]` in the result, making it easy to understand why the evaluator produces or skips findings.
+
+```rust
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    debug_log(&format!("evaluating: kind={}, children={}", node.kind, node.children.len()));
+    vec![]
+}
+```
+
+**Limits**: 100 messages max, 10 KB total. Messages past either limit are silently dropped. When no `debug_log()` calls are made, `debug_output` is an empty list (zero overhead).
 
 ### OwnedNode reference
 

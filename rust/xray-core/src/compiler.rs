@@ -106,6 +106,28 @@ fn truncate_snippet(s: &str, max_len: usize) -> String {
         format!("{}...", &collapsed[..boundary])
     }
 }
+
+use std::cell::RefCell;
+
+thread_local! {
+    static DEBUG_LOG: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
+
+/// Debug logging helper for evaluator development.
+/// Messages are collected in a per-thread buffer (max 100 messages, 10KB total)
+/// and returned alongside findings in the JSON output as debug_messages[].
+/// Calls past the limits are silently dropped.
+fn debug_log(msg: &str) {
+    DEBUG_LOG.with(|log| {
+        let mut log = log.borrow_mut();
+        if log.len() < 100 {
+            let total_bytes: usize = log.iter().map(|s| s.len()).sum();
+            if total_bytes + msg.len() <= 10240 {
+                log.push(msg.to_string());
+            }
+        }
+    });
+}
 "#;
 
 const EPILOGUE: &str = r#"
@@ -117,6 +139,14 @@ pub fn xray_evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
 #[no_mangle]
 pub fn xray_abi_version() -> u64 {
     XRAY_ABI_VERSION
+}
+
+#[no_mangle]
+pub fn xray_drain_debug_log() -> Vec<String> {
+    DEBUG_LOG.with(|log| {
+        let mut log = log.borrow_mut();
+        std::mem::take(&mut *log)
+    })
 }
 "#;
 
@@ -505,5 +535,80 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         assert!(PREAMBLE.contains("pub pattern: String"), "EvalFinding.pattern missing");
         assert!(PREAMBLE.contains("pub line: usize"), "EvalFinding.line missing");
         assert!(PREAMBLE.contains("pub snippet: String"), "EvalFinding.snippet missing");
+    }
+
+    // --- AC1/AC2/AC5: debug_log tests ---
+
+    #[test]
+    fn test_preamble_contains_debug_log() {
+        // AC1: debug_log(msg) must be in preamble so user code can call it.
+        assert!(
+            PREAMBLE.contains("fn debug_log(msg: &str)"),
+            "PREAMBLE must define fn debug_log(msg: &str)"
+        );
+        assert!(
+            PREAMBLE.contains("thread_local!"),
+            "PREAMBLE must define thread_local! storage for debug messages"
+        );
+        assert!(
+            PREAMBLE.contains("RefCell"),
+            "PREAMBLE must use RefCell for interior mutability of debug log"
+        );
+        assert!(
+            PREAMBLE.contains("10240"),
+            "PREAMBLE must enforce 10KB (10240 byte) size limit"
+        );
+    }
+
+    #[test]
+    fn test_epilogue_contains_drain_debug_log() {
+        // AC2: xray_drain_debug_log must be exported so the loader can retrieve messages.
+        assert!(
+            EPILOGUE.contains("xray_drain_debug_log"),
+            "EPILOGUE must export xray_drain_debug_log symbol"
+        );
+        assert!(
+            EPILOGUE.contains("Vec<String>"),
+            "xray_drain_debug_log must return Vec<String>"
+        );
+    }
+
+    #[test]
+    fn test_compiled_evaluator_can_call_debug_log() {
+        // Integration: evaluator code using debug_log() must compile successfully.
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    debug_log("visiting node");
+    debug_log(&format!("kind={}", node.kind));
+    Vec::new()
+}
+"#;
+        let result = compile_evaluator(user_code, dir.path());
+        assert!(
+            result.is_ok(),
+            "evaluator using debug_log must compile: {:?}",
+            result.err().map(|e| e.to_string())
+        );
+    }
+
+    #[test]
+    fn test_debug_log_truncation_limits() {
+        // AC5: evaluator calling debug_log 200 times must compile (truncation is runtime).
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    for i in 0..200usize {
+        debug_log(&format!("message {}", i));
+    }
+    Vec::new()
+}
+"#;
+        let result = compile_evaluator(user_code, dir.path());
+        assert!(
+            result.is_ok(),
+            "evaluator with looping debug_log must compile: {:?}",
+            result.err().map(|e| e.to_string())
+        );
     }
 }

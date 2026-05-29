@@ -6,6 +6,7 @@ use std::path::Path;
 
 type EvaluateNodeFn = fn(&OwnedNode) -> Vec<EvalFinding>;
 type AbiVersionFn = fn() -> u64;
+type DrainDebugLogFn = fn() -> Vec<String>;
 
 /// Must match `XRAY_ABI_VERSION` in compiler.rs PREAMBLE.
 /// Increment both when OwnedNode or EvalFinding layout changes.
@@ -14,6 +15,8 @@ const EXPECTED_ABI_VERSION: u64 = 1;
 pub struct DynlibEvaluator {
     _lib: Library,
     evaluate_fn: EvaluateNodeFn,
+    /// Optional drain function — None when loading an old .so that predates debug_log.
+    drain_debug_log_fn: Option<DrainDebugLogFn>,
 }
 
 impl std::fmt::Debug for DynlibEvaluator {
@@ -50,13 +53,41 @@ impl DynlibEvaluator {
                 .map_err(|e| format!("Symbol xray_evaluate_node not found: {}", e))?;
             *sym
         };
-        Ok(Self { _lib: lib, evaluate_fn })
+
+        // Load xray_drain_debug_log — optional for backward compat with old .so files.
+        // Missing symbol is non-fatal: drain_debug_log() returns empty vec in that case.
+        let drain_debug_log_fn: Option<DrainDebugLogFn> = unsafe {
+            lib.get::<DrainDebugLogFn>(b"xray_drain_debug_log")
+                .ok()
+                .map(|sym| *sym)
+        };
+
+        Ok(Self { _lib: lib, evaluate_fn, drain_debug_log_fn })
+    }
+
+    /// Drain accumulated debug_log() messages from the evaluator's thread-local buffer.
+    ///
+    /// Returns all messages collected since the last drain (or since load), then clears
+    /// the buffer. Returns empty vec when the evaluator made no debug_log() calls or
+    /// when the loaded .so predates the debug_log feature.
+    pub fn drain_debug_log(&self) -> Vec<String> {
+        match self.drain_debug_log_fn {
+            Some(f) => f(),
+            None => vec![],
+        }
     }
 }
 
 impl Evaluator for DynlibEvaluator {
     fn evaluate_node(&self, node: &OwnedNode) -> Vec<EvalFinding> {
         (self.evaluate_fn)(node)
+    }
+
+    fn drain_debug_log(&self) -> Vec<String> {
+        // Use fully-qualified call to route to the inherent method, not this trait
+        // method (which would recurse).  The inherent method dispatches to the dynlib's
+        // xray_drain_debug_log export, or returns empty vec for old .so files.
+        DynlibEvaluator::drain_debug_log(self)
     }
 }
 
@@ -67,6 +98,8 @@ impl Evaluator for DynlibEvaluator {
 // 3. No std::fs, std::net, std::process, std::env, std::io access
 // 4. No extern blocks or raw pointers
 // 5. No println!/eprintln!/print!/eprint! (no I/O side effects)
+// 6. debug_log() uses thread_local! storage (RefCell<Vec<String>>), which is
+//    per-thread and does not create shared mutable state across threads.
 // The function takes &OwnedNode (immutable ref) and returns Vec<EvalFinding> (owned).
 // With no global state and no I/O, concurrent calls from rayon threads are safe.
 // The Library handle (_lib) is kept alive for the lifetime of the evaluator,
@@ -145,5 +178,110 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].pattern, "dynlib-test");
         assert_eq!(findings[0].line, 42);
+    }
+
+    // --- AC2: debug_log drain tests ---
+
+    #[test]
+    fn test_drain_debug_log_returns_messages() {
+        // AC2: evaluator calling debug_log produces messages retrievable via drain_debug_log.
+        use crate::compiler;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    debug_log("hello from evaluator");
+    debug_log(&format!("kind is: {}", node.kind));
+    Vec::new()
+}
+"#;
+        let cr = compiler::compile_evaluator(user_code, dir.path())
+            .expect("compile must succeed");
+        let evaluator = DynlibEvaluator::load(&cr.so_path)
+            .expect("load must succeed");
+
+        let node = OwnedNode {
+            kind: "some_node".to_string(),
+            start_line: 1,
+            start_byte: 0,
+            end_byte: 5,
+            children: vec![],
+            is_named: true,
+            text: "x".to_string(),
+        };
+        evaluator.evaluate_node(&node);
+        let messages = evaluator.drain_debug_log();
+        assert_eq!(messages.len(), 2, "must have 2 debug messages: {:?}", messages);
+        assert_eq!(messages[0], "hello from evaluator");
+        assert_eq!(messages[1], "kind is: some_node");
+    }
+
+    #[test]
+    fn test_drain_debug_log_empty_without_calls() {
+        // AC6: when evaluator makes no debug_log calls, drain returns empty vec.
+        use crate::compiler;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    Vec::new()
+}
+"#;
+        let cr = compiler::compile_evaluator(user_code, dir.path())
+            .expect("compile must succeed");
+        let evaluator = DynlibEvaluator::load(&cr.so_path)
+            .expect("load must succeed");
+
+        let node = OwnedNode {
+            kind: "root".to_string(),
+            start_line: 1,
+            start_byte: 0,
+            end_byte: 0,
+            children: vec![],
+            is_named: true,
+            text: String::new(),
+        };
+        evaluator.evaluate_node(&node);
+        let messages = evaluator.drain_debug_log();
+        assert!(messages.is_empty(), "must be empty when no debug_log calls: {:?}", messages);
+    }
+
+    #[test]
+    fn test_drain_debug_log_via_trait_dispatch() {
+        // Regression: drain_debug_log must work through Evaluator trait dispatch,
+        // not just as an inherent method on DynlibEvaluator.
+        use crate::compiler;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    debug_log("trait dispatch test");
+    Vec::new()
+}
+"#;
+        let cr = compiler::compile_evaluator(user_code, dir.path())
+            .expect("compile must succeed");
+        let evaluator = DynlibEvaluator::load(&cr.so_path)
+            .expect("load must succeed");
+
+        let node = OwnedNode {
+            kind: "root".to_string(),
+            start_line: 1,
+            start_byte: 0,
+            end_byte: 0,
+            children: vec![],
+            is_named: true,
+            text: String::new(),
+        };
+
+        // Call through trait reference — this is how scanner.rs uses evaluators.
+        let eval_ref: &dyn Evaluator = &evaluator;
+        eval_ref.evaluate_node(&node);
+        let messages = eval_ref.drain_debug_log();
+        assert_eq!(messages.len(), 1, "trait dispatch must return debug messages: {:?}", messages);
+        assert_eq!(messages[0], "trait dispatch test");
     }
 }

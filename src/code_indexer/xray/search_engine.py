@@ -450,6 +450,9 @@ class XRaySearchEngine:
             "files_processed": files_processed,
             "files_total": files_total,
             "elapsed_seconds": elapsed,
+            # AC3: debug_log() messages from the Rust evaluator (via _last_debug_messages
+            # side-channel). Empty list when no debug_log() calls were made (AC6).
+            "debug_output": getattr(self.rust_backend, "_last_debug_messages", []),
         }
 
         # COMPLETED_PARTIAL contract: timeout takes precedence over max_files cap.

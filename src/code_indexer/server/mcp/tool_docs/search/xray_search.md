@@ -108,6 +108,11 @@ outputSchema:
     is_admin:
       type: boolean
       description: 'Job-priority opt-in flag present in GET /api/jobs/{job_id} results. Always false for xray_search and xray_explore jobs -- these handlers never request the admin priority lane. This field does NOT reflect whether the submitting user is an administrator; an admin user submitting xray_search will see is_admin=false.'
+    debug_output:
+      type: array
+      items:
+        type: string
+      description: 'Debug messages emitted by debug_log() calls in the evaluator. Empty list when no debug_log() calls were made (zero overhead). Present in inline results when await_seconds > 0 resolves; also available in polled job results.'
     error:
       type: string
       description: 'Error code when the request is rejected synchronously.'
@@ -197,6 +202,30 @@ pub struct EvalFinding {
 - `pattern`: a short, descriptive label for the kind of finding. This surfaces in the response `matches[]` as the `pattern` field. Use consistent names across findings to allow grouping/filtering.
 - `line`: 1-based line number. Use `node.start_line` directly -- it is already 1-based.
 - `snippet`: code context for the finding. Typically the node's text truncated to a reasonable length: `node.text.chars().take(80).collect()`.
+
+### debug_log() function
+
+Use `debug_log(msg: &str)` inside your evaluator to trace execution and diagnose unexpected results. Debug messages are collected in-memory and returned in the `debug_output[]` field of the result.
+
+```rust
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    debug_log("evaluator called");
+    debug_log(&format!("root kind: {}", node.kind));
+    for f in node.descendants_of_kind("function_definition") {
+        debug_log(&format!("found function at line {}", f.start_line));
+    }
+    vec![]
+}
+```
+
+**Limits** (enforced at runtime, not compile time):
+- Maximum 100 messages per evaluation run.
+- Maximum 10 KB total across all messages.
+- Messages past either limit are silently dropped.
+
+**Security**: `debug_log` writes to an in-memory buffer only. It does NOT perform any I/O, network access, or file system access. It is fully sandboxed.
+
+When no `debug_log()` calls are made, `debug_output` is an empty list (zero overhead).
 
 ### OwnedNode reference
 

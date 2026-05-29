@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.67.0 (2026-05-28) -- Xray Evaluator debug_log() Function
+
+### Added
+- Story #1028: `debug_log(msg: &str)` function available inside xray evaluator code for runtime debugging. Messages are collected in a per-thread buffer (max 100 messages, 10KB total) and returned in the JSON output as `debug_messages[]`. Python-side `XRaySearchEngine` surfaces them as `debug_output[]` in job results for both `xray_search` and `xray_explore`. Security: in-memory only, no sandbox bypass.
+- `xray_drain_debug_log()` exported symbol in compiled evaluator dynlibs for draining debug messages after evaluation.
+- `drain_debug_log()` method on `Evaluator` trait with default empty implementation; `DynlibEvaluator` overrides via trait dispatch to call the dynlib export.
+- `debug_messages` field in `ScanResult` and xray-cli JSON output.
+- `debug_output` field documented in `xray_search` and `xray_explore` MCP tool docs with usage examples, limits, and security notes.
+
 ## v10.66.0 (2026-05-28) -- Activation Metadata + Cache Page Index Fixes
 
 ### Fixed
