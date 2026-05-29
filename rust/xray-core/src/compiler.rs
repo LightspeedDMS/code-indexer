@@ -611,4 +611,115 @@ fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
             result.err().map(|e| e.to_string())
         );
     }
+
+    #[test]
+    fn test_debug_log_truncation_limits_runtime() {
+        // Runtime assertion: evaluator calling debug_log 150 times must yield exactly
+        // 100 messages (not 150) — the PREAMBLE enforces a hard cap of 100 per evaluation.
+        use crate::dynlib::DynlibEvaluator;
+        use crate::owned_node::OwnedNode;
+        use crate::scanner::Evaluator;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    for i in 0..150usize {
+        debug_log(&format!("msg {}", i));
+    }
+    Vec::new()
+}
+"#;
+        let cr = compile_evaluator(user_code, dir.path())
+            .expect("evaluator with 150 debug_log calls must compile");
+
+        let evaluator = DynlibEvaluator::load(&cr.so_path)
+            .expect("compiled .so must load successfully");
+
+        let node = OwnedNode {
+            kind: "root".to_string(),
+            start_line: 1,
+            start_byte: 0,
+            end_byte: 0,
+            children: vec![],
+            is_named: true,
+            text: String::new(),
+        };
+
+        evaluator.evaluate_node(&node);
+        let messages = evaluator.drain_debug_log();
+
+        assert_eq!(
+            messages.len(),
+            100,
+            "100-message cap must be enforced at runtime: got {} messages",
+            messages.len()
+        );
+        // Verify the FIRST 100 messages are retained (not arbitrary ones).
+        for i in 0..100usize {
+            assert_eq!(
+                messages[i],
+                format!("msg {}", i),
+                "message at index {} must be 'msg {}', got: {}",
+                i, i, messages[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_debug_log_byte_limit_runtime() {
+        // Runtime assertion: when messages exceed 10KB total, further messages are
+        // silently dropped — enforced by the PREAMBLE 10240-byte guard.
+        // Each message is 200 bytes; 51 * 200 = 10200 <= 10240 (fits).
+        // 52nd message would push total to 10400 > 10240 (dropped).
+        use crate::dynlib::DynlibEvaluator;
+        use crate::owned_node::OwnedNode;
+        use crate::scanner::Evaluator;
+
+        let dir = TempDir::new().unwrap();
+        let user_code = r#"
+fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+    let big_msg: String = std::iter::repeat('b').take(200).collect();
+    for _ in 0..60usize {
+        debug_log(&big_msg);
+    }
+    Vec::new()
+}
+"#;
+        let cr = compile_evaluator(user_code, dir.path())
+            .expect("evaluator with large debug_log messages must compile");
+
+        let evaluator = DynlibEvaluator::load(&cr.so_path)
+            .expect("compiled .so must load successfully");
+
+        let node = OwnedNode {
+            kind: "root".to_string(),
+            start_line: 1,
+            start_byte: 0,
+            end_byte: 0,
+            children: vec![],
+            is_named: true,
+            text: String::new(),
+        };
+
+        evaluator.evaluate_node(&node);
+        let messages = evaluator.drain_debug_log();
+
+        // 51 * 200 = 10200 bytes fits within 10240; 52nd message (200 bytes) would
+        // make 10400 > 10240 and is dropped. Exactly 51 messages must be retained.
+        assert_eq!(
+            messages.len(),
+            51,
+            "10KB byte cap must be enforced: expected 51 messages, got {}",
+            messages.len()
+        );
+        let expected_msg: String = std::iter::repeat('b').take(200).collect();
+        for (i, msg) in messages.iter().enumerate() {
+            assert_eq!(
+                msg, &expected_msg,
+                "message {} must be the 200-byte string, got len={}",
+                i,
+                msg.len()
+            );
+        }
+    }
 }

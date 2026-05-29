@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.68.0 (2026-05-28) -- Xray Tool Doc Improvements + Runtime Truncation Tests
+
+### Added
+- Quick Start sections in both `xray_search` and `xray_explore` MCP tool docs with complete working examples so first-time users see a runnable pattern before the reference material.
+- `debug_log()` and `truncate_snippet()` now listed in the "Allowed constructs" security whitelist in both xray tool docs (were missing despite being preamble-provided functions).
+- REST/MCP field name mismatch note in `xray_search` docs: REST API uses `driver_regex`/`max_files` while MCP uses `pattern`/`max_results`.
+- Self-contained Quick Start in `xray_explore` with two examples (AST exploration without evaluator, evaluator with debug_log tracing).
+- Rust runtime integration test `test_debug_log_truncation_limits_runtime`: compiles evaluator calling debug_log 150 times, loads .so, asserts exactly 100 messages returned in-order.
+- Rust runtime integration test `test_debug_log_byte_limit_runtime`: compiles evaluator sending 60x200B messages, asserts exactly 51 retained (10KB cap enforced).
+
 ## v10.67.0 (2026-05-28) -- Xray Evaluator debug_log() Function
 
 ### Added
