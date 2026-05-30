@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.84.0 (2026-05-30) -- Opus M3 helpers extraction (Story #1032 Commit 11)
+
+### Refactor (Opus M3 — Phase 1 of 2-phase)
+- Extracted the 4 module-level deactivation helpers from `activated_repo_manager.py` into a new module `src/code_indexer/server/repositories/deactivation_helpers.py`:
+  - `_safe_purge_trash_entry(trash_root, entry_name)` — fd-anchored recursive delete
+  - `_fd_anchored_rmtree(name, parent_fd, expected_st_dev)` — recursive helper
+  - `_fd_anchored_phase1_rename(activated_repos_dir, username, user_alias)` — atomic Phase 1 rename
+  - `_predeactivation_leak_scan_enabled()` — bootstrap config flag accessor
+- Manager file: **3888 → 3580 lines** (~308 lines removed). Still violates MESSI Rule 6 (500-line cap) but the largest single contributor is gone.
+- All 4 helpers re-exported from `activated_repo_manager` namespace so tests/callers that patch via `activated_repo_manager._fd_anchored_phase1_rename` continue to work unchanged.
+- Zero behavior change — pure file-organization refactor. All 57 deactivation tests pass. server-fast-automation all 6 chunks green (13,417 tests).
+
+### Deferred (Opus M3 Phase 2)
+- The deactivation METHODS (`_do_deactivate_single`, `_do_deactivate_composite`, `_do_deactivate_repository`, `sweep_orphan_trash_dirs`, `_detect_resource_leaks`) remain on `ActivatedRepoManager` for now. A future commit can extract them into a `DeactivationService` class (composition pattern) for further file-bloat reduction.
+
 ## v10.83.0 (2026-05-30) -- Opus review H1 + H2 (Story #1032 Commit 10)
 
 ### Documentation (Opus H1)
