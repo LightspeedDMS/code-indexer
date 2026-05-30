@@ -206,3 +206,72 @@ class TestRealDeletion:
     def test_nonexistent_entry_is_noop(self, trash_root):
         # Should NOT raise FileNotFoundError; absorbed by inner unlink fallback.
         _safe_purge_trash_entry(trash_root, "does-not-exist")
+
+
+# -------- HIGH #4: scandir does NOT materialise full DirEntry list -----------
+
+
+class TestScandirNotFullyMaterialised:
+    """_fd_anchored_rmtree must NOT call list() on the scandir iterator.
+
+    HIGH #4 fix: collecting full DirEntry objects (with stat metadata) for
+    every entry is an OOM/DoS vector on directories with millions of files.
+    The fix collects only (name, is_dir) tuples — cheap strings + one bool —
+    by passing a list comprehension over (e.name, e.is_dir()) directly, which
+    does NOT call list() on a bare scandir iterator object.
+
+    We verify this by patching builtins.list and tracking whether it is ever
+    called with an os.scandir iterator as its argument.
+    """
+
+    def test_scandir_iterator_not_passed_to_list(self, trash_root, monkeypatch):
+        """list() must NOT receive an os.scandir iterator as argument."""
+        import builtins
+        import os as _os
+        from src.code_indexer.server.repositories.activated_repo_manager import (
+            _fd_anchored_rmtree,
+        )
+
+        # Build a real entry with a few files.
+        entry = Path(trash_root) / "target-dir"
+        entry.mkdir()
+        (entry / "a.txt").write_text("a")
+        (entry / "b.txt").write_text("b")
+        sub = entry / "sub"
+        sub.mkdir()
+        (sub / "c.txt").write_text("c")
+
+        # Capture the scandir iterator type without leaking the resource.
+        with _os.scandir(".") as sd:
+            scandir_iterator_type = type(sd)
+
+        list_called_on_scandir_iter: list = []
+        original_list = builtins.list
+
+        def tracking_list(obj=None, *args, **kwargs):
+            if obj is not None and isinstance(obj, scandir_iterator_type):
+                list_called_on_scandir_iter.append(repr(obj))
+            if obj is None:
+                return original_list()
+            return original_list(obj, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "list", tracking_list)
+
+        # Open trash_fd and call _fd_anchored_rmtree directly.
+        trash_fd = _os.open(trash_root, _os.O_RDONLY | _os.O_DIRECTORY | _os.O_NOFOLLOW)
+        try:
+            trash_st = _os.fstat(trash_fd)
+            _fd_anchored_rmtree("target-dir", trash_fd, trash_st.st_dev)
+        finally:
+            _os.close(trash_fd)
+
+        # Target must be deleted.
+        assert not entry.exists(), (
+            "target-dir should have been deleted by _fd_anchored_rmtree"
+        )
+
+        # list() must NOT have been called with a scandir iterator.
+        assert list_called_on_scandir_iter == [], (
+            "list() was called with an os.scandir iterator — OOM risk on large dirs; "
+            f"calls: {list_called_on_scandir_iter}"
+        )
