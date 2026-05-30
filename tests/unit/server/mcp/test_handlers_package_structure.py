@@ -26,6 +26,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "repository_status",
         "sync_repository",
         "switch_branch",
+        "store_xray_pattern",
         "list_files",
         "get_file_content",
         "browse_directory",

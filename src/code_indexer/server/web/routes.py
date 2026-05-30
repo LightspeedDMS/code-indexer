@@ -7,6 +7,7 @@ Provides admin web interface routes for CIDX server administration.
 from code_indexer import __version__ as _cidx_version
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import html
 import json
 import logging
 import os
@@ -622,6 +623,12 @@ def dashboard_stats_partial(
         api_metrics_backend=_api_metrics_backend,
     )
 
+    # AC1: Compute active deactivations count for the dashboard tile
+    _job_manager = _get_background_job_manager()
+    active_deactivations = (
+        _job_manager.count_active_deactivations() if _job_manager else 0
+    )
+
     return templates.TemplateResponse(
         "partials/dashboard_stats.html",
         {
@@ -633,6 +640,7 @@ def dashboard_stats_partial(
             "time_filter": time_filter,
             "recent_filter": recent_filter,
             "api_filter": api_filter,
+            "active_deactivations": active_deactivations,
         },
     )
 
@@ -3727,7 +3735,6 @@ def _get_all_activated_repos() -> list:
                         repo["temporal_status"] = {
                             "error": str(e),
                             "format": "error",
-                            "file_count": 0,
                             "needs_reindex": False,
                             "message": f"Unable to determine temporal index status: {str(e)}",
                         }
@@ -3814,6 +3821,38 @@ def _paginate_repos(repos: list, page: int = 1, per_page: int = 25) -> tuple:
     return paginated, total_pages, page
 
 
+def _build_deactivating_map() -> dict:
+    """Build a {(username, user_alias): job_id} map for in-flight deactivations.
+
+    AC2: Used by the repos page to render the 'Deactivating...' badge per row.
+    Returns an empty dict when the job manager is unavailable or no active jobs exist.
+    """
+    result: dict = {}
+    job_manager = _get_background_job_manager()
+    if not job_manager:
+        return result
+    try:
+        jobs_data = job_manager.list_jobs(
+            username="",
+            is_admin=True,
+            status_filter=None,
+            limit=500,
+            offset=0,
+        )
+        for job in jobs_data.get("jobs", []):
+            if job.get("operation_type") != "deactivate_repository":
+                continue
+            if job.get("status") not in ("pending", "running"):
+                continue
+            username = job.get("username", "")
+            repo_alias = job.get("repo_alias") or ""
+            if username and repo_alias:
+                result[(username, repo_alias)] = job["job_id"]
+    except Exception as e:
+        logger.warning(f"Failed to build deactivating_map: {e}")
+    return result
+
+
 def _create_repos_page_response(
     request: Request,
     session: SessionData,
@@ -3840,6 +3879,9 @@ def _create_repos_page_response(
     # Paginate
     paginated_repos, total_pages, current_page = _paginate_repos(filtered_repos, page)
 
+    # AC2: Build deactivating map for per-row badge rendering
+    deactivating_map = _build_deactivating_map()
+
     response = templates.TemplateResponse(
         "repos.html",
         {
@@ -3858,6 +3900,7 @@ def _create_repos_page_response(
             "total_pages": total_pages,
             "success_message": success_message,
             "error_message": error_message,
+            "deactivating_map": deactivating_map,
         },
     )
 
@@ -4030,10 +4073,11 @@ def deactivate_repo(
             username=username,
             user_alias=user_alias,
         )
+        job_link = f'<a href="/admin/jobs?search_text={job_id}">{job_id}</a>'
         return _create_repos_page_response(
             request,
             session,
-            success_message=f"Repository '{user_alias}' deactivation job submitted (Job ID: {job_id})",
+            success_message=f"Repository '{html.escape(user_alias)}' deactivation job submitted (Job ID: {job_link})",
         )
     except Exception as e:
         error_msg = str(e)
@@ -4171,6 +4215,7 @@ def _get_all_jobs(
     search: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
+    is_admin: bool = True,
 ):
     """
     Get all jobs with filters and pagination.
@@ -4185,6 +4230,9 @@ def _get_all_jobs(
     2. Fetch and filter all JobTracker jobs with the same criteria.
     3. Deduplicate by job_id (BG manager record wins for shared IDs).
     4. Re-paginate the merged list and recompute total_count / total_pages.
+
+    AC11: is_admin=True (default, because /jobs is admin-only) bypasses
+    per-user scoping so admin sees all users' jobs.
 
     Returns jobs from both tracking systems with consistent filtering and
     pagination.
@@ -4202,15 +4250,18 @@ def _get_all_jobs(
             search_text=search,
             page=page,
             page_size=page_size,
+            is_admin=is_admin,
         )
 
     # Fetch all matching BG jobs (un-paginated) so we can merge before slicing.
+    # AC11: pass is_admin so admin sees all users' jobs in the tracker-merge path.
     all_bg_jobs, _bg_total, _bg_pages = job_manager.get_jobs_for_display(
         status_filter=status_filter,
         type_filter=type_filter,
         search_text=search,
         page=1,
         page_size=_MAX_JOBS_FOR_MERGE,
+        is_admin=is_admin,
     )
 
     seen_ids = {j["job_id"] for j in all_bg_jobs}

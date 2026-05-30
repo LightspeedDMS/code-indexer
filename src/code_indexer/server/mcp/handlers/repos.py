@@ -567,6 +567,7 @@ def _append_global_repos_to_status(status_summary: list, user: User) -> None:
 
 
 # Story #196: Whitelist of MCP-relevant fields for activated repos
+# Story #1032 AC4: deactivation_job added — null or {job_id, status}
 _ACTIVATED_REPO_FIELDS = {
     "user_alias",
     "golden_repo_alias",
@@ -577,7 +578,49 @@ _ACTIVATED_REPO_FIELDS = {
     "repo_category",
     "is_composite",
     "golden_repo_aliases",
+    "deactivation_job",
 }
+
+# Maximum jobs to fetch when building deactivation map for list_repositories.
+_MCP_DEACT_JOB_LOOKUP_LIMIT = 500
+
+
+def _build_mcp_deactivating_map() -> dict:
+    """Build a map from (username, repo_alias) -> {job_id, status} for active deactivations.
+
+    Returns empty dict when background_job_manager is unavailable or on any error.
+    Fetches with is_admin=True so admin-submitted deactivations appear for all users.
+    Filters client-side for operation_type=deactivate_repository and pending/running status.
+    """
+    bjm = getattr(_utils.app_module, "background_job_manager", None)
+    if bjm is None:
+        return {}
+    try:
+        result = bjm.list_jobs(
+            username="",
+            is_admin=True,
+            limit=_MCP_DEACT_JOB_LOOKUP_LIMIT,
+            offset=0,
+        )
+        deact_map: dict = {}
+        for job in result.get("jobs", []):
+            if job.get("operation_type") != "deactivate_repository":
+                continue
+            if job.get("status") not in ("pending", "running"):
+                continue
+            repo_alias = job.get("repo_alias")
+            username = job.get("username")
+            if repo_alias and username:
+                deact_map[(username, repo_alias)] = {
+                    "job_id": job["job_id"],
+                    "status": job["status"],
+                }
+        return deact_map
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch deactivation jobs for MCP repo listing: %s", exc
+        )
+        return {}
 
 
 def _load_global_repos_normalized() -> list:
@@ -669,6 +712,15 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 user.username
             )
         )
+
+        # AC4 (Story #1032): annotate each raw repo with deactivation_job before
+        # field-stripping so the whitelisted field passes through.
+        deact_map = _build_mcp_deactivating_map()
+        for repo in raw_activated:
+            repo_alias = repo.get("user_alias", "")
+            repo_username = repo.get("username", user.username)
+            repo["deactivation_job"] = deact_map.get((repo_username, repo_alias))
+
         activated_repos = [
             {k: v for k, v in repo.items() if k in _ACTIVATED_REPO_FIELDS}
             for repo in raw_activated

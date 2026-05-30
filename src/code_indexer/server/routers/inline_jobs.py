@@ -76,7 +76,9 @@ def register_job_routes(
             HTTPException: If job not found
         """
         job_status = background_job_manager.get_job_status(
-            job_id, current_user.username
+            job_id,
+            current_user.username,
+            is_admin=(current_user.role == UserRole.ADMIN),
         )
         if not job_status:
             raise HTTPException(
@@ -133,6 +135,7 @@ def register_job_routes(
             status_filter=status,
             limit=limit,
             offset=offset,
+            is_admin=(current_user.role == UserRole.ADMIN),
         )
 
         # Convert job data to response models

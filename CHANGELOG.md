@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.73.0 (2026-05-29) -- Repository Deactivation Visibility + Admin Bypass (Story #1032 Commit 1)
+
+### Added
+- Dashboard: new "Active deactivations" stat tile showing count of in-flight `deactivate_repository` jobs across the whole cluster (queries both in-memory and PG/SQLite backend, de-duped by job_id).
+- Repos page: per-row "Deactivating..." badge that links to the running job for any pending/running deactivation, visible to admin for any user's repo.
+- REST `GET /api/repos` and MCP `list_repositories`: new `deactivation_job` field per repo (`{"job_id": "...", "status": "running"} | null`) so CLI/MCP clients see in-flight deactivations.
+- Web UI admin deactivate success flash now contains a clickable Job ID linking to `/admin/jobs?search_text=<id>` for one-click navigation to the job detail.
+
+### Changed
+- `BackgroundJobManager.list_jobs`, `get_job_status`, `get_jobs_for_display` gain an `is_admin: bool = False` parameter; when True, the username scope is bypassed so admin can see all users' jobs.
+- REST endpoints `GET /api/jobs`, `GET /api/jobs/{job_id}`, `DELETE /api/jobs/{job_id}` now pass `is_admin=(current_user.role == 'admin')`. Non-admin users continue to see only their own jobs (privilege-escalation regression test added).
+
+### Removed
+- Repos page: dead "File Count" column (always rendered `N/A` because the backend never populated the field). Pure UI noise removed.
+
+### Security
+- Stored-XSS hardening: `user_alias` is now HTML-escaped in the admin deactivation success flash before being rendered through Jinja's `|safe` filter, preventing script injection via maliciously-named activated repos.
+
+### Fixed
+- Test debt from Story #1031: `EXPECTED_REGISTRY_KEYS` in the MCP handler registry structure test now includes `store_xray_pattern` (was failing on master/development since the tool was registered).
+
 ## v10.72.0 (2026-05-29) -- directory_tree Absolute Path Disclosure Fix
 
 ### Fixed

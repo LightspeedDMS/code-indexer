@@ -399,7 +399,9 @@ class BackgroundJobManager:
         )
         return job_id
 
-    def get_job_status(self, job_id: str, username: str) -> Optional[Dict[str, Any]]:
+    def get_job_status(
+        self, job_id: str, username: str, is_admin: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """
         Get status of a background job with user isolation.
 
@@ -409,6 +411,7 @@ class BackgroundJobManager:
         Args:
             job_id: Job ID to check
             username: Username requesting the status (for authorization)
+            is_admin: When True, skip ownership check — admin can see any job (AC11)
 
         Returns:
             Job status dictionary or None if job not found or not authorized
@@ -416,7 +419,7 @@ class BackgroundJobManager:
         with self._lock:
             job = self.jobs.get(job_id)
             if job:
-                if job.username != username:
+                if not is_admin and job.username != username:
                     return None
                 return {
                     "job_id": job.job_id,
@@ -449,7 +452,9 @@ class BackgroundJobManager:
         if self._sqlite_backend:
             try:
                 db_job = self._sqlite_backend.get_job(job_id)
-                if db_job and db_job.get("username") == username:
+                # AC11: when is_admin=True, bypass ownership check so admin can
+                # fetch any user's completed job from the DB.
+                if db_job and (is_admin or db_job.get("username") == username):
                     # v10.4.6 (Obs 3.2): scrub internal is_admin field from public
                     # response. The in-memory path above already omits it; the SQLite
                     # row includes it for internal scheduling/ownership-bypass logic
@@ -491,6 +496,7 @@ class BackgroundJobManager:
         status_filter: Optional[str] = None,
         limit: int = 10,
         offset: int = 0,
+        is_admin: bool = False,
     ) -> Dict[str, Any]:
         """
         List jobs for a user with filtering and pagination.
@@ -500,19 +506,21 @@ class BackgroundJobManager:
         (overriding DB entries for the same job_id) to provide fresher progress data.
 
         Args:
-            username: Username to filter jobs for
+            username: Username to filter jobs for (ignored when is_admin=True)
             status_filter: Optional status filter
             limit: Maximum number of jobs to return
             offset: Number of jobs to skip
+            is_admin: When True, skip username filter and return ALL users' jobs (AC11)
 
         Returns:
             Dictionary with jobs list and total count
         """
         if self._sqlite_backend is not None:
             try:
-                # Fetch all matching jobs from DB; paginate client-side after merging
+                # Fetch all matching jobs from DB; paginate client-side after merging.
+                # AC11: when is_admin=True, pass username=None to skip the WHERE filter.
                 db_jobs = self._sqlite_backend.list_jobs(
-                    username=username,
+                    username=None if is_admin else username,
                     status=status_filter,
                     limit=_MAX_DB_FETCH_FOR_PAGINATION,
                 )
@@ -524,10 +532,11 @@ class BackgroundJobManager:
                 for j in db_jobs:
                     j.pop("is_admin", None)
                     merged[j["job_id"]] = j
-                # Override with in-memory jobs (fresher progress) for matching criteria
+                # Override with in-memory jobs (fresher progress) for matching criteria.
+                # AC11: when is_admin=True, include all in-memory jobs regardless of owner.
                 with self._lock:
                     for job in self.jobs.values():
-                        if job.username != username:
+                        if not is_admin and job.username != username:
                             continue
                         if status_filter and job.status.value != status_filter:
                             continue
@@ -550,8 +559,13 @@ class BackgroundJobManager:
                 logging.error(f"Failed to list jobs from SQLite backend: {e}")
 
         with self._lock:
-            # Filter jobs by user
-            user_jobs = [job for job in self.jobs.values() if job.username == username]
+            # AC11: when is_admin=True, include all jobs regardless of owner.
+            if is_admin:
+                user_jobs = list(self.jobs.values())
+            else:
+                user_jobs = [
+                    job for job in self.jobs.values() if job.username == username
+                ]
 
             # Apply status filter if provided
             if status_filter:
@@ -2011,10 +2025,13 @@ class BackgroundJobManager:
         search_text: str = None,  # type: ignore[assignment]
         page: int = 1,
         page_size: int = 50,
+        is_admin: bool = False,
+        username: Optional[str] = None,
     ) -> tuple:
         """Return (jobs_list, total_count, total_pages) merging memory + SQLite.
 
         Story #271 Component 2: Filtered, paginated jobs for the Web UI jobs page.
+        AC11: is_admin=True bypasses username filter; username= scopes to one user.
 
         Algorithm:
         1. Collect active jobs (running/pending) from self.jobs under self._lock.
@@ -2030,6 +2047,8 @@ class BackgroundJobManager:
             search_text: Case-insensitive substring to search repo name / username.
             page: 1-based page number.
             page_size: Number of results per page.
+            is_admin: When True, skip username scoping (AC11 admin bypass).
+            username: When provided and is_admin=False, scope results to this user.
 
         Returns:
             Tuple of (jobs: List[Dict], total_count: int, total_pages: int).
@@ -2041,6 +2060,10 @@ class BackgroundJobManager:
         with self._lock:
             for job in self.jobs.values():
                 if job.status not in (JobStatus.RUNNING, JobStatus.PENDING):
+                    continue
+
+                # AC11: when not admin and username is specified, scope to that user
+                if not is_admin and username is not None and job.username != username:
                     continue
 
                 # Apply filters to memory jobs in Python
@@ -2098,3 +2121,47 @@ class BackgroundJobManager:
         paginated = all_jobs[offset : offset + page_size]
 
         return paginated, total_count, total_pages
+
+    def count_active_deactivations(self) -> int:
+        """Count PENDING+RUNNING deactivate_repository jobs across all users.
+
+        AC1: Used by the dashboard 'Active deactivations' tile.
+        Returns 0 when no active deactivations exist.
+
+        Cluster-aware: also queries the SQLite/PG backend so jobs submitted
+        on other cluster nodes (stored in shared DB but not in this node's
+        in-memory dict) are included.  De-duplicates by job_id so a job
+        present in both sources is counted only once.
+        """
+        # Step 1: collect matching in-memory job_ids
+        seen_ids: set = set()
+        with self._lock:
+            for job in self.jobs.values():
+                if job.operation_type == "deactivate_repository" and job.status in (
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                ):
+                    seen_ids.add(job.job_id)
+
+        count = len(seen_ids)
+
+        # Step 2: also query DB backend for active deactivations not in memory
+        if self._sqlite_backend is not None:
+            try:
+                for status_val in ("pending", "running"):
+                    db_rows, _ = self._sqlite_backend.list_jobs_filtered(
+                        status=status_val,
+                        operation_type="deactivate_repository",
+                    )
+                    for row in db_rows:
+                        job_id = row.get("job_id")
+                        if job_id and job_id not in seen_ids:
+                            seen_ids.add(job_id)
+                            count += 1
+            except Exception as e:
+                logging.error(
+                    f"Failed to query DB for active deactivations count: {e}",
+                    exc_info=True,
+                )
+
+        return count

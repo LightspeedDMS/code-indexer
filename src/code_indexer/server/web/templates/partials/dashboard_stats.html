@@ -61,6 +61,18 @@
             <small>Last {{ time_filter or '24h' }}</small>
         </footer>
     </article>
+
+    <article class="stat-card stat-warning">
+        <header>
+            <h3>Active Deactivations</h3>
+        </header>
+        <div class="stat-value">
+            <a href="/admin/jobs?job_type=deactivate_repository&status=running">{{ active_deactivations if active_deactivations is defined else 0 }}</a>
+        </div>
+        <footer>
+            <small>Pending or running</small>
+        </footer>
+    </article>
 </div>
 
 <!-- Repository Statistics Section -->
