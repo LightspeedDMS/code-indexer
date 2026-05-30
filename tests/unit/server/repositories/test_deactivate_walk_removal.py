@@ -342,14 +342,18 @@ class TestCompositeLeakDetectionOnRmtreeFailure:
             leak_calls.append((repo_dir, alias_arg))
             return []
 
-        def rmtree_raises(path, *args, **kwargs):
-            raise OSError("Simulated disk failure")
+        def rename_raises(*args, **kwargs):
+            # Post-Commit 5: composite Phase 1 failure is fd-anchored rename
+            raise OSError("Simulated rename failure")
 
         with patch.object(
             manager, "_detect_resource_leaks", side_effect=tracking_detect
         ):
             with patch.object(manager, "_stop_composite_services"):
-                with patch("shutil.rmtree", side_effect=rmtree_raises):
+                with patch(
+                    "src.code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
+                    side_effect=rename_raises,
+                ):
                     with patch(
                         "src.code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
                         return_value=False,
@@ -357,10 +361,10 @@ class TestCompositeLeakDetectionOnRmtreeFailure:
                         try:
                             manager._do_deactivate_composite(username, alias, metadata)
                         except Exception:
-                            pass  # rmtree failure may propagate differently for composite
+                            pass  # rename failure may propagate differently for composite
 
         assert len(leak_calls) >= 1, (
-            f"_detect_resource_leaks should be called on composite rmtree failure; "
+            f"_detect_resource_leaks should be called on composite Phase 1 rename failure; "
             f"got {len(leak_calls)} calls"
         )
 

@@ -170,6 +170,162 @@ def _fd_anchored_rmtree(name: str, parent_fd: int, expected_st_dev: int) -> None
         pass
 
 
+def _fd_anchored_phase1_rename(
+    activated_repos_dir: str,
+    username: str,
+    user_alias: str,
+) -> str:
+    """Atomically rename ``{activated_repos_dir}/{username}/{user_alias}`` into
+    ``{activated_repos_dir}/.trash/<trash_name>`` using fd-anchored syscalls.
+
+    Story #1032 Commit 5 — closes BLOCKER #1 and BLOCKER #2 from the Codex
+    re-review:
+
+      BLOCKER #1: ``.trash`` can be swapped to a symlink between makedirs and
+        os.rename.  Fix: open ``.trash`` with O_DIRECTORY|O_NOFOLLOW before
+        calling rename, so a swap after the open is irrelevant — the kernel
+        resolves the dst dir_fd, not the path.
+
+      BLOCKER #2: ``{username}`` ancestor dir can be swapped to a symlink,
+        redirecting the rename to an attacker-chosen source.  Fix: open
+        ``{username}`` with O_DIRECTORY|O_NOFOLLOW relative to
+        ``activated_repos_dir``, so the fd is pinned to the real inode
+        regardless of later swaps.
+
+    Both parent dirs are opened with O_DIRECTORY|O_NOFOLLOW before any rename
+    syscall.  The final rename is issued as::
+
+        os.rename(user_alias, trash_name,
+                  src_dir_fd=user_fd, dst_dir_fd=trash_fd)
+
+    which passes only basenames to the kernel — ancestor swaps after the fd
+    opens cannot redirect the operation.
+
+    Args:
+        activated_repos_dir: Absolute path to the activated-repos root.  Must
+            be a real directory (not a symlink) — opened with O_NOFOLLOW.
+        username: Basename of the user directory.  Must not contain ``/``,
+            ``\\``, ``..``, or null bytes.
+        user_alias: Basename of the repo directory inside the user dir.
+            Same basename constraints as *username*.
+
+    Returns:
+        The chosen ``trash_name`` basename (the new name under ``.trash/``).
+
+    Raises:
+        ValueError: Any safety invariant violated (symlink detected, bad arg,
+            cross-filesystem target).
+        OSError / FileNotFoundError: Kernel-level failure (missing directory,
+            permissions, etc.).
+    """
+    # --- argument validation --------------------------------------------------
+    for arg_name, arg_val in (("username", username), ("user_alias", user_alias)):
+        if not arg_val or not isinstance(arg_val, str):
+            raise ValueError(
+                f"_fd_anchored_phase1_rename: refuse empty/non-string {arg_name}: {arg_val!r}"
+            )
+        if "\x00" in arg_val:
+            raise ValueError(
+                f"_fd_anchored_phase1_rename: null byte in {arg_name}: {arg_val!r}"
+            )
+        if "/" in arg_val or "\\" in arg_val:
+            raise ValueError(
+                f"_fd_anchored_phase1_rename: path separator in {arg_name}: {arg_val!r}"
+            )
+        if arg_val in (".", "..") or arg_val.startswith(".."):
+            raise ValueError(
+                f"_fd_anchored_phase1_rename: dot-dot in {arg_name}: {arg_val!r}"
+            )
+
+    # --- build trash_name -----------------------------------------------------
+    trash_name = (
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+        f"-{uuid.uuid4().hex[:8]}"
+        f"-{username}-{user_alias}"
+    )
+
+    # --- open activated_repos_dir (top-level anchor) -------------------------
+    try:
+        repos_root_fd = os.open(
+            activated_repos_dir,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except OSError as e:
+        raise ValueError(
+            f"_fd_anchored_phase1_rename: cannot open activated_repos_dir "
+            f"{activated_repos_dir!r} with O_NOFOLLOW: {e}"
+        ) from e
+
+    user_fd: Optional[int] = None
+    trash_fd: Optional[int] = None
+    try:
+        # --- open username dir relative to repos_root_fd ---------------------
+        try:
+            user_fd = os.open(
+                username,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=repos_root_fd,
+            )
+        except OSError as e:
+            raise ValueError(
+                f"_fd_anchored_phase1_rename: cannot open username dir "
+                f"{username!r} with O_NOFOLLOW: {e}"
+            ) from e
+
+        # --- ensure .trash exists and open it with O_NOFOLLOW ----------------
+        # Create if missing (mkdir relative to repos_root_fd).
+        try:
+            trash_fd = os.open(
+                ".trash",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=repos_root_fd,
+            )
+        except FileNotFoundError:
+            # .trash doesn't exist yet — create it atomically.
+            try:
+                os.mkdir(".trash", mode=0o700, dir_fd=repos_root_fd)
+            except FileExistsError:
+                pass  # race: another thread created it
+            try:
+                trash_fd = os.open(
+                    ".trash",
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=repos_root_fd,
+                )
+            except OSError as e2:
+                raise ValueError(
+                    f"_fd_anchored_phase1_rename: cannot open .trash after mkdir: {e2}"
+                ) from e2
+        except OSError as e:
+            raise ValueError(
+                f"_fd_anchored_phase1_rename: cannot open .trash with O_NOFOLLOW: {e}"
+            ) from e
+
+        # --- cross-filesystem guard ------------------------------------------
+        user_dev = os.fstat(user_fd).st_dev
+        trash_dev = os.fstat(trash_fd).st_dev
+        if user_dev != trash_dev:
+            raise ValueError(
+                "_fd_anchored_phase1_rename: refuse cross-filesystem rename "
+                f"(user st_dev={user_dev}, trash st_dev={trash_dev})"
+            )
+
+        # --- fd-anchored atomic rename ----------------------------------------
+        # Both src and dst are basenames; both dir_fds are pinned inodes.
+        # An ancestor swap after the os.open calls cannot redirect this.
+        os.rename(user_alias, trash_name, src_dir_fd=user_fd, dst_dir_fd=trash_fd)
+
+    finally:
+        for fd in (repos_root_fd, user_fd, trash_fd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    return trash_name
+
+
 def _predeactivation_leak_scan_enabled() -> bool:
     """Return True if the pre-deactivation leak scan is enabled (Story #1032 AC6).
 
@@ -1966,11 +2122,32 @@ class ActivatedRepoManager:
                 # directory.  Treat as "already deactivated" — clean up any
                 # remaining artifacts and return success so the reaper does not
                 # reschedule this job every cycle (Bug #1030).
+                # HIGH #1 fix: replace path-based shutil.rmtree with
+                # fd-anchored rename-then-purge so orphan cleanup is also
+                # TOCTOU-immune.  If the directory is already gone (ENOENT on
+                # opening the username fd or the rename), absorb silently.
                 repo_dir = os.path.join(self.activated_repos_dir, username, user_alias)
                 if os.path.exists(repo_dir):
+                    trash_root = os.path.join(self.activated_repos_dir, ".trash")
                     try:
-                        shutil.rmtree(repo_dir)
-                    except (OSError, IOError) as e:
+                        trash_name = _fd_anchored_phase1_rename(
+                            activated_repos_dir=self.activated_repos_dir,
+                            username=username,
+                            user_alias=user_alias,
+                        )
+                        try:
+                            _safe_purge_trash_entry(trash_root, trash_name)
+                        except Exception as purge_err:  # noqa: BLE001 — best-effort
+                            self.logger.warning(
+                                "Bug #1030 orphan cleanup: trash purge incomplete, "
+                                "orphan sweeper will retry: %s",
+                                str(purge_err),
+                            )
+                    except FileNotFoundError:
+                        # Directory vanished between os.path.exists and rename
+                        # open — already gone, treat as success.
+                        pass
+                    except (OSError, IOError, ValueError) as e:
                         self.logger.warning(
                             "Bug #1030 orphan cleanup: failed to remove repo dir %s: %s",
                             repo_dir,
@@ -2077,19 +2254,21 @@ class ActivatedRepoManager:
             # AC7: rename-then-delete.  Rename is atomic on same-FS (XFS + NFSv4)
             # so the source directory disappears from listings within milliseconds.
             # The slow recursive delete then happens against the trash entry,
-            # invisible to UI clients.  On any rename failure we fall through
-            # to direct rmtree as before so behavior is never worse.
+            # invisible to UI clients.
+            # Phase 1 uses fd-anchored rename (BLOCKER #1 + #2 fix): both the
+            # .trash dir and the {username} dir are opened with
+            # O_DIRECTORY|O_NOFOLLOW before os.rename is called with dual
+            # dir_fd args, so ancestor symlink swaps cannot redirect the rename.
             if os.path.exists(repo_dir):
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
-                trash_name = (
-                    f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
-                    f"-{uuid.uuid4().hex[:8]}"
-                    f"-{username}-{user_alias}"
-                )
-                trash_path = os.path.join(trash_root, trash_name)
                 try:
-                    os.makedirs(trash_root, exist_ok=True)
-                    os.rename(repo_dir, trash_path)
+                    # Phase 1: fd-anchored atomic rename into .trash.
+                    trash_name = _fd_anchored_phase1_rename(
+                        activated_repos_dir=self.activated_repos_dir,
+                        username=username,
+                        user_alias=user_alias,
+                    )
+                    trash_path = os.path.join(trash_root, trash_name)
                     # Phase 1 done — source dir is gone from user-visible space.
                     # Phase 2: slow recursive delete via fd-anchored helper.
                     try:
@@ -2108,7 +2287,7 @@ class ActivatedRepoManager:
                             },
                         )
                     resource_summary["directories_removed"] = 1
-                except (OSError, IOError) as e:
+                except (OSError, IOError, ValueError) as e:
                     cleanup_warnings.append(
                         f"Failed to remove repository directory: {str(e)}"
                     )
@@ -2239,44 +2418,47 @@ class ActivatedRepoManager:
             # Step 1: Stop any running services (non-fatal if fails)
             self._stop_composite_services(repo_path)
 
-            # Step 2: Clean up component repositories
+            # Step 2: Remove entire composite repository directory atomically.
+            # BLOCKER #3 fix: replace per-component shutil.rmtree + full-dir
+            # shutil.rmtree with a single fd-anchored rename-then-purge:
+            #   Phase 1 (fast): rename {username}/{user_alias} into .trash/ with
+            #     O_DIRECTORY|O_NOFOLLOW-pinned parent fds — atomic, TOCTOU-immune.
+            #   Phase 2 (slow): fd-anchored recursive delete of the trash entry.
+            # Components are included in the single rename (they live inside the
+            # composite dir), so no per-component rmtree is needed.
             if repo_path.exists():
+                trash_root = os.path.join(self.activated_repos_dir, ".trash")
                 try:
-                    from ...proxy.config_manager import ProxyConfigManager
-
-                    proxy_config = ProxyConfigManager(repo_path)
-                    discovered_repos = proxy_config.get_repositories()
-
-                    for repo_name in discovered_repos:
-                        subrepo_path = repo_path / repo_name
-                        if subrepo_path.exists():
-                            try:
-                                shutil.rmtree(subrepo_path)
-                                components_removed += 1
-                                self.logger.info(
-                                    f"Removed component: {repo_name}",
-                                    extra={"correlation_id": get_correlation_id()},
-                                )
-                            except (OSError, IOError) as e:
-                                cleanup_warnings.append(
-                                    f"Failed to remove component '{repo_name}': {str(e)}"
-                                )
-                except Exception as e:
-                    # Non-fatal - we'll still remove the entire directory
-                    cleanup_warnings.append(f"Failed to enumerate components: {str(e)}")
-                    self.logger.warning(
-                        f"Component enumeration failed, will remove entire directory: {str(e)}"
+                    trash_name = _fd_anchored_phase1_rename(
+                        activated_repos_dir=self.activated_repos_dir,
+                        username=username,
+                        user_alias=user_alias,
                     )
-
-            # Step 3: Remove entire composite repository directory
-            # This includes .code-indexer config and any remaining components
-            if repo_path.exists():
-                try:
-                    shutil.rmtree(repo_path)
+                    trash_path = os.path.join(trash_root, trash_name)
                     self.logger.info(
-                        f"Removed composite repository directory: {repo_path}"
+                        f"Phase 1 complete: composite repo renamed to trash: {trash_path}"
                     )
-                except (OSError, IOError) as e:
+                    # Phase 2: fd-anchored recursive delete.
+                    try:
+                        _safe_purge_trash_entry(trash_root, trash_name)
+                        components_removed = 1  # whole composite dir removed
+                        self.logger.info(
+                            f"Phase 2 complete: composite repository directory purged: {repo_path}"
+                        )
+                    except Exception as purge_err:  # noqa: BLE001 — phase 2 best-effort
+                        cleanup_warnings.append(
+                            f"Trash purge incomplete (will be retried by startup sweeper): {purge_err}"
+                        )
+                        self.logger.warning(
+                            "Composite trash purge incomplete -- orphan sweeper will retry",
+                            extra={
+                                "username": username,
+                                "user_alias": user_alias,
+                                "trash_path": trash_path,
+                                "error": str(purge_err),
+                            },
+                        )
+                except (OSError, IOError, ValueError) as e:
                     cleanup_warnings.append(
                         f"Failed to remove composite directory: {str(e)}"
                     )
