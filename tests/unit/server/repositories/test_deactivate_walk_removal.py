@@ -184,23 +184,27 @@ class TestLeakDetectionOnRmtreeFailurePath:
             leak_calls.append((repo_dir, alias_arg))
             return []
 
-        def rmtree_raises(path, *args, **kwargs):
-            raise OSError("Simulated disk failure")
+        def rename_raises(src, dst, *args, **kwargs):
+            # Post-Commit 4: failure path is Phase 1 os.rename (not Phase 2 rmtree)
+            raise OSError("Simulated rename failure")
 
         with patch.object(
             manager, "_detect_resource_leaks", side_effect=tracking_detect
         ):
-            with patch("shutil.rmtree", side_effect=rmtree_raises):
+            with patch(
+                "src.code_indexer.server.repositories.activated_repo_manager.os.rename",
+                side_effect=rename_raises,
+            ):
                 with patch(
                     "src.code_indexer.server.repositories.activated_repo_manager._predeactivation_leak_scan_enabled",
                     return_value=False,
                 ):
                     result = manager._do_deactivate_single(username, alias, metadata)
 
-        # Result is still returned (rmtree failure is non-fatal — metadata deletion continues)
+        # Result is still returned (rename failure is non-fatal — metadata cleanup continues)
         assert result["success"] is True or "warnings" in result
         assert len(leak_calls) == 1, (
-            f"_detect_resource_leaks should be called exactly once on rmtree failure; "
+            f"_detect_resource_leaks should be called exactly once on Phase 1 rename failure; "
             f"got {len(leak_calls)} calls"
         )
 
