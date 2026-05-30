@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.76.0 (2026-05-29) -- Drop redundant pre-deletion walks in deactivation (Story #1032 Commit 3)
+
+### Performance
+- `_do_deactivate_single` and `_do_deactivate_composite` no longer perform the pre-flight `os.walk + os.path.getsize` traversal that existed purely to populate `repo_size_mb`/`file_count` fields in one log line. For a 100k-file activated repo (typical Java/Node golden-repo CoW clone), this saves ~100k+ `stat()` syscalls per deactivation — the dominant cost on cold cache.
+- `_detect_resource_leaks` moved from a mandatory pre-flight scan to a post-failure-only diagnostic — runs only when `shutil.rmtree` raises, surfacing whatever blocked deletion (`.git` >100MB, large temp files, etc.) in the resulting cleanup warnings.
+
+### Added
+- New bootstrap-only config flag `enable_predeactivation_leak_scan` (default `false`). Set to `true` in `config.json` to restore the pre-flight leak scan when investigating an incident. Bootstrap-only (read once at startup) per the existing flag pattern used by `enable_malloc_trim`.
+
+### Removed
+- `repo_size_mb` and `file_count` fields no longer appear in the "Repository deactivation initiated" log line. They were the sole consumer of Walk #1 telemetry.
+
 ## v10.75.0 (2026-05-29) -- Fix actor_username persistence in PostgreSQL backend (Story #1032 Commit 2 follow-up)
 
 ### Fixed

@@ -1146,6 +1146,12 @@ class ServerConfig:
     enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
     enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
 
+    # Story #1032 AC6 - Pre-deactivation leak scan (bootstrap-only, never DB).
+    # Default False: _detect_resource_leaks is post-failure-only diagnostic.
+    # Set enable_predeactivation_leak_scan=true in config.json to restore pre-flight
+    # scanning before rmtree (useful for incident investigation on large repos).
+    enable_predeactivation_leak_scan: bool = False
+
     # Bootstrap-only: anyio threadpool size for sync FastAPI handlers.
     # Default 256 (anyio default is 40). Bumped to absorb concurrent long-polls
     # without starving other endpoints. Set to 0 or negative to leave at anyio default.
