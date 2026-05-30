@@ -2473,6 +2473,7 @@ class BackgroundJobsSqliteBackend:
         metadata: Optional[Dict[str, Any]] = None,
         executing_node: Optional[str] = None,
         claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
     ) -> None:
         """Save a new background job."""
 
@@ -2483,8 +2484,8 @@ class BackgroundJobsSqliteBackend:
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
                     language_resolution_status, current_phase, phase_detail,
-                    progress_info, metadata, executing_node, claimed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    progress_info, metadata, executing_node, claimed_at, actor_username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     operation_type,
@@ -2516,6 +2517,7 @@ class BackgroundJobsSqliteBackend:
                     json.dumps(metadata) if metadata else None,
                     executing_node,
                     claimed_at,
+                    actor_username,
                 ),
             )
             return None
@@ -2531,7 +2533,7 @@ class BackgroundJobsSqliteBackend:
                       result, error, progress, username, is_admin, cancelled, repo_alias,
                       resolution_attempts, claude_actions, failure_reason, extended_error,
                       language_resolution_status, current_phase, phase_detail,
-                      progress_info, metadata, executing_node, claimed_at
+                      progress_info, metadata, executing_node, claimed_at, actor_username
                FROM background_jobs WHERE job_id = ?""",
             (job_id,),
         )
@@ -2567,6 +2569,8 @@ class BackgroundJobsSqliteBackend:
             "metadata": json.loads(row[21]) if len(row) > 21 and row[21] else None,
             "executing_node": row[22] if len(row) > 22 else None,
             "claimed_at": row[23] if len(row) > 23 else None,
+            # Story #1032 AC12: actor_username audit trail
+            "actor_username": row[24] if len(row) > 24 else None,
         }
 
     def update_job(self, job_id: str, **kwargs) -> None:
@@ -2626,7 +2630,7 @@ class BackgroundJobsSqliteBackend:
                           result, error, progress, username, is_admin, cancelled, repo_alias,
                           resolution_attempts, claude_actions, failure_reason, extended_error,
                           language_resolution_status, current_phase, phase_detail,
-                          progress_info, metadata
+                          progress_info, metadata, executing_node, claimed_at, actor_username
                    FROM background_jobs"""
 
         conditions = []
@@ -2659,6 +2663,7 @@ class BackgroundJobsSqliteBackend:
         exclude_ids: Optional[set] = None,
         limit: Optional[int] = None,
         offset: int = 0,
+        username: Optional[str] = None,
     ) -> tuple:
         """Return (list_of_job_dicts, total_count) with dynamic SQL WHERE filters.
 
@@ -2672,6 +2677,7 @@ class BackgroundJobsSqliteBackend:
             exclude_ids: Set of job_ids to exclude (used to skip in-memory active jobs)
             limit: Maximum number of rows to return (None = no limit)
             offset: Number of rows to skip for pagination (default 0)
+            username: When set, scope results to this owner's jobs (H2: non-admin scope)
 
         Returns:
             Tuple of (jobs: List[Dict], total_count: int) where total_count reflects
@@ -2683,11 +2689,17 @@ class BackgroundJobsSqliteBackend:
                                 completed_at, result, error, progress, username, is_admin,
                                 cancelled, repo_alias, resolution_attempts, claude_actions,
                                 failure_reason, extended_error, language_resolution_status,
-                                current_phase, phase_detail
+                                current_phase, phase_detail, progress_info, metadata,
+                                executing_node, claimed_at, actor_username
                          FROM background_jobs"""
 
         conditions: List[str] = []
         params: List[Any] = []
+
+        # H2: Non-admin username scoping for DB-stored completed jobs
+        if username is not None:
+            conditions.append("username = ?")
+            params.append(username)
 
         if status:
             conditions.append("status = ?")

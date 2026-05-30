@@ -117,6 +117,7 @@ class ActivatedReaperService:
                         "deactivate_repository",
                         self._activated_repo_manager._do_deactivate_repository,
                         submitter_username="system",
+                        actor_username="system",
                         is_admin=True,
                         repo_alias=user_alias,
                         username=username,

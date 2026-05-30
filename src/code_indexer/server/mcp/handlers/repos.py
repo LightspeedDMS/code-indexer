@@ -81,7 +81,9 @@ def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         job_id = _utils.app_module.activated_repo_manager.deactivate_repository(
-            username=user.username, user_alias=user_alias
+            username=user.username,
+            user_alias=user_alias,
+            actor_username=user.username,  # AC12: MCP caller is both actor and owner
         )
         return _mcp_response(
             {
@@ -1146,7 +1148,9 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
         elif operation == "update":
             try:
                 _utils.app_module.activated_repo_manager.deactivate_repository(
-                    username=user.username, user_alias=user_alias
+                    username=user.username,
+                    user_alias=user_alias,
+                    actor_username=user.username,  # AC12: MCP caller is actor
                 )
             except Exception as deact_err:
                 logger.debug(
@@ -1160,7 +1164,9 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
             msg = f"Composite repository '{user_alias}' update started"
         elif operation == "delete":
             job_id = _utils.app_module.activated_repo_manager.deactivate_repository(
-                username=user.username, user_alias=user_alias
+                username=user.username,
+                user_alias=user_alias,
+                actor_username=user.username,  # AC12: MCP caller is actor
             )
             msg = f"Composite repository '{user_alias}' deletion started"
         else:

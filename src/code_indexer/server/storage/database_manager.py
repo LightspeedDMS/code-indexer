@@ -751,6 +751,9 @@ class DatabaseSchema:
             # Story #876: executing_node + claimed_at columns and index
             # (mirrors PostgreSQL migrations 001 lines 150-151 and 005).
             self._migrate_add_executing_node_claimed_at(conn)
+            # Story #1032 AC12: actor_username column for audit trail
+            # (mirrors PostgreSQL migration 026).
+            self._migrate_background_jobs_actor_username(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -784,6 +787,25 @@ class DatabaseSchema:
             logger.info(
                 f"Migrated background_jobs schema for phase progress: added {migrations_applied}"
             )
+
+    def _migrate_background_jobs_actor_username(self, conn: sqlite3.Connection) -> None:
+        """
+        Add actor_username column to background_jobs table (Story #1032 AC12).
+
+        Tracks WHO actually triggered a background job (the actor) separately from
+        WHOSE resource is being operated on (username). Required for admin deactivations
+        of other users' repos, reaper auto-deactivation, and audit trail integrity.
+
+        Idempotent: checks for existing column via PRAGMA table_info before adding.
+        Backward-compatible: existing rows get NULL (treated as "actor unknown / same as owner").
+        """
+        cursor = conn.execute("PRAGMA table_info(background_jobs)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "actor_username" not in existing_columns:
+            conn.execute("ALTER TABLE background_jobs ADD COLUMN actor_username TEXT")
+            conn.commit()
+            logger.info("Migrated background_jobs schema: added actor_username column")
 
     def _migrate_user_git_credentials(self, conn: sqlite3.Connection) -> None:
         """
