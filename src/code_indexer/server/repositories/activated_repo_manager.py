@@ -50,7 +50,9 @@ def _safe_purge_trash_entry(trash_root: str, entry_name: str) -> None:
          is itself a symlink).
       4. entry opens cleanly with O_NOFOLLOW (refuses if entry is a symlink).
       5. Cross-filesystem boundary check: entry must live on same st_dev as
-         trash_root.  Refuses to cross mount points (NFS bind, etc.).
+         trash_root.  Refuses to cross filesystem boundaries (different st_dev).
+         NOTE: same-superblock bind mounts share st_dev and are NOT detected
+         by this check.
 
     Recursive deletion is performed via os.unlink(name, dir_fd=...) and
     os.rmdir(name, dir_fd=...) -- no path strings ever cross to the kernel
@@ -146,15 +148,21 @@ def _fd_anchored_rmtree(name: str, parent_fd: int, expected_st_dev: int) -> None
                 f"(st_dev={entry_st.st_dev} expected={expected_st_dev})"
             )
         # Enumerate children using the fd (Python supports fd path on Linux).
+        # Collect names-only first (cheap strings, not DirEntry objects), then
+        # close the iterator before mutating.  Collecting the full list of
+        # DirEntry objects would materialise stat info for every entry, which is
+        # an OOM/DoS vector on directories with millions of files (HIGH #4).
+        # Collecting names is cheap and safe: os.scandir over an fd is bounded
+        # by the directory's actual entry count, and we only store strings.
         with os.scandir(entry_fd) as it:
-            children = list(it)
-        for child in children:
-            if child.is_dir(follow_symlinks=False):
-                _fd_anchored_rmtree(child.name, entry_fd, expected_st_dev)
+            child_names = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+        for child_name, is_dir in child_names:
+            if is_dir:
+                _fd_anchored_rmtree(child_name, entry_fd, expected_st_dev)
             else:
                 # Files, symlinks, special files -- unlink (no follow).
                 try:
-                    os.unlink(child.name, dir_fd=entry_fd)
+                    os.unlink(child_name, dir_fd=entry_fd)
                 except FileNotFoundError:
                     pass
     finally:
@@ -2270,6 +2278,27 @@ class ActivatedRepoManager:
                     )
                     trash_path = os.path.join(trash_root, trash_name)
                     # Phase 1 done — source dir is gone from user-visible space.
+                    # HIGH #2 fix: delete metadata immediately after Phase 1 rename,
+                    # BEFORE Phase 2 purge.  In PG/cluster mode, _list_user_repos_pg
+                    # reads from PG, so the UI sees the repo gone as soon as the
+                    # metadata row is removed.  If Phase 2 later fails, metadata is
+                    # already gone (repo is logically deactivated); the orphan sweeper
+                    # handles the leftover trash entry.
+                    try:
+                        self._delete_metadata(username, user_alias)
+                    except (OSError, IOError) as meta_err:
+                        cleanup_warnings.append(
+                            f"Failed to remove metadata after Phase 1: {str(meta_err)}"
+                        )
+                        self.logger.warning(
+                            "Metadata cleanup issue after Phase 1 rename",
+                            extra={
+                                "username": username,
+                                "user_alias": user_alias,
+                                "error": str(meta_err),
+                                "impact": "minor",
+                            },
+                        )
                     # Phase 2: slow recursive delete via fd-anchored helper.
                     try:
                         _safe_purge_trash_entry(trash_root, trash_name)
@@ -2320,7 +2349,9 @@ class ActivatedRepoManager:
                         },
                     )
 
-            # Remove metadata via dual-mode helper
+            # Remove metadata via dual-mode helper.
+            # NOTE: metadata may already be deleted above (after Phase 1 rename).
+            # _delete_metadata is idempotent — a second call is a safe no-op.
             try:
                 self._delete_metadata(username, user_alias)
             except (OSError, IOError) as e:
@@ -2438,6 +2469,31 @@ class ActivatedRepoManager:
                     self.logger.info(
                         f"Phase 1 complete: composite repo renamed to trash: {trash_path}"
                     )
+                    # HIGH #2 fix: delete metadata immediately after Phase 1 rename,
+                    # BEFORE Phase 2 purge.  In PG/cluster mode, _list_user_repos_pg
+                    # reads from PG, so the UI sees the repo gone as soon as the
+                    # metadata row is removed.  If Phase 2 later fails, metadata is
+                    # already gone (repo is logically deactivated); the orphan sweeper
+                    # handles the leftover trash entry.
+                    try:
+                        self._delete_metadata(username, user_alias)
+                        self.logger.info(
+                            f"Removed metadata for '{user_alias}' after Phase 1",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    except (OSError, IOError) as meta_err:
+                        cleanup_warnings.append(
+                            f"Failed to remove metadata after Phase 1: {str(meta_err)}"
+                        )
+                        self.logger.warning(
+                            "Composite metadata cleanup issue after Phase 1 rename",
+                            extra={
+                                "username": username,
+                                "user_alias": user_alias,
+                                "error": str(meta_err),
+                                "impact": "minor",
+                            },
+                        )
                     # Phase 2: fd-anchored recursive delete.
                     try:
                         _safe_purge_trash_entry(trash_root, trash_name)
@@ -2489,7 +2545,9 @@ class ActivatedRepoManager:
                         },
                     )
 
-            # Step 4: Remove metadata via dual-mode helper
+            # Step 4: Remove metadata via dual-mode helper.
+            # NOTE: metadata may already be deleted above (after Phase 1 rename).
+            # _delete_metadata is idempotent — a second call is a safe no-op.
             try:
                 self._delete_metadata(username, user_alias)
                 self.logger.info(
@@ -2610,15 +2668,21 @@ class ActivatedRepoManager:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-    def sweep_orphan_trash_dirs(self) -> int:
-        """AC8: Scan the .trash root and purge every orphan entry.
+    def sweep_orphan_trash_dirs(self, cap: int = 0) -> int:
+        """AC8: Scan the .trash root and purge orphan entries up to `cap`.
 
         Called at server startup to recover from crashes that left a trash
         directory half-deleted.  Idempotent: missing or empty .trash returns 0.
 
-        Each entry is purged synchronously via the fd-anchored helper -- safe
-        because Phase 2 purges are expected to be fast for normal-sized repos
-        and startup already pays a cold-start cost.
+        Each entry is purged synchronously via the fd-anchored helper.
+
+        Args:
+            cap: Maximum number of entries to purge in one call.  0 (default)
+                means unlimited — purge all found entries.  Set to a positive
+                integer (e.g. 100) at startup to prevent blocking for minutes
+                when thousands of orphans accumulate (HIGH #3 fix).  Remaining
+                entries are left for the next restart and logged at WARNING so
+                operators know more sweeps are needed.
 
         Returns:
             Count of orphan entries successfully purged.
@@ -2637,6 +2701,16 @@ class ActivatedRepoManager:
 
         purged = 0
         for entry_name in entries:
+            if cap > 0 and purged >= cap:
+                remaining = len(entries) - purged
+                self.logger.warning(
+                    "Orphan trash sweep: capped at %d entries; %d orphan(s) remain "
+                    "in %s — will be picked up on next restart",
+                    cap,
+                    remaining,
+                    trash_root,
+                )
+                break
             try:
                 _safe_purge_trash_entry(trash_root, entry_name)
                 purged += 1

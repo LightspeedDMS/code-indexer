@@ -57,12 +57,19 @@ def _make_repo_dir(manager: ActivatedRepoManager, username: str, alias: str) -> 
 
 
 def _make_metadata(manager: ActivatedRepoManager, username: str, alias: str) -> None:
-    """Write minimal JSON metadata so _delete_metadata / _load_metadata work."""
+    """Write minimal JSON metadata so _delete_metadata / _load_metadata work.
+
+    Uses the production filename convention: ``{alias}_metadata.json``.
+    (Previously this wrote ``{alias}.json`` — a silent test bug because
+    _delete_metadata_file expects the ``_metadata.json`` suffix.)
+    """
     import json
 
     metadata_dir = os.path.join(manager.activated_repos_dir, username)
     os.makedirs(metadata_dir, exist_ok=True)
-    meta_file = os.path.join(metadata_dir, f"{alias}.json")
+    # Production code uses {alias}_metadata.json (see _save_metadata_file,
+    # _load_metadata_file, _delete_metadata_file in activated_repo_manager.py).
+    meta_file = os.path.join(metadata_dir, f"{alias}_metadata.json")
     meta = {
         "user_alias": alias,
         "repo_url": "https://example.com/repo.git",
@@ -277,7 +284,7 @@ class TestCompositeNoWalkOnSuccessPath:
 
         # Write metadata file
         meta_dir = os.path.join(manager.activated_repos_dir, username)
-        meta_file = os.path.join(meta_dir, f"{alias}.json")
+        meta_file = os.path.join(meta_dir, f"{alias}_metadata.json")
         with open(meta_file, "w") as f:
             json.dump(metadata, f)
 
@@ -332,7 +339,7 @@ class TestCompositeLeakDetectionOnRmtreeFailure:
 
         # Write metadata file
         meta_dir = os.path.join(manager.activated_repos_dir, username)
-        meta_file = os.path.join(meta_dir, f"{alias}.json")
+        meta_file = os.path.join(meta_dir, f"{alias}_metadata.json")
         with open(meta_file, "w") as f:
             json.dump(metadata, f)
 

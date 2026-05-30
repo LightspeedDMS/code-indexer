@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.79.0 (2026-05-30) -- Codex HIGH items + test bug (Story #1032 Commit 6)
+
+### Performance / Visibility
+- **HIGH #2 fixed**: metadata-first ordering. `_do_deactivate_single` and `_do_deactivate_composite` now delete metadata IMMEDIATELY after Phase 1 rename, before Phase 2 purge starts. In PG/cluster mode, the UI sees the repo gone instantly via `_list_user_repos_pg`. Phase 2 still runs to free disk; if Phase 2 fails, metadata is already deleted and orphan sweeper handles the leftover dir.
+- **HIGH #3 fixed**: startup orphan sweep no longer blocks lifespan. Bounded via new bootstrap config flag `orphan_trash_sweep_per_startup_cap` (default 100) — after the cap, the remaining orphans are picked up on next restart. Documented in the sweeper docstring.
+- **HIGH #4 fixed**: `_fd_anchored_rmtree` no longer materializes the whole directory via `list(scandir)`. Iterates the scandir streaming, deleting per iteration. Eliminates OOM/DoS vector on malicious huge subtrees (e.g. crafted `.git/objects/`).
+
+### Documentation
+- **HIGH #5 fixed**: three lying docstrings/comments corrected:
+  - Phase 1 "fall through to direct rmtree as before" comment removed (the except block doesn't actually call rmtree).
+  - Lifespan AC8 comment "never blocks startup" replaced with accurate "bounded by `orphan_trash_sweep_per_startup_cap`".
+  - `_safe_purge_trash_entry` docstring softened: "Refuses to cross filesystem boundaries (different `st_dev`). NOTE: same-superblock bind mounts share `st_dev` and are NOT detected by this check."
+
+### Tests
+- Test bug fixed: `tests/unit/server/repositories/test_deactivate_walk_removal.py` fixture helper now writes `{alias}_metadata.json` (matching production code), not `{alias}.json`. Tests had been silently passing on an unverified path.
+- 5 new tests covering metadata-first ordering + bounded sweep + streaming scandir. All 50 deactivation-related tests pass. server-fast-automation all 6 chunks green.
+
 ## v10.78.0 (2026-05-30) -- Phase 1 fd-anchored rename + composite safe purge (Story #1032 Commit 5) + Bug #1033
 
 ### Security (Story #1032 Commit 5 — closes 3 Codex GPT-5 BLOCKERS)

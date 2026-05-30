@@ -1153,23 +1153,40 @@ def make_lifespan(
             activated_reaper_scheduler.start()
             app.state.activated_reaper_scheduler = activated_reaper_scheduler
 
-            # Story #1032 AC8: orphan trash sweep -- recover leftover trash
-            # entries from crashes mid-Phase-2.  Best-effort; never blocks startup.
-            try:
-                _swept = (
-                    golden_repo_manager.activated_repo_manager.sweep_orphan_trash_dirs()
-                )
-                if _swept > 0:
-                    logger.info(
-                        "Story #1032 AC8: startup orphan trash sweep purged %d entries",
-                        _swept,
+            # Story #1032 AC8 / HIGH #3: orphan trash sweep -- recover leftover
+            # trash entries from crashes mid-Phase-2.
+            # Dispatched as an asyncio background task so server startup never
+            # blocks on large trash directories (HIGH #3 fix; previous synchronous
+            # call could block for ~17 min with 10K orphans × ~100ms each).
+            # The sweep runs after the server is already listening.
+            # Cap is read from bootstrap config (default 100 entries per startup).
+            _sweep_cap: int = getattr(
+                startup_config, "orphan_trash_sweep_per_startup_cap", 100
+            )
+            _arm = golden_repo_manager.activated_repo_manager
+
+            async def _run_orphan_sweep() -> None:
+                try:
+                    import anyio.to_thread as _to_thread
+
+                    _swept = await _to_thread.run_sync(
+                        lambda: _arm.sweep_orphan_trash_dirs(cap=_sweep_cap)
                     )
-            except Exception as _sweep_err:  # noqa: BLE001 — startup safety
-                logger.warning(
-                    "Story #1032 AC8: startup orphan trash sweep failed: %s",
-                    _sweep_err,
-                    exc_info=True,
-                )
+                    if _swept > 0:
+                        logger.info(
+                            "Story #1032 AC8: background orphan trash sweep purged %d entries "
+                            "(cap=%d)",
+                            _swept,
+                            _sweep_cap,
+                        )
+                except Exception as _sweep_err:  # noqa: BLE001 — startup safety
+                    logger.warning(
+                        "Story #1032 AC8: background orphan trash sweep failed: %s",
+                        _sweep_err,
+                        exc_info=True,
+                    )
+
+            asyncio.create_task(_run_orphan_sweep())
             logger.info(
                 "Activated reaper scheduler started",
                 extra={"correlation_id": get_correlation_id()},
