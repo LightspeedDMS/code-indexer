@@ -53,7 +53,8 @@ _SELECT_COLS = """
     result, error, progress, username, is_admin, cancelled, repo_alias,
     resolution_attempts, claude_actions, failure_reason, extended_error,
     language_resolution_status, progress_info, metadata,
-    executing_node, claimed_at, current_phase, phase_detail
+    executing_node, claimed_at, current_phase, phase_detail,
+    actor_username
 """
 
 
@@ -124,6 +125,8 @@ class BackgroundJobsPostgresBackend:
             "claimed_at": row[21] if len(row) > 21 else None,
             "current_phase": row[22] if len(row) > 22 else None,
             "phase_detail": row[23] if len(row) > 23 else None,
+            # Story #1032 AC12: actor_username audit trail
+            "actor_username": row[24] if len(row) > 24 else None,
         }
 
     # ------------------------------------------------------------------
@@ -156,6 +159,7 @@ class BackgroundJobsPostgresBackend:
         claimed_at: Optional[str] = None,
         current_phase: Optional[str] = None,
         phase_detail: Optional[str] = None,
+        actor_username: Optional[str] = None,
     ) -> None:
         """Insert a new background job row.
 
@@ -176,7 +180,8 @@ class BackgroundJobsPostgresBackend:
                             failure_reason, extended_error, language_resolution_status,
                             progress_info, metadata,
                             executing_node, claimed_at,
-                            current_phase, phase_detail
+                            current_phase, phase_detail,
+                            actor_username
                         ) VALUES (
                             %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s,
@@ -184,7 +189,8 @@ class BackgroundJobsPostgresBackend:
                             %s, %s, %s,
                             %s, %s,
                             %s, %s,
-                            %s, %s
+                            %s, %s,
+                            %s
                         )
                         ON CONFLICT (job_id) DO NOTHING
                         """,
@@ -227,6 +233,7 @@ class BackgroundJobsPostgresBackend:
                             claimed_at,
                             current_phase,
                             phase_detail,
+                            actor_username,
                         ),
                     )
         except Exception as exc:

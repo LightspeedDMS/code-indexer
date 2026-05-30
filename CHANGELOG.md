@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.75.0 (2026-05-29) -- Fix actor_username persistence in PostgreSQL backend (Story #1032 Commit 2 follow-up)
+
+### Fixed
+- PostgreSQL `BackgroundJobsBackend.save_job` now accepts and persists the new `actor_username` column. v10.74.0 added the column and the SQLite/in-memory paths but missed the PG backend, so cluster-mode (storage_mode=postgres) deployments silently wrote `actor_username=NULL` for every job. Discovered during live staging verification immediately after v10.74.0 deployment.
+- `_SELECT_COLS` constant and `_row_to_dict` helper updated in lockstep so PG SELECTs surface `actor_username` to callers.
+
 ## v10.74.0 (2026-05-29) -- Deactivation actor_username tracking (Story #1032 Commit 2)
 
 ### Added
