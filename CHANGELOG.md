@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.80.0 (2026-05-30) -- Xray pattern library doc improvements (Story #1032 Commit 7)
+
+### Documentation
+User reported building six xray evaluators in one session before discovering `store_xray_pattern` existed. Tool docs were mechanically accurate but the motivation/trigger framing was buried. Five enhancements:
+
+- **`store_xray_pattern.md` slim_description** rewritten to lead with the iteration trigger: "Persist a hard-won xray evaluator... Use this whenever an evaluator took more than one iteration to get right." (was: "Store a named, reusable Rust xray evaluator pattern..."  — no trigger.)
+- **"When to store a pattern" trigger block** added near the top of `store_xray_pattern.md`, before the YAML schema. Lists 5 trigger heuristics + the cost-of-not-storing line: "If you close the session without storing, that work is gone."
+- **"Post-session checklist"** subsection added: "Before ending a session where you developed a new evaluator: if the evaluator took iteration, call `store_xray_pattern`..."
+- **`xray_search.md` + `xray_explore.md` `pattern_name` description** rewritten from passive ("Mutually exclusive with evaluator_code") to active: "Before writing evaluator_code inline, check the pattern library — a pattern for your use case may already exist. Use `browse_directory('cidx-meta-global', path='xray-patterns')` to list available patterns." Plus post-session reminder.
+- **"Best Practices" cost quantified**: replaced vague "complex, tuned through iteration, or laborious to produce should be stored" with concrete: "A non-trivial evaluator typically costs 3-6 tool round-trips to develop... Storing the result means that cost is paid once across all users and all future sessions. An evaluator that is not stored is effectively thrown away when the session ends."
+
+### Verification
+- `python3 tools/verify_tool_docs.py` CI gate: PASS (all 149 tools documented, frontmatter valid).
+- Schema, YAML examples, parametrization, error codes unchanged. Mechanics intact; only framing improved.
+
 ## v10.79.0 (2026-05-30) -- Codex HIGH items + test bug (Story #1032 Commit 6)
 
 ### Performance / Visibility

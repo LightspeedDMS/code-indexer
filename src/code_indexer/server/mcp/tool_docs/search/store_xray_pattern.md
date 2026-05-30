@@ -3,7 +3,7 @@ name: store_xray_pattern
 category: search
 required_permission: query_repos
 tl_dr: Store a reusable Rust xray evaluator pattern in the cidx-meta pattern library. Stored patterns can be referenced by name in xray_search and xray_explore via the pattern_name parameter.
-slim_description: "Store a named, reusable Rust xray evaluator pattern in the cidx-meta pattern library. Patterns can declare typed parameters (usize, i64, f64, bool, str) with defaults that callers can override. Reference stored patterns in xray_search and xray_explore via pattern_name."
+slim_description: "Persist a hard-won xray evaluator to the pattern library so it survives session restarts, is shared with all users, and can be re-run without re-deriving. Use this whenever an evaluator took more than one iteration to get right. Patterns can declare typed parameters (usize, i64, f64, bool, str) with defaults that callers override via pattern_name in xray_search and xray_explore."
 inputSchema:
   type: object
   properties:
@@ -61,6 +61,22 @@ Store a named, reusable Rust xray evaluator pattern in the cidx-meta pattern lib
 Stored patterns are YAML files written to the cidx-meta repository under `xray-patterns/{scope}/{name}.yaml`. The write is committed to git automatically so the pattern is versioned and available across server restarts.
 
 Once stored, use the pattern by name in `xray_search` or `xray_explore` via the `pattern_name` parameter (mutually exclusive with `evaluator_code`).
+
+## When to store a pattern
+
+Store a pattern when any of these apply:
+
+- You ran `xray_explore` before writing the evaluator (the AST shape wasn't obvious).
+- The evaluator needed more than one compile/run cycle to get right.
+- You filtered out false positives through iteration (e.g. added a `Promise.all` exclusion, tightened node-kind checks).
+- The pattern encodes domain knowledge specific to this codebase.
+- Another user would plausibly need the same scan.
+
+If you close the session without storing, that work is gone.
+
+### Post-session checklist
+
+Before ending a session where you developed a new evaluator: if the evaluator took iteration, call `store_xray_pattern`. The pattern is git-committed to cidx-meta automatically and immediately available to all users.
 
 ## Pattern YAML Schema
 
@@ -159,7 +175,9 @@ Store in `__any__` scope for patterns that apply to any codebase. Store in a rep
 
 ## Pattern Library Best Practices
 
-Evaluator patterns that are complex, tuned through iteration, or laborious to produce should be stored for reuse via this tool rather than passed inline each time. Benefits:
+A non-trivial evaluator typically costs 3-6 tool round-trips to develop: one `xray_explore` to understand the AST shape, one or two compile failures on type errors, and one or two runs to eliminate false positives. Storing the result means that cost is paid once across all users and all future sessions. An evaluator that is not stored is effectively thrown away when the session ends.
+
+Store any evaluator that meets the trigger heuristics above (see "When to store a pattern") rather than re-deriving it later. Benefits:
 
 - **Reuse across sessions**: Stored patterns persist in cidx-meta (git-versioned) and survive server restarts.
 - **Share across users**: All authenticated users with query_repos permission can reference stored patterns.
