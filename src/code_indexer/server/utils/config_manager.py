@@ -1153,9 +1153,12 @@ class ServerConfig:
     enable_predeactivation_leak_scan: bool = False
 
     # Story #1032 HIGH #3 - Startup orphan trash sweep cap (bootstrap-only, never DB).
-    # Maximum number of orphan trash entries purged synchronously at server startup.
-    # Default 100 keeps worst-case startup overhead under ~10s. Set to 0 for unlimited
-    # (pre-HIGH #3 behaviour — blocks startup until all orphans are purged).
+    # Maximum number of orphan trash entries purged per startup. The sweep is
+    # dispatched asynchronously via asyncio.create_task in lifespan, so it
+    # NEVER blocks FastAPI startup regardless of cap. Default 100 keeps the
+    # background workload bounded; remaining orphans are deferred to next
+    # restart. Set to 0 for unlimited (sweep runs to completion in background,
+    # may take minutes for 10K+ orphans).
     orphan_trash_sweep_per_startup_cap: int = 100
 
     # Bootstrap-only: anyio threadpool size for sync FastAPI handlers.

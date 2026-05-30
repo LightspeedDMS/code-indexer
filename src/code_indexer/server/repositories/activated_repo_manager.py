@@ -2350,21 +2350,43 @@ class ActivatedRepoManager:
                     )
 
             # Remove metadata via dual-mode helper.
-            # NOTE: metadata may already be deleted above (after Phase 1 rename).
-            # _delete_metadata is idempotent — a second call is a safe no-op.
-            try:
-                self._delete_metadata(username, user_alias)
-            except (OSError, IOError) as e:
-                cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
-                self.logger.warning(
-                    "Metadata cleanup issue",
+            # NEW HIGH FIX (codex re-re-review): only delete metadata when
+            # the repo dir is actually gone — Phase 1 succeeded OR the dir
+            # was never present (orphan-already-gone state).  If Phase 1
+            # FAILED (rename raised), the live repo is still on disk in
+            # {username}/{user_alias} — deleting metadata would create a
+            # ghost: UI shows "deactivated" while bytes remain hidden.
+            # _delete_metadata above (inside Phase 1 success block) already
+            # ran the idempotent first delete.
+            if os.path.exists(repo_dir):
+                cleanup_warnings.append(
+                    "Phase 1 rename failed -- metadata preserved to prevent "
+                    "ghost repo (live dir still on disk, requires admin attention)"
+                )
+                self.logger.error(
+                    "GHOST REPO PREVENTION: skipping metadata delete because "
+                    "repo dir still exists after Phase 1 failure",
                     extra={
                         "username": username,
                         "user_alias": user_alias,
-                        "error": str(e),
-                        "impact": "minor",
+                        "repo_dir": repo_dir,
+                        "requires_admin_cleanup": True,
                     },
                 )
+            else:
+                try:
+                    self._delete_metadata(username, user_alias)
+                except (OSError, IOError) as e:
+                    cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
+                    self.logger.warning(
+                        "Metadata cleanup issue",
+                        extra={
+                            "username": username,
+                            "user_alias": user_alias,
+                            "error": str(e),
+                            "impact": "minor",
+                        },
+                    )
 
             # Post-cleanup verification
             cleanup_success = not os.path.exists(repo_dir) and (
@@ -2546,25 +2568,46 @@ class ActivatedRepoManager:
                     )
 
             # Step 4: Remove metadata via dual-mode helper.
-            # NOTE: metadata may already be deleted above (after Phase 1 rename).
-            # _delete_metadata is idempotent — a second call is a safe no-op.
-            try:
-                self._delete_metadata(username, user_alias)
-                self.logger.info(
-                    f"Removed metadata for '{user_alias}'",
-                    extra={"correlation_id": get_correlation_id()},
+            # NEW HIGH FIX (codex re-re-review): only delete metadata when
+            # the composite dir is actually gone — Phase 1 succeeded OR the
+            # dir was never present.  If Phase 1 FAILED (rename raised), the
+            # live composite is still on disk — deleting metadata would
+            # create a ghost: UI shows "deactivated" while bytes remain.
+            if repo_path.exists():
+                cleanup_warnings.append(
+                    "Phase 1 rename failed -- metadata preserved to prevent "
+                    "ghost composite repo (live dir still on disk, requires "
+                    "admin attention)"
                 )
-            except (OSError, IOError) as e:
-                cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
-                self.logger.warning(
-                    "Metadata cleanup issue",
+                self.logger.error(
+                    "GHOST COMPOSITE REPO PREVENTION: skipping metadata "
+                    "delete because composite dir still exists after Phase "
+                    "1 failure",
                     extra={
                         "username": username,
                         "user_alias": user_alias,
-                        "error": str(e),
-                        "impact": "minor",
+                        "directory": str(repo_path),
+                        "requires_admin_cleanup": True,
                     },
                 )
+            else:
+                try:
+                    self._delete_metadata(username, user_alias)
+                    self.logger.info(
+                        f"Removed metadata for '{user_alias}'",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                except (OSError, IOError) as e:
+                    cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
+                    self.logger.warning(
+                        "Metadata cleanup issue",
+                        extra={
+                            "username": username,
+                            "user_alias": user_alias,
+                            "error": str(e),
+                            "impact": "minor",
+                        },
+                    )
 
             # Post-cleanup verification
             cleanup_success = not repo_path.exists() and (

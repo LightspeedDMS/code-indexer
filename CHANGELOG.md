@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.81.0 (2026-05-30) -- Ghost-repo prevention (Story #1032 Commit 8, codex re-re-review NEW HIGH)
+
+### Fixed
+- **NEW HIGH from Codex GPT-5 final review of v10.80.0**: when `_fd_anchored_phase1_rename` raised (e.g. `.trash` symlink swap → ValueError, OSError, IOError), the outer `_delete_metadata` call still ran unconditionally in both `_do_deactivate_single` AND `_do_deactivate_composite`. Result: live repo dir remained on disk in `{username}/{user_alias}` while metadata was deleted → UI showed "deactivated" while bytes were ghost-alive.
+- Both deactivation methods now guard the outer `_delete_metadata` with `if not <repo_dir>.exists()` — metadata is only removed when the dir is actually gone (Phase 1 success OR orphan-already-gone state). On Phase 1 failure, metadata is preserved AND a `GHOST REPO PREVENTION` error is logged with `requires_admin_cleanup: True`.
+- Stale comment in `config_manager.py` for `orphan_trash_sweep_per_startup_cap` corrected: was "synchronously at server startup ... blocks startup", now accurately says "dispatched asynchronously via asyncio.create_task ... NEVER blocks FastAPI startup". (HIGH #5 leftover from previous review.)
+
+### Tests
+- New file `tests/unit/server/repositories/test_ghost_repo_prevention.py` with 3 regression tests:
+  - Single-path metadata preserved when Phase 1 fails + ghost warning surfaced.
+  - Composite-path metadata preserved when Phase 1 fails + ghost warning surfaced.
+  - Normal success path still deletes metadata correctly (no regression).
+- All 13,413 server tests pass via `server-fast-automation.sh`. Lint exit 0.
+
+### Status
+This is the final cleanup commit of Story #1032 deactivation work. Three Codex re-reviews now performed; the BLOCKER + HIGH list from each review is fully closed. The orphan-sweep cap operational weakness (10K orphans needing multiple restarts to drain) is documented but not a blocker — admins can set `orphan_trash_sweep_per_startup_cap: 0` for unlimited background-task sweep when needed.
+
 ## v10.80.0 (2026-05-30) -- Xray pattern library doc improvements (Story #1032 Commit 7)
 
 ### Documentation
