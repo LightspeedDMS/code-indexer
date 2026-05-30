@@ -942,7 +942,13 @@ class ActivatedRepoManager:
                 self._update_composite_config(composite_path)
 
             except Exception as e:
-                # Clean up on failure
+                # Activation failure — clean up the partially-created composite
+                # directory.  Path is trusted: composite_path =
+                # self.activated_repos_dir / username / user_alias, computed
+                # entirely from instance state and validated function args in
+                # this frame.  No metadata row was ever written (Step 6 comes
+                # later), so the rename-to-trash pattern used during
+                # deactivation is both unnecessary and inappropriate here.
                 if composite_path.exists():
                     shutil.rmtree(composite_path, ignore_errors=True)
                 raise ActivatedRepoError(
@@ -983,7 +989,13 @@ class ActivatedRepoManager:
                     )
 
                 except Exception as e:
-                    # Clean up on failure
+                    # Activation failure during CoW clone — roll back the
+                    # partially-created composite directory.  Path is trusted:
+                    # composite_path = self.activated_repos_dir / username /
+                    # user_alias, freshly created in this function frame.  No
+                    # metadata row exists yet (Step 6 writes it only after all
+                    # clones succeed), so the deactivation rename-to-trash path
+                    # is not applicable here.
                     self.logger.error(
                         f"Failed to clone repository '{alias}': {str(e)}",
                         extra={"correlation_id": get_correlation_id()},
@@ -1005,7 +1017,12 @@ class ActivatedRepoManager:
                 proxy_config.refresh_repositories()
                 update_progress(90, "Repository discovery completed")
             except Exception as e:
-                # Clean up on failure
+                # Activation failure during proxy-config refresh — roll back
+                # the composite directory.  Path is trusted: composite_path =
+                # self.activated_repos_dir / username / user_alias, computed in
+                # this frame with no user-controlled traversal.  No metadata row
+                # was written (Step 6 follows this block), so the deactivation
+                # rename-to-trash path does not apply.
                 self.logger.error(
                     f"Failed to refresh repositories: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
@@ -1037,7 +1054,13 @@ class ActivatedRepoManager:
             try:
                 self._save_metadata(username, user_alias, metadata)
             except Exception as e:
-                # Clean up on failure
+                # Activation failure: metadata write failed so no row was
+                # committed.  Roll back the composite directory.  Path is
+                # trusted: composite_path = self.activated_repos_dir / username
+                # / user_alias, computed in this frame.  Because _save_metadata
+                # raised before completing, there is no registered metadata to
+                # clean up via _delete_metadata — path-based rmtree is the
+                # correct rollback here.
                 self.logger.error(
                     f"Failed to create metadata: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
@@ -1999,7 +2022,14 @@ class ActivatedRepoManager:
                 )
 
                 if result.returncode != 0:
-                    # Clean up on failure
+                    # Activation failure: branch checkout failed — roll back
+                    # the cloned directory.  Path is trusted: activated_repo_path
+                    # = self.activated_repos_dir / username / user_alias,
+                    # computed from instance state and validated args in this
+                    # frame.  No metadata row has been written yet (metadata
+                    # is persisted only after this block succeeds), so
+                    # _delete_metadata is not needed and the deactivation
+                    # rename-to-trash path does not apply.
                     shutil.rmtree(activated_repo_path, ignore_errors=True)
                     raise GitOperationError(
                         f"Failed to switch to branch '{branch_name}': {result.stderr}"
@@ -2951,6 +2981,14 @@ class ActivatedRepoManager:
                         dst_item = os.path.join(git_dir_new, item)
                         if os.path.exists(dst_item):
                             if os.path.isdir(dst_item):
+                                # Remove a pre-existing git-internal directory
+                                # before moving the bare-repo counterpart into
+                                # its place.  Path is trusted: dst_item is
+                                # entirely within dest_path/.git/, where
+                                # dest_path was just created by cp --reflink in
+                                # the same call frame and `item` comes from
+                                # os.listdir of that freshly-created dir.  No
+                                # user-controlled traversal crosses this path.
                                 shutil.rmtree(dst_item)
                             else:
                                 os.remove(dst_item)
@@ -3041,7 +3079,13 @@ class ActivatedRepoManager:
                 f"Clone operation timed out: {source_path} -> {dest_path}"
             )
         except Exception as e:
-            # Clean up on failure
+            # Clone failure — remove partial clone directory.  Path is trusted:
+            # dest_path is the caller-supplied destination for cp --reflink=auto
+            # (activated_repo_path or composite subrepo path), computed from
+            # self.activated_repos_dir / username / user_alias in the calling
+            # frame with no user-controlled traversal.  The clone never
+            # completed so no metadata row was committed; the deactivation
+            # rename-to-trash pattern does not apply.
             if os.path.exists(dest_path):
                 shutil.rmtree(dest_path, ignore_errors=True)
             raise ActivatedRepoError(f"Clone operation failed: {str(e)}")
