@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.78.0 (2026-05-30) -- Phase 1 fd-anchored rename + composite safe purge (Story #1032 Commit 5) + Bug #1033
+
+### Security (Story #1032 Commit 5 — closes 3 Codex GPT-5 BLOCKERS)
+- **BLOCKER #1 + #2 fixed**: Phase 1 of `_do_deactivate_single` no longer uses path-based `os.makedirs` + `os.rename`. New helper `_fd_anchored_phase1_rename(activated_repos_dir, username, user_alias)` opens parent fds with `O_DIRECTORY|O_NOFOLLOW` (refuses if any ancestor is a symlink), pins inodes via `st_dev` check, and uses fd-anchored `os.rename(src, dst, src_dir_fd=user_fd, dst_dir_fd=trash_fd)`. Codex GPT-5 reproduced two TOCTOU exploits locally against v10.77.0 (ancestor `.trash` swap and `{username}` swap); both are now structurally impossible because the kernel uses the pinned fd identity, not pathname resolution.
+- **BLOCKER #3 fixed**: `_do_deactivate_composite` no longer calls `shutil.rmtree(subrepo_path)` per component + `shutil.rmtree(repo_path)` on the composite root. Both replaced by a single `_fd_anchored_phase1_rename` + `_safe_purge_trash_entry` sequence — components move atomically with the composite dir into `.trash/`, then are purged via the fd-anchored recursive deleter. Composite path is now TOCTOU-immune symmetrically with single path.
+- **HIGH #1 (carryover) fixed**: `_do_deactivate_repository` metadata-missing orphan branch (Bug #1030 cleanup) no longer uses path-based `shutil.rmtree(repo_dir)`. Routes through `_fd_anchored_phase1_rename` + `_safe_purge_trash_entry`.
+
+### Tests
+- 14 new tests in `tests/unit/server/repositories/test_phase1_fd_anchored.py` covering: rename success path, `.trash` symlink swap resistance, `{username}` ancestor symlink swap resistance, symlinked activated_repos_dir refusal, O_NOFOLLOW flag verification, dual `dir_fd` rename verification, nonexistent-repo handling.
+- Composite leak-on-failure test updated to patch `_fd_anchored_phase1_rename` (new failure mode under fd-anchored composite flow).
+- All 45 deactivation-related tests pass. fast-automation + server-fast-automation (13,405 server tests) all green.
+
+### Fixed (Bug #1033 — concurrent agent work)
+- `ConfigManager.load()` now reconciles a stored absolute `codebase_dir` against the actual config file location. On NFS clusters where nodes mount the same share at different paths (e.g. node-A: `/mnt/nfs/project`, node-B: `/data/project`), a config saved on node-A would point at node-A's path; the new behavior auto-corrects to the current node's path and logs a warning. Test: `tests/unit/config/test_config_manager_codebase_dir_reconcile.py`.
+
 ## v10.77.0 (2026-05-29) -- Rename-then-delete + orphan trash sweeper (Story #1032 Commit 4)
 
 ### Changed

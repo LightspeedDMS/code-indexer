@@ -723,6 +723,19 @@ class ConfigManager:
                         config_dir = self.config_path.parent.parent
                         path = (config_dir / path).resolve()
                     data["codebase_dir"] = str(path)
+                    # Bug #1033: reconcile against actual config file location.
+                    # On NFS clusters, nodes may mount the same share at different paths.
+                    actual_dir = self.config_path.resolve().parent.parent
+                    if path.is_absolute() and actual_dir != path.resolve():
+                        logger.warning(
+                            "codebase_dir mismatch: stored=%s, actual=%s. "
+                            "Using actual path (config at %s)",
+                            path,
+                            actual_dir,
+                            self.config_path,
+                        )
+                        path = actual_dir
+                        data["codebase_dir"] = str(path)
 
                 self._config = Config(**data)
 
