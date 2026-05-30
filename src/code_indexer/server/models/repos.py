@@ -179,6 +179,8 @@ class ActivatedRepositoryInfo(BaseModel):
     current_branch: Optional[str] = None  # Optional for composite repos
     activated_at: str
     last_accessed: str
+    # AC4: In-flight deactivation job info, null when no active deactivation
+    deactivation_job: Optional[Dict[str, Any]] = None
 
 
 class SwitchBranchRequest(BaseModel):

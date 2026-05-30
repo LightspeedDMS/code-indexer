@@ -78,6 +78,7 @@ from ..models.api_models import (
 from ..models.repository_discovery import RepositoryDiscoveryResponse
 
 from ..auth import dependencies
+from ..auth.user_manager import UserRole
 from ..app_helpers import (
     _execute_repository_sync,
 )
@@ -137,6 +138,40 @@ def register_repo_routes(
                     if filter.lower() in repo["user_alias"].lower():
                         filtered_repos.append(repo)
                 repos = filtered_repos
+
+            # AC4: Build per-repo deactivation_job lookup from in-flight jobs.
+            # Limit chosen to cover all typical activated repo counts per server.
+            _DEACT_JOB_LOOKUP_LIMIT = 500
+            deact_map: dict = {}
+            try:
+                is_admin = current_user.role == UserRole.ADMIN
+                jobs_result = background_job_manager.list_jobs(
+                    username=current_user.username,
+                    is_admin=is_admin,
+                    status_filter=None,
+                    limit=_DEACT_JOB_LOOKUP_LIMIT,
+                    offset=0,
+                )
+                for job in jobs_result.get("jobs", []):
+                    if job.get("operation_type") != "deactivate_repository":
+                        continue
+                    if job.get("status") not in ("pending", "running"):
+                        continue
+                    repo_alias = job.get("repo_alias") or ""
+                    if repo_alias:
+                        deact_map[repo_alias] = {
+                            "job_id": job["job_id"],
+                            "status": job["status"],
+                        }
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch deactivation jobs for repo listing: %s", e
+                )
+                # deact_map remains empty; deactivation_job fields degrade to None
+
+            # Annotate each repo with its in-flight deactivation job (or None)
+            for repo in repos:
+                repo["deactivation_job"] = deact_map.get(repo.get("user_alias", ""))
 
             # Return wrapped in RepositoryListResponse for consistency
             return RepositoryListResponse(
