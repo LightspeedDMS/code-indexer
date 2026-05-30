@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.82.0 (2026-05-30) -- Codex RED ghost-window closure (Story #1032 Commit 9)
+
+### Fixed
+- **Codex GPT-5 final-final review of v10.81.0 found RED**: the Commit 8 ghost-prevention guard `if not phase1_succeeded and os.path.exists(repo_dir):` still relied on `os.path.exists()`, which returns `False` (not raises) on permission errors — leaving a narrow ghost-window where a refused Phase 1 + permission-restricted parent would route to the metadata-delete branch.
+- Replaced single-flag exists()-based guard with **two explicit boolean flags** in both `_do_deactivate_single` and `_do_deactivate_composite`:
+  - `rename_was_attempted` — set True when we enter the rename branch (initial existence check passed at entry).
+  - `phase1_succeeded` — set True ONLY after `_fd_anchored_phase1_rename` returns.
+  - Outer guard now reads purely from these flags: `if rename_was_attempted and not phase1_succeeded:` → preserve metadata + log GHOST REPO PREVENTION. No filesystem probes in the discriminator → immune to exists() lying.
+
+### Tests
+- New regression test `TestPermissionErrorFalseNegativeBlocked::test_ghost_blocked_even_when_exists_returns_false_negative` in `tests/unit/server/repositories/test_ghost_repo_prevention.py`. Mocks `os.path.exists` to lie with False after the entry check, asserting the explicit flag still preserves metadata. Locks in the Commit 9 fix.
+- 27/27 deactivation-related tests pass. server-fast-automation all 6 chunks green (13,414 tests).
+
 ## v10.81.0 (2026-05-30) -- Ghost-repo prevention (Story #1032 Commit 8, codex re-re-review NEW HIGH)
 
 ### Fixed
