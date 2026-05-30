@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.74.0 (2026-05-29) -- Deactivation actor_username tracking (Story #1032 Commit 2)
+
+### Added
+- `background_jobs.actor_username TEXT NULL` column (PG migration `026_actor_username_background_jobs.sql` + SQLite migration in `database_manager.py`). Tracks WHO triggered the action when the actor differs from the resource owner.
+- `BackgroundJobManager.submit_job(actor_username=None)` parameter. When None, defaults to `submitter_username` for backward compatibility (preserves prior audit semantics).
+- `ActivatedRepoManager.deactivate_repository(..., actor_username=None)` parameter — propagates the actor through to submit_job.
+- Entry points wired to derive actor_username from authenticated session:
+  - `web/routes.py` admin deactivate route passes `actor_username=session.username`
+  - `routers/inline_repos.py` REST DELETE /api/repos/{user_alias} passes `actor_username=current_user.username`
+  - `mcp/handlers/repos.py` MCP `deactivate_repository` passes `actor_username=user.username` (credential owner)
+  - `services/activated_reaper_service.py` TTL reaper passes `actor_username="system"` (explicit)
+- Dashboard "Recent Jobs" partial: when `actor_username` is set AND differs from `username`, renders "actor → owner" instead of just "owner", surfacing admin actions on other users' repos.
+
+### Changed
+- `_get_all_jobs(...)` default flipped to `is_admin=False` (default-deny); both existing callers (`_create_jobs_page_response`, `jobs_list_partial`) now pass `is_admin=True` explicitly.
+- `BackgroundJobManager.get_jobs_for_display(...)` SQLite branch now plumbs the username scope into `list_jobs_filtered`, closing a cross-user data leakage gap for completed DB-stored jobs when non-admin users query.
+- `_build_deactivating_map` exception path: logs at `ERROR` with `exc_info=True` instead of swallowing silently (anti-silent-failure per Messi rule 13).
+
+### Security
+- Server-side actor derivation only — no API surface accepts `actor_username` from request body/query/header, preventing audit-evidence forging.
+
+### Migrations
+- Backward-compatible: column is NULL-able with no DEFAULT. Old rolling-restart nodes continue to INSERT without the column; rows are queryable by both old and new code. Idempotent on re-run.
+
 ## v10.73.0 (2026-05-29) -- Repository Deactivation Visibility + Admin Bypass (Story #1032 Commit 1)
 
 ### Added

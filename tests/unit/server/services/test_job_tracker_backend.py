@@ -57,7 +57,8 @@ def _make_schema(db_path: str) -> None:
         current_phase TEXT,
         phase_detail TEXT,
         executing_node TEXT,
-        claimed_at TEXT
+        claimed_at TEXT,
+        actor_username TEXT
     )"""
     )
     conn.commit()

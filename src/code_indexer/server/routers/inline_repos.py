@@ -357,6 +357,7 @@ def register_repo_routes(
             job_id = activated_repo_manager.deactivate_repository(
                 username=current_user.username,
                 user_alias=user_alias,
+                actor_username=current_user.username,  # AC12: same as owner for REST self-service
             )
 
             return JobResponse(

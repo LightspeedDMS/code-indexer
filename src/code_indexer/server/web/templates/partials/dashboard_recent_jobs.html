@@ -13,6 +13,14 @@
         <td>{{ job.job_type }}</td>
         <td>{{ (job.completion_time|string)[:19] if job.completion_time else 'N/A' }}</td>
         <td>
+            {# AC12: show "actor → owner" when actor is set and differs from owner #}
+            {% if job.actor_username and job.actor_username != job.username %}
+            {{ job.actor_username }} → {{ job.username }}
+            {% else %}
+            {{ job.username or 'N/A' }}
+            {% endif %}
+        </td>
+        <td>
             {% if job.status == 'completed_partial' %}
             <span class="job-status status-completed_partial">Partial</span>
             {% else %}
@@ -35,6 +43,6 @@
     {% endfor %}
 {% else %}
     <tr>
-        <td colspan="{{ 5 if has_providers else 4 }}" style="text-align: center;">No recent activity to display.</td>
+        <td colspan="{{ 6 if has_providers else 5 }}" style="text-align: center;">No recent activity to display.</td>
     </tr>
 {% endif %}

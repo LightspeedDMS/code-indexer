@@ -3849,7 +3849,8 @@ def _build_deactivating_map() -> dict:
             if username and repo_alias:
                 result[(username, repo_alias)] = job["job_id"]
     except Exception as e:
-        logger.warning(f"Failed to build deactivating_map: {e}")
+        # H3: Log at ERROR (not WARNING) with exc_info so traceback is captured
+        logger.error("Failed to build deactivating_map: %s", e, exc_info=True)
     return result
 
 
@@ -4072,6 +4073,7 @@ def deactivate_repo(
         job_id = manager.deactivate_repository(
             username=username,
             user_alias=user_alias,
+            actor_username=session.username,  # AC12: attribute to admin who clicked
         )
         job_link = f'<a href="/admin/jobs?search_text={job_id}">{job_id}</a>'
         return _create_repos_page_response(
@@ -4215,7 +4217,7 @@ def _get_all_jobs(
     search: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
-    is_admin: bool = True,
+    is_admin: bool = False,  # H1: changed from True — callers pass is_admin explicitly
 ):
     """
     Get all jobs with filters and pagination.
@@ -4231,8 +4233,9 @@ def _get_all_jobs(
     3. Deduplicate by job_id (BG manager record wins for shared IDs).
     4. Re-paginate the merged list and recompute total_count / total_pages.
 
-    AC11: is_admin=True (default, because /jobs is admin-only) bypasses
-    per-user scoping so admin sees all users' jobs.
+    AC11: is_admin parameter — when True (callers must opt-in explicitly,
+    default is False), bypasses per-user scoping so admin sees all users'
+    jobs. The /jobs page route passes True because it is admin-only.
 
     Returns jobs from both tracking systems with consistent filtering and
     pagination.
@@ -4328,12 +4331,13 @@ def _create_jobs_page_response(
     # Generate CSRF token
     csrf_token = generate_csrf_token()
 
-    # Get jobs
+    # Get jobs (H1: explicit admin scope — /jobs page is admin-only)
     jobs, total_count, total_pages = _get_all_jobs(
         status_filter=status_filter,
         type_filter=type_filter,
         search=search,
         page=page,
+        is_admin=True,
     )
 
     response = templates.TemplateResponse(
@@ -4402,12 +4406,13 @@ def jobs_list_partial(
         # Fallback: generate new token if cookie missing/invalid
         csrf_token = generate_csrf_token()
 
-    # Get jobs
+    # Get jobs (H1: explicit admin scope — /jobs page is admin-only)
     jobs, total_count, total_pages = _get_all_jobs(
         status_filter=status_filter,
         type_filter=job_type,
         search=search,
         page=page,
+        is_admin=True,
     )
 
     response = templates.TemplateResponse(

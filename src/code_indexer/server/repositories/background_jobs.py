@@ -100,6 +100,10 @@ class BackgroundJob:
     )
     phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
 
+    # Story #1032 AC12: audit trail — WHO triggered the job (may differ from username)
+    # When None, actor is the same as username (legacy / self-service).
+    actor_username: Optional[str] = None
+
 
 _BG_JOB_FIELDS = {f.name for f in fields(BackgroundJob)}
 
@@ -289,6 +293,7 @@ class BackgroundJobManager:
         submitter_username: str,
         is_admin: bool = False,
         repo_alias: Optional[str] = None,  # AC5: Fix unknown repo bug
+        actor_username: Optional[str] = None,  # AC12: who triggered the job
         **kwargs,
     ) -> str:
         """
@@ -298,9 +303,11 @@ class BackgroundJobManager:
             operation_type: Type of operation (e.g., 'add_golden_repo')
             func: Function to execute
             *args: Function arguments
-            submitter_username: Username of the job submitter
+            submitter_username: Username of the job submitter (resource owner)
             is_admin: Whether this is an admin job (higher priority)
             repo_alias: Repository alias being processed (AC5: Fix unknown repo bug)
+            actor_username: Who actually triggered the job (AC12). When None,
+                defaults to submitter_username for backward compatibility.
             **kwargs: Function keyword arguments
 
         Returns:
@@ -335,6 +342,12 @@ class BackgroundJobManager:
 
         job_id = str(uuid.uuid4())
 
+        # AC12: When actor_username is None, default to submitter_username
+        # so old callers that don't pass actor_username preserve existing semantics.
+        resolved_actor = (
+            actor_username if actor_username is not None else submitter_username
+        )
+
         job = BackgroundJob(
             job_id=job_id,
             operation_type=operation_type,
@@ -348,6 +361,7 @@ class BackgroundJobManager:
             username=submitter_username,
             is_admin=is_admin,
             repo_alias=repo_alias,  # AC5: Store repo_alias
+            actor_username=resolved_actor,  # AC12: audit trail
         )
 
         with self._lock:
@@ -446,6 +460,8 @@ class BackgroundJobManager:
                     # Story #480: Real-time phase progress fields
                     "current_phase": job.current_phase,
                     "phase_detail": job.phase_detail,
+                    # Story #1032 AC12: audit trail
+                    "actor_username": job.actor_username,
                 }
 
         # Story #267 Component 8: Fall back to SQLite for completed/failed jobs
@@ -488,6 +504,8 @@ class BackgroundJobManager:
             "failure_reason": job.failure_reason,
             "extended_error": job.extended_error,
             "language_resolution_status": job.language_resolution_status,
+            # Story #1032 AC12: audit trail
+            "actor_username": job.actor_username,
         }
 
     def list_jobs(
@@ -1407,6 +1425,8 @@ class BackgroundJobManager:
             # Story #480: Real-time phase progress fields (Bug fix: persist to SQLite)
             "current_phase": job.current_phase,
             "phase_detail": job.phase_detail,
+            # Story #1032 AC12: audit trail
+            "actor_username": job.actor_username,
         }
 
     def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> None:
@@ -1459,6 +1479,8 @@ class BackgroundJobManager:
                     language_resolution_status=snapshot["language_resolution_status"],
                     current_phase=snapshot.get("current_phase"),
                     phase_detail=snapshot.get("phase_detail"),
+                    # Story #1032 AC12: persist actor_username audit trail
+                    actor_username=snapshot.get("actor_username"),
                 )
         except Exception as e:
             logging.error(f"Failed to persist job {job_id} to SQLite: {e}")
@@ -1592,6 +1614,8 @@ class BackgroundJobManager:
                         failure_reason=job.failure_reason,
                         extended_error=job.extended_error,
                         language_resolution_status=job.language_resolution_status,
+                        # Story #1032 AC12: persist actor_username audit trail
+                        actor_username=job.actor_username,
                     )
         except Exception as e:
             logging.error(f"Failed to persist jobs to SQLite: {e}")
@@ -1970,6 +1994,8 @@ class BackgroundJobManager:
                 "repository_url": getattr(job, "repository_url", None),
                 "progress_info": getattr(job, "progress_info", None),
                 "duration_seconds": duration_seconds,
+                # Story #1032 AC12: audit trail for display surfaces
+                "actor_username": job.actor_username,
             }
         else:
             # --- SQLite row dict (from _row_to_dict) ---
@@ -2016,6 +2042,8 @@ class BackgroundJobManager:
                 "repository_url": None,  # Not stored in DB
                 "progress_info": None,  # Not stored in DB
                 "duration_seconds": duration_seconds,
+                # Story #1032 AC12: audit trail for display surfaces
+                "actor_username": job.get("actor_username"),
             }
 
     def get_jobs_for_display(
@@ -2099,11 +2127,15 @@ class BackgroundJobManager:
 
         if self._sqlite_backend:
             try:
+                # H2: non-admin users scope DB query to their own jobs;
+                # admin (is_admin=True) sees all users' jobs (username=None = no filter).
+                db_username_filter = None if is_admin else username
                 db_rows, db_count = self._sqlite_backend.list_jobs_filtered(
                     status=status_filter,
                     operation_type=type_filter,
                     search_text=search_text,
                     exclude_ids=seen_ids if seen_ids else None,
+                    username=db_username_filter,
                 )
                 db_total_from_sqlite = db_count
                 for row in db_rows:

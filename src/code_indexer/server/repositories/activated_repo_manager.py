@@ -835,13 +835,21 @@ class ActivatedRepoManager:
 
         return matching_repos
 
-    def deactivate_repository(self, username: str, user_alias: str) -> str:
+    def deactivate_repository(
+        self,
+        username: str,
+        user_alias: str,
+        actor_username: Optional[str] = None,
+    ) -> str:
         """
         Deactivate a repository for a user (background job).
 
         Args:
-            username: Username requesting deactivation
+            username: Username of the resource owner (target user)
             user_alias: User's alias for the repository
+            actor_username: Who actually triggered the deactivation (AC12).
+                When None, defaults to username (self-service). Pass the
+                admin's session username when called from an admin route.
 
         Returns:
             Job ID for tracking deactivation progress
@@ -869,6 +877,7 @@ class ActivatedRepoManager:
             user_alias=user_alias,
             submitter_username=username,
             repo_alias=user_alias,  # AC5: Fix unknown repo bug
+            actor_username=actor_username,  # AC12: audit trail
         )
 
         return job_id
