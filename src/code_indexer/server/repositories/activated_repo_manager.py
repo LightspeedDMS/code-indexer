@@ -33,6 +33,26 @@ def _dict_row_factory() -> Any:
     return dict_row
 
 
+def _predeactivation_leak_scan_enabled() -> bool:
+    """Return True if the pre-deactivation leak scan is enabled (Story #1032 AC6).
+
+    Reads the bootstrap config flag `enable_predeactivation_leak_scan`.  Default
+    is False — pre-flight leak detection is OFF, so deactivation only pays the
+    cost on the failure path.  Ops can flip the flag to True in config.json to
+    restore pre-flight scanning during incident investigation.
+
+    Returns False on any error so deactivation never fails because of telemetry.
+    Tests patch this function directly via mock.patch.
+    """
+    try:
+        from code_indexer.server.utils.config_manager import ServerConfigManager
+
+        cfg = ServerConfigManager().load_config()
+        return bool(getattr(cfg, "enable_predeactivation_leak_scan", False))
+    except Exception:
+        return False
+
+
 class ActivatedRepoError(Exception):
     """Base exception for activated repository operations."""
 
@@ -1894,60 +1914,55 @@ class ActivatedRepoManager:
             user_dir = os.path.join(self.activated_repos_dir, username)
             repo_dir = os.path.join(user_dir, user_alias)
 
-            # Pre-deactivation resource analysis
-            initial_size = 0
-            file_count = 0
+            # Story #1032 AC6: pre-flight leak scan is OFF by default — runs only
+            # when ops flips the bootstrap flag during incident investigation.
+            # Walk #1 (os.walk size telemetry) was removed entirely as pure overhead.
+            potential_leaks: List[str] = []
+            if _predeactivation_leak_scan_enabled():
+                potential_leaks = self._detect_resource_leaks(repo_dir, user_alias)
+                if potential_leaks:
+                    resource_summary["potential_leaks"] = potential_leaks
+                    cleanup_warnings.extend(
+                        [f"Resource leak detected: {leak}" for leak in potential_leaks]
+                    )
 
-            if os.path.exists(repo_dir):
-                try:
-                    for root, dirs, files in os.walk(repo_dir):
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            try:
-                                file_size = os.path.getsize(file_path)
-                                initial_size += file_size
-                                file_count += 1
-                            except (OSError, IOError):
-                                cleanup_warnings.append(
-                                    f"Unable to analyze file: {file_path}"
-                                )
-                except (OSError, IOError) as e:
-                    cleanup_warnings.append(f"Directory analysis failed: {str(e)}")
-
-            # Check for potential resource leaks before cleanup
-            potential_leaks = self._detect_resource_leaks(repo_dir, user_alias)
-            if potential_leaks:
-                resource_summary["potential_leaks"] = potential_leaks
-                cleanup_warnings.extend(
-                    [f"Resource leak detected: {leak}" for leak in potential_leaks]
-                )
-
-            # Administrative logging before cleanup
+            # Administrative logging before cleanup (size/file_count dropped per AC6)
             self.logger.warning(
                 "Repository deactivation initiated",
                 extra={
                     "username": username,
                     "user_alias": user_alias,
-                    "repo_size_mb": round(initial_size / 1024 / 1024, 2),
-                    "file_count": file_count,
                     "potential_leaks": len(potential_leaks),
                     "operation": "deactivation_start",
                 },
             )
 
-            # Remove repository directory with detailed tracking
+            # Remove repository directory
             if os.path.exists(repo_dir):
                 try:
                     shutil.rmtree(repo_dir)
                     resource_summary["directories_removed"] = 1
-                    resource_summary["files_removed"] = file_count
-                    resource_summary["size_freed_mb"] = round(
-                        initial_size / 1024 / 1024, 2
-                    )
                 except (OSError, IOError) as e:
                     cleanup_warnings.append(
                         f"Failed to remove repository directory: {str(e)}"
                     )
+                    # AC6: post-failure diagnostic — surface whatever blocked deletion
+                    try:
+                        failure_leaks = self._detect_resource_leaks(
+                            repo_dir, user_alias
+                        )
+                        if failure_leaks:
+                            resource_summary["potential_leaks"] = failure_leaks
+                            cleanup_warnings.extend(
+                                [
+                                    f"Resource leak detected (post-failure): {leak}"
+                                    for leak in failure_leaks
+                                ]
+                            )
+                    except Exception as leak_err:  # noqa: BLE001 — diagnostic best-effort
+                        cleanup_warnings.append(
+                            f"Post-failure leak detection failed: {leak_err}"
+                        )
                     # Log as potential resource leak
                     self.logger.error(
                         "RESOURCE LEAK WARNING: Failed to remove repository directory",
@@ -2099,6 +2114,22 @@ class ActivatedRepoManager:
                     cleanup_warnings.append(
                         f"Failed to remove composite directory: {str(e)}"
                     )
+                    # AC6: post-failure diagnostic — surface whatever blocked deletion
+                    try:
+                        failure_leaks = self._detect_resource_leaks(
+                            str(repo_path), user_alias
+                        )
+                        if failure_leaks:
+                            cleanup_warnings.extend(
+                                [
+                                    f"Resource leak detected (post-failure): {leak}"
+                                    for leak in failure_leaks
+                                ]
+                            )
+                    except Exception as leak_err:  # noqa: BLE001 — diagnostic best-effort
+                        cleanup_warnings.append(
+                            f"Post-failure leak detection failed: {leak_err}"
+                        )
                     self.logger.error(
                         "RESOURCE LEAK WARNING: Failed to remove composite directory",
                         extra={

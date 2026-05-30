@@ -88,6 +88,7 @@ BOOTSTRAP_KEYS = frozenset(
         "server_threadpool_size",  # startup threadpool config
         "pace_maker_clone_path",  # Story #997 - bootstrap-only (written by auto-updater pre-DB)
         "mcp_dispatch_pool_size",  # Story #1009 - asyncio default executor size
+        "enable_predeactivation_leak_scan",  # Story #1032 - bootstrap flag to restore pre-flight leak scan
     }
 )
 CONFIG_KEY_RUNTIME = "runtime"
