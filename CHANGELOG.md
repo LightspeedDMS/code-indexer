@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.77.0 (2026-05-29) -- Rename-then-delete + orphan trash sweeper (Story #1032 Commit 4)
+
+### Changed
+- `_do_deactivate_single` now uses rename-then-delete: Phase 1 atomically renames `repo_dir` to `{activated_repos_dir}/.trash/{ts}-{uuid8}-{username}-{user_alias}/` (visible to user as instant), Phase 2 performs the slow recursive purge against the trash entry. Rename is atomic on XFS (production) and NFSv4 (CoW Daemon staging) within the same export — the trash root is a single top-level directory under `activated_repos_dir` so source and destination always share a mount.
+
+### Added
+- New `_safe_purge_trash_entry(trash_root, entry_name)` module-level helper that recursively deletes a trash entry using fd-anchored Python ops only (no subprocess). Replaces the original `_safe_rm_rf_trash` subprocess wrapper after Codex GPT-5 code review found a TOCTOU vulnerability in path-based check-then-delete: an ancestor symlink swap between `os.path.exists()` and `subprocess.run(["rm","-rf",...])` could redirect deletion outside the trash root. The new design eliminates the entire attack surface:
+  - Opens trash_root with `O_DIRECTORY | O_NOFOLLOW` (pins inode; refuses symlinked root).
+  - Accepts only a basename `entry_name` (no path traversal possible by design).
+  - Validates `entry_name` has no `/`, `\\`, `..`, `.`, dot-dot-prefix, or null bytes.
+  - All recursive ops via `os.unlink(name, dir_fd=...)` and `os.rmdir(name, dir_fd=...)` — no path strings cross to the kernel after the initial fd.
+  - `st_dev` mount-boundary guard at every descent — refuses to cross filesystem boundaries (NFS bind, etc.).
+  - Symlinks never followed (O_NOFOLLOW + `is_symlink` check) — unlinked as the link, never recursed into the target.
+  - Raises ValueError on any safety violation; raises OSError on kernel-level failures (no silent CompletedProcess returns).
+- New `ActivatedRepoManager.sweep_orphan_trash_dirs()` method scans `{activated_repos_dir}/.trash/` and purges every leftover entry via the fd-anchored helper. Idempotent (missing/empty trash → 0). Returns count purged.
+- App lifespan startup invokes `sweep_orphan_trash_dirs()` once per server start (best-effort; logged at WARNING on failure, never blocks startup) to recover from crashes mid-Phase-2.
+
+### Performance
+- Deactivation now feels instant from the user's perspective: source dir disappears within milliseconds of clicking Deactivate (Phase 1 rename). Slow recursive purge runs synchronously in the same background-job worker thread but is no longer in the UI-visible critical path.
+
+### Security (Codex GPT-5 code review findings — addressed)
+- BLOCKING: TOCTOU via ancestor symlink swap — fixed by replacing path-based subprocess with fd-anchored Python deletion.
+- HIGH #1: Broken `..` invariant in path normalisation — eliminated by requiring basename-only entry_name (no path components to traverse).
+- HIGH #2: Mount-boundary crossing — fixed via `st_dev` check at every directory descent.
+- HIGH #3: Silent nonzero handling — fixed by raising on any failure (no silent CompletedProcess).
+- HIGH #4: Caller-supplied root misuse-prone — mitigated by ActivatedRepoManager always passing its own `self.activated_repos_dir`.
+
+### Tests
+- 16 new tests in `tests/unit/server/repositories/test_safe_rm_rf_trash.py` covering all safety invariants (8 entry-name validations, 3 trash-root validations, symlink defense, cross-FS refusal, real deletion).
+- 6 new tests in `tests/unit/server/repositories/test_orphan_trash_sweep.py` covering idempotency, single/multi orphan purge, sweep resilience past individual failure.
+
+### Deferred (composite path)
+- `_do_deactivate_composite` not yet refactored to rename-then-delete — composite repos are rarely used and the existing Commit-3 leak-on-failure diagnostic already applies. Will be addressed in a follow-up if usage patterns warrant.
+
 ## v10.76.0 (2026-05-29) -- Drop redundant pre-deletion walks in deactivation (Story #1032 Commit 3)
 
 ### Performance

@@ -1152,6 +1152,24 @@ def make_lifespan(
             )
             activated_reaper_scheduler.start()
             app.state.activated_reaper_scheduler = activated_reaper_scheduler
+
+            # Story #1032 AC8: orphan trash sweep -- recover leftover trash
+            # entries from crashes mid-Phase-2.  Best-effort; never blocks startup.
+            try:
+                _swept = (
+                    golden_repo_manager.activated_repo_manager.sweep_orphan_trash_dirs()
+                )
+                if _swept > 0:
+                    logger.info(
+                        "Story #1032 AC8: startup orphan trash sweep purged %d entries",
+                        _swept,
+                    )
+            except Exception as _sweep_err:  # noqa: BLE001 — startup safety
+                logger.warning(
+                    "Story #1032 AC8: startup orphan trash sweep failed: %s",
+                    _sweep_err,
+                    exc_info=True,
+                )
             logger.info(
                 "Activated reaper scheduler started",
                 extra={"correlation_id": get_correlation_id()},

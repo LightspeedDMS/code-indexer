@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 import logging
 
 # yaml import removed - using json for config files
@@ -31,6 +32,142 @@ def _dict_row_factory() -> Any:
     from psycopg.rows import dict_row
 
     return dict_row
+
+
+def _safe_purge_trash_entry(trash_root: str, entry_name: str) -> None:
+    """Recursively delete `{trash_root}/{entry_name}` via fd-anchored ops only.
+
+    Story #1032 AC7 / AC8.  Codex code review demanded this design: pathname-
+    based check-then-delete is racy (TOCTOU via ancestor symlink swap).  This
+    function ELIMINATES the attack surface entirely by anchoring every syscall
+    to an open directory file descriptor opened with O_DIRECTORY|O_NOFOLLOW.
+
+    Safety invariants enforced BEFORE any unlink:
+      1. trash_root is a non-empty string.
+      2. entry_name is a non-empty string with NO path separators, NO `..`,
+         NO null bytes, NO leading dot-dot-anything.  Must be a simple basename.
+      3. trash_root opens cleanly with O_DIRECTORY|O_NOFOLLOW (refuses if root
+         is itself a symlink).
+      4. entry opens cleanly with O_NOFOLLOW (refuses if entry is a symlink).
+      5. Cross-filesystem boundary check: entry must live on same st_dev as
+         trash_root.  Refuses to cross mount points (NFS bind, etc.).
+
+    Recursive deletion is performed via os.unlink(name, dir_fd=...) and
+    os.rmdir(name, dir_fd=...) -- no path strings ever cross to the kernel
+    after the initial fd is opened, so ancestor swaps are impossible.
+
+    Raises:
+        ValueError: any safety invariant violated.
+        OSError / FileNotFoundError: unlink/rmdir kernel-level failures
+            (caller MUST catch and decide; this function does NOT silently
+            swallow).
+    """
+    if not trash_root or not isinstance(trash_root, str):
+        raise ValueError(
+            f"_safe_purge_trash_entry: refuse empty/non-string trash_root: {trash_root!r}"
+        )
+    if not entry_name or not isinstance(entry_name, str):
+        raise ValueError(
+            f"_safe_purge_trash_entry: refuse empty/non-string entry_name: {entry_name!r}"
+        )
+    if "\x00" in entry_name:
+        raise ValueError("_safe_purge_trash_entry: refuse null byte in entry_name")
+    if "/" in entry_name or "\\" in entry_name:
+        raise ValueError(
+            f"_safe_purge_trash_entry: entry_name must be a basename, no path separators: {entry_name!r}"
+        )
+    if entry_name in (".", "..") or entry_name.startswith(".."):
+        raise ValueError(
+            f"_safe_purge_trash_entry: refuse '.' / '..' / dot-dot-prefix entry_name: {entry_name!r}"
+        )
+
+    # Open trash root with O_DIRECTORY|O_NOFOLLOW -- pins inode; refuses
+    # symlinked root.  All subsequent ops are relative to this fd.
+    try:
+        root_fd = os.open(trash_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except (FileNotFoundError, NotADirectoryError) as e:
+        raise ValueError(
+            f"_safe_purge_trash_entry: cannot open trash_root {trash_root!r}: {e}"
+        ) from e
+    except OSError as e:
+        # ELOOP raised when root is a symlink under O_NOFOLLOW
+        raise ValueError(
+            f"_safe_purge_trash_entry: refuse trash_root open failure {trash_root!r}: {e}"
+        ) from e
+
+    try:
+        root_st = os.fstat(root_fd)
+        _fd_anchored_rmtree(entry_name, root_fd, root_st.st_dev)
+    finally:
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
+
+
+def _fd_anchored_rmtree(name: str, parent_fd: int, expected_st_dev: int) -> None:
+    """Recursively delete `name` (basename) under `parent_fd`.
+
+    All filesystem ops are fd-anchored (dir_fd=parent_fd).  Symlinks are
+    unlinked (never followed).  Cross-filesystem boundaries are refused via
+    st_dev check at every directory descent -- so an attacker cannot mount
+    a different filesystem under our trash mid-purge to redirect the recursion.
+
+    Raises OSError on any unlink/rmdir failure.  Callers handle.
+    """
+    # Open the entry as a directory with O_NOFOLLOW.  If it's a symlink or
+    # not a directory, we fall through to unlink.
+    try:
+        entry_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except (NotADirectoryError, FileNotFoundError):
+        # Symlink or non-directory or missing -- unlink directly (no follow).
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        return
+    except OSError:
+        # ELOOP for symlink-to-dir under O_NOFOLLOW etc. -- unlink the link.
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        return
+
+    try:
+        entry_st = os.fstat(entry_fd)
+        if entry_st.st_dev != expected_st_dev:
+            raise ValueError(
+                f"_fd_anchored_rmtree: refuse cross-filesystem entry {name!r} "
+                f"(st_dev={entry_st.st_dev} expected={expected_st_dev})"
+            )
+        # Enumerate children using the fd (Python supports fd path on Linux).
+        with os.scandir(entry_fd) as it:
+            children = list(it)
+        for child in children:
+            if child.is_dir(follow_symlinks=False):
+                _fd_anchored_rmtree(child.name, entry_fd, expected_st_dev)
+            else:
+                # Files, symlinks, special files -- unlink (no follow).
+                try:
+                    os.unlink(child.name, dir_fd=entry_fd)
+                except FileNotFoundError:
+                    pass
+    finally:
+        try:
+            os.close(entry_fd)
+        except OSError:
+            pass
+
+    # Now-empty directory -- remove via fd-anchored rmdir.
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
 
 
 def _predeactivation_leak_scan_enabled() -> bool:
@@ -1937,10 +2074,39 @@ class ActivatedRepoManager:
                 },
             )
 
-            # Remove repository directory
+            # AC7: rename-then-delete.  Rename is atomic on same-FS (XFS + NFSv4)
+            # so the source directory disappears from listings within milliseconds.
+            # The slow recursive delete then happens against the trash entry,
+            # invisible to UI clients.  On any rename failure we fall through
+            # to direct rmtree as before so behavior is never worse.
             if os.path.exists(repo_dir):
+                trash_root = os.path.join(self.activated_repos_dir, ".trash")
+                trash_name = (
+                    f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+                    f"-{uuid.uuid4().hex[:8]}"
+                    f"-{username}-{user_alias}"
+                )
+                trash_path = os.path.join(trash_root, trash_name)
                 try:
-                    shutil.rmtree(repo_dir)
+                    os.makedirs(trash_root, exist_ok=True)
+                    os.rename(repo_dir, trash_path)
+                    # Phase 1 done — source dir is gone from user-visible space.
+                    # Phase 2: slow recursive delete via fd-anchored helper.
+                    try:
+                        _safe_purge_trash_entry(trash_root, trash_name)
+                    except Exception as purge_err:  # noqa: BLE001 — phase 2 is best-effort
+                        cleanup_warnings.append(
+                            f"Trash purge incomplete (will be retried by startup sweeper): {purge_err}"
+                        )
+                        self.logger.warning(
+                            "Trash purge incomplete -- orphan sweeper will retry",
+                            extra={
+                                "username": username,
+                                "user_alias": user_alias,
+                                "trash_path": trash_path,
+                                "error": str(purge_err),
+                            },
+                        )
                     resource_summary["directories_removed"] = 1
                 except (OSError, IOError) as e:
                     cleanup_warnings.append(
@@ -2261,6 +2427,53 @@ class ActivatedRepoManager:
                 f"Service stop attempted but failed: {str(e)}",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+    def sweep_orphan_trash_dirs(self) -> int:
+        """AC8: Scan the .trash root and purge every orphan entry.
+
+        Called at server startup to recover from crashes that left a trash
+        directory half-deleted.  Idempotent: missing or empty .trash returns 0.
+
+        Each entry is purged synchronously via the fd-anchored helper -- safe
+        because Phase 2 purges are expected to be fast for normal-sized repos
+        and startup already pays a cold-start cost.
+
+        Returns:
+            Count of orphan entries successfully purged.
+        """
+        trash_root = os.path.join(self.activated_repos_dir, ".trash")
+        if not os.path.isdir(trash_root):
+            return 0
+        try:
+            entries = os.listdir(trash_root)
+        except OSError as e:
+            self.logger.warning(
+                "Orphan trash sweep: cannot list trash root",
+                extra={"trash_root": trash_root, "error": str(e)},
+            )
+            return 0
+
+        purged = 0
+        for entry_name in entries:
+            try:
+                _safe_purge_trash_entry(trash_root, entry_name)
+                purged += 1
+            except Exception as e:  # noqa: BLE001 — best-effort startup recovery
+                self.logger.warning(
+                    "Orphan trash sweep: failed to purge entry",
+                    extra={
+                        "trash_root": trash_root,
+                        "entry_name": entry_name,
+                        "error": str(e),
+                    },
+                )
+        if purged > 0:
+            self.logger.info(
+                "Orphan trash sweep: purged %d orphan trash entries from %s",
+                purged,
+                trash_root,
+            )
+        return purged
 
     def _detect_resource_leaks(self, repo_dir: str, user_alias: str) -> List[str]:
         """
