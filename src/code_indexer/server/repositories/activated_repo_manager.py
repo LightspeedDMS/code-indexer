@@ -2267,7 +2267,16 @@ class ActivatedRepoManager:
             # .trash dir and the {username} dir are opened with
             # O_DIRECTORY|O_NOFOLLOW before os.rename is called with dual
             # dir_fd args, so ancestor symlink swaps cannot redirect the rename.
+            # Codex RED-review fix: TWO explicit flags, NO post-hoc exists() checks.
+            #   rename_was_attempted: did we enter the rename branch at all?
+            #   phase1_succeeded:    did the rename helper actually return?
+            # Outer metadata-delete uses ONLY these flags — never re-checks
+            # filesystem state, which can lie under permission errors and
+            # would re-open the ghost-state attack window.
+            rename_was_attempted = False
+            phase1_succeeded = False
             if os.path.exists(repo_dir):
+                rename_was_attempted = True
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
                 try:
                     # Phase 1: fd-anchored atomic rename into .trash.
@@ -2276,6 +2285,7 @@ class ActivatedRepoManager:
                         username=username,
                         user_alias=user_alias,
                     )
+                    phase1_succeeded = True  # Only set after rename returns.
                     trash_path = os.path.join(trash_root, trash_name)
                     # Phase 1 done — source dir is gone from user-visible space.
                     # HIGH #2 fix: delete metadata immediately after Phase 1 rename,
@@ -2350,26 +2360,35 @@ class ActivatedRepoManager:
                     )
 
             # Remove metadata via dual-mode helper.
-            # NEW HIGH FIX (codex re-re-review): only delete metadata when
-            # the repo dir is actually gone — Phase 1 succeeded OR the dir
-            # was never present (orphan-already-gone state).  If Phase 1
-            # FAILED (rename raised), the live repo is still on disk in
-            # {username}/{user_alias} — deleting metadata would create a
-            # ghost: UI shows "deactivated" while bytes remain hidden.
-            # _delete_metadata above (inside Phase 1 success block) already
-            # ran the idempotent first delete.
-            if os.path.exists(repo_dir):
+            # GHOST REPO PREVENTION (codex RED-review fix): use the explicit
+            # phase1_succeeded flag, NOT os.path.exists() — which returns False
+            # on permission errors (e.g. parent chmod 000), creating a ghost-
+            # state false-negative.  Logic:
+            #   - phase1_succeeded=True:  rename returned → metadata already
+            #     deleted in the inner Phase 1 block; _delete_metadata is
+            #     idempotent so a second call is safe.
+            #   - phase1_succeeded=False AND repo_dir exists: Phase 1 failed
+            #     (rename raised or initial existence-check ran on a present
+            #     dir but rename never returned). The live dir is on disk →
+            #     PRESERVE metadata to avoid ghost state.
+            #   - phase1_succeeded=False AND repo_dir absent: orphan-already-
+            #     gone state (initial existence-check returned False → outer
+            #     block never entered). Metadata is stale → delete it.
+            if rename_was_attempted and not phase1_succeeded:
                 cleanup_warnings.append(
                     "Phase 1 rename failed -- metadata preserved to prevent "
                     "ghost repo (live dir still on disk, requires admin attention)"
                 )
                 self.logger.error(
                     "GHOST REPO PREVENTION: skipping metadata delete because "
-                    "repo dir still exists after Phase 1 failure",
+                    "rename was attempted but did not succeed -- live dir still "
+                    "on disk in user namespace",
                     extra={
                         "username": username,
                         "user_alias": user_alias,
                         "repo_dir": repo_dir,
+                        "rename_was_attempted": rename_was_attempted,
+                        "phase1_succeeded": phase1_succeeded,
                         "requires_admin_cleanup": True,
                     },
                 )
@@ -2479,7 +2498,12 @@ class ActivatedRepoManager:
             #   Phase 2 (slow): fd-anchored recursive delete of the trash entry.
             # Components are included in the single rename (they live inside the
             # composite dir), so no per-component rmtree is needed.
+            # Codex RED-review fix: TWO explicit flags for composite, no exists()
+            # in the outer guard. See _do_deactivate_single for full rationale.
+            rename_was_attempted = False
+            phase1_succeeded = False
             if repo_path.exists():
+                rename_was_attempted = True
                 trash_root = os.path.join(self.activated_repos_dir, ".trash")
                 try:
                     trash_name = _fd_anchored_phase1_rename(
@@ -2487,6 +2511,7 @@ class ActivatedRepoManager:
                         username=username,
                         user_alias=user_alias,
                     )
+                    phase1_succeeded = True  # Only set after rename returns.
                     trash_path = os.path.join(trash_root, trash_name)
                     self.logger.info(
                         f"Phase 1 complete: composite repo renamed to trash: {trash_path}"
@@ -2568,12 +2593,11 @@ class ActivatedRepoManager:
                     )
 
             # Step 4: Remove metadata via dual-mode helper.
-            # NEW HIGH FIX (codex re-re-review): only delete metadata when
-            # the composite dir is actually gone — Phase 1 succeeded OR the
-            # dir was never present.  If Phase 1 FAILED (rename raised), the
-            # live composite is still on disk — deleting metadata would
-            # create a ghost: UI shows "deactivated" while bytes remain.
-            if repo_path.exists():
+            # GHOST REPO PREVENTION (codex RED-review fix): use explicit
+            # phase1_succeeded flag — NOT Path.exists() which false-negatives
+            # on permission errors and would re-open the ghost-state attack
+            # window. See _do_deactivate_single for full rationale.
+            if rename_was_attempted and not phase1_succeeded:
                 cleanup_warnings.append(
                     "Phase 1 rename failed -- metadata preserved to prevent "
                     "ghost composite repo (live dir still on disk, requires "
@@ -2581,12 +2605,14 @@ class ActivatedRepoManager:
                 )
                 self.logger.error(
                     "GHOST COMPOSITE REPO PREVENTION: skipping metadata "
-                    "delete because composite dir still exists after Phase "
-                    "1 failure",
+                    "delete because rename was attempted but did not succeed "
+                    "-- live composite dir still on disk in user namespace",
                     extra={
                         "username": username,
                         "user_alias": user_alias,
                         "directory": str(repo_path),
+                        "rename_was_attempted": rename_was_attempted,
+                        "phase1_succeeded": phase1_succeeded,
                         "requires_admin_cleanup": True,
                     },
                 )

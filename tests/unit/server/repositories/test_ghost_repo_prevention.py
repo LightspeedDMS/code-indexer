@@ -145,6 +145,61 @@ class TestGhostRepoPreventionComposite:
         )
 
 
+class TestPermissionErrorFalseNegativeBlocked:
+    """Codex RED-review scenario: os.path.exists() returns False on permission
+    errors (e.g. parent chmod 000). Before Commit 9, the exists()-based guard
+    would route to the metadata-delete branch → ghost. After Commit 9, the
+    explicit phase1_succeeded flag prevents this even when exists() lies.
+    """
+
+    def test_ghost_blocked_even_when_exists_returns_false_negative(self, manager):
+        repo_dir, meta_file = _make_single_repo(manager, "alice", "perm-test")
+        metadata = {
+            "user_alias": "perm-test",
+            "path": repo_dir,
+            "is_composite": False,
+            "username": "alice",
+        }
+
+        def fail_rename(*args, **kwargs):
+            raise OSError("simulated rename failure")
+
+        # Simulate os.path.exists returning False even though repo_dir IS on
+        # disk (mimics permission-denied parent).
+        original_exists = os.path.exists
+        exists_calls = {"count": 0}
+
+        def lying_exists(path):
+            exists_calls["count"] += 1
+            # First call (the "if os.path.exists(repo_dir)" guard before
+            # rename) must return True so we enter the rename block.
+            # Second + later calls (the outer guard) return False —
+            # simulating permission-error false-negative.
+            if exists_calls["count"] == 1:
+                return original_exists(path)
+            if path == repo_dir:
+                return False  # lie: dir is actually present on disk
+            return original_exists(path)
+
+        with patch(
+            "src.code_indexer.server.repositories.activated_repo_manager._fd_anchored_phase1_rename",
+            side_effect=fail_rename,
+        ):
+            with patch(
+                "src.code_indexer.server.repositories.activated_repo_manager.os.path.exists",
+                side_effect=lying_exists,
+            ):
+                manager._do_deactivate_single("alice", "perm-test", metadata)
+
+        # The explicit phase1_succeeded=False flag must have prevented the
+        # metadata delete even though os.path.exists lied with False.
+        assert os.path.exists(meta_file), (
+            "GHOST REPO REGRESSION: metadata was deleted despite Phase 1 "
+            "failure — the codex RED scenario (exists() false-negative) "
+            "was not blocked by the explicit phase1_succeeded flag."
+        )
+
+
 class TestNoRegressionWhenPhase1Succeeds:
     """When Phase 1 succeeds normally, metadata IS deleted (no regression)."""
 
