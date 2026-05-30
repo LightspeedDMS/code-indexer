@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v10.84.0 (2026-05-30) -- Opus M3 helpers extraction (Story #1032 Commit 11)
+
+### Refactor (Opus M3 — Phase 1 of 2-phase)
+- Extracted the 4 module-level deactivation helpers from `activated_repo_manager.py` into a new module `src/code_indexer/server/repositories/deactivation_helpers.py`:
+  - `_safe_purge_trash_entry(trash_root, entry_name)` — fd-anchored recursive delete
+  - `_fd_anchored_rmtree(name, parent_fd, expected_st_dev)` — recursive helper
+  - `_fd_anchored_phase1_rename(activated_repos_dir, username, user_alias)` — atomic Phase 1 rename
+  - `_predeactivation_leak_scan_enabled()` — bootstrap config flag accessor
+- Manager file: **3888 → 3580 lines** (~308 lines removed). Still violates MESSI Rule 6 (500-line cap) but the largest single contributor is gone.
+- All 4 helpers re-exported from `activated_repo_manager` namespace so tests/callers that patch via `activated_repo_manager._fd_anchored_phase1_rename` continue to work unchanged.
+- Zero behavior change — pure file-organization refactor. All 57 deactivation tests pass. server-fast-automation all 6 chunks green (13,417 tests).
+
+### Deferred (Opus M3 Phase 2)
+- The deactivation METHODS (`_do_deactivate_single`, `_do_deactivate_composite`, `_do_deactivate_repository`, `sweep_orphan_trash_dirs`, `_detect_resource_leaks`) remain on `ActivatedRepoManager` for now. A future commit can extract them into a `DeactivationService` class (composition pattern) for further file-bloat reduction.
+
+## v10.83.0 (2026-05-30) -- Opus review H1 + H2 (Story #1032 Commit 10)
+
+### Documentation (Opus H1)
+- Added justification comments to 7 remaining `shutil.rmtree(path, ignore_errors=True)` call sites in activation/clone failure-cleanup paths in `src/code_indexer/server/repositories/activated_repo_manager.py` (lines 953, 1004, 1031, 1069, 2033, 2992, 3090). Each comment documents:
+  - The path is computed from instance state + validated function args in the SAME call frame — no user input crosses the boundary.
+  - No metadata row has been written yet (cleanup happens BEFORE Step 6 metadata persistence in activation flow) — so the deactivation rename-to-trash pattern does not apply.
+  - Why path-based rmtree is the correct rollback mechanism here.
+- Inconsistent with the new fd-anchored discipline only stylistically; not exploitable from current call patterns per opus review.
+
+### Tests (Opus H2)
+- New file `tests/unit/server/repositories/test_pg_metadata_first_ordering.py` with 3 tests asserting the metadata-before-Phase-2 ordering invariant (HIGH #2 fix from Commit 6):
+  - `TestMetadataDeletedBeforePhase2Single::test_metadata_deleted_before_phase2` — single path: `_delete_metadata` called AFTER `_fd_anchored_phase1_rename` and BEFORE `_safe_purge_trash_entry`.
+  - `TestMetadataDeletedBeforePhase2Composite::test_metadata_delete_ordering_holds_for_composite` — composite path: same invariant.
+  - `TestPhase2NeverRunsBeforeMetadataDelete::test_phase2_not_invoked_until_metadata_call_returns` — belt-and-suspenders: Phase 2 must not START until metadata delete RETURNS (state-based assertion, not just call-count).
+- Invariant is backend-agnostic (file mode + PG mode) so single-mode tests cover both.
+- All 57 deactivation-related tests pass. server-fast-automation all 6 chunks green (13,417 tests).
+
 ## v10.82.0 (2026-05-30) -- Codex RED ghost-window closure (Story #1032 Commit 9)
 
 ### Fixed
