@@ -16,6 +16,7 @@ Acceptance criteria covered here:
 
 import json
 import shutil
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -61,13 +62,45 @@ def registry(golden_repos_dir):
 
 
 @pytest.fixture
-def scheduler(golden_repos_dir, config_mgr, query_tracker, cleanup_manager, registry):
+def mock_snapshot_manager(golden_repos_dir):
+    """Mock snapshot_manager that replicates cp --reflink=auto via shutil.copytree."""
+    mgr = MagicMock()
+
+    def _create_snapshot(repo_name, source_path):
+        versioned_path = (
+            golden_repos_dir / ".versioned" / repo_name / f"v_{int(time.time())}"
+        )
+        versioned_path.mkdir(parents=True, exist_ok=True)
+        for item in Path(source_path).iterdir():
+            dest = versioned_path / item.name
+            if item.is_dir():
+                shutil.copytree(str(item), str(dest))
+            else:
+                shutil.copy2(str(item), str(dest))
+        # Simulate source was already indexed: index dir must exist in clone
+        (versioned_path / ".code-indexer" / "index").mkdir(parents=True, exist_ok=True)
+        return str(versioned_path)
+
+    mgr.create_snapshot.side_effect = _create_snapshot
+    return mgr
+
+
+@pytest.fixture
+def scheduler(
+    golden_repos_dir,
+    config_mgr,
+    query_tracker,
+    cleanup_manager,
+    registry,
+    mock_snapshot_manager,
+):
     return RefreshScheduler(
         golden_repos_dir=str(golden_repos_dir),
         config_source=config_mgr,
         query_tracker=query_tracker,
         cleanup_manager=cleanup_manager,
         registry=registry,
+        snapshot_manager=mock_snapshot_manager,
     )
 
 
@@ -135,6 +168,21 @@ class TestCallOrder:
 
         call_sequence = []
 
+        # Story #1034: CoW clone now goes through snapshot_manager.create_snapshot(),
+        # not subprocess.run(["cp", "--reflink=auto", ...]). Wrap the existing
+        # mock_snapshot_manager side_effect to also record into call_sequence.
+        original_create_snapshot = (
+            scheduler._snapshot_manager.create_snapshot.side_effect
+        )
+
+        def recording_create_snapshot(repo_name, source_path):
+            call_sequence.append(("cow_clone", str(source_path)))
+            return original_create_snapshot(repo_name, source_path)
+
+        scheduler._snapshot_manager.create_snapshot.side_effect = (
+            recording_create_snapshot
+        )
+
         def mock_popen_progress(**kwargs):
             cwd = kwargs.get("cwd", "")
             call_sequence.append(("cidx_index_fts", str(cwd)))
@@ -149,10 +197,7 @@ class TestCallOrder:
             result.stdout = ""
             result.stderr = ""
 
-            if cmd[0] == "cp" and "--reflink=auto" in cmd:
-                call_sequence.append(("cow_clone", str(cwd)))
-                shutil.copytree(cmd[-2], cmd[-1])
-            elif cmd[:2] == ["cidx", "fix-config"]:
+            if cmd[:2] == ["cidx", "fix-config"]:
                 call_sequence.append(("fix_config", str(cwd)))
 
             return result
@@ -181,7 +226,9 @@ class TestCallOrder:
         ]
 
         assert index_positions, "cidx index --fts was never called"
-        assert cow_positions, "CoW clone (cp --reflink=auto) was never called"
+        assert cow_positions, (
+            "CoW clone was never called: snapshot_manager.create_snapshot() was not invoked."
+        )
 
         first_index = min(index_positions)
         first_cow = min(cow_positions)
@@ -428,3 +475,113 @@ class TestExecuteRefreshCallSite:
         assert call_order.index("_index_source") < call_order.index(
             "_create_snapshot"
         ), "C5: _index_source() must be called before _create_snapshot()."
+
+
+# ---------------------------------------------------------------------------
+# Tests: snapshot_manager integration (Story #1034 Commit 3)
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotManagerIntegration:
+    """Verify _create_snapshot delegates to snapshot_manager when injected."""
+
+    def test_create_snapshot_uses_snapshot_manager_when_injected(
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        registry,
+        source_repo,
+    ):
+        """
+        Story #1034 C3: When snapshot_manager is injected, _create_snapshot must
+        call snapshot_manager.create_snapshot(repo_name, source_path) instead of
+        spawning subprocess cp --reflink=auto.
+        """
+        fake_versioned_path = str(
+            golden_repos_dir / ".versioned" / "test-repo" / "v_9999999"
+        )
+        mock_snapshot_manager = MagicMock()
+        mock_snapshot_manager.create_snapshot.return_value = fake_versioned_path
+
+        # Create the versioned path so Step 5 validation passes
+        Path(fake_versioned_path).mkdir(parents=True, exist_ok=True)
+        (Path(fake_versioned_path) / ".code-indexer" / "index").mkdir(
+            parents=True, exist_ok=True
+        )
+
+        sched = RefreshScheduler(
+            golden_repos_dir=str(golden_repos_dir),
+            config_source=config_mgr,
+            query_tracker=query_tracker,
+            cleanup_manager=cleanup_manager,
+            registry=registry,
+            snapshot_manager=mock_snapshot_manager,
+        )
+
+        registry.register_global_repo(
+            "test-repo",
+            "test-repo-global",
+            "git@github.com:org/repo.git",
+            str(source_repo),
+        )
+
+        cp_called = []
+
+        def mock_run(cmd, **kwargs):
+            if cmd[0] == "cp" and "--reflink=auto" in cmd:
+                cp_called.append(cmd)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        with patch("subprocess.run", side_effect=mock_run):
+            result = sched._create_snapshot(
+                alias_name="test-repo-global", source_path=str(source_repo)
+            )
+
+        # snapshot_manager.create_snapshot must have been called
+        mock_snapshot_manager.create_snapshot.assert_called_once_with(
+            "test-repo", str(source_repo)
+        )
+
+        # cp --reflink=auto must NOT have been called directly
+        assert cp_called == [], (
+            f"Story #1034 C3: cp --reflink=auto must NOT be called when snapshot_manager "
+            f"is injected. Got calls: {cp_called}"
+        )
+
+        assert result == fake_versioned_path, (
+            f"_create_snapshot must return the path from snapshot_manager. "
+            f"Expected {fake_versioned_path}, got {result}"
+        )
+
+    def test_create_snapshot_raises_wiring_bug_when_snapshot_manager_is_none(
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        registry,
+        source_repo,
+    ):
+        """
+        Story #1034 C3: When snapshot_manager is None, _create_snapshot must raise
+        RuntimeError with 'wiring bug in lifespan.py' (fail-loud per Codex B4).
+        """
+        sched = RefreshScheduler(
+            golden_repos_dir=str(golden_repos_dir),
+            config_source=config_mgr,
+            query_tracker=query_tracker,
+            cleanup_manager=cleanup_manager,
+            registry=registry,
+            snapshot_manager=None,
+        )
+
+        with pytest.raises(RuntimeError, match="wiring bug in lifespan.py"):
+            sched._create_snapshot(
+                alias_name="test-repo-global", source_path=str(source_repo)
+            )

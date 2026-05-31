@@ -844,6 +844,325 @@ class TestLocalCloneBackendDeleteErrors:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# LocalCloneBackend.create_clone timeout forwarding (Commit 2)
+# ---------------------------------------------------------------------------
+
+
+class TestLocalCloneBackendCreateCloneTimeout:
+    """Tests for LocalCloneBackend.create_clone() timeout parameter (Commit 2)."""
+
+    def test_create_clone_forwards_timeout_to_subprocess(self, tmp_path: Path):
+        """create_clone(timeout=X) passes timeout=X to subprocess.run."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = tmp_path / "source"
+        source.mkdir()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            backend.create_clone(str(source), "ns", "clone-t", timeout=42)
+
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs.get("timeout") == 42
+
+    def test_create_clone_timeout_none_by_default(self, tmp_path: Path):
+        """create_clone without timeout= passes timeout=None to subprocess.run."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = tmp_path / "source"
+        source.mkdir()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            backend.create_clone(str(source), "ns", "clone-default")
+
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs.get("timeout") is None
+
+
+# ---------------------------------------------------------------------------
+# LocalCloneBackend.create_clone_at_path (Commit 2)
+# ---------------------------------------------------------------------------
+
+
+class TestLocalCloneBackendCreateCloneAtPath:
+    """Tests for LocalCloneBackend.create_clone_at_path()."""
+
+    def test_create_clone_at_path_calls_cp_with_dash_a_when_preserve_attrs(
+        self, tmp_path: Path
+    ):
+        """create_clone_at_path uses -a flag when preserve_attrs=True (default)."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = str(tmp_path / "source")
+        dest = str(tmp_path / "dest")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            backend.create_clone_at_path(source, dest)
+
+        cmd = mock_run.call_args[0][0]
+        assert "-a" in cmd
+        assert "-r" not in cmd
+
+    def test_create_clone_at_path_calls_cp_with_dash_r_when_no_preserve_attrs(
+        self, tmp_path: Path
+    ):
+        """create_clone_at_path uses -r flag when preserve_attrs=False."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = str(tmp_path / "source")
+        dest = str(tmp_path / "dest")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            backend.create_clone_at_path(source, dest, preserve_attrs=False)
+
+        cmd = mock_run.call_args[0][0]
+        assert "-r" in cmd
+        assert "-a" not in cmd
+
+    def test_create_clone_at_path_includes_reflink_auto(self, tmp_path: Path):
+        """create_clone_at_path always includes --reflink=auto."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = str(tmp_path / "source")
+        dest = str(tmp_path / "dest")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            backend.create_clone_at_path(source, dest)
+
+        cmd = mock_run.call_args[0][0]
+        assert "--reflink=auto" in cmd
+
+    def test_create_clone_at_path_returns_dest_path(self, tmp_path: Path):
+        """create_clone_at_path returns the caller-specified dest_path."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = str(tmp_path / "source")
+        dest = str(tmp_path / "my_dest")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = backend.create_clone_at_path(source, dest)
+
+        assert result == dest
+
+    def test_create_clone_at_path_forwards_timeout(self, tmp_path: Path):
+        """create_clone_at_path passes timeout= to subprocess.run."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = str(tmp_path / "source")
+        dest = str(tmp_path / "dest")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            backend.create_clone_at_path(source, dest, timeout=99)
+
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs.get("timeout") == 99
+
+    def test_create_clone_at_path_propagates_called_process_error(self, tmp_path: Path):
+        """create_clone_at_path propagates CalledProcessError from cp."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = str(tmp_path / "source")
+        dest = str(tmp_path / "dest")
+
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "cp"),
+        ):
+            with pytest.raises(subprocess.CalledProcessError):
+                backend.create_clone_at_path(source, dest)
+
+    def test_create_clone_at_path_propagates_timeout_expired(self, tmp_path: Path):
+        """create_clone_at_path propagates subprocess.TimeoutExpired."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = str(tmp_path / "source")
+        dest = str(tmp_path / "dest")
+
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired("cp", 5),
+        ):
+            with pytest.raises(subprocess.TimeoutExpired):
+                backend.create_clone_at_path(source, dest, timeout=5)
+
+    def test_create_clone_at_path_passes_source_and_dest_to_cp(self, tmp_path: Path):
+        """create_clone_at_path passes source_path and dest_path to cp."""
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(tmp_path))
+        source = str(tmp_path / "my_source")
+        dest = str(tmp_path / "my_dest")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            backend.create_clone_at_path(source, dest)
+
+        cmd = mock_run.call_args[0][0]
+        assert source in cmd
+        assert dest in cmd
+
+
+# ---------------------------------------------------------------------------
+# CowDaemonBackend._sanitize_identifier (Commit 2)
+# ---------------------------------------------------------------------------
+
+
+class TestCowDaemonBackendSanitizeIdentifier:
+    """Tests for CowDaemonBackend._sanitize_identifier()."""
+
+    def test_sanitize_replaces_dots_with_underscores(self):
+        """_sanitize_identifier replaces dots with underscores."""
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        result = CowDaemonBackend._sanitize_identifier(
+            "langfuse_Claude_Code_seba.battig_lightspeeddms.com-global"
+        )
+        assert result == "langfuse_Claude_Code_seba_battig_lightspeeddms_com-global"
+
+    def test_sanitize_leaves_safe_chars_untouched(self):
+        """_sanitize_identifier does not change alphanumeric, hyphen, or underscore."""
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        result = CowDaemonBackend._sanitize_identifier("my-repo_name123")
+        assert result == "my-repo_name123"
+
+    def test_sanitize_replaces_multiple_dots(self):
+        """_sanitize_identifier replaces every dot, not just the first."""
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        result = CowDaemonBackend._sanitize_identifier("a.b.c")
+        assert result == "a_b_c"
+
+
+# ---------------------------------------------------------------------------
+# CowDaemonBackend.create_clone_at_path (Commit 2)
+# ---------------------------------------------------------------------------
+
+
+class TestCowDaemonBackendCreateCloneAtPath:
+    """Tests for CowDaemonBackend.create_clone_at_path()."""
+
+    def test_create_clone_at_path_posts_to_clones_endpoint(self):
+        """create_clone_at_path POSTs to /api/v1/clones."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "job-123"})
+        poll_resp = _make_response(
+            200, {"status": "completed", "clone_path": "ns/name"}
+        )
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path("/src/repo", "/mnt/nfs/cidx/myns/myclone")
+
+        mock_req.post.assert_called_once()
+        url = mock_req.post.call_args[0][0]
+        assert "/api/v1/clones" in url
+
+    def test_create_clone_at_path_includes_dest_path_in_body(self):
+        """create_clone_at_path sends dest_path in POST body."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "job-abc"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+        dest = "/mnt/nfs/cidx/myns/myclone"
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path("/src/repo", dest)
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["dest_path"] == dest
+
+    def test_create_clone_at_path_includes_source_path_in_body(self):
+        """create_clone_at_path sends source_path in POST body."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "j"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path("/src/myrepo", "/mnt/nfs/cidx/ns/cl")
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["source_path"] == "/src/myrepo"
+
+    def test_create_clone_at_path_sanitizes_namespace_from_dest_path(self):
+        """create_clone_at_path derives namespace from dest_path parent directory, sanitized."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "j2"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        # dest_path parent name contains dots — must be sanitized
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path(
+                "/src/repo",
+                "/mnt/nfs/cidx/seba.battig/myclone",
+            )
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["namespace"] == "seba_battig"
+
+    def test_create_clone_at_path_sanitizes_name_from_dest_path(self):
+        """create_clone_at_path derives name from dest_path basename, sanitized."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "j3"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path(
+                "/src/repo",
+                "/mnt/nfs/cidx/ns/my.clone.v1",
+            )
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["name"] == "my_clone_v1"
+
+    def test_create_clone_at_path_returns_caller_specified_dest_path(self):
+        """create_clone_at_path returns the caller-specified dest_path, not daemon clone_path."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "j4"})
+        poll_resp = _make_response(
+            200, {"status": "completed", "clone_path": "something/else"}
+        )
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+        dest = "/mnt/nfs/cidx/myns/myclone"
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            result = backend.create_clone_at_path("/src/repo", dest)
+
+        assert result == dest
+
+    def test_create_clone_at_path_sends_bearer_auth(self):
+        """create_clone_at_path includes Authorization Bearer header."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "j5"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path("/src/repo", "/mnt/nfs/cidx/ns/cl")
+
+        headers = mock_req.post.call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer test-api-key"
+
+
 class TestCloneBackendFactoryMissingConfig:
     """Factory raises ValueError when required config is None."""
 

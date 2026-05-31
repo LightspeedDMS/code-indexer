@@ -8,6 +8,7 @@ C5: _create_new_index() git guards (no git commands when no .git dir).
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -41,7 +42,32 @@ def mock_registry():
 
 
 @pytest.fixture
-def scheduler(temp_golden_repos_dir, mock_registry):
+def mock_snapshot_manager(temp_golden_repos_dir):
+    """Mock snapshot_manager that replicates cp --reflink=auto via shutil.copytree."""
+    mgr = MagicMock()
+
+    def _create_snapshot(repo_name, source_path):
+        versioned_path = (
+            Path(temp_golden_repos_dir)
+            / ".versioned"
+            / repo_name
+            / f"v_{int(time.time())}"
+        )
+        versioned_path.mkdir(parents=True, exist_ok=True)
+        for item in Path(source_path).iterdir():
+            dest = versioned_path / item.name
+            if item.is_dir():
+                shutil.copytree(str(item), str(dest))
+            else:
+                shutil.copy2(str(item), str(dest))
+        return str(versioned_path)
+
+    mgr.create_snapshot.side_effect = _create_snapshot
+    return mgr
+
+
+@pytest.fixture
+def scheduler(temp_golden_repos_dir, mock_registry, mock_snapshot_manager):
     """Create a RefreshScheduler with injected mock registry."""
     config_source = MagicMock()
     config_source.get_global_refresh_interval.return_value = 3600
@@ -51,6 +77,7 @@ def scheduler(temp_golden_repos_dir, mock_registry):
         query_tracker=MagicMock(spec=QueryTracker),
         cleanup_manager=MagicMock(spec=CleanupManager),
         registry=mock_registry,
+        snapshot_manager=mock_snapshot_manager,
     )
 
 
@@ -306,7 +333,9 @@ class TestCreateNewIndexGitGuards:
             f"No git commands must run for non-git repos. Got: {git_calls}"
         )
 
-    def test_git_commands_run_for_git_repo(self, scheduler, temp_golden_repos_dir):
+    def test_git_commands_run_for_git_repo(
+        self, scheduler, mock_snapshot_manager, temp_golden_repos_dir
+    ):
         """
         When the CoW clone DOES contain .git/, git commands must run.
 
@@ -318,22 +347,30 @@ class TestCreateNewIndexGitGuards:
 
         git_calls = []
 
+        # Story #1034 C3: snapshot_manager now owns the CoW clone.
+        # Override its side_effect to create a .git dir in the versioned path,
+        # triggering the git guard in _create_snapshot() (Steps 3+4).
+        def _snapshot_with_git(repo_name, source_path_arg):
+            versioned_path = (
+                Path(temp_golden_repos_dir)
+                / ".versioned"
+                / repo_name
+                / f"v_{int(time.time())}"
+            )
+            versioned_path.mkdir(parents=True, exist_ok=True)
+            (versioned_path / ".git").mkdir(parents=True, exist_ok=True)
+            return str(versioned_path)
+
+        mock_snapshot_manager.create_snapshot.side_effect = _snapshot_with_git
+
         def mock_subprocess_run(cmd, **kwargs):
             result = MagicMock()
             result.returncode = 0
             result.stdout = ""
             result.stderr = ""
 
-            if isinstance(cmd, list):
-                if cmd[0] == "git":
-                    git_calls.append(cmd)
-                elif cmd[0] == "cp":
-                    # After CoW clone, create a fake .git dir in versioned path
-                    # to trigger the git guard
-                    # The destination is the last arg in cp command
-                    dest = Path(cmd[-1])
-                    dest.mkdir(parents=True, exist_ok=True)
-                    (dest / ".git").mkdir(parents=True, exist_ok=True)
+            if isinstance(cmd, list) and cmd[0] == "git":
+                git_calls.append(cmd)
 
             return result
 

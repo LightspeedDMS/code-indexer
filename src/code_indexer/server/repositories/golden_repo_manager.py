@@ -139,6 +139,7 @@ class GoldenRepoManager:
     _refresh_scheduler: Optional[Any] = (
         None  # RefreshScheduler (existing, re-declared for clarity)
     )
+    _snapshot_manager: Optional[Any] = None  # VersionedSnapshotManager (Story #1034)
 
     def __init__(
         self,
@@ -2402,17 +2403,23 @@ class GoldenRepoManager:
         cidx_fix_timeout: int,
     ) -> str:
         """Create CoW snapshot and return its path."""
-        versioned_base = os.path.join(self.golden_repos_dir, ".versioned", alias)
-        os.makedirs(versioned_base, exist_ok=True)
-        snapshot_path = os.path.join(versioned_base, f"v_{int(time.time())}")
-
-        subprocess.run(
-            ["cp", "--reflink=auto", "-a", base_clone_path, snapshot_path],
-            capture_output=True,
-            text=True,
-            timeout=cow_timeout,
-            check=True,
-        )
+        if self._snapshot_manager is not None:
+            # Story #1034: route through VersionedSnapshotManager (single source of truth)
+            snapshot_path = str(
+                self._snapshot_manager.create_snapshot(alias, base_clone_path)
+            )
+        else:
+            # Standalone CLI fallback: no manager wired (e.g., test contexts or CLI usage)
+            versioned_base = os.path.join(self.golden_repos_dir, ".versioned", alias)
+            os.makedirs(versioned_base, exist_ok=True)
+            snapshot_path = os.path.join(versioned_base, f"v_{int(time.time())}")
+            subprocess.run(
+                ["cp", "--reflink=auto", "-a", base_clone_path, snapshot_path],
+                capture_output=True,
+                text=True,
+                timeout=cow_timeout,
+                check=True,
+            )
         # fix-config on clone only (non-fatal)
         try:
             subprocess.run(

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.85.0] - 2026-05-31
+
+### Fixed (Story #1034)
+- CRITICAL: CoW clone operations now route through VersionedSnapshotManager / CowDaemonBackend in cluster mode, fixing 600s timeouts on the langfuse repo (1.1GB, 11.7k files) — every refresh was timing out for 20+ hours when the job landed on a non-storage node (NFS byte-copy instead of XFS reflink).
+- Pre-existing wiring bug: clone_backend_wiring.build_snapshot_manager() now passes versioned_base to VersionedSnapshotManager.
+- _fallback_copy_on_write_clone() dead code removed from activated_repo_manager.py.
+
+### Added (Story #1034)
+- CloneBackend.create_clone_at_path() method (Protocol) with LocalCloneBackend and CowDaemonBackend implementations.
+- CowDaemonBackend._sanitize_identifier() — replaces dots with underscores for daemon namespace/name.
+- Daemon version check at CIDX startup: _check_daemon_health reads daemon version field, fails loud if < 0.2.0.
+- RefreshScheduler/ActivatedRepoManager/GoldenRepoManager accept snapshot_manager / clone_backend injection.
+- scripts/check_no_direct_cp_reflink.py AC15 CI gate (wired into lint.sh).
+- LocalCloneBackend.versioned_base constructor param is now Optional (default None); callers using only create_clone_at_path() no longer need to provide a meaningless value. create_clone() raises loud RuntimeError if called when versioned_base is None.
+
+### Companion daemon
+- Daemon v0.1.0 -> 0.2.0: optional dest_path in POST /api/v1/clones, version in HealthResponse, MetadataStore dest_path column + delete fix, Path.resolve() validation.
+
 ## v10.84.0 (2026-05-30) -- Opus M3 helpers extraction (Story #1032 Commit 11)
 
 ### Refactor (Opus M3 — Phase 1 of 2-phase)

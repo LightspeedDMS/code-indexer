@@ -70,6 +70,16 @@ class CloneBackend(Protocol):
         """Create a clone and return its absolute filesystem path."""
         ...  # pragma: no cover
 
+    def create_clone_at_path(
+        self,
+        source_path: str,
+        dest_path: str,
+        preserve_attrs: bool = True,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """Clone source_path to caller-specified dest_path. Returns dest_path."""
+        ...  # pragma: no cover
+
     def delete_clone(self, clone_path: str) -> bool:
         """Delete a clone by its absolute path. Returns True on success or if already absent."""
         ...  # pragma: no cover
@@ -91,18 +101,29 @@ class CloneBackend(Protocol):
 class LocalCloneBackend:
     """Filesystem CoW clone backend using ``cp --reflink=auto``.
 
-    Clones are stored under ``{versioned_base}/.versioned/{namespace}/{name}``.
+    Clones are stored under ``{versioned_base}/.versioned/{namespace}/{name}``
+    when versioned_base is provided.  Callers that only use
+    ``create_clone_at_path()`` may construct ``LocalCloneBackend()`` without
+    supplying *versioned_base*; calling ``create_clone()`` or ``list_clones()``
+    without it raises ``RuntimeError``.
     """
 
-    def __init__(self, versioned_base: str) -> None:
+    def __init__(self, versioned_base: Optional[str] = None) -> None:
         self._versioned_base = versioned_base
 
     def _clone_path(self, namespace: str, name: str) -> Path:
+        if self._versioned_base is None:
+            raise RuntimeError(
+                "LocalCloneBackend.create_clone() requires versioned_base. "
+                "Constructed without versioned_base — use create_clone_at_path() instead."
+            )
         _validate_path_component(namespace, "namespace")
         _validate_path_component(name, "name")
         return Path(self._versioned_base) / ".versioned" / namespace / name
 
-    def create_clone(self, source_path: str, namespace: str, name: str) -> str:
+    def create_clone(
+        self, source_path: str, namespace: str, name: str, timeout: Optional[int] = None
+    ) -> str:
         """Create a CoW directory clone using ``cp --reflink=auto -a``."""
         dest = self._clone_path(namespace, name)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -117,8 +138,32 @@ class LocalCloneBackend:
             ["cp", "--reflink=auto", "-a", source_path, str(dest)],
             check=True,
             capture_output=True,
+            timeout=timeout,
         )
         return str(dest)
+
+    def create_clone_at_path(
+        self,
+        source_path: str,
+        dest_path: str,
+        preserve_attrs: bool = True,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """Clone source_path to caller-specified dest_path. Returns dest_path."""
+        attr_flag = "-a" if preserve_attrs else "-r"
+        logger.info(
+            "LocalCloneBackend: creating clone at path '%s' from '%s'",
+            dest_path,
+            source_path,
+        )
+        subprocess.run(
+            ["cp", "--reflink=auto", attr_flag, source_path, dest_path],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return dest_path
 
     def delete_clone(self, clone_path: str) -> bool:
         """Remove the clone directory tree.
@@ -142,6 +187,11 @@ class LocalCloneBackend:
 
     def list_clones(self, namespace: str) -> List[dict]:
         """Return one dict per subdirectory of ``.versioned/{namespace}/``."""
+        if self._versioned_base is None:
+            raise RuntimeError(
+                "LocalCloneBackend.list_clones() requires versioned_base. "
+                "Constructed without versioned_base — use create_clone_at_path() instead."
+            )
         _validate_path_component(namespace, "namespace")
         ns_dir = Path(self._versioned_base) / ".versioned" / namespace
         if not ns_dir.exists():
@@ -190,6 +240,19 @@ class OntapCloneBackend:
         junction_path = f"/{name}"
         self._client.create_clone(name, junction_path=junction_path)
         return f"{self._mount_point}/{name}"
+
+    def create_clone_at_path(
+        self,
+        source_path: str,
+        dest_path: str,
+        preserve_attrs: bool = True,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """Not supported by ONTAP backend (uses volume-level cloning, not path-specified)."""
+        raise NotImplementedError(
+            "OntapCloneBackend does not support create_clone_at_path; "
+            "ONTAP uses volume-level FlexClone, not caller-specified paths."
+        )
 
     def delete_clone(self, clone_path: str) -> bool:
         """Delete the FlexClone volume whose name is the basename of *clone_path*."""
@@ -243,7 +306,18 @@ class CowDaemonBackend:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._api_key}"}
 
-    def create_clone(self, source_path: str, namespace: str, name: str) -> str:
+    @staticmethod
+    def _sanitize_identifier(alias: str) -> str:
+        """Daemon rejects dots in namespace/name. Replace with underscores."""
+        return alias.replace(".", "_")
+
+    def create_clone(
+        self,
+        source_path: str,
+        namespace: str,
+        name: str,
+        timeout: Optional[int] = None,
+    ) -> str:
         """POST to create a clone and poll until completed. Returns absolute path."""
         requests = self._requests()
         body = {"source_path": source_path, "namespace": namespace, "name": name}
@@ -255,13 +329,49 @@ class CowDaemonBackend:
         response.raise_for_status()
 
         job_id = response.json()["job_id"]
-        clone_path = self._poll_job(job_id)
+        effective_timeout = timeout if timeout is not None else self._timeout
+        clone_path = self._poll_job(job_id, effective_timeout)
         return f"{self._mount_point}/{clone_path}"
 
-    def _poll_job(self, job_id: str) -> str:
+    def create_clone_at_path(
+        self,
+        source_path: str,
+        dest_path: str,
+        preserve_attrs: bool = True,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """POST to create a clone at caller-specified dest_path. Returns dest_path."""
+        requests = self._requests()
+        namespace = self._sanitize_identifier(Path(dest_path).parent.name)
+        name = self._sanitize_identifier(Path(dest_path).name)
+        body = {
+            "source_path": source_path,
+            "namespace": namespace,
+            "name": name,
+            "dest_path": dest_path,
+        }
+        logger.info(
+            "CowDaemonBackend: creating clone at path '%s' from '%s'",
+            dest_path,
+            source_path,
+        )
+        response = requests.post(
+            f"{self._daemon_url}/api/v1/clones",
+            json=body,
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+
+        job_id = response.json()["job_id"]
+        effective_timeout = timeout if timeout is not None else self._timeout
+        self._poll_job(job_id, effective_timeout)
+        return dest_path
+
+    def _poll_job(self, job_id: str, timeout: Optional[float] = None) -> str:
         """Poll GET /api/v1/jobs/{job_id} until completed or timeout. Returns clone_path."""
         requests = self._requests()
-        deadline = time.monotonic() + self._timeout
+        effective_timeout = timeout if timeout is not None else self._timeout
+        deadline = time.monotonic() + effective_timeout
         interval = self._poll_interval
 
         while time.monotonic() < deadline:
@@ -284,7 +394,7 @@ class CowDaemonBackend:
             interval = min(interval * 2, _MAX_COW_DAEMON_POLL_INTERVAL_SECONDS)
 
         raise TimeoutError(
-            f"CoW daemon job {job_id} did not complete within {self._timeout}s"
+            f"CoW daemon job {job_id} did not complete within {effective_timeout}s"
         )
 
     def delete_clone(self, clone_path: str) -> bool:
