@@ -547,29 +547,11 @@ def make_lifespan(
             config_service = get_config_service()
             server_config = config_service.get_config()
 
-            global_lifecycle_manager = GlobalReposLifecycleManager(
-                str(golden_repos_dir),
-                background_job_manager=background_job_manager,
-                resource_config=server_config.resource_config,
-                job_tracker=job_tracker,
-            )
-            global_lifecycle_manager.start()
-
-            # Store lifecycle manager in app state for access by query handlers
-            app.state.global_lifecycle_manager = global_lifecycle_manager
-            app.state.query_tracker = global_lifecycle_manager.query_tracker
-            app.state.golden_repos_dir = str(golden_repos_dir)
-
-            # Wire refresh_scheduler into golden_repo_manager so that
-            # add_indexes_to_golden_repo() and change_branch() can acquire
-            # write locks and perform CoW snapshots (Bug B fix).
-            if golden_repo_manager is not None:
-                golden_repo_manager._refresh_scheduler = (
-                    global_lifecycle_manager.refresh_scheduler
-                )
-
-            # Story #510 AC8: Build VersionedSnapshotManager with configured CloneBackend
-            # and store it in app.state for use by snapshot-aware lifecycle services.
+            # Story #1034 wiring fix: build VersionedSnapshotManager BEFORE
+            # GlobalReposLifecycleManager so RefreshScheduler gets it at construction
+            # time (not as a late post-hoc injection).  Failure is non-fatal — the
+            # lifecycle manager still starts, but CoW clone ops will raise at runtime.
+            snapshot_manager = None
             try:
                 from code_indexer.server.startup.clone_backend_wiring import (
                     build_snapshot_manager,
@@ -580,10 +562,6 @@ def make_lifespan(
                     server_config, versioned_base=versioned_base
                 )
                 app.state.snapshot_manager = snapshot_manager
-                # Story #1034: inject into GoldenRepoManager so change_branch CoW
-                # routes through VersionedSnapshotManager (single source of truth).
-                if golden_repo_manager is not None:
-                    golden_repo_manager._snapshot_manager = snapshot_manager
                 logger.info(
                     "Story #510: VersionedSnapshotManager initialized "
                     "(clone_backend=%r, versioned_base=%s)",
@@ -605,6 +583,42 @@ def make_lifespan(
                     )
                 )
                 app.state.snapshot_manager = None
+
+            global_lifecycle_manager = GlobalReposLifecycleManager(
+                str(golden_repos_dir),
+                background_job_manager=background_job_manager,
+                resource_config=server_config.resource_config,
+                job_tracker=job_tracker,
+                snapshot_manager=snapshot_manager,
+            )
+            global_lifecycle_manager.start()
+
+            # Store lifecycle manager in app state for access by query handlers
+            app.state.global_lifecycle_manager = global_lifecycle_manager
+            app.state.query_tracker = global_lifecycle_manager.query_tracker
+            app.state.golden_repos_dir = str(golden_repos_dir)
+
+            # Wire refresh_scheduler into golden_repo_manager so that
+            # add_indexes_to_golden_repo() and change_branch() can acquire
+            # write locks and perform CoW snapshots (Bug B fix).
+            if golden_repo_manager is not None:
+                golden_repo_manager._refresh_scheduler = (
+                    global_lifecycle_manager.refresh_scheduler
+                )
+
+            # Story #1034: inject snapshot_manager into GoldenRepoManager so
+            # change_branch CoW routes through VersionedSnapshotManager (single
+            # source of truth).  Belt-and-suspenders: also wire directly into
+            # refresh_scheduler in case it was constructed before snapshot_manager
+            # was ready (should not happen with the ordering fix above, but guards
+            # against future ordering regressions).
+            if snapshot_manager is not None:
+                if golden_repo_manager is not None:
+                    golden_repo_manager._snapshot_manager = snapshot_manager
+                # Direct wire into refresh_scheduler (belt-and-suspenders)
+                global_lifecycle_manager.refresh_scheduler._snapshot_manager = (
+                    snapshot_manager
+                )
 
             logger.info(
                 "Global repos background services started successfully",
