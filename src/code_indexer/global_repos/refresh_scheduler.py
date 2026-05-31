@@ -39,6 +39,9 @@ from code_indexer.server.utils.config_manager import ScipConfig, ServerResourceC
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
     from code_indexer.server.services.job_tracker import JobTracker
+    from code_indexer.server.storage.shared.snapshot_manager import (
+        VersionedSnapshotManager,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +171,7 @@ class RefreshScheduler:
         background_job_manager: Optional["BackgroundJobManager"] = None,
         registry: Optional["GlobalRegistry"] = None,  # type: ignore[name-defined]  # noqa: F821
         job_tracker: Optional["JobTracker"] = None,
+        snapshot_manager: Optional["VersionedSnapshotManager"] = None,
     ):
         """
         Initialize the refresh scheduler.
@@ -183,6 +187,8 @@ class RefreshScheduler:
             job_tracker: Optional JobTracker for drain-status visibility (Bug #935). When provided,
                 each in-flight _execute_refresh call registers itself so drain-status sees it.
                 When None (CLI mode), no registration occurs.
+            snapshot_manager: Optional VersionedSnapshotManager for CoW snapshot coordination
+                (Commit 1 injection point — stored, used in later commits).
         """
         self.golden_repos_dir = Path(golden_repos_dir)
         self.config_source = config_source
@@ -191,6 +197,7 @@ class RefreshScheduler:
         self.resource_config = resource_config
         self.background_job_manager = background_job_manager
         self._job_tracker = job_tracker
+        self._snapshot_manager = snapshot_manager
 
         # Initialize managers
         self.alias_manager = AliasManager(str(self.golden_repos_dir / "aliases"))
@@ -1957,61 +1964,41 @@ class RefreshScheduler:
         # Use resource_config defaults when none supplied — ServerResourceConfig
         # is the single source of truth for both default and operator-tuned values.
         cfg = self.resource_config or ServerResourceConfig()
-        cow_timeout = cfg.cow_clone_timeout
         git_update_timeout = cfg.git_update_index_timeout
         git_restore_timeout = cfg.git_restore_timeout
         cidx_fix_timeout = cfg.cidx_fix_config_timeout
 
-        # Generate version timestamp (use time.time() for correct UTC epoch;
-        # datetime.utcnow().timestamp() is wrong on non-UTC servers due to
-        # naive datetime timezone interpretation)
-        timestamp = int(time.time())
-        version = f"v_{timestamp}"
-
         repo_name = alias_name.removesuffix("-global")
-        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
-        versioned_path = versioned_base / version
 
-        logger.info(f"Creating versioned snapshot at: {versioned_path}")
+        # versioned_path is set inside the try block by snapshot_manager.create_snapshot().
+        # Initialize to None so the cleanup except block can guard against None safely.
+        versioned_path: Optional[Path] = None
+
+        logger.info(f"Creating versioned snapshot for: {alias_name}")
 
         try:
-            # Step 1: Create versioned directory structure
-            versioned_base.mkdir(parents=True, exist_ok=True)
+            # Story #1034 Commit 3: Route CoW clone through VersionedSnapshotManager
+            # (and through CoW Daemon HTTP API in cluster mode). Eliminates NFS-cp
+            # fallback that caused 600s timeouts on langfuse repos.
+            if self._snapshot_manager is None:
+                raise RuntimeError(
+                    "RefreshScheduler invoked without snapshot_manager — wiring bug in lifespan.py. "
+                    "Story #1034 Commit 3 requires snapshot_manager injection. Fail-loud per Codex B4."
+                )
 
-            # Step 2: Perform CoW clone
-            # NOTE: tantivy_index is NOT deleted — indexes were built on source
-            # and are correct. The CoW clone inherits them directly.
-            logger.info(f"CoW cloning from {source_path} to {versioned_path}")
+            logger.info(f"CoW cloning via snapshot_manager: source={source_path}")
             try:
-                subprocess.run(
-                    [
-                        "cp",
-                        "--reflink=auto",
-                        "-a",
-                        str(source_path),
-                        str(versioned_path),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=cow_timeout,
-                    check=True,
+                versioned_path = Path(
+                    self._snapshot_manager.create_snapshot(repo_name, str(source_path))
                 )
-                logger.info("CoW clone completed successfully")
-            except subprocess.CalledProcessError as e:
+                logger.info(f"CoW clone completed successfully: {versioned_path}")
+            except Exception as e:
                 logger.error(
-                    f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}",
+                    f"CoW clone failed for {alias_name} via snapshot_manager: {type(e).__name__}: {e}",
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"CoW clone failed for {alias_name}: {type(e).__name__}: {e.stderr}"
-                )
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"CoW clone timed out for {alias_name} after {cow_timeout} seconds: {type(e).__name__}"
+                    f"CoW clone failed for {alias_name} via snapshot_manager: {type(e).__name__}: {e}"
                 )
 
             # Step 3: Fix git status on clone (only if .git exists) — non-fatal
@@ -2097,7 +2084,7 @@ class RefreshScheduler:
                 f"Failed to create snapshot for {alias_name}, cleaning up: {type(e).__name__}: {e}",
                 exc_info=True,
             )
-            if versioned_path.exists():
+            if versioned_path is not None and versioned_path.exists():
                 try:
                     shutil.rmtree(versioned_path)
                     logger.info(f"Cleaned up partial snapshot at: {versioned_path}")
@@ -2408,13 +2395,18 @@ class RefreshScheduler:
             f"Reconciliation: restoring {alias_name} master from {latest_version} via reverse CoW"
         )
 
+        cow_timeout = 600
         try:
-            subprocess.run(
-                ["cp", "--reflink=auto", "-a", str(latest_version), str(master_path)],
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=True,
+            if self._snapshot_manager is None:
+                raise RuntimeError(
+                    "RefreshScheduler restore invoked without snapshot_manager — wiring bug. "
+                    "Story #1034 Commit 4 requires snapshot_manager injection."
+                )
+            self._snapshot_manager._clone_backend.create_clone_at_path(
+                str(latest_version),
+                str(master_path),
+                preserve_attrs=True,
+                timeout=cow_timeout,
             )
         except Exception as e:
             logger.error(

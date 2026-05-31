@@ -23,12 +23,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _check_daemon_health(daemon_url: str) -> None:
-    """Verify CoW daemon is reachable via GET /api/v1/health.
+_MIN_DAEMON_VERSION = "0.2.0"
 
-    Raises RuntimeError if the daemon does not return HTTP 200.
+
+def _check_daemon_health(daemon_url: str) -> None:
+    """Verify CoW daemon is reachable via GET /api/v1/health and meets minimum version.
+
+    Raises RuntimeError if the daemon does not return HTTP 200, or if the reported
+    version is absent or older than 0.2.0.
     """
     import requests  # noqa: PLC0415
+    from packaging.version import parse as parse_version  # noqa: PLC0415
 
     health_url = f"{daemon_url.rstrip('/')}/api/v1/health"
     logger.info("Checking CoW daemon health at %s", health_url)
@@ -40,7 +45,18 @@ def _check_daemon_health(daemon_url: str) -> None:
             f"CoW daemon not reachable at {daemon_url}. "
             f"Ensure the daemon is running. Error: {exc}"
         ) from exc
-    logger.info("CoW daemon health check: OK")
+
+    data = resp.json()
+    version = data.get("version")
+    if version is None or parse_version(str(version)) < parse_version(
+        _MIN_DAEMON_VERSION
+    ):
+        raise RuntimeError(
+            f"CoW Daemon at {daemon_url} is version {version!r}; "
+            f"CIDX requires {_MIN_DAEMON_VERSION}+. "
+            f"Old daemon silently ignores dest_path and clones to wrong location."
+        )
+    logger.info("CoW daemon health check: OK (version=%s)", version)
 
 
 def _check_nfs_mount(mount_point: str) -> None:
@@ -131,4 +147,6 @@ def build_snapshot_manager(config: Any, versioned_base: str) -> Any:
             versioned_base,
         )
 
-    return VersionedSnapshotManager(clone_backend=backend)
+    return VersionedSnapshotManager(
+        clone_backend=backend, versioned_base=versioned_base
+    )

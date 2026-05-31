@@ -15,7 +15,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone
 
 import pytest
@@ -52,7 +52,9 @@ class TestActivatedRepoManager:
             clone_path="/path/to/golden/test-repo",
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        mock.golden_repos = {"test-repo": golden_repo}
+        golden_repos_dict = {"test-repo": golden_repo}
+        mock.golden_repos = golden_repos_dict
+        mock.get_golden_repo.side_effect = lambda alias: golden_repos_dict.get(alias)
         return mock
 
     @pytest.fixture
@@ -63,14 +65,26 @@ class TestActivatedRepoManager:
         return mock
 
     @pytest.fixture
+    def mock_clone_backend(self):
+        """Mock CloneBackend for CoW clone operations."""
+        backend = MagicMock()
+        backend.create_clone_at_path.return_value = "/dest/path"
+        return backend
+
+    @pytest.fixture
     def activated_repo_manager(
-        self, temp_data_dir, golden_repo_manager_mock, background_job_manager_mock
+        self,
+        temp_data_dir,
+        golden_repo_manager_mock,
+        background_job_manager_mock,
+        mock_clone_backend,
     ):
         """Create ActivatedRepoManager instance with temp directory."""
         return ActivatedRepoManager(
             data_dir=temp_data_dir,
             golden_repo_manager=golden_repo_manager_mock,
             background_job_manager=background_job_manager_mock,
+            clone_backend=mock_clone_backend,
         )
 
     def test_initialization_creates_activated_repos_directory(self, temp_data_dir):
@@ -285,16 +299,16 @@ class TestActivatedRepoManager:
     @patch("os.path.exists")
     @patch("subprocess.run")
     def test_clone_with_copy_on_write_success_git_repo(
-        self, mock_subprocess, mock_exists, activated_repo_manager
+        self, mock_subprocess, mock_exists, activated_repo_manager, mock_clone_backend
     ):
-        """Test successful git clone for git repositories."""
+        """Test successful git clone for git repositories via CloneBackend."""
         golden_path = "/path/to/golden/repo"
         activated_path = "/path/to/activated/repo"
 
         # Mock that source is a git repository
         mock_exists.return_value = True
 
-        # Mock subprocess calls with different responses
+        # Mock subprocess calls with different responses (git ops after clone)
         def subprocess_side_effect(*args, **kwargs):
             result = MagicMock()
             result.returncode = 0
@@ -324,97 +338,38 @@ class TestActivatedRepoManager:
 
         assert result is True
 
-        # Verify CoW clone workflow (Story #636 - dual remote setup):
-        # 1. cp --reflink=auto -r
-        # 2. git rev-parse --is-bare-repository (bare detection)
-        # 3. git update-index --refresh
-        # 4. git restore .
-        # 5. cidx fix-config --force
-        # 6. git remote get-url origin (from golden repo)
-        # 7. git remote add origin <github-url>
-        # 8. git remote add golden <local-path>
-        # 9. git fetch golden
-        # 10. git status (verification)
-        expected_calls = [
-            call(
-                ["cp", "--reflink=auto", "-r", golden_path, activated_path],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            ),
-            call(
-                ["git", "rev-parse", "--is-bare-repository"],
-                cwd=activated_path,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ),
-            call(
-                ["git", "update-index", "--refresh"],
-                cwd=activated_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            ),
-            call(
-                ["git", "restore", "."],
-                cwd=activated_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            ),
-            call(
-                ["cidx", "fix-config", "--force"],
-                cwd=activated_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            ),
-            call(
-                ["git", "remote", "get-url", "origin"],
-                cwd=golden_path,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            ),
-            call(
-                ["git", "remote", "add", "origin", "git@github.com:example/repo.git"],
-                cwd=activated_path,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            ),
-            call(
-                ["git", "remote", "add", "golden", golden_path],
-                cwd=activated_path,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            ),
-            call(
-                ["git", "fetch", "golden"],
-                cwd=activated_path,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            ),
-            call(
-                ["git", "status"],
-                cwd=activated_path,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            ),
-        ]
+        # Verify CloneBackend.create_clone_at_path was called (Story #1034 Commit 4)
+        mock_clone_backend.create_clone_at_path.assert_called_once_with(
+            golden_path,
+            activated_path,
+            preserve_attrs=False,
+            timeout=120,
+        )
 
-        mock_subprocess.assert_has_calls(expected_calls)
+        # Verify git operations still run after the clone (no cp subprocess for clone)
+        cp_calls = [
+            c
+            for c in mock_subprocess.call_args_list
+            if c.args and isinstance(c.args[0], list) and c.args[0][:1] == ["cp"]
+        ]
+        assert len(cp_calls) == 0, (
+            f"subprocess.run cp must not be called when clone_backend is used: {cp_calls}"
+        )
+
+        # git rev-parse still called for bare detection
+        git_calls = [
+            c
+            for c in mock_subprocess.call_args_list
+            if c.args and isinstance(c.args[0], list) and c.args[0][:1] == ["git"]
+        ]
+        assert len(git_calls) >= 1, "git operations must still run after clone"
 
     @patch("os.path.exists")
     @patch("subprocess.run")
     def test_clone_with_copy_on_write_success_non_git_repo(
-        self, mock_subprocess, mock_exists, activated_repo_manager
+        self, mock_subprocess, mock_exists, activated_repo_manager, mock_clone_backend
     ):
-        """Test successful CoW clone for non-git directories."""
+        """Test successful CoW clone for non-git directories via CloneBackend."""
         golden_path = "/path/to/golden/repo"
         activated_path = "/path/to/activated/repo"
 
@@ -430,33 +385,39 @@ class TestActivatedRepoManager:
 
         assert result is True
 
-        # Verify CoW clone is used for non-git directories (Issue #500 fix)
-        # For non-git repos, only cp --reflink=auto is called (no git operations)
-        expected_calls = [
-            call(
-                ["cp", "--reflink=auto", "-r", golden_path, activated_path],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            ),
-        ]
+        # Verify CloneBackend.create_clone_at_path was called (Story #1034 Commit 4)
+        mock_clone_backend.create_clone_at_path.assert_called_once_with(
+            golden_path,
+            activated_path,
+            preserve_attrs=False,
+            timeout=120,
+        )
 
-        mock_subprocess.assert_has_calls(expected_calls)
+        # For non-git repos, no cp subprocess (backend handles the clone)
+        cp_calls = [
+            c
+            for c in mock_subprocess.call_args_list
+            if c.args and isinstance(c.args[0], list) and c.args[0][:1] == ["cp"]
+        ]
+        assert len(cp_calls) == 0, (
+            f"subprocess.run cp must not be called when clone_backend is used: {cp_calls}"
+        )
 
     @patch("subprocess.run")
     def test_clone_with_copy_on_write_failure_raises_exception(
-        self, mock_subprocess, activated_repo_manager
+        self, mock_subprocess, activated_repo_manager, mock_clone_backend
     ):
-        """Test that CoW failure raises ActivatedRepoError (no fallback)."""
+        """Test that CloneBackend failure raises ActivatedRepoError (no fallback)."""
         golden_path = "/path/to/golden/repo"
         activated_path = "/path/to/activated/repo"
 
-        # Mock cp --reflink=always failing
-        mock_subprocess.return_value.returncode = 1
-        mock_subprocess.return_value.stderr = "Copy-on-write not supported"
+        # Mock clone_backend raising an exception (simulates CoW failure)
+        mock_clone_backend.create_clone_at_path.side_effect = Exception(
+            "Copy-on-write not supported"
+        )
 
-        # Should raise ActivatedRepoError instead of falling back
-        with pytest.raises(ActivatedRepoError, match="CoW clone failed"):
+        # Should raise ActivatedRepoError wrapping the backend error
+        with pytest.raises(ActivatedRepoError, match="Clone operation failed"):
             activated_repo_manager._clone_with_copy_on_write(
                 golden_path, activated_path
             )
@@ -759,3 +720,121 @@ class TestActivatedRepoManager:
         assert "user1-repo1" in user_aliases
         assert "user1-repo2" in user_aliases
         assert "user2-repo1" in user_aliases
+
+
+# ---------------------------------------------------------------------------
+# Story #1034 Commit 4: _clone_with_copy_on_write routes via CloneBackend
+# ---------------------------------------------------------------------------
+
+
+class TestCloneWithCopyOnWriteUsesBackend:
+    """
+    Story #1034 Commit 4: _clone_with_copy_on_write must delegate the
+    filesystem clone to CloneBackend.create_clone_at_path when clone_backend
+    is injected, instead of calling subprocess.run directly for the cp step.
+    """
+
+    @pytest.fixture
+    def temp_data_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            yield temp_dir
+
+    @pytest.fixture
+    def mock_clone_backend(self):
+        backend = MagicMock()
+        backend.create_clone_at_path.return_value = "/dest/path"
+        return backend
+
+    @pytest.fixture
+    def golden_repo_manager_mock(self):
+        mock = MagicMock()
+        golden_repo = GoldenRepo(
+            alias="test-repo",
+            repo_url="https://github.com/example/test-repo.git",
+            default_branch="main",
+            clone_path="/path/to/golden/test-repo",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        golden_repos_dict = {"test-repo": golden_repo}
+        mock.golden_repos = golden_repos_dict
+        mock.get_golden_repo.side_effect = lambda alias: golden_repos_dict.get(alias)
+        return mock
+
+    @pytest.fixture
+    def background_job_manager_mock(self):
+        mock = MagicMock()
+        mock.submit_job.return_value = "job-456"
+        return mock
+
+    @pytest.fixture
+    def manager_with_backend(
+        self,
+        temp_data_dir,
+        golden_repo_manager_mock,
+        background_job_manager_mock,
+        mock_clone_backend,
+    ):
+        return ActivatedRepoManager(
+            data_dir=temp_data_dir,
+            golden_repo_manager=golden_repo_manager_mock,
+            background_job_manager=background_job_manager_mock,
+            clone_backend=mock_clone_backend,
+        )
+
+    def test_clone_uses_clone_backend_create_clone_at_path(
+        self,
+        manager_with_backend,
+        mock_clone_backend,
+        temp_data_dir,
+    ):
+        """
+        Story #1034 Commit 4: when clone_backend is injected, _clone_with_copy_on_write
+        must call clone_backend.create_clone_at_path(source_path, dest_path,
+        preserve_attrs=False, timeout=<timeout>) instead of subprocess.run for cp.
+        """
+        source_path = temp_data_dir + "/source-repo"
+        dest_path = temp_data_dir + "/dest-repo"
+        os.makedirs(source_path, exist_ok=True)
+
+        with patch("subprocess.run") as mock_subprocess:
+            manager_with_backend._clone_with_copy_on_write(source_path, dest_path)
+
+        mock_clone_backend.create_clone_at_path.assert_called_once_with(
+            source_path,
+            dest_path,
+            preserve_attrs=False,
+            timeout=120,
+        )
+        # Direct subprocess.run for cp must NOT be called (backend handles it)
+        cp_calls = [
+            c
+            for c in mock_subprocess.call_args_list
+            if c.args and isinstance(c.args[0], list) and c.args[0][:1] == ["cp"]
+        ]
+        assert len(cp_calls) == 0, (
+            f"subprocess.run cp must not be called when clone_backend is used, got: {cp_calls}"
+        )
+
+    def test_clone_without_backend_raises_runtime_error(
+        self,
+        temp_data_dir,
+        golden_repo_manager_mock,
+        background_job_manager_mock,
+    ):
+        """
+        Story #1034 Commit 4: when clone_backend is None, _clone_with_copy_on_write
+        raises RuntimeError (wiring bug guard) wrapped as ActivatedRepoError.
+        """
+        manager_no_backend = ActivatedRepoManager(
+            data_dir=temp_data_dir,
+            golden_repo_manager=golden_repo_manager_mock,
+            background_job_manager=background_job_manager_mock,
+            clone_backend=None,
+        )
+
+        source_path = temp_data_dir + "/source-repo"
+        dest_path = temp_data_dir + "/dest-repo"
+        os.makedirs(source_path, exist_ok=True)
+
+        with pytest.raises(ActivatedRepoError):
+            manager_no_backend._clone_with_copy_on_write(source_path, dest_path)

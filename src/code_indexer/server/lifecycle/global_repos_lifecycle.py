@@ -20,6 +20,9 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
     from code_indexer.server.utils.config_manager import ServerResourceConfig
+    from code_indexer.server.storage.shared.snapshot_manager import (
+        VersionedSnapshotManager,
+    )
 
 from ...global_repos.query_tracker import QueryTracker
 from ...global_repos.cleanup_manager import CleanupManager
@@ -48,6 +51,7 @@ class GlobalReposLifecycleManager:
         background_job_manager: Optional["BackgroundJobManager"] = None,
         resource_config: Optional["ServerResourceConfig"] = None,
         job_tracker=None,
+        snapshot_manager: Optional["VersionedSnapshotManager"] = None,
     ):
         """
         Initialize the lifecycle manager.
@@ -57,6 +61,8 @@ class GlobalReposLifecycleManager:
             background_job_manager: Optional job manager for dashboard visibility (server mode)
             resource_config: Optional resource configuration (timeouts, etc.)
             job_tracker: Optional JobTracker for dashboard visibility (Story #314)
+            snapshot_manager: Optional VersionedSnapshotManager for CoW snapshot coordination
+                (Commit 1 injection point — forwarded to RefreshScheduler).
         """
         self.golden_repos_dir = Path(golden_repos_dir)
 
@@ -84,6 +90,7 @@ class GlobalReposLifecycleManager:
             cleanup_manager=self.cleanup_manager,
             background_job_manager=background_job_manager,
             resource_config=resource_config,
+            snapshot_manager=snapshot_manager,
         )
 
         # Track running state

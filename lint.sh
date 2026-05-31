@@ -64,6 +64,15 @@ main() {
         all_passed=false
     fi
 
+    # Story #1034 AC15: anti-orphan check — no direct cp+reflink in production code
+    echo -e "${BLUE}Running Story #1034 AC15 anti-orphan check...${NC}"
+    if python3 scripts/check_no_direct_cp_reflink.py; then
+        echo -e "${GREEN}✅ AC15 anti-orphan check passed${NC}"
+    else
+        echo -e "${RED}❌ AC15 anti-orphan check failed${NC}"
+        all_passed=false
+    fi
+
     if $all_passed; then
         echo -e "${GREEN}🎉 All linting checks passed!${NC}"
         exit 0

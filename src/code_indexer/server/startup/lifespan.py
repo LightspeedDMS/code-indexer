@@ -580,6 +580,10 @@ def make_lifespan(
                     server_config, versioned_base=versioned_base
                 )
                 app.state.snapshot_manager = snapshot_manager
+                # Story #1034: inject into GoldenRepoManager so change_branch CoW
+                # routes through VersionedSnapshotManager (single source of truth).
+                if golden_repo_manager is not None:
+                    golden_repo_manager._snapshot_manager = snapshot_manager
                 logger.info(
                     "Story #510: VersionedSnapshotManager initialized "
                     "(clone_backend=%r, versioned_base=%s)",

@@ -13,6 +13,7 @@ This forces a full FTS rebuild from scratch with no inherited stale entries.
 """
 
 import shutil
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -62,8 +63,39 @@ class TestRefreshSchedulerFtsCleanup:
         return AliasManager(str(golden_repos_dir / "aliases"))
 
     @pytest.fixture
+    def mock_snapshot_manager(self, golden_repos_dir):
+        """Mock snapshot_manager that replicates cp --reflink=auto via shutil.copytree."""
+        mgr = MagicMock()
+
+        def _create_snapshot(repo_name, source_path):
+            versioned_path = (
+                golden_repos_dir / ".versioned" / repo_name / f"v_{int(time.time())}"
+            )
+            versioned_path.mkdir(parents=True, exist_ok=True)
+            for item in Path(source_path).iterdir():
+                dest = versioned_path / item.name
+                if item.is_dir():
+                    shutil.copytree(str(item), str(dest))
+                else:
+                    shutil.copy2(str(item), str(dest))
+            # Simulate source was already indexed: index dir must exist in clone
+            (versioned_path / ".code-indexer" / "index").mkdir(
+                parents=True, exist_ok=True
+            )
+            return str(versioned_path)
+
+        mgr.create_snapshot.side_effect = _create_snapshot
+        return mgr
+
+    @pytest.fixture
     def scheduler(
-        self, golden_repos_dir, config_mgr, query_tracker, cleanup_manager, registry
+        self,
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        registry,
+        mock_snapshot_manager,
     ):
         """Create a RefreshScheduler instance."""
         return RefreshScheduler(
@@ -72,6 +104,7 @@ class TestRefreshSchedulerFtsCleanup:
             query_tracker=query_tracker,
             cleanup_manager=cleanup_manager,
             registry=registry,
+            snapshot_manager=mock_snapshot_manager,
         )
 
     @pytest.fixture
@@ -276,7 +309,7 @@ class TestRefreshSchedulerFtsCleanup:
         - cidx fix-config runs with tantivy_index PRESENT (inherited correctly)
         - tantivy_index is not deleted at any point in _create_snapshot
         """
-        call_sequence = []
+        fix_config_entries: list = []
 
         def mock_subprocess_run(cmd, **kwargs):
             mock_result = MagicMock()
@@ -284,19 +317,11 @@ class TestRefreshSchedulerFtsCleanup:
             mock_result.stdout = ""
             mock_result.stderr = ""
 
-            if cmd[0] == "cp":
-                dst = cmd[-1]
-                shutil.copytree(cmd[-2], dst)
-                # Simulate source was already indexed: index dir must exist in clone
-                (Path(dst) / ".code-indexer" / "index").mkdir(
-                    parents=True, exist_ok=True
-                )
-                call_sequence.append("cow_clone")
-            elif cmd[:2] == ["cidx", "fix-config"]:
+            if cmd[:2] == ["cidx", "fix-config"]:
                 # Record tantivy state at fix-config time — must be PRESENT
                 cwd = Path(kwargs.get("cwd", "."))
                 tantivy_path = cwd / ".code-indexer" / "tantivy_index"
-                call_sequence.append(
+                fix_config_entries.append(
                     f"fix-config:tantivy_exists={tantivy_path.exists()}"
                 )
 
@@ -324,13 +349,13 @@ class TestRefreshSchedulerFtsCleanup:
                         source_path=str(source_repo_with_tantivy),
                     )
 
-        # Verify cow_clone happened
-        assert "cow_clone" in call_sequence, (
-            "CoW clone step was not recorded in call sequence."
+        # Story #1034: CoW clone now routes through snapshot_manager.create_snapshot(),
+        # not through subprocess.run(["cp", "--reflink=auto", ...]). Verify via mock.
+        assert scheduler._snapshot_manager.create_snapshot.call_count >= 1, (
+            "CoW clone step was not performed: snapshot_manager.create_snapshot() was never called."
         )
 
         # Verify fix-config happened with tantivy PRESENT (Story #229: no deletion)
-        fix_config_entries = [e for e in call_sequence if e.startswith("fix-config:")]
         assert len(fix_config_entries) >= 1, "cidx fix-config was not called."
         assert fix_config_entries[0] == "fix-config:tantivy_exists=True", (
             "Story #229: tantivy_index must be PRESENT when cidx fix-config runs. "

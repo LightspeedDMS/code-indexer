@@ -16,7 +16,10 @@ import logging
 # yaml import removed - using json for config files
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable
+
+if TYPE_CHECKING:
+    from code_indexer.server.storage.shared.clone_backend import CloneBackend
 from pydantic import BaseModel
 
 from .golden_repo_manager import GoldenRepoManager
@@ -96,6 +99,7 @@ class ActivatedRepoManager:
         data_dir: Optional[str] = None,
         golden_repo_manager: Optional[GoldenRepoManager] = None,
         background_job_manager: Optional[BackgroundJobManager] = None,
+        clone_backend: Optional["CloneBackend"] = None,
     ):
         """
         Initialize activated repository manager.
@@ -104,6 +108,8 @@ class ActivatedRepoManager:
             data_dir: Data directory path (defaults to ~/.cidx-server/data)
             golden_repo_manager: Golden repo manager instance
             background_job_manager: Background job manager instance
+            clone_backend: Optional CloneBackend for CoW snapshot operations
+                (Commit 1 injection point — stored, used in later commits).
         """
         if data_dir:
             self.data_dir = data_dir
@@ -132,6 +138,7 @@ class ActivatedRepoManager:
             )
         self.golden_repo_manager = golden_repo_manager
         self.background_job_manager = background_job_manager or BackgroundJobManager()
+        self._clone_backend = clone_backend
 
     def set_connection_pool(self, pool: Any) -> None:
         """Set PostgreSQL connection pool for cluster mode.
@@ -2614,16 +2621,17 @@ class ActivatedRepoManager:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-            # Use cp --reflink=auto to attempt CoW, fallback to regular copy
-            result = subprocess.run(
-                ["cp", "--reflink=auto", "-r", source_path, dest_path],
-                capture_output=True,
-                text=True,
+            if self._clone_backend is None:
+                raise RuntimeError(
+                    "ActivatedRepoManager._clone_with_copy_on_write invoked without clone_backend — wiring bug. "
+                    "Story #1034 Commit 4 requires clone_backend injection."
+                )
+            self._clone_backend.create_clone_at_path(
+                source_path,
+                dest_path,
+                preserve_attrs=False,
                 timeout=120,
             )
-
-            if result.returncode != 0:
-                raise ActivatedRepoError(f"CoW clone failed: {result.stderr}")
 
             self.logger.info(
                 f"CoW clone successful: {source_path} -> {dest_path}",
@@ -2779,42 +2787,6 @@ class ActivatedRepoManager:
             if os.path.exists(dest_path):
                 shutil.rmtree(dest_path, ignore_errors=True)
             raise ActivatedRepoError(f"Clone operation failed: {str(e)}")
-
-    def _fallback_copy_on_write_clone(self, source_path: str, dest_path: str) -> bool:
-        """
-        Fallback CoW clone implementation.
-
-        Args:
-            source_path: Source repository path
-            dest_path: Destination repository path
-
-        Returns:
-            True if cloning succeeded
-
-        Raises:
-            ActivatedRepoError: If CoW clone fails
-        """
-        result = subprocess.run(
-            ["cp", "--reflink=always", "-r", source_path, dest_path],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
-        if result.returncode != 0:
-            raise ActivatedRepoError(f"CoW clone failed: {result.stderr}")
-
-        self.logger.info(
-            f"CoW clone successful: {source_path} -> {dest_path}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-
-        # Configure git structure if destination is a git repository
-        git_dir = os.path.join(dest_path, ".git")
-        if os.path.exists(git_dir):
-            self._configure_git_structure(source_path, dest_path)
-
-        return True
 
     def _setup_origin_remote_for_local_repo(
         self, source_path: str, dest_path: str
@@ -2975,7 +2947,6 @@ class ActivatedRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.GIT_FETCH_TIMEOUT,
-                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
