@@ -341,9 +341,28 @@ class CowDaemonBackend:
         name: str,
         timeout: Optional[int] = None,
     ) -> str:
-        """POST to create a clone and poll until completed. Returns absolute path."""
+        """POST to create a clone and poll until completed. Returns absolute path.
+
+        Sanitizes namespace and name (replaces dots with underscores) so aliases containing
+        dots (e.g. langfuse_Claude_Code_seba.battig_lightspeeddms.com) pass daemon validation.
+        Daemon stores at {base_path}/{sanitized_ns}/{sanitized_name}; returned path uses
+        mount_point view for CIDX-side consumption.
+        """
         requests = self._requests()
-        body = {"source_path": source_path, "namespace": namespace, "name": name}
+        sanitized_namespace = self._sanitize_identifier(namespace)
+        sanitized_name = self._sanitize_identifier(name)
+        body = {
+            "source_path": source_path,
+            "namespace": sanitized_namespace,
+            "name": sanitized_name,
+        }
+        logger.info(
+            "CowDaemonBackend.create_clone: source=%s namespace=%s (sanitized from %s) name=%s",
+            source_path,
+            sanitized_namespace,
+            namespace,
+            sanitized_name,
+        )
         response = requests.post(
             f"{self._daemon_url}/api/v1/clones",
             json=body,
