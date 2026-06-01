@@ -283,6 +283,17 @@ Sync runs BEFORE indexing in refresh path. All git ops on mutable base path only
 
 -> Full reference: `docs/cidx-meta-backup.md`
 
+### Dep-Map Re-Entrancy Sentinels (Story #1035)
+
+Dep-map analysis coordination state lives on the NFS-shared `cidx-meta` filesystem so every node in a cluster observes the same lock. `SharedJobSentinel` (`services/shared_job_sentinel.py`) claims sentinels via atomic POSIX `O_CREAT|O_EXCL` writes; `FilesystemDashboardCacheBackend` (`storage/filesystem_backends.py`) persists the dashboard cache as a JSON file written via tempfile + `os.replace` (NFSv4-safe). Owner-only release. Stale recovery is built in.
+
+**Key invariants**:
+- Sentinel files: `cidx-meta/dependency-map/_active_{op_type}.lock`. Dashboard cache: `cidx-meta/dependency-map/_dashboard_cache.json`. Both live on the MUTABLE base path -- NEVER inside `.versioned/` snapshots. Path is computed via `DependencyMapService.get_sentinel_dir()` -- the service AND web route MUST call this helper; never recompute the path independently.
+- Two independent op_type families: `"analysis"` (stale timeout 4h, `ANALYSIS_STALE_TIMEOUT_SECONDS = 14400`, guards `run_full_analysis`/`run_delta_analysis`) and `"dashboard"` (stale timeout 30m, `DASHBOARD_STALE_TIMEOUT_SECONDS = 1800`, guards the lightweight dashboard refresh job). One does not block the other. Timeouts are module constants today; TODO comments mark them for future Web UI exposure.
+- Synchronous claim order in BOTH route layers (`web/dependency_map_routes.py::trigger_dependency_map`, `mcp/handlers/admin/__init__.py::trigger_dependency_analysis`): (1) `is_available()` pre-flight -> 409 with `active_job_id` on conflict; (2) `SharedJobSentinel.try_claim()` in the route handler (NOT inside the worker thread) catches TOCTOU; (3) `JobTracker.register_job_if_no_conflict` (cluster-atomic via partial unique index `idx_active_job_per_repo`) is the second guard -- on `DuplicateJobError`, release sentinel + return 409; (4) only then spawn the worker thread, which calls `run_full_analysis(..., pre_claimed=True)` so it does NOT re-claim.
+- Dashboard defense-in-depth: `_submit_dashboard_job` registers with `repo_alias="__depmap_dashboard__"` (non-NULL) so `idx_active_job_per_repo` also covers it. Dashboard partial STATE 3/4 in `web/dependency_map_routes.py` reflects sentinel status.
+- NEVER store dep-map coordination state in per-node SQLite (`cidx_server.db`). In cluster mode that DB is per-node -- the exact bug Story #1035 fixed. All coordination state goes through `SharedJobSentinel` on cidx-meta.
+
 ---
 
 ## Operational Modes

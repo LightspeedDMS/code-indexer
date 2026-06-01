@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 import uuid
@@ -41,6 +42,7 @@ from .activity_journal_service import ActivityJournalService
 from .constants import CIDX_META_REPO
 from .dep_map_health_detector import DepMapHealthDetector
 from .metadata_reader import read_current_commit
+from .shared_job_sentinel import AnalysisAlreadyRunningError, SharedJobSentinel
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,11 @@ _DEFAULT_DELTA_INTERVAL_HOURS = (
 _AUTO_REPAIR_JOB_ID_SUFFIX_LEN = (
     8  # Story #927: hex suffix length for auto-repair job IDs
 )
+# TODO: expose via Web UI Config Screen (Story #1035 follow-up)
+ANALYSIS_STALE_TIMEOUT_SECONDS = 14400  # 4 hours — sentinel stale recovery threshold
+
+# Re-export for backward compatibility (callers importing from this module)
+__all__ = ["AnalysisAlreadyRunningError", "DependencyMapService"]
 
 
 class _DomainUpdateResult(Enum):
@@ -167,6 +174,25 @@ class DependencyMapService:
         """Return the ActivityJournalService instance (Story #329)."""
         return self._activity_journal  # type: ignore[no-any-return]
 
+    def get_sentinel_dir(self) -> Optional[Path]:
+        """Return the sentinel directory used by SharedJobSentinel (Story #1035 B6).
+
+        Single source of truth for the dep-map sentinel path so route handlers
+        and MCP handlers do not re-derive it independently.
+
+        Returns None when golden_repos_manager is not yet initialised (e.g. during
+        early startup before the manager is wired up).
+        """
+        try:
+            return (
+                Path(self._golden_repos_manager.golden_repos_dir)
+                / "cidx-meta"
+                / "dependency-map"
+            )
+        except AttributeError:
+            # _golden_repos_manager is None or lacks golden_repos_dir (early startup)
+            return None
+
     def set_repair_invoker_fn(
         self,
         fn: Optional[Callable[[str], None]],
@@ -204,25 +230,41 @@ class DependencyMapService:
 
     def is_available(self) -> bool:
         """
-        Check if dependency map analysis can be started (Story #195).
+        Check if dependency map analysis can be started (Story #195, Story #1035).
 
-        Performs a non-blocking lock probe to determine if the service
-        is available for a new analysis.
+        Consults SharedJobSentinel on the mutable cidx-meta base path (cluster-aware).
+        A stale sentinel (older than ANALYSIS_STALE_TIMEOUT_SECONDS) is treated as
+        absent — the crashed owner can be reclaimed.
+
+        The in-process threading.Lock is checked as a fast-path belt after the
+        sentinel, to guard same-process re-entrancy without a filesystem round-trip.
 
         Returns:
-            True if no analysis is running (lock available)
-            False if analysis is already in progress (lock held)
+            True if no fresh analysis sentinel exists (slot available)
+            False if a fresh sentinel is held by any cluster node
         """
-        # Try to acquire lock without blocking
-        acquired = self._lock.acquire(blocking=False)
+        dep_map_dir = self.get_sentinel_dir()
+        if dep_map_dir is None:
+            # Manager not yet wired; fall through to threading.Lock only
+            acquired = self._lock.acquire(blocking=False)
+            if acquired:
+                self._lock.release()
+                return True
+            return False
 
+        sentinel = SharedJobSentinel(dep_map_dir, ANALYSIS_STALE_TIMEOUT_SECONDS)
+        active = sentinel.read_active("analysis")
+        if active is not None and not sentinel.is_stale(
+            active, ANALYSIS_STALE_TIMEOUT_SECONDS
+        ):
+            return False
+
+        # In-process belt: also consult the threading.Lock for same-process guard
+        acquired = self._lock.acquire(blocking=False)
         if acquired:
-            # Lock was available - release it immediately and return True
             self._lock.release()
             return True
-        else:
-            # Lock is held by another operation
-            return False
+        return False
 
     def run_graph_repair_dry_run(self) -> Dict[str, Any]:
         """Run Phase 3.7 graph-channel repair in dry-run mode (Story #919 AC5).
@@ -294,7 +336,9 @@ class DependencyMapService:
         # (enable_graph_channel_repair=False).  cast narrows the type for mypy only.
         return asdict(cast(DryRunReport, report))
 
-    def run_full_analysis(self, job_id: Optional[str] = None) -> Dict[str, Any]:
+    def run_full_analysis(
+        self, job_id: Optional[str] = None, pre_claimed: bool = False
+    ) -> Dict[str, Any]:
         """
         Orchestrate full dependency map analysis pipeline.
 
@@ -302,6 +346,10 @@ class DependencyMapService:
             job_id: Optional caller-provided job ID for unified job tracking.
                     When None, a new UUID-based ID is generated internally.
                     MCP handler passes its own job_id for consistency (AC4).
+            pre_claimed: When True, the caller has already claimed the sentinel
+                    (synchronous pre-flight in route layer). The method skips
+                    try_claim but still initialises _sentinel for the finally
+                    release so the sentinel is always cleaned up (Story #1035 B3).
 
         Returns:
             Dict with status, domains_count, repos_analyzed, errors
@@ -309,6 +357,7 @@ class DependencyMapService:
         Raises:
             RuntimeError: If analysis is already in progress
             DuplicateJobError: If job_tracker detects a concurrent full analysis (AC6)
+            AnalysisAlreadyRunningError: If sentinel claim fails (not pre_claimed)
         """
         # Story #876 Phase B-1 Deliverable 2: cluster-atomic job gate.
         # Replaces the Story #312 TOCTOU pattern (check_operation_conflict +
@@ -394,6 +443,41 @@ class DependencyMapService:
                         f"JobTracker fail_job (lock conflict) failed (non-fatal): {tracker_err}"
                     )
             raise RuntimeError("Dependency map analysis already in progress")
+
+        # Story #1035: Claim shared sentinel AFTER acquiring in-process lock.
+        # The sentinel is the cluster-wide authority; threading.Lock is the same-process belt.
+        # When pre_claimed=True the route layer already claimed before spawning the thread,
+        # so we skip try_claim but still initialise _sentinel for the finally release (B3).
+        _sentinel_job_id = (
+            _tracked_job_id or job_id or f"dep-map-full-{uuid.uuid4().hex[:8]}"
+        )
+        _dep_map_dir = self.get_sentinel_dir() or (
+            Path(self._golden_repos_manager.golden_repos_dir)
+            / "cidx-meta"
+            / "dependency-map"
+        )
+        _sentinel = SharedJobSentinel(_dep_map_dir, ANALYSIS_STALE_TIMEOUT_SECONDS)
+        if not pre_claimed:
+            _claim = _sentinel.try_claim(
+                "analysis", _sentinel_job_id, self._get_node_id()
+            )
+            if not _claim.success:
+                self._lock.release()
+                if _tracked_job_id is not None and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.fail_job(
+                            _tracked_job_id,
+                            error="Analysis already in progress (sentinel held)",
+                        )
+                    except Exception as tracker_err:
+                        logger.warning(
+                            f"JobTracker fail_job (sentinel conflict) failed (non-fatal): {tracker_err}"
+                        )
+                raise AnalysisAlreadyRunningError(
+                    active_job_id=_claim.active.job_id
+                    if _claim.active
+                    else _sentinel_job_id
+                )
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
         _write_lock_acquired = False
@@ -547,6 +631,16 @@ class DependencyMapService:
                     )
 
             self._lock.release()
+
+            # Story #1035: Release shared sentinel so other nodes can claim.
+            if "_sentinel" in locals() and "_sentinel_job_id" in locals():
+                try:
+                    _sentinel.release("analysis", expected_job_id=_sentinel_job_id)
+                except Exception as sentinel_err:
+                    logger.warning(
+                        "run_full_analysis: sentinel.release failed (non-fatal): %s",
+                        sentinel_err,
+                    )
 
             # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
             if (
@@ -1156,6 +1250,24 @@ class DependencyMapService:
             )
 
         return golden_repos_dir / "cidx-meta"
+
+    def _get_node_id(self) -> str:
+        """
+        Return the cluster node identifier for use in sentinel payloads (Story #1035).
+
+        Reads `cluster.node_id` from bootstrap config.json (BOOTSTRAP_ONLY per CLAUDE.md).
+        Falls back to socket.gethostname() in solo mode (no config or key absent).
+        """
+        try:
+            cfg_path = Path.home() / ".cidx-server" / "config.json"
+            if cfg_path.exists():
+                cfg_data = json.loads(cfg_path.read_text())
+                node_id = cfg_data.get("cluster", {}).get("node_id", "")
+                if node_id:
+                    return str(node_id)
+        except Exception as exc:
+            logger.debug("_get_node_id: could not read bootstrap config: %s", exc)
+        return socket.gethostname()
 
     @property
     def cidx_meta_read_path(self) -> Path:
@@ -2662,7 +2774,7 @@ class DependencyMapService:
             )
 
     def run_delta_analysis(
-        self, job_id: Optional[str] = None
+        self, job_id: Optional[str] = None, pre_claimed: bool = False
     ) -> Optional[Dict[str, Any]]:
         """
         Run delta analysis to refresh only affected domains (Story #193, AC1-8).
@@ -2671,12 +2783,17 @@ class DependencyMapService:
             job_id: Optional caller-provided job ID for unified job tracking.
                     When None, a new UUID-based ID is generated internally.
                     MCP handler passes its own job_id for consistency (AC4).
+            pre_claimed: When True, the caller has already claimed the sentinel
+                    (synchronous pre-flight in route layer). The method skips
+                    try_claim but still initialises _delta_sentinel for the
+                    finally release (Story #1035 B3).
 
         Returns:
             Dict with status or None if skipped (lock held or disabled)
 
         Raises:
             DuplicateJobError: If job_tracker detects a concurrent delta analysis (AC6)
+            AnalysisAlreadyRunningError: If sentinel claim fails (not pre_claimed)
         """
         # Story #876 Phase B-1 Deliverable 3: cluster-atomic job gate.
         # Replaces the Story #312 TOCTOU pattern.  register_job_if_no_conflict
@@ -2757,6 +2874,45 @@ class DependencyMapService:
                         f"JobTracker complete_job (lock skip) failed (non-fatal): {tracker_err}"
                     )
             return None
+
+        # Story #1035: Claim shared sentinel AFTER acquiring in-process lock.
+        # The sentinel is the cluster-wide authority; threading.Lock is the same-process belt.
+        # When pre_claimed=True the route layer already claimed before spawning the thread,
+        # so we skip try_claim but still initialise _delta_sentinel for the finally release (B3).
+        _delta_sentinel_job_id = (
+            _tracked_job_id or job_id or f"dep-map-delta-{uuid.uuid4().hex[:8]}"
+        )
+        _delta_dep_map_dir = self.get_sentinel_dir() or (
+            Path(self._golden_repos_manager.golden_repos_dir)
+            / "cidx-meta"
+            / "dependency-map"
+        )
+        _delta_sentinel = SharedJobSentinel(
+            _delta_dep_map_dir, ANALYSIS_STALE_TIMEOUT_SECONDS
+        )
+        if not pre_claimed:
+            _delta_claim = _delta_sentinel.try_claim(
+                "analysis", _delta_sentinel_job_id, self._get_node_id()
+            )
+            if not _delta_claim.success:
+                self._lock.release()
+                if _tracked_job_id is not None and self._job_tracker is not None:
+                    try:
+                        self._job_tracker.fail_job(
+                            _tracked_job_id,
+                            error="Analysis already in progress (sentinel held)",
+                        )
+                    except Exception as tracker_err:
+                        logger.warning(
+                            f"JobTracker fail_job (delta sentinel conflict) failed (non-fatal): {tracker_err}"
+                        )
+                raise AnalysisAlreadyRunningError(
+                    active_job_id=(
+                        _delta_claim.active.job_id
+                        if _delta_claim.active
+                        else _delta_sentinel_job_id
+                    )
+                )
 
         # Story #227: Acquire write lock so RefreshScheduler skips CoW clone during writes.
         _write_lock_acquired = False
@@ -3132,6 +3288,18 @@ class DependencyMapService:
                 )
 
             self._lock.release()
+
+            # Story #1035: Release shared sentinel so other nodes can claim.
+            if "_delta_sentinel" in locals() and "_delta_sentinel_job_id" in locals():
+                try:
+                    _delta_sentinel.release(
+                        "analysis", expected_job_id=_delta_sentinel_job_id
+                    )
+                except Exception as sentinel_err:
+                    logger.warning(
+                        "run_delta_analysis: sentinel.release failed (non-fatal): %s",
+                        sentinel_err,
+                    )
 
             # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
             if (
