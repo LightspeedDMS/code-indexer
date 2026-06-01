@@ -643,6 +643,39 @@ class TestCowDaemonBackendCreateClone:
             with pytest.raises(TimeoutError, match="slow-job"):
                 backend.create_clone("/src", "ns", "clone")
 
+    def test_create_clone_sanitizes_namespace_with_dots(self):
+        """Story #1034: alias with dots must be sanitized before sending to daemon
+        (daemon _validate_identifier rejects dots in namespace/name)."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "job-san"})
+        poll_resp = _make_response(
+            200, {"status": "completed", "clone_path": "alias_with_dots/v_123"}
+        )
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone("/src/repo", "alias.with.dots", "v_123")
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["namespace"] == "alias_with_dots"
+        assert body["name"] == "v_123"
+
+    def test_create_clone_sanitizes_name_with_dots(self):
+        """Story #1034: name with dots must be sanitized before sending to daemon."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "job-san2"})
+        poll_resp = _make_response(
+            200, {"status": "completed", "clone_path": "ns/v_1_2_3"}
+        )
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone("/src/repo", "ns", "v_1.2.3")
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["namespace"] == "ns"
+        assert body["name"] == "v_1_2_3"
+
 
 class TestCowDaemonBackendDeleteClone:
     """Tests for CowDaemonBackend.delete_clone()."""
