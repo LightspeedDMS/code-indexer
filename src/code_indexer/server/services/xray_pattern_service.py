@@ -39,6 +39,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+from code_indexer.server.services.cidx_meta_backup.branch_detect import (
+    detect_default_branch,
+)
+from code_indexer.server.services.cidx_meta_backup.sync import CidxMetaBackupSync
+from code_indexer.server.services.config_service import get_config_service
 from code_indexer.xray.sandbox import validate_rust_evaluator
 
 logger = logging.getLogger(__name__)
@@ -420,17 +426,29 @@ class XrayPatternService:
             )
 
     def _git_commit(self, files: List[Path], message: str) -> None:
-        """Add files and create a git commit in cidx-meta.
+        """Add files and create a git commit in cidx-meta, then trigger backup sync.
+
+        Uses canonical cidx-meta-backup author/committer identity. After a
+        successful commit, calls CidxMetaBackupSync.sync() when backup is
+        configured and enabled. Any sync failure is surfaced as a WARNING
+        (deferred-failure pattern) — the commit itself is not rolled back.
 
         Args:
             files: List of absolute paths to git-add.
             message: Commit message.
         """
+        env = build_non_interactive_git_env()
+        env["GIT_AUTHOR_NAME"] = "cidx-meta-backup"
+        env["GIT_AUTHOR_EMAIL"] = "cidx-meta-backup@example.invalid"
+        env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
+        env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
+
         try:
             relative_files = [str(f.relative_to(self._cidx_meta)) for f in files]
             subprocess.run(
                 ["git", "add"] + relative_files,
                 cwd=str(self._cidx_meta),
+                env=env,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -438,12 +456,31 @@ class XrayPatternService:
             subprocess.run(
                 ["git", "commit", "-m", message],
                 cwd=str(self._cidx_meta),
+                env=env,
                 check=True,
                 capture_output=True,
                 text=True,
             )
         except subprocess.CalledProcessError as exc:
             logger.warning("xray_pattern_service: git commit failed: %s", exc)
+            return
+
+        # Trigger backup sync when configured and enabled
+        config = get_config_service().get_config()
+        backup_cfg = getattr(config, "cidx_meta_backup_config", None)
+        if backup_cfg is not None and getattr(backup_cfg, "enabled", False):
+            branch = detect_default_branch(str(self._cidx_meta)) or "master"
+            sync = CidxMetaBackupSync(
+                cidx_meta_path=str(self._cidx_meta),
+                branch=branch,
+                claude_resolver=None,
+            )
+            result = sync.sync()
+            if result.sync_failure:
+                logger.warning(
+                    "XrayPatternService: cidx-meta backup sync deferred-failure: %s",
+                    result.sync_failure,
+                )
 
     # ------------------------------------------------------------------
     # Private helpers
