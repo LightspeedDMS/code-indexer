@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.87.0] - 2026-06-01
+
+### Fixed (Bug #1036)
+- `XrayPatternService._git_commit` (`server/services/xray_pattern_service.py`) now uses the canonical cidx-meta backup pattern from Story #926: `build_non_interactive_git_env()` + `cidx-meta-backup` author/committer identity, followed by `CidxMetaBackupSync.sync()` to push to the configured remote. Previously the bare `subprocess.run(["git", "commit"], ...)` produced commits authored as `code-indexer@<hostname>` that were never pushed — pattern changes only reached the remote when the next refresh cycle's sync happened to run.
+- Sync failures surface via WARNING log (deferred-failure pattern mirroring `refresh_scheduler.py`); the commit itself is not rolled back.
+- Graceful degradation when `cidx_meta_backup_config.enabled=False` — local commit still happens, sync is skipped.
+
+### Tests (Bug #1036)
+- 5 new unit tests in `tests/unit/server/services/test_xray_pattern_service_backup_sync.py` covering canonical env vars, sync invocation, sync_failure surfacing, graceful degradation when backup disabled, and `cidx_meta_path` correctly forwarded to `CidxMetaBackupSync`.
+
 ## [10.86.0] - 2026-06-01
 
 ### Added (Story #1035)
