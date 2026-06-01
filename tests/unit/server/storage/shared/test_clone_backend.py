@@ -1163,6 +1163,77 @@ class TestCowDaemonBackendCreateCloneAtPath:
         assert headers["Authorization"] == "Bearer test-api-key"
 
 
+class TestCowDaemonBackendPathTranslation:
+    """Story #1034: CowDaemonBackend translates CIDX NFS paths to daemon-local XFS paths."""
+
+    def _make_cow_config_with_translation(self):
+        from code_indexer.server.utils.config_manager import CowDaemonConfig
+
+        return CowDaemonConfig(
+            daemon_url="http://daemon:8081",
+            api_key="test-api-key",
+            mount_point="/mnt/cow-storage",
+            poll_interval_seconds=1,
+            timeout_seconds=30,
+            daemon_storage_path="/home/jsbattig/cow-storage",
+        )
+
+    def test_create_clone_at_path_translates_paths_when_daemon_storage_path_set(self):
+        """Story #1034: CowDaemonBackend must translate mount_point to daemon_storage_path for both source and dest."""
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        config = self._make_cow_config_with_translation()
+        backend = CowDaemonBackend(config=config)
+
+        post_resp = _make_response(202, {"job_id": "job-translate"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path(
+                "/mnt/cow-storage/golden-repos/myrepo",
+                "/mnt/cow-storage/golden-repos/myrepo/.versioned/ns/v_123",
+            )
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["source_path"] == "/home/jsbattig/cow-storage/golden-repos/myrepo"
+        assert (
+            body["dest_path"]
+            == "/home/jsbattig/cow-storage/golden-repos/myrepo/.versioned/ns/v_123"
+        )
+
+    def test_create_clone_at_path_no_translation_when_daemon_storage_path_unset(self):
+        """Backward compat: when daemon_storage_path is None, paths pass through unchanged."""
+        backend = _make_cow_backend()  # no daemon_storage_path
+
+        post_resp = _make_response(202, {"job_id": "job-notr"})
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.create_clone_at_path(
+                "/mnt/nfs/cidx/golden-repos/src",
+                "/mnt/nfs/cidx/golden-repos/dst",
+            )
+
+        body = mock_req.post.call_args[1]["json"]
+        assert body["source_path"] == "/mnt/nfs/cidx/golden-repos/src"
+        assert body["dest_path"] == "/mnt/nfs/cidx/golden-repos/dst"
+
+    def test_create_clone_at_path_rejects_path_outside_mount_point(self):
+        """If daemon_storage_path is set, paths NOT under mount_point raise ValueError."""
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+
+        config = self._make_cow_config_with_translation()
+        backend = CowDaemonBackend(config=config)
+
+        with pytest.raises(ValueError, match="not under mount_point"):
+            backend.create_clone_at_path(
+                "/elsewhere/golden-repos/src",
+                "/elsewhere/golden-repos/dst",
+            )
+
+
 class TestCloneBackendFactoryMissingConfig:
     """Factory raises ValueError when required config is None."""
 
