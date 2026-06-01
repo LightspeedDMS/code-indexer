@@ -676,6 +676,43 @@ class TestCowDaemonBackendCreateClone:
         assert body["namespace"] == "ns"
         assert body["name"] == "v_1_2_3"
 
+    def test_create_clone_translates_daemon_path_when_storage_path_set(self):
+        """Story #1034: when daemon_storage_path is set, daemon absolute clone_path is
+        translated back to CIDX mount-point view, not double-prefixed."""
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+        from code_indexer.server.utils.config_manager import CowDaemonConfig
+
+        config = CowDaemonConfig(
+            daemon_url="http://daemon:8081",
+            api_key="key",
+            mount_point="/mnt/cow-storage",
+            poll_interval_seconds=1,
+            timeout_seconds=30,
+            daemon_storage_path="/home/jsbattig/cow-storage",
+        )
+        backend = CowDaemonBackend(config=config)
+
+        post_resp = _make_response(202, {"job_id": "job-tr"})
+        # Daemon returns clone_path as absolute daemon-local path (without leading slash)
+        poll_resp = _make_response(
+            200,
+            {
+                "status": "completed",
+                "clone_path": "home/jsbattig/cow-storage/langfuse_Claude_Code_seba_battig/v_123",
+            },
+        )
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            result = backend.create_clone("/src/repo", "langfuse.alias", "v_123")
+
+        # Should be /mnt/cow-storage/langfuse_Claude_Code_seba_battig/v_123,
+        # NOT /mnt/cow-storage/home/jsbattig/cow-storage/...
+        assert result == "/mnt/cow-storage/langfuse_Claude_Code_seba_battig/v_123"
+        # namespace must be sanitized in the POST body
+        body = mock_req.post.call_args[1]["json"]
+        assert body["namespace"] == "langfuse_alias"
+
 
 class TestCowDaemonBackendDeleteClone:
     """Tests for CowDaemonBackend.delete_clone()."""
@@ -1194,6 +1231,48 @@ class TestCowDaemonBackendCreateCloneAtPath:
 
         headers = mock_req.post.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer test-api-key"
+
+
+class TestCowDaemonBackendTranslateFromDaemonPath:
+    """Story #1034: CowDaemonBackend._translate_from_daemon_path reverses daemon-local path to CIDX view."""
+
+    def _make_backend_with_translation(self):
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+        from code_indexer.server.utils.config_manager import CowDaemonConfig
+
+        config = CowDaemonConfig(
+            daemon_url="http://daemon:8081",
+            api_key="key",
+            mount_point="/mnt/cow-storage",
+            poll_interval_seconds=1,
+            timeout_seconds=30,
+            daemon_storage_path="/home/jsbattig/cow-storage",
+        )
+        return CowDaemonBackend(config=config)
+
+    def test_translate_from_daemon_path_strips_daemon_prefix_and_adds_mount_point(self):
+        """Daemon absolute path /home/jsbattig/cow-storage/ns/name -> /mnt/cow-storage/ns/name."""
+        backend = self._make_backend_with_translation()
+        result = backend._translate_from_daemon_path(
+            "/home/jsbattig/cow-storage/langfuse_Claude_Code_seba_battig/v_123"
+        )
+        assert result == "/mnt/cow-storage/langfuse_Claude_Code_seba_battig/v_123"
+
+    def test_translate_from_daemon_path_handles_path_without_leading_slash(self):
+        """Daemon returns path without leading slash (e.g. 'home/jsbattig/cow-storage/ns/name')."""
+        backend = self._make_backend_with_translation()
+        result = backend._translate_from_daemon_path(
+            "home/jsbattig/cow-storage/myns/v_456"
+        )
+        assert result == "/mnt/cow-storage/myns/v_456"
+
+    def test_translate_from_daemon_path_no_daemon_storage_path_uses_original_behaviour(
+        self,
+    ):
+        """When daemon_storage_path unset, prepends mount_point directly to clone_path."""
+        backend = _make_cow_backend()  # no daemon_storage_path
+        result = backend._translate_from_daemon_path("ns/clone-001")
+        assert result == "/mnt/nfs/cidx/ns/clone-001"
 
 
 class TestCowDaemonBackendPathTranslation:

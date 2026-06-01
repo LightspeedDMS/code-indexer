@@ -334,6 +334,42 @@ class CowDaemonBackend:
             )
         return self._daemon_storage_path + cidx_path[len(self._mount_point) :]
 
+    def _translate_from_daemon_path(self, daemon_clone_path: str) -> str:
+        """Translate daemon-local clone_path returned by a job back to a CIDX mount-point path.
+
+        The daemon job response contains clone_path as the daemon-local absolute path
+        (e.g. ``home/jsbattig/cow-storage/ns/name`` without leading slash, or
+        ``/home/jsbattig/cow-storage/ns/name`` with leading slash).
+
+        When daemon_storage_path is configured we strip it and replace with mount_point.
+        When daemon_storage_path is empty the clone_path is already relative (``ns/name``)
+        and we prepend mount_point directly (original behaviour).
+        """
+        if not self._daemon_storage_path:
+            # Original behaviour: clone_path is "namespace/name" relative
+            return f"{self._mount_point}/{daemon_clone_path}"
+        # Normalise: ensure absolute path form for comparison
+        absolute_clone = (
+            daemon_clone_path
+            if daemon_clone_path.startswith("/")
+            else f"/{daemon_clone_path}"
+        )
+        daemon_prefix = self._daemon_storage_path  # already rstripped of "/"
+        if (
+            absolute_clone.startswith(daemon_prefix + "/")
+            or absolute_clone == daemon_prefix
+        ):
+            suffix: str = absolute_clone[len(daemon_prefix) :]
+            return str(self._mount_point) + suffix
+        # Fallback: daemon returned an unexpected path — prefix mount_point as-is
+        logger.warning(
+            "CowDaemonBackend._translate_from_daemon_path: clone_path '%s' is not under "
+            "daemon_storage_path '%s' — returning mount_point-prefixed path",
+            daemon_clone_path,
+            self._daemon_storage_path,
+        )
+        return f"{self._mount_point}/{daemon_clone_path}"
+
     def create_clone(
         self,
         source_path: str,
@@ -373,7 +409,7 @@ class CowDaemonBackend:
         job_id = response.json()["job_id"]
         effective_timeout = timeout if timeout is not None else self._timeout
         clone_path = self._poll_job(job_id, effective_timeout)
-        return f"{self._mount_point}/{clone_path}"
+        return self._translate_from_daemon_path(clone_path)
 
     def create_clone_at_path(
         self,
