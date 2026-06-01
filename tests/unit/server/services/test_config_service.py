@@ -593,3 +593,25 @@ class TestClaudeDelegationSettings:
         # Get settings and verify skip_ssl_verify is True
         settings = service.get_all_settings()
         assert settings["claude_delegation"]["skip_ssl_verify"] is True
+
+
+def test_clone_backend_cow_daemon_are_bootstrap_keys() -> None:
+    """Story #510 / Bug #1034: clone_backend and cow_daemon must be bootstrap keys.
+
+    These fields are read during clone_backend_wiring at startup, before the
+    runtime DB is available. They must survive the _strip_config_file_to_bootstrap()
+    pass that runs on every startup in cluster mode. If they are missing from
+    BOOTSTRAP_KEYS, config.json is stripped of them on startup, causing the
+    VersionedSnapshotManager to always fall back to 'local' clone backend regardless
+    of what was written to config.json.
+    """
+    from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
+
+    assert "clone_backend" in BOOTSTRAP_KEYS, (
+        "clone_backend must be in BOOTSTRAP_KEYS: it is read at startup before "
+        "the runtime DB is available and is stripped by _strip_config_file_to_bootstrap()"
+    )
+    assert "cow_daemon" in BOOTSTRAP_KEYS, (
+        "cow_daemon must be in BOOTSTRAP_KEYS: it is read at startup before "
+        "the runtime DB is available and is stripped by _strip_config_file_to_bootstrap()"
+    )
