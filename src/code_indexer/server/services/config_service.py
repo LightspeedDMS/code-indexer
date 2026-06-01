@@ -90,6 +90,8 @@ BOOTSTRAP_KEYS = frozenset(
         "mcp_dispatch_pool_size",  # Story #1009 - asyncio default executor size
         "enable_predeactivation_leak_scan",  # Story #1032 - bootstrap flag to restore pre-flight leak scan
         "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
+        "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
+        "cow_daemon",  # Story #510 / #1034 - daemon config for CowDaemonBackend wiring at startup
     }
 )
 CONFIG_KEY_RUNTIME = "runtime"

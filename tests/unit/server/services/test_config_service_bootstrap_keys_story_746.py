@@ -68,8 +68,6 @@ def test_all_server_config_fields_are_classified() -> None:
             "voyage_ai_sinbin",
             "cohere_sinbin",
             "query_orchestration",
-            "clone_backend",
-            "cow_daemon",
             "memory_retrieval_config",
             "lifecycle_analysis_config",
             "codex_integration_config",  # Story #844 — runtime, not bootstrap
