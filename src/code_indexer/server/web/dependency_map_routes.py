@@ -16,9 +16,13 @@ import html
 import logging
 import re
 import threading
-from datetime import datetime, timezone
+import uuid as _uuid
+from datetime import datetime, datetime as _dt, timezone, timezone as _tz
 from pathlib import Path
-from typing import Optional, Set, Tuple
+from typing import TYPE_CHECKING, Optional, Set, Tuple
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.shared_job_sentinel import SharedJobSentinel
 from urllib.parse import quote
 
 from code_indexer import __version__ as _cidx_version
@@ -91,22 +95,16 @@ def _get_dashboard_service():
 
 def _get_dashboard_cache_backend():
     """
-    Construct and return a DependencyMapDashboardCacheBackend backed by the server DB.
+    Construct and return a FilesystemDashboardCacheBackend for the dep-map output dir.
 
-    Follows the same config-resolution pattern as _get_dashboard_service.
-    Returns None if the server configuration is unavailable.
+    Returns None if _get_dep_map_output_dir() returns None (dep-map disabled/unavailable).
     """
-    try:
-        from ..services.config_service import get_config_service
-        from ..storage.sqlite_backends import DependencyMapDashboardCacheBackend
-
-        config_service = get_config_service()
-        server_dir = config_service.config_manager.server_dir
-        db_path = str(server_dir / "data" / "cidx_server.db")
-        return DependencyMapDashboardCacheBackend(db_path)
-    except Exception as e:
-        logger.warning("_get_dashboard_cache_backend failed: %s", e)
+    dep_map_dir = _get_dep_map_output_dir()
+    if dep_map_dir is None:
         return None
+    from ..storage.filesystem_backends import FilesystemDashboardCacheBackend
+
+    return FilesystemDashboardCacheBackend(cache_dir=dep_map_dir)
 
 
 def _get_job_tracker():
@@ -257,6 +255,9 @@ _DASHBOARD_CACHE_TTL_DEFAULT = 600
 # Operation type registered with BackgroundJobManager for dashboard analysis jobs
 _DASHBOARD_OP_TYPE = "dep_map_dashboard"
 
+# TODO: expose via Web UI Config Screen (Story #1035 follow-up)
+DASHBOARD_STALE_TIMEOUT_SECONDS = 1800  # 30 minutes — dashboard sentinel stale recovery
+
 
 def _get_repair_journal_dir() -> Path:
     """Return the repair activity journal directory.
@@ -339,7 +340,7 @@ def _submit_dashboard_job(
             new_job_id,
             submitter_username="system",
             is_admin=True,
-            repo_alias=None,
+            repo_alias="__depmap_dashboard__",
         )
     except Exception as exc:
         logger.warning("_submit_dashboard_job: submit_job raised: %s", exc)
@@ -691,20 +692,68 @@ def depmap_job_status_partial(request: Request):
                 return _render_computing_response(request, job_id, tracker)
 
     # STATE 3: any in-flight job running (generic, no specific job_id from caller)
+    # First check the shared sentinel (cross-node visibility before local cache slot)
+    dep_map_dir_s3 = _get_dep_map_output_dir()
+    if dep_map_dir_s3 is not None:
+        from ..services.shared_job_sentinel import SharedJobSentinel
+
+        _sentinel_s3 = SharedJobSentinel(
+            sentinel_dir=dep_map_dir_s3,
+            stale_timeout_seconds=DASHBOARD_STALE_TIMEOUT_SECONDS,
+        )
+        _active_s3 = _sentinel_s3.read_active("dashboard")
+        if _active_s3 is not None and not _sentinel_s3.is_stale(
+            _active_s3, DASHBOARD_STALE_TIMEOUT_SECONDS
+        ):
+            _tracked_s3 = (
+                tracker.get_job(_active_s3.job_id) if tracker is not None else None
+            )
+            if _tracked_s3 is not None and _tracked_s3.status in ("running", "pending"):
+                return _render_computing_response(request, _active_s3.job_id, tracker)
+
     running_job_id = (
         cache_backend.get_running_job_id(tracker) if cache_backend is not None else None
     )
     if running_job_id:
         return _render_computing_response(request, running_job_id, tracker)
 
-    # STATE 4: no cache, no in-flight job — submit a new background job
+    # STATE 4: no cache, no in-flight job — claim sentinel and submit a new background job
+    import uuid as _uuid_s4
+    import socket as _socket_s4
+
     bg_manager = _get_background_job_manager()
     dashboard_service = _get_dashboard_service()
-    new_job_id = _submit_dashboard_job(
-        cache_backend, bg_manager, dashboard_service, tracker
-    )
-    if new_job_id:
-        return _render_computing_response(request, new_job_id, tracker)
+    new_job_id = str(_uuid_s4.uuid4())
+
+    dep_map_dir_s4 = _get_dep_map_output_dir()
+    if dep_map_dir_s4 is None:
+        # No sentinel dir available — fall back to direct submit (solo dev mode)
+        submitted_id = _submit_dashboard_job(
+            cache_backend, bg_manager, dashboard_service, tracker
+        )
+        if submitted_id:
+            return _render_computing_response(request, submitted_id, tracker)
+    else:
+        from ..services.shared_job_sentinel import SharedJobSentinel
+
+        _sentinel_s4 = SharedJobSentinel(
+            sentinel_dir=dep_map_dir_s4,
+            stale_timeout_seconds=DASHBOARD_STALE_TIMEOUT_SECONDS,
+        )
+        _node_id_s4 = _socket_s4.gethostname()
+        _claim_s4 = _sentinel_s4.try_claim("dashboard", new_job_id, _node_id_s4)
+        if not _claim_s4.success:
+            # Lost sentinel race — attach to winner's job_id
+            _winner_job_id = (
+                _claim_s4.active.job_id if _claim_s4.active is not None else "unknown"
+            )
+            return _render_computing_response(request, _winner_job_id, tracker)
+        # Won the sentinel claim — submit background job under this job_id
+        submitted_id = _submit_dashboard_job(
+            cache_backend, bg_manager, dashboard_service, tracker
+        )
+        if submitted_id:
+            return _render_computing_response(request, submitted_id, tracker)
 
     # Submission failed: async infrastructure unavailable
     logger.warning(
@@ -1013,12 +1062,24 @@ def depmap_graph_data(request: Request):
 
 def _get_dep_map_output_dir() -> Optional[Path]:
     """
-    Get the dependency map output directory path (Story #342).
+    Get the dependency map output directory path (Story #342, Story #1035 B6).
 
     Returns the path to golden-repos/cidx-meta/dependency-map/ or None
     if the directory does not exist or the config is unavailable.
+
+    Story #1035 B6: Delegates to dep_map_service.get_sentinel_dir() when the
+    service is available so there is a single source of truth for the path.
+    Falls back to config-based derivation when the service is not wired up.
     """
     try:
+        # B6: prefer the service's authoritative path computation
+        dep_map_service = _get_dep_map_service_from_state()
+        if dep_map_service is not None:
+            sentinel_dir: Optional[Path] = dep_map_service.get_sentinel_dir()
+            if sentinel_dir is not None and sentinel_dir.exists():
+                return sentinel_dir
+
+        # Fallback: config-based derivation (used when service not yet wired)
         from ..services.config_service import get_config_service
 
         config_service = get_config_service()
@@ -1337,7 +1398,6 @@ def _run_repair_with_feedback(
     AC3: job registered then delegated to _execute_repair_body (Story #927).
     AC1/AC4/AC5: handled inside _execute_repair_body.
     """
-    import uuid as _uuid
 
     # AC2: Initialize journal in a repair-specific directory
     journal_dir = _get_repair_journal_dir()
@@ -1486,39 +1546,133 @@ def trigger_dependency_map(
             status_code=503,
         )
 
-    # Pre-flight check: prevent concurrent run start using is_available()
+    # Story #1035 — B2/B3: pre-flight sentinel check; on conflict, include
+    # active job_id from the shared sentinel in the 409 body.
     if not dep_map_service.is_available():
+        sentinel_dir_pf = dep_map_service.get_sentinel_dir()
+        active_job_id_pf: str = "unknown"
+        if isinstance(sentinel_dir_pf, (str, Path)):
+            from code_indexer.server.services.shared_job_sentinel import (
+                SharedJobSentinel as _SharedJobSentinel,
+            )
+            from code_indexer.server.services.dependency_map_service import (
+                ANALYSIS_STALE_TIMEOUT_SECONDS as _ANALYSIS_STALE_TIMEOUT_SECONDS_PF,
+            )
+
+            _sentinel_pf = _SharedJobSentinel(
+                sentinel_dir=Path(sentinel_dir_pf),
+                stale_timeout_seconds=_ANALYSIS_STALE_TIMEOUT_SECONDS_PF,
+            )
+            _active_pf = _sentinel_pf.read_active("analysis")
+            if _active_pf is not None:
+                active_job_id_pf = _active_pf.job_id
         return JSONResponse(
-            content={"error": "Analysis already in progress"},
+            content={
+                "error": "already in progress",
+                "job_id": active_job_id_pf,
+                "mode": mode,
+            },
             status_code=409,
         )
+
+    # Story #1035 — B3: synchronous sentinel claim BEFORE spawning the thread.
+    # Catches TOCTOU window between is_available() and the actual claim.
+    job_id = (
+        f"dep-map-{mode}-{_uuid.uuid4().hex[:8]}-{int(_dt.now(_tz.utc).timestamp())}"
+    )
+    pre_claimed = False
+    sentinel_obj: Optional["SharedJobSentinel"] = None
+    sentinel_dir_sc = dep_map_service.get_sentinel_dir()
+    if isinstance(sentinel_dir_sc, (str, Path)):
+        from code_indexer.server.services.shared_job_sentinel import (
+            SharedJobSentinel as _SharedJobSentinel_SC,
+        )
+        from code_indexer.server.services.dependency_map_service import (
+            ANALYSIS_STALE_TIMEOUT_SECONDS as _ANALYSIS_STALE_TIMEOUT_SECONDS_SC,
+        )
+
+        sentinel_obj = _SharedJobSentinel_SC(
+            sentinel_dir=Path(sentinel_dir_sc),
+            stale_timeout_seconds=_ANALYSIS_STALE_TIMEOUT_SECONDS_SC,
+        )
+        _node_id_sc = dep_map_service._get_node_id()
+        _claim_sc = sentinel_obj.try_claim("analysis", job_id, _node_id_sc)
+        if not _claim_sc.success:
+            winner_job_id = (
+                _claim_sc.active.job_id if _claim_sc.active is not None else "unknown"
+            )
+            return JSONResponse(
+                content={
+                    "error": "already in progress",
+                    "job_id": winner_job_id,
+                    "mode": mode,
+                },
+                status_code=409,
+            )
+        pre_claimed = True
 
     if mode == "full":
 
         def _run_full():
+            from code_indexer.server.services.dependency_map_service import (
+                AnalysisAlreadyRunningError,
+            )
+            from code_indexer.server.services.job_tracker import DuplicateJobError
+
             try:
-                dep_map_service.run_full_analysis()
+                dep_map_service.run_full_analysis(pre_claimed=pre_claimed)
+            except (AnalysisAlreadyRunningError, DuplicateJobError) as e:
+                logger.info("Background full analysis skipped (duplicate): %s", e)
             except Exception as e:
                 logger.error("Background full analysis failed: %s", e)
 
-        thread = threading.Thread(target=_run_full, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=_run_full, daemon=True)
+            thread.start()
+        except Exception:
+            # N1: release sentinel if thread spawn fails
+            if pre_claimed and sentinel_obj is not None:
+                sentinel_obj.release("analysis", expected_job_id=job_id)
+            raise
         return JSONResponse(
-            content={"success": True, "message": "Full analysis triggered"},
+            content={
+                "success": True,
+                "message": "Full analysis triggered",
+                "job_id": job_id,
+                "mode": "full",
+            },
             status_code=202,
         )
     else:  # delta
 
         def _run_delta():
+            from code_indexer.server.services.dependency_map_service import (
+                AnalysisAlreadyRunningError,
+            )
+            from code_indexer.server.services.job_tracker import DuplicateJobError
+
             try:
-                dep_map_service.run_delta_analysis()
+                dep_map_service.run_delta_analysis(pre_claimed=pre_claimed)
+            except (AnalysisAlreadyRunningError, DuplicateJobError) as e:
+                logger.info("Background delta analysis skipped (duplicate): %s", e)
             except Exception as e:
                 logger.error("Background delta analysis failed: %s", e)
 
-        thread = threading.Thread(target=_run_delta, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=_run_delta, daemon=True)
+            thread.start()
+        except Exception:
+            # N1: release sentinel if thread spawn fails
+            if pre_claimed and sentinel_obj is not None:
+                sentinel_obj.release("analysis", expected_job_id=job_id)
+            raise
         return JSONResponse(
-            content={"success": True, "message": "Delta refresh triggered"},
+            content={
+                "success": True,
+                "message": "Delta refresh triggered",
+                "job_id": job_id,
+                "mode": "delta",
+            },
             status_code=202,
         )
 
@@ -1536,7 +1690,6 @@ def trigger_refinement(request: Request):
     Admin-only. Returns JSON with success or error.
     Refinement runs in a background daemon thread with job tracking.
     """
-    import uuid as _uuid
 
     session = _require_admin_session(request)
     if not session:

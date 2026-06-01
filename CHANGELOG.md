@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.86.0] - 2026-06-01
+
+### Added (Story #1035)
+- `SharedJobSentinel` (`server/services/shared_job_sentinel.py`) — cluster-wide re-entrancy primitive using atomic `O_CREAT|O_EXCL` on NFS-shared cidx-meta. Methods: `try_claim(op_type, job_id, node_id)`, `release(op_type, expected_job_id)`, `read_active(op_type)`, `is_stale(info, timeout)`. Stale recovery built into `try_claim` (atomic replace via tempfile + os.replace).
+- `FilesystemDashboardCacheBackend` (`server/storage/filesystem_backends.py`) — drop-in replacement for the per-node SQLite dashboard cache. Stores `_dashboard_cache.json` under `cidx-meta/dependency-map/`. Atomic NFSv4-safe writes via tempfile + os.replace. Interface parity with the SQLite backend: `is_fresh`, `get_cached`, `set_result`, `claim_job_slot`, `clear_job_slot_for_retry`, `get_running_job_id`.
+- `AnalysisAlreadyRunningError` — surfaced from `DependencyMapService.run_full_analysis` / `run_delta_analysis` when sentinel claim fails. Carries `active_job_id` for 409 response surfacing.
+- `CLAUDE.md` "Dep-Map Re-Entrancy Sentinels" architectural invariant subsection.
+
+### Changed (Story #1035)
+- `DependencyMapService.is_available()` now consults `SharedJobSentinel.read_active("analysis")` (cluster-visible) instead of a per-process `threading.Lock` (per-node only).
+- `DependencyMapService.run_full_analysis()` / `run_delta_analysis()` wrap analysis body in `SharedJobSentinel.try_claim`/`release` (try/finally). New `pre_claimed` parameter allows route-layer ownership (web/MCP claim sentinel synchronously before spawning the worker thread).
+- Web `POST /admin/dependency-map/trigger` (`dependency_map_routes.py`): synchronous sentinel claim before thread spawn; 409 response body now includes `job_id` of the active analysis; sentinel released on thread-spawn failure.
+- Dashboard partial STATE 3/4 (`dependency_map_routes.py`): STATE 3 reads `SharedJobSentinel.read_active("dashboard")` from shared storage; STATE 4 attempts sentinel claim before submitting the dashboard job. Losing nodes fall through to STATE 3 rendering Processing view attached to winner's job_id.
+- Dashboard background job now submitted with non-NULL `repo_alias="__depmap_dashboard__"` (defense-in-depth — engages JobTracker's `idx_active_job_per_repo` partial unique index alongside sentinel).
+- MCP `trigger_dependency_analysis` handler (`mcp/handlers/admin/__init__.py`): same architecture — synchronous sentinel claim before thread spawn; 409-equivalent error envelope `{"success": false, "error": "already in progress", "job_id": <active>}` on cross-node collision.
+- Bare `except Exception` clauses in both trigger paths narrowed to catch `(DuplicateJobError, AnalysisAlreadyRunningError)` and surface as 409 / MCP error envelope. Other exceptions propagate.
+
+### Tests (Story #1035)
+- 102 new unit tests; 100% coverage on `SharedJobSentinel` and `FilesystemDashboardCacheBackend`.
+- `tests/unit/server/services/test_shared_job_sentinel.py` — claim/release/stale/concurrent race/owner safety.
+- `tests/unit/server/storage/test_filesystem_dashboard_cache.py` — interface parity with SQLite backend.
+- `tests/unit/server/web/test_dependency_map_routes_sentinel.py` — pre-flight claim, 409 surfacing, dashboard STATE 3/4 sentinel paths.
+- `tests/unit/server/services/test_dependency_map_service_sentinel.py` — service-layer sentinel integration.
+- `tests/unit/server/mcp/test_trigger_dependency_analysis_handler_sentinel.py` — MCP handler exception narrowing.
+
 ## [10.85.0] - 2026-05-31
 
 ### Fixed (Story #1034)
