@@ -936,6 +936,9 @@ class CowDaemonConfig:
     mount_point: str = ""
     poll_interval_seconds: int = _COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS
     timeout_seconds: int = _COW_DAEMON_DEFAULT_TIMEOUT_SECONDS
+    daemon_storage_path: Optional[str] = (
+        None  # Story #1034: daemon-side absolute path (where daemon's local XFS lives); used by CowDaemonBackend to translate CIDX paths (mount_point view) to daemon paths (storage_path view) so reflink works on the daemon's local filesystem. Defaults to None for backward compat (no translation when None).
+    )
 
 
 @dataclass

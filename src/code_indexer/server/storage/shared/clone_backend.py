@@ -294,6 +294,7 @@ class CowDaemonBackend:
         self._mount_point = config.mount_point.rstrip("/")
         self._poll_interval = config.poll_interval_seconds
         self._timeout = config.timeout_seconds
+        self._daemon_storage_path = (config.daemon_storage_path or "").rstrip("/")
 
     # Lazy import; direct type annotation is not possible without making requests
     # a hard dependency at import time.
@@ -310,6 +311,28 @@ class CowDaemonBackend:
     def _sanitize_identifier(alias: str) -> str:
         """Daemon rejects dots in namespace/name. Replace with underscores."""
         return alias.replace(".", "_")
+
+    def _translate_to_daemon_path(self, cidx_path: str) -> str:
+        """Translate CIDX-view path (under mount_point) to daemon-local path (under daemon_storage_path).
+
+        Required because:
+        1. Daemon's _validate_dest_path resolves and validates against its local storage_path; CIDX
+           paths via NFS mount are rejected as "not under storage_path".
+        2. For true XFS reflink, the daemon's cp must use its local-XFS paths on both sides.
+
+        When daemon_storage_path is empty (not configured), returns cidx_path unchanged (backward compat).
+        Raises ValueError if cidx_path is not under mount_point (caller must use a path within the mount).
+        """
+        if not self._daemon_storage_path:
+            return cidx_path
+        if (
+            not cidx_path.startswith(self._mount_point + "/")
+            and cidx_path != self._mount_point
+        ):
+            raise ValueError(
+                f"CowDaemonBackend.create_clone_at_path: path '{cidx_path}' is not under mount_point '{self._mount_point}' — cannot translate to daemon view"
+            )
+        return self._daemon_storage_path + cidx_path[len(self._mount_point) :]
 
     def create_clone(
         self,
@@ -340,20 +363,25 @@ class CowDaemonBackend:
         preserve_attrs: bool = True,
         timeout: Optional[int] = None,
     ) -> str:
-        """POST to create a clone at caller-specified dest_path. Returns dest_path."""
+        """POST to create a clone at caller-specified dest_path. Returns dest_path (CIDX-view path)."""
         requests = self._requests()
+        # Translate CIDX-view paths to daemon-local paths so daemon validation passes and reflink works
+        daemon_source = self._translate_to_daemon_path(source_path)
+        daemon_dest = self._translate_to_daemon_path(dest_path)
         namespace = self._sanitize_identifier(Path(dest_path).parent.name)
         name = self._sanitize_identifier(Path(dest_path).name)
         body = {
-            "source_path": source_path,
+            "source_path": daemon_source,
             "namespace": namespace,
             "name": name,
-            "dest_path": dest_path,
+            "dest_path": daemon_dest,
         }
         logger.info(
-            "CowDaemonBackend: creating clone at path '%s' from '%s'",
+            "CowDaemonBackend: creating clone at path '%s' (daemon-side '%s') from '%s' (daemon-side '%s')",
             dest_path,
+            daemon_dest,
             source_path,
+            daemon_source,
         )
         response = requests.post(
             f"{self._daemon_url}/api/v1/clones",
@@ -365,7 +393,7 @@ class CowDaemonBackend:
         job_id = response.json()["job_id"]
         effective_timeout = timeout if timeout is not None else self._timeout
         self._poll_job(job_id, effective_timeout)
-        return dest_path
+        return dest_path  # Return CIDX-view path; caller does file ops via NFS mount
 
     def _poll_job(self, job_id: str, timeout: Optional[float] = None) -> str:
         """Poll GET /api/v1/jobs/{job_id} until completed or timeout. Returns clone_path."""
