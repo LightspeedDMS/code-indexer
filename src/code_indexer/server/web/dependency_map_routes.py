@@ -27,7 +27,7 @@ from urllib.parse import quote
 
 from code_indexer import __version__ as _cidx_version
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth import dependencies
@@ -1497,10 +1497,7 @@ def trigger_dependency_map_repair(request: Request):
     thread = threading.Thread(target=_run_repair, daemon=True)
     thread.start()
 
-    return JSONResponse(
-        content={"success": True, "message": "Repair analysis triggered"},
-        status_code=202,
-    )
+    return Response(status_code=204)
 
 
 @dependency_map_router.post(
@@ -1634,15 +1631,7 @@ def trigger_dependency_map(
             if pre_claimed and sentinel_obj is not None:
                 sentinel_obj.release("analysis", expected_job_id=job_id)
             raise
-        return JSONResponse(
-            content={
-                "success": True,
-                "message": "Full analysis triggered",
-                "job_id": job_id,
-                "mode": "full",
-            },
-            status_code=202,
-        )
+        return Response(status_code=204)
     else:  # delta
 
         def _run_delta():
@@ -1666,15 +1655,7 @@ def trigger_dependency_map(
             if pre_claimed and sentinel_obj is not None:
                 sentinel_obj.release("analysis", expected_job_id=job_id)
             raise
-        return JSONResponse(
-            content={
-                "success": True,
-                "message": "Delta refresh triggered",
-                "job_id": job_id,
-                "mode": "delta",
-            },
-            status_code=202,
-        )
+        return Response(status_code=204)
 
 
 @dependency_map_router.post(
@@ -1758,7 +1739,4 @@ def trigger_refinement(request: Request):
     thread = threading.Thread(target=_run_refinement, daemon=True)
     thread.start()
 
-    return JSONResponse(
-        content={"success": True, "message": "Refinement triggered", "job_id": job_id},
-        status_code=202,
-    )
+    return Response(status_code=204)

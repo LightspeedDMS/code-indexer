@@ -256,17 +256,8 @@
             var statusEl = document.getElementById('depmap-trigger-status');
             if (!statusEl) return;
             var xhr = evt.detail.xhr;
-            if (xhr.status === 200) {
-                try {
-                    var body = JSON.parse(xhr.responseText);
-                    if (body.success) {
-                        statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">' + (body.message || 'Analysis triggered') + '</small>';
-                    } else {
-                        statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">' + (body.error || 'Unexpected response') + '</small>';
-                    }
-                } catch(e) {
-                    statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">Analysis triggered</small>';
-                }
+            if (xhr.status === 204 || xhr.status === 200) {
+                statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">Analysis triggered</small>';
             } else if (xhr.status === 409) {
                 statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Analysis already in progress</small>';
             } else if (xhr.status === 403) {
