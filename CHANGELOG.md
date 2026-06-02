@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.90.0] - 2026-06-02
+
+### Added (Story #1040)
+- Dependency map analysis cancellation: admin can stop a running full or delta analysis mid-flight via `POST /admin/dependency-map/cancel`.
+- `DependencyMapService.cancel_running_analysis()` sets a `threading.Event` (`_cancel_event`) that domain loops in `run_full_analysis`, `run_delta_analysis`, and `run_refinement_cycle` check at the top of each iteration, allowing graceful stop within one domain boundary.
+- Cancel event is cleared at the start of every new analysis run so stale cancellations never affect subsequent runs.
+- When analysis is cancelled, `JobTracker.fail_job()` is called with `"Cancelled by admin"` in the finally block (previously the job was left in `running` state).
+- "Stop Analysis" button added to the dep-map admin page Actions card; visible only while a job is running; disables itself and shows "Stopping..." after click; updates status div with outcome.
+- REST endpoint only (no MCP tool): `POST /admin/dependency-map/cancel` requires admin elevation.
+
 ## [10.89.0] - 2026-06-02
 
 ### Added (Story #1039)

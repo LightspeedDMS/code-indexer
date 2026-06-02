@@ -169,6 +169,11 @@ class DependencyMapService:
         self._daemon_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
+        # Story #1040: Cancellation flag for running analysis jobs.
+        # Set by cancel_running_analysis(); checked in domain loops.
+        # Cleared at the start of each run to prevent stale flags.
+        self._cancel_event = threading.Event()
+
     @property
     def activity_journal(self) -> ActivityJournalService:
         """Return the ActivityJournalService instance (Story #329)."""
@@ -204,6 +209,28 @@ class DependencyMapService:
         constructed service instance, not the pre-construction None placeholder).
         """
         self._repair_invoker_fn = fn
+
+    def cancel_running_analysis(self) -> dict:
+        """Signal cancellation to any running analysis job (Story #1040).
+
+        Checks whether an analysis is currently in progress by attempting a
+        non-blocking lock acquire.  If the lock is free (nothing running),
+        returns a no_active_job response and does NOT set the cancel event.
+        If the lock is held (analysis running), sets _cancel_event and returns
+        a success response.
+
+        Returns:
+            {"success": True, "message": "Cancellation signalled"} when running.
+            {"status": "no_active_job"} when nothing is running.
+        """
+        # Non-blocking probe: if we can acquire the lock, nothing is running.
+        acquired = self._lock.acquire(blocking=False)
+        if acquired:
+            self._lock.release()
+            return {"status": "no_active_job"}
+        # Lock is held by a running analysis — signal cancellation.
+        self._cancel_event.set()
+        return {"success": True, "message": "Cancellation signalled"}
 
     def _run_verification_pass(
         self,
@@ -363,6 +390,10 @@ class DependencyMapService:
             DuplicateJobError: If job_tracker detects a concurrent full analysis (AC6)
             AnalysisAlreadyRunningError: If sentinel claim fails (not pre_claimed)
         """
+        # Story #1040: Clear stale cancel flag before each run so a previous
+        # cancellation does not kill this new analysis.
+        self._cancel_event.clear()
+
         # Story #876 Phase B-1 Deliverable 2: cluster-atomic job gate.
         # Replaces the Story #312 TOCTOU pattern (check_operation_conflict +
         # register_job).  register_job_if_no_conflict is backed by the partial
@@ -568,7 +599,8 @@ class DependencyMapService:
                 run_type="full",
             )
 
-            _analysis_succeeded = True
+            if not self._cancel_event.is_set():
+                _analysis_succeeded = True
             try:
                 self._activity_journal.log(
                     f"Analysis complete: {len(domain_list)} domains analyzed"
@@ -647,16 +679,18 @@ class DependencyMapService:
                     )
 
             # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
-            if (
-                _analysis_succeeded
-                and _tracked_job_id is not None
-                and self._job_tracker is not None
-            ):
+            # Story #1040: Call fail_job when analysis was cancelled.
+            if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
-                    self._job_tracker.complete_job(_tracked_job_id)
+                    if _analysis_succeeded:
+                        self._job_tracker.complete_job(_tracked_job_id)
+                    elif self._cancel_event.is_set():
+                        self._job_tracker.fail_job(
+                            _tracked_job_id, error="Cancelled by admin"
+                        )
                 except Exception as tracker_err:
                     logger.warning(
-                        f"JobTracker complete_job failed (non-fatal): {tracker_err}"
+                        f"JobTracker complete_job/fail_job failed (non-fatal): {tracker_err}"
                     )
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
@@ -832,6 +866,15 @@ class DependencyMapService:
         pass2_start = time.time()
         total_domains = len(domain_list)
         for domain_idx, domain in enumerate(domain_list):
+            # Story #1040: Check for cancellation at the top of each domain iteration.
+            if self._cancel_event.is_set():
+                logger.info(
+                    "Cancellation requested, stopping full analysis after "
+                    "%d/%d domains",
+                    domain_idx,
+                    len(domain_list),
+                )
+                break
             domain_name = domain["name"]
             domain_status = journal.get("pass2", {}).get(domain_name, {}).get("status")
 
@@ -2419,6 +2462,15 @@ class DependencyMapService:
         # Code Review M4: Sort for deterministic processing order
         total_affected = len(affected_domains)
         for domain_idx, domain_name in enumerate(sorted(affected_domains)):
+            # Story #1040: Check for cancellation at the top of each domain iteration.
+            if self._cancel_event.is_set():
+                logger.info(
+                    "Cancellation requested, stopping delta domain update after "
+                    "%d/%d domains",
+                    domain_idx,
+                    total_affected,
+                )
+                break
             domain_file = dependency_map_dir / f"{domain_name}.md"
 
             if not domain_file.exists():
@@ -2810,6 +2862,9 @@ class DependencyMapService:
             DuplicateJobError: If job_tracker detects a concurrent delta analysis (AC6)
             AnalysisAlreadyRunningError: If sentinel claim fails (not pre_claimed)
         """
+        # Story #1040: Clear stale cancel flag before each run.
+        self._cancel_event.clear()
+
         # Story #876 Phase B-1 Deliverable 3: cluster-atomic job gate.
         # Replaces the Story #312 TOCTOU pattern.  register_job_if_no_conflict
         # is backed by the partial unique index idx_active_job_per_repo so
@@ -3248,9 +3303,10 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal copy error: {e}")
 
-            _delta_succeeded = True
+            if not self._cancel_event.is_set():
+                _delta_succeeded = True
             return {
-                "status": "completed",
+                "status": "completed" if _delta_succeeded else "cancelled",
                 "affected_domains": len(affected_domains),
                 "errors": errors,
             }
@@ -3317,16 +3373,18 @@ class DependencyMapService:
                     )
 
             # Story #312: Complete job in tracker on success (AC7). Defensive - never re-raises.
-            if (
-                _delta_succeeded
-                and _tracked_job_id is not None
-                and self._job_tracker is not None
-            ):
+            # Story #1040: Call fail_job when analysis was cancelled.
+            if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
-                    self._job_tracker.complete_job(_tracked_job_id)
+                    if _delta_succeeded:
+                        self._job_tracker.complete_job(_tracked_job_id)
+                    elif self._cancel_event.is_set():
+                        self._job_tracker.fail_job(
+                            _tracked_job_id, error="Cancelled by admin"
+                        )
                 except Exception as tracker_err:
                     logger.warning(
-                        f"JobTracker complete_job failed (non-fatal): {tracker_err}"
+                        f"JobTracker complete_job/fail_job failed (non-fatal): {tracker_err}"
                     )
 
             # Story #227: Release write lock so RefreshScheduler can proceed.
@@ -3486,6 +3544,9 @@ class DependencyMapService:
 
         Returns None in all cases (early exit when disabled or no domains).
         """
+        # Story #1040: Clear stale cancel flag before each run.
+        self._cancel_event.clear()
+
         config = self._config_manager.get_claude_integration_config()
         if not config or not config.refinement_enabled:
             logger.debug("Refinement disabled, skipping refinement cycle")
@@ -3592,6 +3653,15 @@ class DependencyMapService:
             # Bug #874 Story C: time the refinement work so phase_timings_json has honest refine_s.
             t_refine_start = time.time()
             for domain_idx, domain_info in enumerate(batch):
+                # Story #1040: Check for cancellation at the top of each domain iteration.
+                if self._cancel_event.is_set():
+                    logger.info(
+                        "Cancellation requested, stopping refinement after "
+                        "%d/%d domains",
+                        domain_idx,
+                        len(batch),
+                    )
+                    break
                 domain_name = domain_info.get("name", "")
                 if not domain_name:
                     continue
