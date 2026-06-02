@@ -1315,6 +1315,25 @@ def make_lifespan(
             # Story #927: closures capture dep_map_dir, tracking_backend, job_tracker
             _dep_map_dir = Path(golden_repos_dir) / "cidx-meta" / "dependency-map"
 
+            # Bug #1040 follow-up: clean stale sentinel lock files on startup.
+            # Server restart kills analysis threads but leaves sentinel files on
+            # disk, blocking the dep-map UI with a stuck "Processing..." state.
+            if _dep_map_dir.exists():
+                import glob as _glob_sentinel
+
+                for _stale_lock in _glob_sentinel.glob(
+                    str(_dep_map_dir / "_active_*.lock")
+                ):
+                    try:
+                        Path(_stale_lock).unlink()
+                        logger.info("Startup: removed stale sentinel %s", _stale_lock)
+                    except OSError as _e:
+                        logger.warning(
+                            "Startup: failed to remove stale sentinel %s: %s",
+                            _stale_lock,
+                            _e,
+                        )
+
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
                     DepMapHealthDetector,
