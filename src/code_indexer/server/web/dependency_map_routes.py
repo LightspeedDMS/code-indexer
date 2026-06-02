@@ -355,7 +355,10 @@ def _submit_dashboard_job(
         cache_backend.clear_job_slot()
         return None
 
-    return str(submitted_id)
+    actual_id = str(submitted_id)
+    if actual_id != new_job_id:
+        cache_backend.claim_job_slot(actual_id)
+    return actual_id
 
 
 def _render_complete_response(request, session, cached_row: dict) -> HTMLResponse:
