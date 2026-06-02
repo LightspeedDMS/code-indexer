@@ -145,6 +145,33 @@ class TestRewriteLinks:
         # Should not double-add target
         assert result.count("target=") == 1
 
+    def test_parent_relative_link_collapsed_server_side(self, svc):
+        # GitLab-style ../ link from a subdir article: the .. must be resolved
+        # server-side so it never reaches the browser (which would strip the
+        # repo alias). From "guides", "../Public/guide.md" -> repo-root Public/.
+        html = '<a href="../Public/guide.md">Link</a>'
+        result = svc.rewrite_links(html, "my-repo", "guides")
+        assert "/wiki/my-repo/Public/guide.md" in result
+        assert ".." not in result
+
+    def test_parent_relative_link_clamped_at_root(self, svc):
+        # From a root-level article, ../ cannot climb above the repo root.
+        html = '<a href="../Public/guide.md">Link</a>'
+        result = svc.rewrite_links(html, "my-repo", "")
+        assert "/wiki/my-repo/Public/guide.md" in result
+        assert ".." not in result
+
+    def test_dot_slash_relative_link_normalized(self, svc):
+        html = '<a href="./sibling.md">Link</a>'
+        result = svc.rewrite_links(html, "my-repo", "guides")
+        assert "/wiki/my-repo/guides/sibling.md" in result
+
+    def test_relative_link_preserves_fragment(self, svc):
+        html = '<a href="../Public/guide.md#section">Link</a>'
+        result = svc.rewrite_links(html, "my-repo", "guides")
+        assert "/wiki/my-repo/Public/guide.md#section" in result
+        assert ".." not in result
+
 
 class TestBuildBreadcrumbs:
     def test_root_article_path_returns_only_home(self, svc):
