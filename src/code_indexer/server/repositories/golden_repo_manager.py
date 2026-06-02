@@ -652,6 +652,23 @@ class GoldenRepoManager:
         """
         return self._sqlite_backend.list_repos()  # type: ignore[no-any-return]
 
+    def is_globally_active(self, alias: str) -> bool:
+        """Return True if *alias* is registered and globally activated (Story #1039).
+
+        Delegates to ``GlobalActivator.is_globally_active``.
+
+        Args:
+            alias: Golden repository alias (bare form, without ``-global`` suffix).
+
+        Returns:
+            ``True`` when the alias has an active ``<alias>-global`` entry in the
+            global registry; ``False`` otherwise.
+        """
+        from code_indexer.global_repos.global_activation import GlobalActivator
+
+        activator = GlobalActivator(self.golden_repos_dir)
+        return bool(activator.is_globally_active(alias))
+
     def register_local_repo(
         self,
         alias: str,

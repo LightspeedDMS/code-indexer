@@ -1,17 +1,16 @@
 """
 Unit tests for Story #724 v2: verification pass wiring in meta_description_hook.
 
-v2 contract: invoke_verification_pass(document_path, repo_list, config) -> None
-  - edits document_path in place
-  - no VerificationResult, no fallback_reason, no discovery_mode
-  - inner except-swallower removed: VerificationFailed propagates past the
-    verification block and is caught by the outer on_repo_added error handler,
-    which falls back to README copy (atomic_write_description NOT called)
+Bug #1038 contract: invoke_verification_pass(document_path, repo_list, config) -> bool
+  - edits document_path in place when successful
+  - returns True on success, False on failure
+  - on False: caller logs warning and uses unverified content (no exception propagation)
+  - atomic_write_description IS called regardless of verification outcome
 
 Coverage:
 - Flag off: verification not called, original body written (AC12)
-- Flag on: mock edits file in place, atomic_write_description receives verified body
-- VerificationFailed: inner swallower gone, outer handler fires (no atomic write)
+- Flag on + success (True): mock edits file in place, atomic_write_description receives verified body
+- Flag on + failure (False): unverified content IS written via atomic_write_description
 - Ordering: invoke_verification_pass called before atomic_write_description
 """
 
@@ -21,8 +20,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from code_indexer.global_repos.dependency_map_analyzer import VerificationFailed
 
 
 # ---------------------------------------------------------------------------
@@ -80,14 +77,16 @@ def _run_on_repo_added(
     *,
     enabled: bool,
     invoke_side_effect=None,
+    invoke_return_value: bool = True,
     write_side_effect=None,
 ):
     """
     Run on_repo_added with all external dependencies mocked.
 
-    The mock for invoke_verification_pass defaults to a no-op (returns None),
-    simulating a successful in-place edit.  Pass invoke_side_effect to override,
-    e.g. to write _VERIFIED_BODY to the path arg or to raise VerificationFailed.
+    The mock for invoke_verification_pass defaults to returning True (success),
+    simulating a successful in-place edit.  Pass invoke_side_effect to override
+    (e.g. to write _VERIFIED_BODY to the path arg), or invoke_return_value=False
+    to simulate a verification failure.
 
     Returns:
         (mock_atomic_write, mock_invoke_verification_pass)
@@ -100,7 +99,9 @@ def _run_on_repo_added(
     mock_config_service = MagicMock()
     mock_config_service.get_config.return_value = _make_server_config(enabled=enabled)
 
-    mock_invoke = MagicMock(side_effect=invoke_side_effect)
+    mock_invoke = MagicMock(
+        side_effect=invoke_side_effect, return_value=invoke_return_value
+    )
     mock_atomic_write = MagicMock(side_effect=write_side_effect)
 
     with (
@@ -178,6 +179,7 @@ class TestWiringWritePath:
         def _edit_in_place(document_path, *args, **kwargs):
             # Simulate Claude editing the temp file in-place
             document_path.write_text(_VERIFIED_BODY)
+            return True
 
         mock_atomic_write, mock_invoke = _run_on_repo_added(
             temp_dirs, enabled=True, invoke_side_effect=_edit_in_place
@@ -201,45 +203,31 @@ class TestWiringWritePath:
 
 
 class TestVerificationFailed:
-    """VerificationFailed propagates out of on_repo_added (no swallower in v2).
+    """When invoke_verification_pass returns False, unverified content is still written (Bug #1038).
 
-    The inner try/except VerificationFailed fallback was deleted in Story #724 v2.
-    VerificationFailed propagates to the caller of on_repo_added.
-    atomic_write_description is NOT called because the exception fires before it.
+    The old behavior raised VerificationFailed and skipped atomic_write_description.
+    The new behavior (Bug #1038): False return causes warning log and fallback to
+    unverified content — atomic_write_description IS called with the original body.
     """
 
-    def test_verification_failed_skips_atomic_write(self, temp_dirs):
-        """Spec AC8: when VerificationFailed is raised, atomic_write_description is
-        NOT called — unverified content never ships to the final path."""
-        from unittest.mock import MagicMock, patch
+    def test_verification_false_still_writes_original_content(self, temp_dirs):
+        """Bug #1038: when invoke_verification_pass returns False,
+        atomic_write_description is called with the original (unverified) body."""
+        mock_atomic_write, mock_invoke = _run_on_repo_added(
+            temp_dirs, enabled=True, invoke_return_value=False
+        )
 
-        def raise_failed(document_path, *args, **kwargs):
-            raise VerificationFailed("both attempts failed")
+        # atomic_write_description MUST still be called (graceful fallback)
+        assert mock_atomic_write.call_count == 1
+        written_content = mock_atomic_write.call_args[0][1]
+        assert written_content == _ORIGINAL_BODY
 
-        write_mock = MagicMock()
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.atomic_write_description",
-            write_mock,
-        ):
-            with pytest.raises(VerificationFailed):
-                _run_on_repo_added(
-                    temp_dirs, enabled=True, invoke_side_effect=raise_failed
-                )
-
-        # atomic_write_description must NOT be called when verification fails
-        assert write_mock.call_count == 0
-
-    def test_verification_failed_invoke_called_once(self, temp_dirs):
-        """invoke_verification_pass called exactly once even when it raises."""
-        call_count = [0]
-
-        def raise_failed(document_path, *args, **kwargs):
-            call_count[0] += 1
-            raise VerificationFailed("both attempts failed")
-
-        with pytest.raises(VerificationFailed):
-            _run_on_repo_added(temp_dirs, enabled=True, invoke_side_effect=raise_failed)
-        assert call_count[0] == 1
+    def test_verification_false_invoke_called_once(self, temp_dirs):
+        """invoke_verification_pass called exactly once even when it returns False."""
+        _, mock_invoke = _run_on_repo_added(
+            temp_dirs, enabled=True, invoke_return_value=False
+        )
+        assert mock_invoke.call_count == 1
 
 
 # ===========================================================================
@@ -257,6 +245,7 @@ class TestWiringOrdering:
 
         def _invoke_effect(document_path, *args, **kwargs):
             call_order.append("invoke_verification_pass")
+            return True
 
         def _write_effect(*args, **kwargs):
             call_order.append("atomic_write_description")

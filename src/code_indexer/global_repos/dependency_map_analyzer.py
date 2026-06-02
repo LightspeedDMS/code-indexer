@@ -214,13 +214,6 @@ def _strip_leading_yaml_frontmatter(content: str) -> str:
     return content[body_start:]
 
 
-class VerificationFailed(RuntimeError):
-    """Raised by invoke_verification_pass when both retry attempts fail (Story #724 v2).
-
-    The exception message includes the temp file path for debugging.
-    """
-
-
 class DependencyMapAnalyzer:
     """
     Analyzes dependencies across golden repositories using Claude CLI.
@@ -3115,8 +3108,7 @@ Rules:
             f"Relative path from your cwd: `./{temp_file_rel}`\n\n"
             f"1. Read the file at the path above\n"
             f"2. Apply your changes using the Edit tool (NOT stdout)\n"
-            f"3. After ALL edits are complete, print exactly this line: FILE_EDIT_COMPLETE\n"
-            f"4. If NO changes are needed, print exactly this line instead: FILE_UNCHANGED\n\n"
+            f"3. If NO changes are needed, print exactly this line instead: FILE_UNCHANGED\n\n"
             f"Do NOT output the full document to stdout. Edit the FILE.\n"
         )
 
@@ -3212,10 +3204,6 @@ Rules:
                 return _DELTA_NOOP
             if not self._verify_file_modified(temp_file, original_mtime, domain_name):
                 return None
-            if "FILE_EDIT_COMPLETE" not in (result or ""):
-                logger.warning(
-                    f"Completion signal missing for delta merge of '{domain_name}'"
-                )
             updated = self._read_file_if_changed(
                 temp_file, existing_content, domain_name, "Delta merge"
             )
@@ -3391,7 +3379,7 @@ Rules:
             try:
                 # Bug #936: route through dispatcher (Claude or Codex) instead of
                 # calling _invoke_claude_cli directly.
-                result = self._dispatch_via_flow(
+                self._dispatch_via_flow(
                     "_cached_refinement_dispatcher",
                     "dependency_map_refinement",
                     prompt,
@@ -3405,10 +3393,6 @@ Rules:
                 return None
             if not self._verify_file_modified(temp_file, original_mtime, domain_name):
                 return None
-            if "FILE_EDIT_COMPLETE" not in (result or ""):
-                logger.warning(
-                    f"Completion signal missing for refinement of '{domain_name}'"
-                )
             return self._read_file_if_changed(
                 temp_file, existing_content, domain_name, "Refinement"
             )
@@ -3432,22 +3416,25 @@ Rules:
         document_path: Path,
         repo_list: list,
         config: Any,  # duck-typed; avoids circular import of ClaudeIntegrationConfig
-    ) -> None:
-        """Post-generation verification pass — file-edit contract (Story #724 v2).
+    ) -> bool:
+        """Post-generation verification pass — best-effort, single attempt (Bug #1038).
 
         Claude reads the file at document_path, verifies every claim against source,
-        edits the file in-place, then prints FILE_EDIT_COMPLETE.  Two attempts are
-        made; the file is re-seeded from original content before each attempt so a
-        partial edit by attempt 1 cannot corrupt attempt 2.
+        and edits the file in-place.  A single attempt is made.
 
-        Postconditions checked after each subprocess call:
-          1. subprocess.TimeoutExpired — caught, triggers retry
-          2. subprocess.CalledProcessError — caught, triggers retry
-          3. stdout does not end with "FILE_EDIT_COMPLETE" as last non-empty line
-          4. temp file is empty or whitespace-only after subprocess return
+        Returns True when the dispatcher reports success and the file is readable
+        and non-empty.  Returns False on any failure (dispatcher error, exception,
+        or empty file).  Never raises on runtime failures — callers use unverified
+        content on False.  Raises ValueError on programming errors (invalid arguments).
 
-        Raises:
-            VerificationFailed: If both attempts fail any postcondition check.
+        The FILE_EDIT_COMPLETE sentinel check has been removed.  Newer Claude models
+        append trailing text after the sentinel, so the sentinel is unreliable as a
+        completion gate.  The file content on disk is the work product.
+
+        Postconditions checked:
+          1. dispatcher reports success
+          2. file is readable
+          3. file is non-empty (not whitespace-only)
         """
         if not isinstance(document_path, Path):
             raise ValueError("document_path must be a pathlib.Path")
@@ -3457,25 +3444,34 @@ Rules:
             raise ValueError("config must not be None")
 
         prompt = self._build_verification_prompt(document_path, repo_list)
-        original_content = document_path.read_text(encoding="utf-8")
         started = time.monotonic()
 
-        for attempt in (1, 2):
-            document_path.write_text(original_content, encoding="utf-8")
+        try:
             failure = self._run_verification_attempt(
-                document_path, prompt, config, attempt
+                document_path, prompt, config
+            )  # Bug #1038: single attempt
+        except Exception as exc:
+            logger.warning(
+                "invoke_verification_pass: unexpected exception for %s — %s",
+                document_path,
+                exc,
             )
-            if failure is None:
-                duration_ms = int(round((time.monotonic() - started) * 1000))
-                logger.info(
-                    "verification pass completed: domain=%s duration_ms=%d attempt=%d",
-                    document_path.stem,
-                    duration_ms,
-                    attempt,
-                )
-                return
+            return False
+        if failure is None:
+            duration_ms = int(round((time.monotonic() - started) * 1000))
+            logger.info(
+                "verification pass completed: domain=%s duration_ms=%d",
+                document_path.stem,
+                duration_ms,
+            )
+            return True
 
-        raise VerificationFailed(f"verification failed twice for {document_path}")
+        logger.warning(
+            "invoke_verification_pass: verification failed (%s) for %s — using unverified content",
+            failure,
+            document_path,
+        )
+        return False
 
     def _build_verification_prompt(self, document_path: Path, repo_list: list) -> str:
         """Build the full verification prompt: rendered fact_check.md + file instructions."""
@@ -3495,12 +3491,12 @@ Rules:
         document_path: Path,
         prompt: str,
         config: Any,  # duck-typed; avoids circular import of ClaudeIntegrationConfig
-        attempt: int,
     ) -> Optional[str]:
         """Execute one verification subprocess and check all postconditions.
 
         Returns None on full success, or a short failure-reason string on any failure.
-        Logs WARNING for each failure; the caller (invoke_verification_pass) retries or raises.
+        Logs WARNING for each failure; the caller (invoke_verification_pass) decides
+        what to do with the failure.
         """
         # Bug #936: route through dispatcher (Claude or Codex) instead of
         # calling _invoke_claude_cli directly.
@@ -3513,57 +3509,37 @@ Rules:
         )
         if not result.success:
             logger.warning(
-                "invoke_verification_pass: attempt %d dispatcher reported failure: %s",
-                attempt,
+                "invoke_verification_pass: dispatcher reported failure: %s",
                 result.error or result.output,
             )
             return "cli_error"
 
-        return self._check_verification_postconditions(
-            document_path, result.output, attempt
-        )
+        return self._check_verification_postconditions(document_path)
 
     def _check_verification_postconditions(
         self,
         document_path: Path,
-        stdout: str,
-        attempt: int,
     ) -> Optional[str]:
         """Check all postconditions after a verification subprocess returns.
 
         Returns None on success (all checks pass). Returns a reason string
-        (e.g., "empty_file", "missing_sentinel") on failure.
+        (e.g., "empty_file", "file_missing") on failure.
         Failure reason strings are used for WARNING log messages.
 
-        Postconditions checked (4 total):
-          1. subprocess.TimeoutExpired — handled by caller before this function
-          2. subprocess.CalledProcessError — handled by caller before this function
-          3. FILE_EDIT_COMPLETE not the last non-empty line of stdout
-          4. temp file is empty or whitespace-only after subprocess return
+        Postconditions checked:
+          1. file is readable after subprocess return
+          2. file is non-empty (not whitespace-only)
         """
-        # Sentinel must be the last non-empty line, not merely present as substring
-        non_empty_lines = [
-            line.strip() for line in (stdout or "").splitlines() if line.strip()
-        ]
-        if not non_empty_lines or non_empty_lines[-1] != "FILE_EDIT_COMPLETE":
-            logger.warning(
-                "invoke_verification_pass: attempt %d missing FILE_EDIT_COMPLETE sentinel on final line",
-                attempt,
-            )
-            return "missing_sentinel"
-
         try:
             current_content = document_path.read_text(encoding="utf-8")
         except OSError:
             logger.warning(
-                "invoke_verification_pass: attempt %d could not read file", attempt
+                "invoke_verification_pass: could not read file after verification"
             )
             return "file_missing"
 
         if not current_content.strip():
-            logger.warning(
-                "invoke_verification_pass: attempt %d produced empty file", attempt
-            )
+            logger.warning("invoke_verification_pass: verification produced empty file")
             return "empty_file"
 
         return None

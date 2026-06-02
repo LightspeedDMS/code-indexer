@@ -1678,6 +1678,40 @@ def trigger_dependency_map(
 
 
 @dependency_map_router.post(
+    "/dependency-map/cancel",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def cancel_dependency_map_analysis(request: Request):
+    """
+    Cancel a running dependency map analysis (Story #1040).
+
+    POST /admin/dependency-map/cancel
+
+    Admin-only. Sends a cancellation signal to any running full or delta analysis.
+    Returns immediately — the running analysis will stop at the next domain iteration.
+    No MCP tool is provided; this endpoint is REST-only.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(
+            content={"error": "Admin access required"},
+            status_code=401,
+        )
+
+    dep_map_service = _get_dep_map_service_from_state()
+    if dep_map_service is None:
+        return JSONResponse(
+            content={
+                "error": "Dependency map service not available (disabled or not initialized)"
+            },
+            status_code=503,
+        )
+
+    result = dep_map_service.cancel_running_analysis()
+    return JSONResponse(content=result, status_code=200)
+
+
+@dependency_map_router.post(
     "/dependency-map/trigger-refinement",
     dependencies=[Depends(dependencies.require_elevation())],
 )

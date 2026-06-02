@@ -629,6 +629,27 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if isinstance(repository_alias, list):
             return _omni_list_files(params, user)
 
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
+
         path = params.get("path", "")
         recursive = params.get("recursive", True)
         user_path_pattern = params.get("path_pattern")
@@ -678,6 +699,27 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         repository_alias = params["repository_alias"]
         file_path = params["file_path"]
+
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
 
         # Bug #336: Check cidx-meta file-level access before returning content
         if repository_alias and "cidx-meta" in repository_alias:
@@ -767,6 +809,28 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         bp = _normalize_browse_params(params)
         repository_alias = bp["repository_alias"]
+
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        bp["repository_alias"] = _promoted
+                        repository_alias = _promoted
 
         is_global_repo = False
         if repository_alias and repository_alias.endswith("-global"):
@@ -1165,6 +1229,25 @@ def handle_directory_tree(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         golden_repos_dir = _get_golden_repos_dir()

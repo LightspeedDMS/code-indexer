@@ -116,6 +116,8 @@ def _compute_file_history_fetch_limit(
 
 def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_file_history tool - get commit history for a file."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -129,6 +131,26 @@ def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: path"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
+
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
         if error_msg is not None:
@@ -297,6 +319,25 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
 
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_handler_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_handler_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
+
     try:
         # Resolve repository path, checking for .git directory existence
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -428,6 +469,8 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_show_commit tool - get detailed commit information."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -443,6 +486,25 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: commit_hash"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -509,6 +571,8 @@ def handle_git_show_commit(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_file_at_revision tool - get file contents at specific revision."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -529,6 +593,25 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: revision"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -587,6 +670,25 @@ def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: from_revision"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_handler_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_handler_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -845,6 +947,25 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     if line_err:
         return _mcp_response({"success": False, "error": line_err})
 
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_handler_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_handler_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
+
     try:
         repo_path, error_msg = _get_legacy()._resolve_git_repo_path(
             repository_alias, user.username
@@ -992,6 +1113,8 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
 
 def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_commits tool - search commit messages."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1013,6 +1136,25 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: query"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -1090,6 +1232,8 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
 
 def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_diffs tool - search for code changes (pickaxe search)."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1115,6 +1259,25 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "error": "Missing required parameter: search_string or search_pattern",
             }
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Resolve repository path, checking for .git directory existence
@@ -1201,6 +1364,8 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_status tool - get repository working tree status."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1209,6 +1374,25 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1249,11 +1433,32 @@ def git_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_fetch tool - fetch refs from remote."""
+    from . import _utils
+
     repository_alias = args.get("repository_alias")
     if not repository_alias:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         # Bug #639: Call fetch_from_remote wrapper to trigger migration if needed
@@ -1292,6 +1497,8 @@ def git_fetch(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_branch_list tool - list all branches."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1300,6 +1507,25 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1340,6 +1566,8 @@ def git_branch_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_conflict_status tool - get detailed merge conflict status."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1348,6 +1576,25 @@ def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1394,6 +1641,8 @@ def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_diff tool - get diff of working tree changes with pagination."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1402,6 +1651,25 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
@@ -1477,6 +1745,8 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_log tool - get commit history with pagination."""
+    from . import _utils
+
     leg = _get_legacy()
     _resolve_git_repo_path = leg._resolve_git_repo_path
 
@@ -1485,6 +1755,25 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": "Missing required parameter: repository_alias"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)

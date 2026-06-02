@@ -9,6 +9,8 @@
 - [feedback_versioned_path_trap.md](feedback_versioned_path_trap.md) - _resolve_golden_repo_path returns VERSIONED path — NEVER write to it, resolve to base clone first
 - [feedback_convert_tool_docs_destructive.md](feedback_convert_tool_docs_destructive.md) - NEVER run tools/convert_tool_docs.py — silently breaks entire MCP tool surface
 - [feedback_no_secrets_in_memory.md](feedback_no_secrets_in_memory.md) - NEVER write IPs, secrets, credentials, topology into memory files — they are versioned
+- [feedback_own_all_repo_changes.md](feedback_own_all_repo_changes.md) - NEVER revert other subagents' changes — own ALL changes found in repo
+- [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
@@ -27,6 +29,7 @@
 - [feedback_ruff_black_version_alignment.md](feedback_ruff_black_version_alignment.md) - Pre-commit ruff version must match system ruff; server-fast-automation uses ruff format
 - [feedback_no_unnecessary_questions.md](feedback_no_unnecessary_questions.md) - Never stop for obvious next steps — only stop if genuinely blocked
 - [feedback_no_confirmation_on_commands.md](feedback_no_confirmation_on_commands.md) - Direct commands are instructions to execute, not proposals — never ask "should I proceed?"
+- [feedback_implement_story_agentic_no_stops.md](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs the FULL workflow non-stop — no pre-flight questions, the story breakdown is already the agreement
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - Ask confirmation before ANY changes to progress reporting
 - [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - Targeted requests must NOT trigger UI rewrites or unrelated styling changes
 - [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Use code-reviewer (opus) for all reviews — Codex credits running low

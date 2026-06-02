@@ -511,6 +511,26 @@ def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # Single-repo path (string alias)
     # ------------------------------------------------------------------
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repo_alias_parsed, str) and not repo_alias_parsed.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repo_alias_parsed):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repo_alias_parsed, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repo_alias_parsed,
+                        _promoted,
+                        user.username,
+                    )
+                    repo_alias_parsed = _promoted
+                    params["repository_alias"] = _promoted
+
     repo_path_str = _resolve_repo_path(repo_alias_parsed)
     if repo_path_str is None:
         return _mcp_response(
@@ -966,6 +986,26 @@ def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     # Single-repo path
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repo_alias_parsed, str) and not repo_alias_parsed.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repo_alias_parsed):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repo_alias_parsed, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repo_alias_parsed,
+                        _promoted,
+                        user.username,
+                    )
+                    repo_alias_parsed = _promoted
+                    params["repository_alias"] = _promoted
+
     repo_path_str = _resolve_repo_path(repo_alias_parsed)
     if repo_path_str is None:
         return _mcp_response(
@@ -1057,6 +1097,25 @@ def handle_xray_dump_ast(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"error": "invalid_file_path", "message": "file_path must not be empty"}
         )
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repo_alias, str) and not repo_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repo_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repo_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repo_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    repo_alias = _promoted
+                    params["repository_alias"] = _promoted
 
     # 3. Repository alias resolution
     repo_path_str = _resolve_repo_path(repo_alias)

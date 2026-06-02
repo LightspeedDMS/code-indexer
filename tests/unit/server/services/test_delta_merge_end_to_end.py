@@ -144,7 +144,7 @@ def test_update_domain_file_ends_with_exactly_two_frontmatter_markers(
             import subprocess as _subprocess
 
             return _subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
+                args=[], returncode=0, stdout="delta merge done", stderr=""
             )
 
         return _side_effect

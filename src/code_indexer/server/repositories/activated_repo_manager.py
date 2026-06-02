@@ -815,6 +815,24 @@ class ActivatedRepoManager:
         """
         return self._list_user_repos(username)
 
+    def user_has_activated_repo(self, username: str, alias: str) -> bool:
+        """Return True if *username* has *alias* in their activated-repo list.
+
+        Used by the bare-to-global fallback (Story #1039) to decide whether
+        the fallback should be skipped (activated repo takes precedence).
+
+        Args:
+            username: Authenticated user's username.
+            alias: Repository alias to look up (bare, no ``-global`` suffix).
+
+        Returns:
+            ``True`` when the user has an activated repo whose ``user_alias``
+            matches *alias*; ``False`` otherwise.
+        """
+        return alias in {
+            r["user_alias"] for r in self.list_activated_repositories(username)
+        }
+
     def list_all_activated_repositories(self) -> List[Dict[str, Any]]:
         """
         List activated repositories across all users (admin only).

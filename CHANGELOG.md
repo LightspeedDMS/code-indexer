@@ -5,7 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.90.0] - 2026-06-02
+
+### Added (Story #1040)
+- Dependency map analysis cancellation: admin can stop a running full or delta analysis mid-flight via `POST /admin/dependency-map/cancel`.
+- `DependencyMapService.cancel_running_analysis()` sets a `threading.Event` (`_cancel_event`) that domain loops in `run_full_analysis`, `run_delta_analysis`, and `run_refinement_cycle` check at the top of each iteration, allowing graceful stop within one domain boundary.
+- Cancel event is cleared at the start of every new analysis run so stale cancellations never affect subsequent runs.
+- When analysis is cancelled, `JobTracker.fail_job()` is called with `"Cancelled by admin"` in the finally block (previously the job was left in `running` state).
+- "Stop Analysis" button added to the dep-map admin page Actions card; visible only while a job is running; disables itself and shows "Stopping..." after click; updates status div with outcome.
+- REST endpoint only (no MCP tool): `POST /admin/dependency-map/cancel` requires admin elevation.
+
+## [10.89.0] - 2026-06-02
+
+### Added (Story #1039)
+- Per-handler bare-to-global alias fallback for 31 read-only MCP handlers. When a dep-map analysis Claude subagent passes a bare repo alias (e.g. `evolution`) instead of the `-global`-suffixed form (`evolution-global`), and the user does not have that repo in their own activated-repo list, the handler transparently promotes the alias to `evolution-global` if the golden repo is globally active. Eliminates the 445 daily "Repository not found for user admin" errors that Claude dep-map subagents were generating.
+- New `_global_fallback.py` helper module (`server/mcp/handlers/`) with `try_global_fallback(alias, golden_repo_manager) -> str | None`.
+- New `user_has_activated_repo(username, alias) -> bool` method on `ActivatedRepoManager` for pre-check membership test.
+- New `is_globally_active(alias) -> bool` method on `GoldenRepoManager` delegating to `GlobalActivator`.
+- Fallback applied to: `search_code`, `handle_regex_search`, `get_file_content`, `list_files`, `browse_directory`, `handle_directory_tree`, `handle_xray_search`, `handle_xray_explore`, `handle_xray_dump_ast`, `scip_definition`, `scip_references`, `scip_dependencies`, `scip_dependents`, `scip_impact`, `scip_callchain`, `scip_context`, `get_branches`, and 12 git-read handlers.
+- Write/mutation handlers remain strict -- no fallback applied.
+
 ## [10.88.0] - 2026-06-01
+
+### Fixed (Bug #1038)
+- Bug #1038: Removed FILE_EDIT_COMPLETE sentinel from dep-map verification pipeline. Verification is now best-effort (single attempt, returns bool, never raises). Eliminates catastrophic retry cascade that burned hundreds of dollars when model output format changed.
 
 ### Fixed (Bug #1037)
 - `XrayPatternService.store_pattern` / `delete_pattern` (`server/services/xray_pattern_service.py`) now serialize via the existing `_COARSE_ALIAS="cidx-meta"` write lock through a `_run_with_coarse_lock` helper modeled on `MemoryStoreService` (`server/services/memory_store_service.py:372`). When the lock is held by `refresh_scheduler` / `memory_store_service` / `dep_map_service`, the xray service writes the YAML to disk and SKIPS `_git_commit` — the lock holder's refresh will sweep the change via `git add -A`. When unlocked, xray acquires the lock and runs `_git_commit` + `CidxMetaBackupSync.sync()` inside the critical section.

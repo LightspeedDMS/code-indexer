@@ -196,3 +196,4 @@ coverage.json
 /reports/manual-testing
 /reports/test-debug
 /.claude/worktrees
+/rust/xray-core/.claude/tdd-guard
