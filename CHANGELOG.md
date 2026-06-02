@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.2] - 2026-06-02
+
+### Fixed
+- Users page delete (and other admin POST handlers) now use PRG (Post-Redirect-Get): on success/failure the server returns a 303 redirect to `/admin/users?success=<code>&u=<username>` (or `?error=<code>`) instead of rendering the page inline. This avoids the `document.write()` HTMX re-init bug (v10.91.1 polling fallback was insufficient in practice). The form interceptor in `base.html` already handles `resp.redirected === true` by doing a full `window.location.href = resp.url` navigation, which triggers HTMX auto-init normally. The users table now re-renders after delete.
+- Added `_USERS_PAGE_SUCCESS_MESSAGES` and `_USERS_PAGE_ERROR_MESSAGES` whitelist dicts in `routes.py` so query-string status codes can never inject HTML into the rendered page (XSS prevention). Unknown codes silently fall through to no banner.
+
 ## [10.91.1] - 2026-06-02
 
 ### Fixed
