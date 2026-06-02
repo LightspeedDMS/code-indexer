@@ -691,69 +691,26 @@ def depmap_job_status_partial(request: Request):
             elif job.status in ("running", "pending"):
                 return _render_computing_response(request, job_id, tracker)
 
-    # STATE 3: any in-flight job running (generic, no specific job_id from caller)
-    # First check the shared sentinel (cross-node visibility before local cache slot)
-    dep_map_dir_s3 = _get_dep_map_output_dir()
-    if dep_map_dir_s3 is not None:
-        from ..services.shared_job_sentinel import SharedJobSentinel
-
-        _sentinel_s3 = SharedJobSentinel(
-            sentinel_dir=dep_map_dir_s3,
-            stale_timeout_seconds=DASHBOARD_STALE_TIMEOUT_SECONDS,
-        )
-        _active_s3 = _sentinel_s3.read_active("dashboard")
-        if _active_s3 is not None and not _sentinel_s3.is_stale(
-            _active_s3, DASHBOARD_STALE_TIMEOUT_SECONDS
-        ):
-            _tracked_s3 = (
-                tracker.get_job(_active_s3.job_id) if tracker is not None else None
-            )
-            if _tracked_s3 is not None and _tracked_s3.status in ("running", "pending"):
-                return _render_computing_response(request, _active_s3.job_id, tracker)
-
+    # STATE 3: any in-flight dashboard job running (check actual job status, not sentinel)
     running_job_id = (
         cache_backend.get_running_job_id(tracker) if cache_backend is not None else None
     )
     if running_job_id:
         return _render_computing_response(request, running_job_id, tracker)
 
-    # STATE 4: no cache, no in-flight job — claim sentinel and submit a new background job
-    import uuid as _uuid_s4
-    import socket as _socket_s4
-
+    # STATE 4: no cache, no in-flight job -- submit a new background dashboard job.
+    # Dashboard jobs are lightweight (~1s) and already have dedup via
+    # cache_backend.claim_job_slot(). SharedJobSentinel is NOT used for dashboard
+    # jobs -- the sentinel was never released after completion, causing permanent
+    # "Processing..." on every subsequent page load (Bug in Story #1035).
     bg_manager = _get_background_job_manager()
     dashboard_service = _get_dashboard_service()
-    new_job_id = str(_uuid_s4.uuid4())
 
-    dep_map_dir_s4 = _get_dep_map_output_dir()
-    if dep_map_dir_s4 is None:
-        # No sentinel dir available — fall back to direct submit (solo dev mode)
-        submitted_id = _submit_dashboard_job(
-            cache_backend, bg_manager, dashboard_service, tracker
-        )
-        if submitted_id:
-            return _render_computing_response(request, submitted_id, tracker)
-    else:
-        from ..services.shared_job_sentinel import SharedJobSentinel
-
-        _sentinel_s4 = SharedJobSentinel(
-            sentinel_dir=dep_map_dir_s4,
-            stale_timeout_seconds=DASHBOARD_STALE_TIMEOUT_SECONDS,
-        )
-        _node_id_s4 = _socket_s4.gethostname()
-        _claim_s4 = _sentinel_s4.try_claim("dashboard", new_job_id, _node_id_s4)
-        if not _claim_s4.success:
-            # Lost sentinel race — attach to winner's job_id
-            _winner_job_id = (
-                _claim_s4.active.job_id if _claim_s4.active is not None else "unknown"
-            )
-            return _render_computing_response(request, _winner_job_id, tracker)
-        # Won the sentinel claim — submit background job under this job_id
-        submitted_id = _submit_dashboard_job(
-            cache_backend, bg_manager, dashboard_service, tracker
-        )
-        if submitted_id:
-            return _render_computing_response(request, submitted_id, tracker)
+    submitted_id = _submit_dashboard_job(
+        cache_backend, bg_manager, dashboard_service, tracker
+    )
+    if submitted_id:
+        return _render_computing_response(request, submitted_id, tracker)
 
     # Submission failed: async infrastructure unavailable
     logger.warning(
