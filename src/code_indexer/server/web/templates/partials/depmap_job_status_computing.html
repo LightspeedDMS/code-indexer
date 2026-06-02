@@ -18,30 +18,33 @@
         </button>
         <div id="depmap-trigger-status" style="font-size: 0.9rem;"></div>
     </div>
+    <script>
+    if (!window._depmapStopDefined) {
+        window._depmapStopDefined = true;
+        window.depmapStopAnalysis = function(btn) {
+            btn.disabled = true;
+            btn.textContent = 'Stopping...';
+            var statusEl = document.getElementById('depmap-trigger-status');
+            fetch('/admin/dependency-map/cancel', {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}})
+                .then(function(r) { return r.json().then(function(body) { return {status: r.status, body: body}; }); })
+                .then(function(res) {
+                    if (!statusEl) return;
+                    if (res.status === 200 && res.body.success) {
+                        statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Stop signal sent -- analysis will halt shortly</small>';
+                    } else if (res.status === 200 && res.body.status === 'no_active_job') {
+                        statusEl.innerHTML = '<small style="color: var(--pico-muted-color);">No active analysis to stop</small>';
+                    } else {
+                        statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Stop request failed</small>';
+                        btn.disabled = false;
+                        btn.textContent = 'Stop Analysis';
+                    }
+                })
+                .catch(function() {
+                    if (statusEl) statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Stop request failed</small>';
+                    btn.disabled = false;
+                    btn.textContent = 'Stop Analysis';
+                });
+        };
+    }
+    </script>
 </div>
-<script>
-function depmapStopAnalysis(btn) {
-    btn.disabled = true;
-    btn.textContent = 'Stopping...';
-    var statusEl = document.getElementById('depmap-trigger-status');
-    fetch('/admin/dependency-map/cancel', {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}})
-        .then(function(r) { return r.json().then(function(body) { return {status: r.status, body: body}; }); })
-        .then(function(res) {
-            if (!statusEl) return;
-            if (res.status === 200 && res.body.success) {
-                statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Stop signal sent -- analysis will halt shortly</small>';
-            } else if (res.status === 200 && res.body.status === 'no_active_job') {
-                statusEl.innerHTML = '<small style="color: var(--pico-muted-color);">No active analysis to stop</small>';
-            } else {
-                statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Stop request failed</small>';
-                btn.disabled = false;
-                btn.textContent = 'Stop Analysis';
-            }
-        })
-        .catch(function() {
-            if (statusEl) statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Stop request failed</small>';
-            btn.disabled = false;
-            btn.textContent = 'Stop Analysis';
-        });
-}
-</script>
