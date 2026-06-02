@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.0] - 2026-06-02
+
+### Fixed
+- Users page delete button consistently returned "Invalid CSRF token". Root cause: the hidden `<form id="delete-form-...">` was placed directly inside `<tbody>` in `partials/users_list.html`. HTML5 in-table insertion mode inserts the form and immediately pops it off the open elements stack, orphaning the `<input type="hidden" name="csrf_token">` from the form. Native form submit therefore sent no csrf_token field. Wrapped the delete form in `<tr><td colspan="5">` to match the edit/email/password forms in the same template. Regression test added: `tests/unit/server/web/test_users_delete_form_html5_parse.py` (uses html5lib parser, which enforces HTML5 in-table rules — html.parser/lxml are lenient and do not catch this).
+
 ## [10.90.0] - 2026-06-02
 
 ### Added (Story #1040)
