@@ -1075,14 +1075,50 @@ def _create_users_page_response(
     return response
 
 
+_USERS_PAGE_SUCCESS_MESSAGES = {
+    "user_deleted": "User '{u}' deleted successfully",
+    "user_created": "User '{u}' created successfully",
+    "role_updated": "Role for '{u}' updated successfully",
+    "email_updated": "Email for '{u}' updated successfully",
+    "password_changed": "Password for '{u}' changed successfully",
+}
+
+_USERS_PAGE_ERROR_MESSAGES = {
+    "invalid_csrf": "Invalid CSRF token",
+    "cannot_delete_self": "Cannot delete your own account",
+    "user_manager_unavailable": "User manager not available",
+}
+
+
+def _resolve_users_page_messages(
+    success: Optional[str], error: Optional[str], u: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Whitelist-map PRG query params to user-facing success/error messages."""
+    success_message: Optional[str] = None
+    error_message: Optional[str] = None
+    if success and success in _USERS_PAGE_SUCCESS_MESSAGES:
+        success_message = _USERS_PAGE_SUCCESS_MESSAGES[success].format(u=u or "")
+    if error and error in _USERS_PAGE_ERROR_MESSAGES:
+        error_message = _USERS_PAGE_ERROR_MESSAGES[error]
+    return success_message, error_message
+
+
 @web_router.get("/users", response_class=HTMLResponse)
-def users_page(request: Request):
+def users_page(
+    request: Request,
+    success: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    u: Optional[str] = Query(None),
+):
     """Users management page - list all users with CRUD operations."""
     session = _require_admin_session(request)
     if not session:
         return _create_login_redirect(request)
 
-    return _create_users_page_response(request, session)
+    success_message, error_message = _resolve_users_page_messages(success, error, u)
+    return _create_users_page_response(
+        request, session, success_message=success_message, error_message=error_message
+    )
 
 
 @web_router.post(
@@ -1337,28 +1373,28 @@ async def delete_user(
     username: str,
     csrf_token: Optional[str] = Form(None),
 ):
-    """Delete a user."""
+    """Delete a user (PRG: redirects to /admin/users with status query)."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Prevent deleting self
     if username == session.username:
-        return _create_users_page_response(
-            request, session, error_message="Cannot delete your own account"
+        return RedirectResponse(
+            url="/admin/users?error=cannot_delete_self", status_code=303
         )
 
     # Delete user
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
@@ -1392,11 +1428,12 @@ async def delete_user(
                 )
             )
 
-        return _create_users_page_response(
-            request, session, success_message=f"User '{username}' deleted successfully"
+        return RedirectResponse(
+            url=f"/admin/users?success=user_deleted&u={quote(username, safe='')}",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
 
 @web_router.get(
