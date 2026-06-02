@@ -2615,6 +2615,25 @@ class BackgroundJobsSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
+    def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
+        """Mark all running/pending jobs as failed. Called on startup."""
+        from datetime import datetime, timezone
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        result = {"count": 0}
+
+        def operation(conn):
+            cur = conn.execute(
+                "UPDATE background_jobs SET status = 'failed', error = ?, "
+                "completed_at = ? WHERE status IN ('running', 'pending')",
+                (error, now_iso),
+            )
+            result["count"] = cur.rowcount
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+        return result["count"]
+
     def list_jobs(
         self,
         username: Optional[str] = None,

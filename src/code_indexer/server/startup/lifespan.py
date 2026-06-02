@@ -1334,6 +1334,24 @@ def make_lifespan(
                             _e,
                         )
 
+            # Bug #1040 follow-up: fail orphaned running/pending jobs in the DB.
+            # Server restart kills threads but leaves job rows as "running" in
+            # PG/SQLite, blocking new submissions via the partial unique index.
+            try:
+                _orphan_count = background_job_manager.fail_orphaned_jobs(
+                    error="Orphaned by server restart"
+                )
+                if _orphan_count:
+                    logger.info(
+                        "Startup: failed %d orphaned running/pending jobs",
+                        _orphan_count,
+                    )
+            except AttributeError:
+                # fail_orphaned_jobs not yet implemented on this BJM version
+                pass
+            except Exception as _oe:
+                logger.warning("Startup: orphaned job cleanup failed: %s", _oe)
+
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
                     DepMapHealthDetector,

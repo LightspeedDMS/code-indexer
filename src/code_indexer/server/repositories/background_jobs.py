@@ -760,6 +760,39 @@ class BackgroundJobManager:
 
         return {"success": False, "message": "Job not found or not authorized"}
 
+    def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
+        """Mark all running/pending jobs as failed on startup.
+
+        Server restart kills threads but leaves job rows as running/pending
+        in the DB, blocking new submissions via the partial unique index.
+        Called from lifespan startup to clean these orphans.
+
+        Returns the number of jobs failed.
+        """
+        count = 0
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+
+        with self._lock:
+            for job in list(self.jobs.values()):
+                if job.status in (JobStatus.RUNNING, JobStatus.PENDING):
+                    job.status = JobStatus.FAILED
+                    job.completed_at = now
+                    job.error = error
+                    count += 1
+
+        if self._sqlite_backend is not None:
+            try:
+                db_count = self._sqlite_backend.fail_orphaned_jobs(error)
+                count += db_count
+            except AttributeError:
+                pass
+            except Exception as e:
+                logging.warning("fail_orphaned_jobs DB cleanup failed: %s", e)
+
+        return count
+
     def _check_db_cancellation(self, job_id: str) -> None:
         """Poll DB for external cancellation (cross-node cluster support).
 
