@@ -692,13 +692,12 @@ def depmap_job_status_partial(request: Request):
         if job is not None:
             if job.status == "completed":
                 if not _analysis_running:
-                    cached = (
-                        cache_backend.get_cached()
-                        if cache_backend is not None
-                        else None
-                    )
-                    if cached is not None:
-                        return _render_complete_response(request, session, cached)
+                    if cache_backend is not None and cache_backend.is_fresh(
+                        _DASHBOARD_CACHE_TTL_DEFAULT
+                    ):
+                        cached = cache_backend.get_cached()
+                        if cached is not None:
+                            return _render_complete_response(request, session, cached)
             elif job.status == "failed":
                 if not _analysis_running:
                     error = getattr(job, "error", None) or "Unknown error"
