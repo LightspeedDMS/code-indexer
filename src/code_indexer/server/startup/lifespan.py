@@ -1318,15 +1318,52 @@ def make_lifespan(
             # Bug #1040 follow-up: clean stale sentinel lock files on startup.
             # Server restart kills analysis threads but leaves sentinel files on
             # disk, blocking the dep-map UI with a stuck "Processing..." state.
+            # CLUSTER SAFETY (Codex SENTINEL-1): only delete sentinels owned by
+            # THIS node. Sibling nodes may have live jobs behind their sentinels.
             if _dep_map_dir.exists():
                 import glob as _glob_sentinel
+                import json as _json_sentinel
+                import socket as _socket_sentinel
+
+                _this_node_id = ""
+                try:
+                    _sc_path = Path(server_data_dir) / "config.json"
+                    if _sc_path.exists():
+                        _sc_data = _json_sentinel.loads(
+                            _sc_path.read_text(encoding="utf-8")
+                        )
+                        _this_node_id = (
+                            _sc_data.get("cluster", {}).get("node_id", "") or ""
+                        )
+                    if not _this_node_id:
+                        _this_node_id = _socket_sentinel.gethostname()
+                except Exception:
+                    _this_node_id = _socket_sentinel.gethostname()
 
                 for _stale_lock in _glob_sentinel.glob(
                     str(_dep_map_dir / "_active_*.lock")
                 ):
                     try:
+                        _lock_text = Path(_stale_lock).read_text(encoding="utf-8")
+                        _lock_data = _json_sentinel.loads(_lock_text)
+                        _lock_node = _lock_data.get("node_id", "")
+                        if _lock_node and _lock_node != _this_node_id:
+                            logger.info(
+                                "Startup: keeping sentinel %s (owned by %s, we are %s)",
+                                _stale_lock,
+                                _lock_node,
+                                _this_node_id,
+                            )
+                            continue
                         Path(_stale_lock).unlink()
-                        logger.info("Startup: removed stale sentinel %s", _stale_lock)
+                        logger.info(
+                            "Startup: removed stale sentinel %s (owned by %s)",
+                            _stale_lock,
+                            _lock_node or "unknown",
+                        )
+                    except (_json_sentinel.JSONDecodeError, KeyError):
+                        Path(_stale_lock).unlink(missing_ok=True)
+                        logger.info("Startup: removed corrupt sentinel %s", _stale_lock)
                     except OSError as _e:
                         logger.warning(
                             "Startup: failed to remove stale sentinel %s: %s",
