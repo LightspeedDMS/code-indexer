@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.88.0] - 2026-06-01
+
+### Fixed (Bug #1037)
+- `XrayPatternService.store_pattern` / `delete_pattern` (`server/services/xray_pattern_service.py`) now serialize via the existing `_COARSE_ALIAS="cidx-meta"` write lock through a `_run_with_coarse_lock` helper modeled on `MemoryStoreService` (`server/services/memory_store_service.py:372`). When the lock is held by `refresh_scheduler` / `memory_store_service` / `dep_map_service`, the xray service writes the YAML to disk and SKIPS `_git_commit` — the lock holder's refresh will sweep the change via `git add -A`. When unlocked, xray acquires the lock and runs `_git_commit` + `CidxMetaBackupSync.sync()` inside the critical section.
+- Two MCP handler call sites in `server/mcp/handlers/xray.py` (`store_xray_pattern`, `delete_xray_pattern`) pass `cidx_meta_path` / `coarse_lock_owner` so the service can identify the lock owner.
+
+### Tests (Bug #1037)
+- 13 new unit tests in `tests/unit/server/services/test_xray_pattern_service_coarse_lock.py` covering lock acquisition (`store_pattern`/`delete_pattern`), piggyback skip when lock held, full critical-section execution when lock free, owner string emission (`xray-pattern:store:*` / `xray-pattern:delete:*`), and integration with `CidxMetaBackupSync`.
+- Handler fixture in `tests/unit/server/mcp/test_xray_pattern_handler.py` updated to accept `**kwargs` for forward compatibility.
+
+### Documentation
+- `CLAUDE.md` adds one-line note to the "cidx-meta backup contract" section pointing to the new coarse-lock invariant.
+
 ## [10.87.0] - 2026-06-01
 
 ### Fixed (Bug #1036)

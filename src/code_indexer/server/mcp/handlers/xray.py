@@ -104,7 +104,10 @@ def _resolve_evaluator_code(
         from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
         cidx_meta = _get_cidx_meta_path()
-        svc = XrayPatternService(cidx_meta)
+        svc = XrayPatternService(
+            cidx_meta,
+            refresh_scheduler=_utils._get_app_refresh_scheduler(),
+        )
         if not _seeds_ensured:
             svc.ensure_seed_patterns()
             _seeds_ensured = True
@@ -186,7 +189,10 @@ def handle_store_xray_pattern(params: Dict[str, Any], user: User) -> Dict[str, A
     from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
     cidx_meta = _get_cidx_meta_path()
-    svc = XrayPatternService(cidx_meta)
+    svc = XrayPatternService(
+        cidx_meta,
+        refresh_scheduler=_utils._get_app_refresh_scheduler(),
+    )
     result = svc.store_xray_pattern(
         scope=scope,
         pattern_yaml=pattern_yaml,
