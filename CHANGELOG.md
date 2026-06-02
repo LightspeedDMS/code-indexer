@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.1] - 2026-06-02
+
+### Fixed
+- Users page: after a successful delete (or any other `/admin/` form POST), the success banner appeared but the users table never re-rendered — stuck on "Loading users…". Root cause: the global form interceptor in `base.html` `_doSubmit()` POSTs via `fetch()` and replaces the page with `document.open()/write()/close()`. `document.write` does not reliably re-fire HTMX's `DOMContentLoaded` auto-init on the new document, so `hx-trigger="load"` elements (like `#users-list-section`) never fire their initial request. Added an explicit `htmx.process(document.body)` call after `document.close()`, with a short polling loop (capped at 40 retries × 50ms = 2s) to wait for the new document's htmx script to load.
+
 ## [10.91.0] - 2026-06-02
 
 ### Fixed

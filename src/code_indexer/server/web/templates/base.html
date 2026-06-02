@@ -91,6 +91,22 @@
                             document.open();
                             document.write(html);
                             document.close();
+                            // document.write does NOT reliably re-fire HTMX's
+                            // DOMContentLoaded auto-init, so hx-trigger="load"
+                            // elements on the new DOM never fire. Poll briefly
+                            // for the new document's htmx to become available,
+                            // then explicitly process the new body.
+                            var _htmxInitTries = 0;
+                            function _processNewDoc() {
+                                if (window.htmx && typeof window.htmx.process === 'function') {
+                                    try { window.htmx.process(document.body); } catch (e) {}
+                                    return;
+                                }
+                                if (_htmxInitTries++ < 40) {
+                                    setTimeout(_processNewDoc, 50);
+                                }
+                            }
+                            _processNewDoc();
                         }
                     });
                 }).catch(function (err) {
