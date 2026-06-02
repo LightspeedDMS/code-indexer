@@ -118,6 +118,14 @@
         document.addEventListener('htmx:beforeSwap', function(evt) {
             var xhr = evt.detail.xhr;
 
+            // Belt-and-suspenders: enforce hx-swap="none" for elements that declare it.
+            // HTMX is not honoring hx-swap="none" reliably, causing JSON responses
+            // to leak into button innerHTML on trigger buttons.
+            var srcElt = evt.detail.elt || (evt.detail.requestConfig && evt.detail.requestConfig.elt);
+            if (srcElt && srcElt.getAttribute && srcElt.getAttribute('hx-swap') === 'none') {
+                evt.detail.shouldSwap = false;
+            }
+
             if (xhr.status === 403) {
                 try {
                     var body = JSON.parse(xhr.responseText);
