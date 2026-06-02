@@ -145,8 +145,8 @@ class TestHandleStoreXrayPattern:
             # Also mock git commit on service instances
             original_init = XrayPatternService.__init__
 
-            def patched_init(self, path: Path) -> None:
-                original_init(self, path)
+            def patched_init(self, path: Path, **kwargs: Any) -> None:
+                original_init(self, path, **kwargs)
                 self._git_commit = MagicMock()  # type: ignore[method-assign]
 
             with patch.object(XrayPatternService, "__init__", patched_init):
@@ -171,8 +171,8 @@ class TestHandleStoreXrayPattern:
 
         original_init = XrayPatternService.__init__
 
-        def patched_init(self, path: Path) -> None:
-            original_init(self, path)
+        def patched_init(self, path: Path, **kwargs: Any) -> None:
+            original_init(self, path, **kwargs)
             self._git_commit = MagicMock()  # type: ignore[method-assign]
 
         with patch(

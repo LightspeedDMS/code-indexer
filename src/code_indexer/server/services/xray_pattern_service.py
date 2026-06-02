@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -54,6 +54,10 @@ _ALLOWED_PARAM_TYPES = frozenset({"usize", "i64", "f64", "bool", "str"})
 
 # Required top-level fields in a pattern YAML
 _REQUIRED_FIELDS = ("name", "description", "language", "evaluator_code")
+
+# Coarse write-lock alias for the shared cidx-meta git repo (Bug #1037).
+# Must match the alias used by MemoryStoreService and RefreshScheduler.
+_COARSE_ALIAS = "cidx-meta"
 
 
 # ---------------------------------------------------------------------------
@@ -223,13 +227,23 @@ class XrayPatternService:
 
     Args:
         cidx_meta_path: The mutable cidx-meta base path (from get_cidx_meta_path()).
+        refresh_scheduler: Optional RefreshScheduler instance. When provided,
+            store_xray_pattern() and delete_pattern() acquire the cidx-meta
+            coarse write lock (mirroring MemoryStoreService._run_with_coarse_lock)
+            before touching the shared git index. When None (default), git commits
+            fire unconditionally as before (backward-compatible solo behaviour).
     """
 
     PATTERNS_DIR = "xray-patterns"
     ANY_SCOPE = "__any__"
 
-    def __init__(self, cidx_meta_path: Path) -> None:
+    def __init__(
+        self,
+        cidx_meta_path: Path,
+        refresh_scheduler: Any = None,
+    ) -> None:
         self._cidx_meta = Path(cidx_meta_path)
+        self._scheduler = refresh_scheduler
 
     @property
     def _patterns_root(self) -> Path:
@@ -321,18 +335,23 @@ class XrayPatternService:
                 ),
             }
 
-        # 7. Write YAML
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(pattern_yaml, encoding="utf-8")
-
-        # 8. Git commit
+        # 7. Write YAML and git-commit under coarse lock.
         action = "update" if is_update else "add"
-        self._git_commit(
-            files=[target_path],
-            message=f"xray-patterns: {action} {scope}/{name}",
-        )
+        owner = f"xray-pattern:store:{name}"
+        result_path = str(target_path.relative_to(self._cidx_meta))
 
-        return {"success": True, "path": str(target_path.relative_to(self._cidx_meta))}
+        def _write_and_commit(piggyback: bool) -> None:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(pattern_yaml, encoding="utf-8")
+            if not piggyback:
+                self._git_commit(
+                    files=[target_path],
+                    message=f"xray-patterns: {action} {scope}/{name}",
+                )
+
+        self._run_with_coarse_lock(owner, _write_and_commit)
+
+        return {"success": True, "path": result_path}
 
     def resolve_and_prepare_pattern(
         self,
@@ -424,6 +443,103 @@ class XrayPatternService:
                 files=created,
                 message="xray-patterns: add seed patterns to __any__/",
             )
+
+    def delete_pattern(self, scope: str, name: str) -> Dict[str, Any]:
+        """Delete a pattern from cidx-meta/xray-patterns/{scope}/{name}.yaml.
+
+        Removes the YAML file from disk under the coarse write lock.
+        When piggybacking (lock already held by another operation) the file
+        is removed from disk but _git_commit is skipped — the lock-holder's
+        refresh picks up the deletion via ``git add -A``.
+
+        Args:
+            scope: Target scope — "__any__" for cross-repo or a repo alias.
+            name: Name of the pattern (filename stem without .yaml).
+
+        Returns:
+            Dict with {"success": True} on success, or
+            {"error": "<code>", "message": "<detail>"} on failure.
+        """
+        for field_label, field_value in (("scope", scope), ("name", name)):
+            if "/" in field_value or "\\" in field_value or ".." in field_value:
+                return {
+                    "error": "path_traversal_rejected",
+                    "message": (
+                        f"{field_label} '{field_value}' contains path traversal sequences"
+                    ),
+                }
+
+        target_path = self._patterns_root / scope / f"{name}.yaml"
+
+        if not target_path.exists():
+            return {
+                "error": "pattern_not_found",
+                "message": f"Pattern '{name}' not found in scope '{scope}'",
+            }
+
+        owner = f"xray-pattern:delete:{name}"
+
+        def _delete_and_commit(piggyback: bool) -> None:
+            target_path.unlink()
+            if not piggyback:
+                self._git_commit(
+                    files=[target_path],
+                    message=f"xray-patterns: delete {scope}/{name}",
+                )
+
+        self._run_with_coarse_lock(owner, _delete_and_commit)
+
+        return {"success": True}
+
+    # ------------------------------------------------------------------
+    # Coarse write-lock coordination (Bug #1037)
+    # Mirrors MemoryStoreService._coarse_piggyback_or_acquire /
+    # _release_coarse_lock / _run_with_coarse_lock.
+    # ------------------------------------------------------------------
+
+    def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
+        """Return True if piggybacking (caller must skip acquire/release).
+
+        Piggyback when is_write_locked returns True, or when acquire returns
+        False (race — another process acquired between check and here).
+        When no scheduler is injected, always returns False (caller owns lock
+        conceptually and will call _git_commit directly).
+        """
+        if self._scheduler is None:
+            return False
+        if self._scheduler.is_write_locked(_COARSE_ALIAS):
+            return True
+        acquired = self._scheduler.acquire_write_lock(_COARSE_ALIAS, owner)
+        # acquired=False means a race into piggyback; we never held the lock.
+        return not acquired
+
+    def _release_coarse_lock(self, owner: str) -> None:
+        """Release the coarse write lock. No-op when no scheduler is injected."""
+        if self._scheduler is None:
+            return
+        self._scheduler.release_write_lock(_COARSE_ALIAS, owner)
+
+    def _run_with_coarse_lock(
+        self,
+        owner: str,
+        operation: Callable[[bool], Any],
+    ) -> Any:
+        """Acquire coarse lock (or piggyback), run operation, release lock.
+
+        The operation receives a single ``piggyback`` bool argument.  When
+        True the operation must skip any git commit (the lock-holder's refresh
+        will pick up filesystem changes via ``git add -A``).
+
+        Guarantees coarse lock release via try/finally when we hold it.
+        Operation exceptions propagate; the coarse lock is still released.
+        """
+        piggyback = self._coarse_piggyback_or_acquire(owner)
+        coarse_held = not piggyback
+        try:
+            return operation(piggyback)
+        finally:
+            if coarse_held:
+                self._release_coarse_lock(owner)
 
     def _git_commit(self, files: List[Path], message: str) -> None:
         """Add files and create a git commit in cidx-meta, then trigger backup sync.

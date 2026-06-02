@@ -281,6 +281,8 @@ Four modules: mcp_parser, parser_tables, parser_hygiene, parser_graph. Anomalies
 
 Sync runs BEFORE indexing in refresh path. All git ops on mutable base path only (`get_cidx_meta_path()`). NEVER inside `.versioned/` snapshots. Push failures deferred (after indexing); conflict failures short-circuit immediately. Conflict resolution via Claude CLI (600s timeout).
 
+`XrayPatternService` (Bug #1037) also acquires the coarse `cidx-meta` write lock via `_run_with_coarse_lock` (mirror of `MemoryStoreService` pattern at `memory_store_service.py:372`) so xray pattern writes serialize with refresh-scheduler / memory-store / dep-map activity on the shared git index.
+
 -> Full reference: `docs/cidx-meta-backup.md`
 
 ### Dep-Map Re-Entrancy Sentinels (Story #1035)
