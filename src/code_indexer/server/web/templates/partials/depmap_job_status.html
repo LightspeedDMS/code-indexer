@@ -280,7 +280,7 @@
                 var statusEl = document.getElementById('depmap-trigger-status');
                 if (!statusEl) return;
                 var xhr = evt.detail.xhr;
-                if (xhr.status === 202) {
+                if (xhr.status === 204) {
                     statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">Repair triggered</small>';
                 } else if (xhr.status === 409) {
                     statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Analysis in progress</small>';

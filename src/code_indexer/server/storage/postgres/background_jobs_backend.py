@@ -318,6 +318,18 @@ class BackgroundJobsPostgresBackend:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
 
+    def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
+        """Mark all running/pending jobs as failed. Called on startup."""
+        sql = (
+            "UPDATE background_jobs SET status = 'failed', error = %s, "
+            "completed_at = NOW() "
+            "WHERE status IN ('running', 'pending')"
+        )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (error,))
+                return int(cur.rowcount)
+
     def list_jobs(
         self,
         username: Optional[str] = None,
