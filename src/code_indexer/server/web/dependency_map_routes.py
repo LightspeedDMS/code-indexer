@@ -669,9 +669,17 @@ def depmap_job_status_partial(request: Request):
     cache_backend = _get_dashboard_cache_backend()
     tracker = _get_job_tracker()
 
-    # STATE 1: fresh cache available
-    if cache_backend is not None and cache_backend.is_fresh(
-        _DASHBOARD_CACHE_TTL_DEFAULT
+    # Story #1040: detect running analysis (full/delta/refinement) BEFORE state machine.
+    # When analysis is running, skip fresh-cache shortcut and show computing partial
+    # with stop button instead of the idle dashboard.
+    _dep_map_svc = _get_dep_map_service_from_state()
+    _analysis_running = _dep_map_svc is not None and not _dep_map_svc.is_available()
+
+    # STATE 1: fresh cache available (skip if analysis is running)
+    if (
+        not _analysis_running
+        and cache_backend is not None
+        and cache_backend.is_fresh(_DASHBOARD_CACHE_TTL_DEFAULT)
     ):
         cached = cache_backend.get_cached()
         if cached is not None:
@@ -683,16 +691,44 @@ def depmap_job_status_partial(request: Request):
         job = tracker.get_job(job_id) if tracker is not None else None
         if job is not None:
             if job.status == "completed":
-                cached = (
-                    cache_backend.get_cached() if cache_backend is not None else None
-                )
-                if cached is not None:
-                    return _render_complete_response(request, session, cached)
+                if not _analysis_running:
+                    cached = (
+                        cache_backend.get_cached()
+                        if cache_backend is not None
+                        else None
+                    )
+                    if cached is not None:
+                        return _render_complete_response(request, session, cached)
             elif job.status == "failed":
-                error = getattr(job, "error", None) or "Unknown error"
-                return _render_error_response(request, error)
+                if not _analysis_running:
+                    error = getattr(job, "error", None) or "Unknown error"
+                    return _render_error_response(request, error)
             elif job.status in ("running", "pending"):
                 return _render_computing_response(request, job_id, tracker)
+
+    # STATE 3a: analysis job (full/delta/refinement) is running -- show computing
+    # partial with stop button. Analysis jobs are tracked via SharedJobSentinel,
+    # not the dashboard cache slot.
+    if _analysis_running:
+        _analysis_job_id = "analysis"
+        try:
+            _sentinel_dir = _dep_map_svc.get_sentinel_dir()
+            if _sentinel_dir is not None:
+                from ..services.shared_job_sentinel import SharedJobSentinel
+                from ..services.dependency_map_service import (
+                    ANALYSIS_STALE_TIMEOUT_SECONDS,
+                )
+
+                _s3a = SharedJobSentinel(
+                    sentinel_dir=Path(_sentinel_dir),
+                    stale_timeout_seconds=ANALYSIS_STALE_TIMEOUT_SECONDS,
+                )
+                _active = _s3a.read_active("analysis")
+                if _active is not None:
+                    _analysis_job_id = _active.job_id
+        except Exception as _e3a:
+            logger.debug("STATE 3a sentinel read failed: %s", _e3a)
+        return _render_computing_response(request, _analysis_job_id, tracker)
 
     # STATE 3: any in-flight dashboard job running (check actual job status, not sentinel)
     running_job_id = (
