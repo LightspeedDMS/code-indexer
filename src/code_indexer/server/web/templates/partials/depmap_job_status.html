@@ -107,17 +107,24 @@
         </header>
         <div style="padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem;">
             <div style="display: flex; gap: 0.5rem;">
-                <button onclick="depmapTrigger(this, 'full')"
+                <button class="depmap-trigger-btn"
+                        hx-post="/admin/dependency-map/trigger"
+                        hx-vals='{"mode": "full"}'
+                        hx-swap="none"
                         style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
                     Full Analysis
                 </button>
-                <button class="secondary"
-                        onclick="depmapTrigger(this, 'delta')"
+                <button class="secondary depmap-trigger-btn"
+                        hx-post="/admin/dependency-map/trigger"
+                        hx-vals='{"mode": "delta"}'
+                        hx-swap="none"
                         style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
                     Delta Refresh
                 </button>
-                <button class="outline small"
-                        onclick="depmapTrigger(this, 'refinement')"
+                <button class="outline small depmap-trigger-btn"
+                        hx-post="/admin/dependency-map/trigger-refinement"
+                        hx-swap="none"
+                        hx-headers='{"X-Requested-With": "XMLHttpRequest"}'
                         style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;"
                         title="Fact-check and refine existing dependency domain documents">
                     Refinement Pass
@@ -238,39 +245,38 @@
 </article>
 {% endif %}
 
-<!-- Story #1040: Trigger button handler (fetch-based, replaces hx-post to prevent JSON leaking into button) -->
+<!-- Story #1040: HTMX afterRequest handler for trigger buttons (prevents JSON leaking into innerHTML) -->
 <script>
-function depmapTrigger(btn, mode) {
-    btn.disabled = true;
-    var label = btn.textContent.trim();
-    btn.textContent = 'Starting...';
-    var statusEl = document.getElementById('depmap-trigger-status');
-    var url = mode === 'refinement' ? '/admin/dependency-map/trigger-refinement' : '/admin/dependency-map/trigger';
-    var body = mode === 'refinement' ? '' : 'mode=' + encodeURIComponent(mode);
-    fetch(url, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest'},
-        body: body
-    })
-    .then(function(r) { return r.json().then(function(b) { return {status: r.status, body: b}; }); })
-    .then(function(res) {
-        btn.disabled = false;
-        btn.textContent = label;
-        if (!statusEl) return;
-        if (res.status === 200 && res.body.success) {
-            statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">' + (res.body.message || 'Analysis triggered') + '</small>';
-        } else if (res.status === 409) {
-            statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Analysis already in progress</small>';
-        } else {
-            statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">' + (res.body.error || 'Trigger failed') + '</small>';
-        }
-    })
-    .catch(function() {
-        btn.disabled = false;
-        btn.textContent = label;
-        if (statusEl) statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Request failed</small>';
-    });
-}
+(function() {
+    if (!window._depmapTriggerListenerAdded) {
+        window._depmapTriggerListenerAdded = true;
+        document.body.addEventListener('htmx:afterRequest', function(evt) {
+            var elt = evt.detail.elt;
+            if (!elt || !elt.classList || !elt.classList.contains('depmap-trigger-btn')) return;
+            var statusEl = document.getElementById('depmap-trigger-status');
+            if (!statusEl) return;
+            var xhr = evt.detail.xhr;
+            if (xhr.status === 200) {
+                try {
+                    var body = JSON.parse(xhr.responseText);
+                    if (body.success) {
+                        statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">' + (body.message || 'Analysis triggered') + '</small>';
+                    } else {
+                        statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">' + (body.error || 'Unexpected response') + '</small>';
+                    }
+                } catch(e) {
+                    statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">Analysis triggered</small>';
+                }
+            } else if (xhr.status === 409) {
+                statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Analysis already in progress</small>';
+            } else if (xhr.status === 403) {
+                statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Elevation required — use the TOTP dialog first</small>';
+            } else {
+                statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Trigger failed (HTTP ' + xhr.status + ')</small>';
+            }
+        });
+    }
+})();
 </script>
 
 <!-- Story #342: Repair button click response handler -->
