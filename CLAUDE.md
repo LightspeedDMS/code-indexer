@@ -296,6 +296,31 @@ Dep-map analysis coordination state lives on the NFS-shared `cidx-meta` filesyst
 - Dashboard defense-in-depth: `_submit_dashboard_job` registers with `repo_alias="__depmap_dashboard__"` (non-NULL) so `idx_active_job_per_repo` also covers it. Dashboard partial STATE 3/4 in `web/dependency_map_routes.py` reflects sentinel status.
 - NEVER store dep-map coordination state in per-node SQLite (`cidx_server.db`). In cluster mode that DB is per-node -- the exact bug Story #1035 fixed. All coordination state goes through `SharedJobSentinel` on cidx-meta.
 
+### Global Repo Alias Fallback (Story #1039)
+
+31 read-only MCP handlers transparently promote bare repo aliases (e.g. `evolution`) to their globally-activated form (`evolution-global`) when:
+1. The alias does not already end with `-global`.
+2. The user does NOT have the alias in their own activated-repo list.
+3. The golden repo is globally active (`GoldenRepoManager.is_globally_active(alias)`).
+
+**Key implementation files**:
+- Helper: `server/mcp/handlers/_global_fallback.py` -- `try_global_fallback(alias, golden_repo_manager) -> str | None`
+- Membership check: `ActivatedRepoManager.user_has_activated_repo(username, alias) -> bool`
+- Global check: `GoldenRepoManager.is_globally_active(alias) -> bool` (delegates to `GlobalActivator`)
+
+**Section A -- handlers with fallback (31 total)**:
+- Search: `search_code`, `handle_regex_search`
+- Files: `get_file_content`, `list_files`, `browse_directory`, `handle_directory_tree`
+- XRay: `handle_xray_search`, `handle_xray_explore`, `handle_xray_dump_ast`
+- SCIP: `scip_definition`, `scip_references`, `scip_dependencies`, `scip_dependents`, `scip_impact`, `scip_callchain`, `scip_context`
+- Repos: `get_branches`
+- Git read: `git_log`, `handle_git_log`, `handle_git_blame`, `git_blame`, `handle_git_file_history`, `handle_git_show_commit`, `handle_git_file_at_revision`, `handle_git_diff`, `handle_git_search_commits`, `handle_git_search_diffs`, `git_status`, `git_fetch`, `git_branch_list`, `git_conflict_status`, `git_diff`
+
+**Section B -- MUST stay strict (no fallback)**:
+All write/mutation handlers: `handle_create_file`, `handle_edit_file`, `handle_delete_file`, git_write handlers (`git_commit`, `git_merge`, `git_branch_create`, `git_branch_delete`, `git_branch_switch`, `git_checkout_file`, `git_merge_abort`, `git_mark_resolved`), PR handlers, CI/CD handlers, provider-index/reindex/status/health handlers, shared resolvers (`_resolve_git_repo_path`, `_resolve_repo_path`, `_get_repository_path`).
+
+**Invariant**: `_global_fallback.py` MUST NEVER be imported from Section B handlers. Pre-check pattern (not catch-and-retry). Activated-repo takes precedence over global fallback.
+
 ---
 
 ## Operational Modes

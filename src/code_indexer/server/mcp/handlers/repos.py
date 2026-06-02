@@ -808,6 +808,27 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         include_remote = params.get("include_remote", False)
 
+        # Story #1039: bare-to-global alias fallback (read-only handler).
+        if isinstance(repository_alias, str) and not repository_alias.endswith(
+            "-global"
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
+
         repo_path, error_response = _resolve_branch_repo_path(repository_alias, user)
         if error_response is not None:
             return error_response  # type: ignore[no-any-return]  # error_response is dict from _mcp_response but mypy sees Any

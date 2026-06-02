@@ -932,6 +932,30 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Story #1039: bare-to-global alias fallback for read-only handlers.
+        # Applied BEFORE routing so the if/elif/else below sees the promoted alias.
+        if (
+            isinstance(repository_alias, str)
+            and repository_alias
+            and not repository_alias.endswith("-global")
+        ):
+            _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+            _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+            if _arm is not None and _grm is not None:
+                if not _arm.user_has_activated_repo(user.username, repository_alias):
+                    from ._global_fallback import try_global_fallback
+
+                    _promoted = try_global_fallback(repository_alias, _grm)
+                    if _promoted is not None:
+                        logger.info(
+                            "bare-alias fallback: %r -> %r for user %r",
+                            repository_alias,
+                            _promoted,
+                            user.username,
+                        )
+                        params["repository_alias"] = _promoted
+                        repository_alias = _promoted
+
         if isinstance(repository_alias, list):
             _result = _omni_search_code(params, user)
         elif repository_alias and repository_alias.endswith("-global"):
@@ -1184,6 +1208,25 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     # once per repo with a single alias, so each recursive call increments here —
     # giving exactly N increments for N repos, with no double-count at the omni entry.
     api_metrics_service.increment_regex_search(username=user.username)
+
+    # Story #1039: bare-to-global alias fallback (read-only handler).
+    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
+        _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+        _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+        if _arm is not None and _grm is not None:
+            if not _arm.user_has_activated_repo(user.username, repository_alias):
+                from ._global_fallback import try_global_fallback
+
+                _promoted = try_global_fallback(repository_alias, _grm)
+                if _promoted is not None:
+                    logger.info(
+                        "bare-alias fallback: %r -> %r for user %r",
+                        repository_alias,
+                        _promoted,
+                        user.username,
+                    )
+                    args["repository_alias"] = _promoted
+                    repository_alias = _promoted
 
     try:
         golden_repos_dir = _get_golden_repos_dir()
