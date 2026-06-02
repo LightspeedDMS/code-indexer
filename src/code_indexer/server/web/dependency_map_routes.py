@@ -1574,7 +1574,9 @@ def trigger_dependency_map(
             from code_indexer.server.services.job_tracker import DuplicateJobError
 
             try:
-                dep_map_service.run_full_analysis(pre_claimed=pre_claimed)
+                dep_map_service.run_full_analysis(
+                    job_id=job_id, pre_claimed=pre_claimed
+                )
             except (AnalysisAlreadyRunningError, DuplicateJobError) as e:
                 logger.info("Background full analysis skipped (duplicate): %s", e)
             except Exception as e:
@@ -1598,7 +1600,9 @@ def trigger_dependency_map(
             from code_indexer.server.services.job_tracker import DuplicateJobError
 
             try:
-                dep_map_service.run_delta_analysis(pre_claimed=pre_claimed)
+                dep_map_service.run_delta_analysis(
+                    job_id=job_id, pre_claimed=pre_claimed
+                )
             except (AnalysisAlreadyRunningError, DuplicateJobError) as e:
                 logger.info("Background delta analysis skipped (duplicate): %s", e)
             except Exception as e:
