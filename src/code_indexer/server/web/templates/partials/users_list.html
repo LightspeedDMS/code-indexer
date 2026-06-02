@@ -106,9 +106,13 @@
         </tr>
 
         <!-- Delete Form (hidden) -->
-        <form id="delete-form-{{ user.username }}" method="post" action="/admin/users/{{ user.username }}/delete" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        </form>
+        <tr id="delete-form-row-{{ user.username }}" class="form-row" style="display: none;">
+            <td colspan="5">
+                <form id="delete-form-{{ user.username }}" method="post" action="/admin/users/{{ user.username }}/delete">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                </form>
+            </td>
+        </tr>
         {% endfor %}
         {% else %}
         <tr>
