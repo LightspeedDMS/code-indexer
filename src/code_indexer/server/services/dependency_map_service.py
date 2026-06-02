@@ -211,22 +211,26 @@ class DependencyMapService:
         document_path: Path,
         repo_list: List[Dict[str, Any]],
         context_label: str,
-    ) -> None:
-        """Run verification pass (Story #724 v2 file-edit contract).
+    ) -> bool:
+        """Run verification pass — best-effort (Bug #1038).
 
-        Delegates to DependencyMapAnalyzer.invoke_verification_pass which edits
-        the file at document_path in-place.  Emits a single structured log on
-        completion.  Raises VerificationFailed if both attempts fail — callers
-        must not swallow this exception.
-
-        Story #724 v2.
+        Returns True on success, False on any failure.
+        Never raises — callers use unverified content on False.
         """
         ci_config = self._config_manager.get_claude_integration_config()
-        self._analyzer.invoke_verification_pass(
-            document_path=document_path,
-            repo_list=repo_list,
-            config=ci_config,
-        )
+        try:
+            return bool(
+                self._analyzer.invoke_verification_pass(
+                    document_path=document_path,
+                    repo_list=repo_list,
+                    config=ci_config,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "verification pass raised for %s", context_label, exc_info=True
+            )
+            return False
 
     def is_available(self) -> bool:
         """
@@ -877,11 +881,16 @@ class DependencyMapService:
                 if chars > 0:
                     # Story #724 v2: optional post-generation verification pass
                     if config.dep_map_fact_check_enabled:
-                        self._run_verification_pass(
+                        verified = self._run_verification_pass(
                             document_path=domain_file,
                             repo_list=repo_list,
                             context_label=f"pass2:{domain_name}",
                         )
+                        if not verified:
+                            logger.warning(
+                                "Verification failed for pass2:%s — keeping unverified content",
+                                domain_name,
+                            )
                         chars = (
                             len(domain_file.read_text()) if domain_file.exists() else 0
                         )
@@ -2346,12 +2355,18 @@ class DependencyMapService:
                 tmp_path = Path(tmp.name)
 
             try:
-                self._run_verification_pass(
+                verified = self._run_verification_pass(
                     document_path=tmp_path,
                     repo_list=delta_repo_list,
                     context_label=f"delta_merge:{domain_name}",
                 )
-                final_content = tmp_path.read_text(encoding="utf-8")
+                if verified:
+                    final_content = tmp_path.read_text(encoding="utf-8")
+                else:
+                    logger.warning(
+                        "Verification failed for delta_merge:%s — using unverified content",
+                        domain_name,
+                    )
             finally:
                 tmp_path.unlink(missing_ok=True)
 

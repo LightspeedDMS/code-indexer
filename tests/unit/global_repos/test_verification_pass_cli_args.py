@@ -5,8 +5,9 @@ Verifies the subprocess cmd and prompt built by invoke_verification_pass:
   - contains --dangerously-skip-permissions
   - config.fact_check_timeout_seconds flows to subprocess timeout kwarg
   - does NOT contain --output-format json (v1 flag, nuked in v2)
-  - prompt appends _build_file_based_instructions output:
-      FILE_EDIT_COMPLETE sentinel string, temp file path, and repo alias
+  - prompt does NOT contain FILE_EDIT_COMPLETE sentinel (Bug #1038: sentinel removed)
+  - prompt still contains FILE_UNCHANGED (intentional no-op signal kept)
+  - prompt contains the temp file path and repo alias
 
 6 tests across 2 classes (TestCmdFlags: 3, TestPromptContent: 3).
 """
@@ -18,12 +19,10 @@ import pytest
 
 from code_indexer.global_repos.dependency_map_analyzer import (
     DependencyMapAnalyzer,
-    VerificationFailed,
     _VERIFICATION_SEMAPHORE_STATE,
 )
 
 # Named constants — no magic numbers in test bodies
-_SENTINEL = "FILE_EDIT_COMPLETE"
 _DEFAULT_TIMEOUT_SECONDS = 60
 _DEFAULT_MAX_CONCURRENT_CLI = 2
 _DEFAULT_MAX_TURNS = 30
@@ -68,9 +67,9 @@ def capture(analyzer, cfg, tmp_path):
     """Factory fixture: call capture(cfg_override=None) -> (cmds, prompts, temp_file, call_kwargs).
 
     Patches subprocess.run inside ClaudeInvoker to record every cmd, the embedded
-    prompt (from cmd[4]), and the kwargs; both attempts exhaust via TimeoutExpired
-    causing VerificationFailed, which is expected here — the fixture is a
-    capture-only helper, not a success-path test harness.
+    prompt (from cmd[4]), and the kwargs; the call raises TimeoutExpired which causes
+    the single verification attempt to fail (returning False). This is expected here
+    — the fixture is a capture-only helper, not a success-path test harness.
     """
 
     def _run(cfg_override=None) -> tuple:
@@ -89,17 +88,13 @@ def capture(analyzer, cfg, tmp_path):
             call_kwargs.append(dict(kwargs))
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=_DEFAULT_TIMEOUT_SECONDS)
 
-        try:
-            with patch(
-                "code_indexer.server.services.claude_invoker.subprocess.run",
-                side_effect=fake_run,
-            ):
-                analyzer.invoke_verification_pass(
-                    temp_file, [{"alias": "r1"}], active_cfg
-                )
-        except VerificationFailed:
-            # Expected: capture helper exhausts both retry attempts intentionally
-            pass
+        with patch(
+            "code_indexer.server.services.claude_invoker.subprocess.run",
+            side_effect=fake_run,
+        ):
+            # Bug #1038: invoke_verification_pass returns bool; single attempt
+            # TimeoutExpired causes it to return False — that's expected here
+            analyzer.invoke_verification_pass(temp_file, [{"alias": "r1"}], active_cfg)
 
         return cmds, prompts, temp_file, call_kwargs
 
@@ -161,15 +156,15 @@ class TestCmdFlags:
 
 
 class TestPromptContent:
-    """Prompt sent to subprocess contains _build_file_based_instructions output."""
+    """Prompt sent to subprocess does NOT contain FILE_EDIT_COMPLETE (Bug #1038)."""
 
-    def test_prompt_contains_file_edit_complete_sentinel(self, capture):
-        """Prompt must reference FILE_EDIT_COMPLETE (from _build_file_based_instructions)."""
+    def test_prompt_does_NOT_contain_file_edit_complete_sentinel(self, capture):
+        """Bug #1038: FILE_EDIT_COMPLETE must NOT be in prompt — sentinel removed."""
         _, prompts, _, _ = capture()
         assert prompts, "No prompts were captured"
         prompt = prompts[0]
-        assert _SENTINEL in prompt, (
-            f"FILE_EDIT_COMPLETE not in prompt — _build_file_based_instructions not appended. "
+        assert "FILE_EDIT_COMPLETE" not in prompt, (
+            f"FILE_EDIT_COMPLETE found in prompt — sentinel must be removed (Bug #1038). "
             f"Prompt start: {prompt[:_PROMPT_PREVIEW_CHARS]}"
         )
 

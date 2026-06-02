@@ -118,7 +118,8 @@ def _make_blocking_fake_run(
     the reseed race where invoke_verification_pass's per-attempt reseed writes
     original_content back to a shared path while another thread's fake_run is
     still using that same path.
-    Returns FILE_EDIT_COMPLETE in stdout to satisfy the sentinel postcondition.
+    Returns non-empty stdout so verification postconditions (readable, non-empty file)
+    are satisfied.
     """
 
     def fake_run(*args, **kwargs):
@@ -146,7 +147,7 @@ def _make_blocking_fake_run(
         thread_doc_path: Path = getattr(doc_path_local, "path")
         thread_doc_path.write_text("# Test\n\nVerified.\n")
         return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
+            args=[], returncode=0, stdout="verification done", stderr=""
         )
 
     return fake_run

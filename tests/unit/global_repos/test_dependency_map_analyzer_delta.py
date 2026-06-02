@@ -1103,7 +1103,7 @@ _TEST_MAX_TURNS = 5
 _MTIME_TICK_S = 0.02  # Sleep duration to guarantee mtime advances
 
 
-def _make_subprocess_result(stdout: str = "FILE_EDIT_COMPLETE") -> object:
+def _make_subprocess_result(stdout: str = "ok") -> object:
     """Return a CompletedProcess-like object with returncode=0."""
     import subprocess as _subprocess
 

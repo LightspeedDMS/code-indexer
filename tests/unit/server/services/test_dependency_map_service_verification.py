@@ -1,16 +1,16 @@
 """
-Unit tests for Story #724 v2: verification pass wiring in DependencyMapService.
+Unit tests for Bug #1038: verification pass wiring in DependencyMapService.
 
-v2 contract: invoke_verification_pass(document_path, repo_list, config) -> None
-  - edits document_path in place
-  - no _run_verification_and_log helper (deleted)
-  - no VerificationResult, no discovery_mode
-  - VerificationFailed propagates (no except-swallower on delta merge path)
+Bug #1038 contract: invoke_verification_pass(document_path, repo_list, config) -> bool
+  - edits document_path in place when successful
+  - returns True on success, False on failure
+  - on False: caller logs warning and uses unverified content
+  - no VerificationFailed exception propagation
 
 Coverage (_update_domain_file — real method, temp files):
 - Flag off: invoke_verification_pass not called; file written with merge content
-- Flag on: invoke_verification_pass called with domain_file; in-place edit reflected on disk
-- VerificationFailed propagates (no swallower)
+- Flag on + True: invoke_verification_pass called; in-place edit reflected on disk
+- Flag on + False: unverified merge content is used (graceful fallback)
 - repo_list built from changed + new + removed aliases (all three sources)
 """
 
@@ -21,7 +21,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import VerificationFailed
 from code_indexer.server.services.dependency_map_service import DependencyMapService
 
 # ---------------------------------------------------------------------------
@@ -82,6 +81,7 @@ def _prime_analyzer(
     *,
     merge_body: str = _MERGE_RESULT_BODY,
     invoke_side_effect=None,
+    invoke_return_value: bool = True,
 ) -> None:
     """Configure mock_analyzer for a delta merge that produces merge_body."""
     mock_analyzer.build_delta_merge_prompt.return_value = "mock prompt"
@@ -89,7 +89,7 @@ def _prime_analyzer(
     if invoke_side_effect is not None:
         mock_analyzer.invoke_verification_pass.side_effect = invoke_side_effect
     else:
-        mock_analyzer.invoke_verification_pass.return_value = None  # v2: returns None
+        mock_analyzer.invoke_verification_pass.return_value = invoke_return_value
 
 
 def _extract_repo_list(mock_analyzer: MagicMock) -> list[Any]:
@@ -111,7 +111,7 @@ class TestDeltaMergeVerificationWiring:
     """Integration tests of the real _update_domain_file method.
 
     Uses a real temp domain file. Mocks analyzer collaborators so no Claude CLI runs.
-    Verifies the verification gate, disk write, and VerificationFailed propagation.
+    Verifies the verification gate, disk write, and graceful fallback on False.
     """
 
     @pytest.fixture()
@@ -193,6 +193,7 @@ class TestDeltaMergeVerificationWiring:
 
         def _edit_in_place(document_path, *args, **kwargs):
             document_path.write_text(_VERIFIED_MERGE_BODY)
+            return True
 
         _prime_analyzer(mock_analyzer, invoke_side_effect=_edit_in_place)
         config = _make_ci_config(fact_check_enabled=True)
@@ -234,28 +235,31 @@ class TestDeltaMergeVerificationWiring:
         assert "new-repo" in aliases, f"new alias missing: {aliases}"
         assert "removed-repo" in aliases, f"removed alias missing: {aliases}"
 
-    def test_flag_true_verification_failed_propagates(self, domain_file: Path) -> None:
-        """VerificationFailed must propagate — no except-swallower on delta merge path.
-        Also confirms domain_file is NOT overwritten with unverified content (AC8)."""
+    def test_flag_true_verification_false_uses_unverified_content(
+        self, domain_file: Path
+    ) -> None:
+        """Bug #1038: when invoke_verification_pass returns False,
+        unverified merge content is written to domain_file (graceful fallback).
+        domain_file is NOT left with the original pre-merge content."""
         service, mock_analyzer, _ = _build_service(fact_check_enabled=True)
-        original_content = domain_file.read_text()
-
-        def _raise_failed(document_path, *args, **kwargs):
-            raise VerificationFailed("both attempts failed")
-
-        _prime_analyzer(mock_analyzer, invoke_side_effect=_raise_failed)
+        _prime_analyzer(
+            mock_analyzer,
+            merge_body=_MERGE_RESULT_BODY,
+            invoke_return_value=False,
+        )
         config = _make_ci_config(fact_check_enabled=True)
 
-        with pytest.raises(VerificationFailed):
-            service._update_domain_file(
-                domain_name="services",
-                domain_file=domain_file,
-                changed_repos=["repo-a"],
-                new_repos=[],
-                removed_repos=[],
-                domain_list=["services"],
-                config=config,
-            )
+        service._update_domain_file(
+            domain_name="services",
+            domain_file=domain_file,
+            changed_repos=["repo-a"],
+            new_repos=[],
+            removed_repos=[],
+            domain_list=["services"],
+            config=config,
+        )
 
-        # domain_file must still contain the original content — unverified merge never written
-        assert domain_file.read_text() == original_content
+        # File must exist and contain the merge result (unverified is acceptable)
+        assert domain_file.exists()
+        content = domain_file.read_text()
+        assert _MERGE_RESULT_BODY in content

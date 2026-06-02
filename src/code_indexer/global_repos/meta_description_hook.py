@@ -410,13 +410,24 @@ def on_repo_added(
                 cidx_meta_path=cidx_meta_path,
                 pass_timeout=ci_config.dependency_map_pass_timeout_seconds,
             )
-            _analyzer.invoke_verification_pass(
+            success = _analyzer.invoke_verification_pass(
                 document_path=tmp_path,
                 repo_list=[{"alias": repo_name, "clone_path": clone_path}],
                 config=ci_config,
             )
-            # Verification succeeded — read the now-edited temp file as verified content
-            verified_content = tmp_path.read_text(encoding="utf-8")
+            if success:
+                verified_content = tmp_path.read_text(encoding="utf-8")
+            else:
+                logger.warning(
+                    "Verification failed for meta description %s — using unverified content",
+                    repo_name,
+                )
+        except Exception:
+            logger.warning(
+                "Verification pass raised for meta description %s",
+                repo_name,
+                exc_info=True,
+            )
         finally:
             tmp_path.unlink(missing_ok=True)
 

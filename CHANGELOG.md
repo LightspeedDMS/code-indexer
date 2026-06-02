@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [10.88.0] - 2026-06-01
 
+### Fixed (Bug #1038)
+- Bug #1038: Removed FILE_EDIT_COMPLETE sentinel from dep-map verification pipeline. Verification is now best-effort (single attempt, returns bool, never raises). Eliminates catastrophic retry cascade that burned hundreds of dollars when model output format changed.
+
 ### Fixed (Bug #1037)
 - `XrayPatternService.store_pattern` / `delete_pattern` (`server/services/xray_pattern_service.py`) now serialize via the existing `_COARSE_ALIAS="cidx-meta"` write lock through a `_run_with_coarse_lock` helper modeled on `MemoryStoreService` (`server/services/memory_store_service.py:372`). When the lock is held by `refresh_scheduler` / `memory_store_service` / `dep_map_service`, the xray service writes the YAML to disk and SKIPS `_git_commit` — the lock holder's refresh will sweep the change via `git add -A`. When unlocked, xray acquires the lock and runs `_git_commit` + `CidxMetaBackupSync.sync()` inside the critical section.
 - Two MCP handler call sites in `server/mcp/handlers/xray.py` (`store_xray_pattern`, `delete_xray_pattern`) pass `cidx_meta_path` / `coarse_lock_owner` so the service can identify the lock owner.

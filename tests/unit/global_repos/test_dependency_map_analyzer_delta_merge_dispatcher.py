@@ -31,7 +31,7 @@ from code_indexer.server.services.intelligence_cli_invoker import InvocationResu
 _DEFAULT_PASS_TIMEOUT = 600
 _DOMAIN_NAME = "test-domain"
 # A sentinel string that invoke_delta_merge_file uses to detect successful file edit.
-_COMPLETION_SIGNAL = "FILE_EDIT_COMPLETE"
+_COMPLETION_SIGNAL = "ok"
 
 
 # ---------------------------------------------------------------------------

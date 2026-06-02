@@ -27,7 +27,7 @@ from code_indexer.server.services.intelligence_cli_invoker import InvocationResu
 
 _DEFAULT_PASS_TIMEOUT = 600
 _DOMAIN_NAME = "test-domain"
-_COMPLETION_SIGNAL = "FILE_EDIT_COMPLETE"
+_COMPLETION_SIGNAL = "ok"
 
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ _MTIME_TICK_S = (
 )
 
 
-def _make_subprocess_result(stdout: str = "FILE_EDIT_COMPLETE") -> object:
+def _make_subprocess_result(stdout: str = "delta merge done") -> object:
     import subprocess as _subprocess
 
     return _subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")

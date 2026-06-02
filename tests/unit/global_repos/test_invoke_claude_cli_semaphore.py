@@ -183,8 +183,8 @@ def _build_dispatching_run(
     """First call blocks (CLI); second is fast (verification) and signals ver_entered_run.
 
     The verification branch (seq != 1) writes different content to doc_path and
-    returns FILE_EDIT_COMPLETE in stdout so all three verification postconditions
-    (sentinel, content-change, non-empty content) are satisfied.
+    returns non-empty stdout so all verification postconditions
+    (file readable, non-empty content) are satisfied.
     """
 
     def dispatching_fake_run(*args, **kwargs):
@@ -200,7 +200,7 @@ def _build_dispatching_run(
         # (constant write — no read — avoids races with concurrent re-seeds)
         doc_path.write_text("# Test\n\nVerified.\n")
         return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
+            args=[], returncode=0, stdout="verification done", stderr=""
         )
 
     return dispatching_fake_run
@@ -363,12 +363,12 @@ class TestColdStartSemaphoreCompatibility(_Base):
                 return subprocess.CompletedProcess(
                     args=[], returncode=0, stdout="CLI result text here", stderr=""
                 )
-            # Verification call: satisfy FILE_EDIT_COMPLETE, mtime-change, non-empty
+            # Verification call: write non-empty content to satisfy postconditions
             doc_path.write_text("# Cold Start Test\n\nVerified content.\n")
             future_time = time.time() + 2.0
             os.utime(doc_path, (future_time, future_time))
             return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
+                args=[], returncode=0, stdout="verification done", stderr=""
             )
 
         with (
