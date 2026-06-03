@@ -615,6 +615,13 @@ def make_lifespan(
             if snapshot_manager is not None:
                 if golden_repo_manager is not None:
                     golden_repo_manager._snapshot_manager = snapshot_manager
+                    # Bug #1044: wire clone_backend into ActivatedRepoManager so
+                    # _clone_with_copy_on_write can route CoW clones through Story
+                    # #1034's backend. Without this every activation fails with the
+                    # wiring-bug guard at activated_repo_manager.py:2643.
+                    arm = getattr(golden_repo_manager, "activated_repo_manager", None)
+                    if arm is not None:
+                        arm._clone_backend = snapshot_manager._clone_backend
                 # Direct wire into refresh_scheduler (belt-and-suspenders)
                 global_lifecycle_manager.refresh_scheduler._snapshot_manager = (
                     snapshot_manager
