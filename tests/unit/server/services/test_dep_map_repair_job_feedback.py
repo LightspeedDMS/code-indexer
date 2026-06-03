@@ -259,13 +259,21 @@ class TestAC2ActivityJournalInitialization:
 
     def test_journal_init_called_before_repair(self, tmp_path):
         """
-        Given repair starts
+        Given repair starts with a dep_map_service providing the shared NFS path (Bug #1041)
         When _run_repair_with_feedback executes
-        Then activity_journal.init() is called with a valid writable path.
+        Then activity_journal.init() is called with a Path.
         """
+        from unittest.mock import MagicMock
+
+        import unittest.mock as _mock
+
         from code_indexer.server.web.dependency_map_routes import (
             _run_repair_with_feedback,
         )
+
+        shared_journal_dir = tmp_path / ".scratch" / "depmap-activity-journal"
+        mock_dep_map_service = MagicMock()
+        mock_dep_map_service.get_activity_journal_dir.return_value = shared_journal_dir
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -277,32 +285,39 @@ class TestAC2ActivityJournalInitialization:
         journal.log = Mock()
         journal.finalize = Mock()
 
-        _run_repair_with_feedback(
-            output_dir=output_dir,
-            tracking_backend=tracking_backend,
-            job_tracker=job_tracker,
-            activity_journal=journal,
-        )
+        with _mock.patch(
+            "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
+            return_value=mock_dep_map_service,
+        ):
+            _run_repair_with_feedback(
+                output_dir=output_dir,
+                tracking_backend=tracking_backend,
+                job_tracker=job_tracker,
+                activity_journal=journal,
+            )
 
         journal.init.assert_called_once()
         init_path = journal.init.call_args[0][0]
         assert isinstance(init_path, Path), (
             f"Expected journal.init() called with a Path, got {type(init_path)}"
         )
-        # The parent directory must exist or be creatable
-        assert init_path.exists() or init_path.parent.exists(), (
-            f"Journal path {init_path} or its parent does not exist"
-        )
 
-    def test_journal_init_uses_repair_specific_directory(self, tmp_path):
+    def test_journal_init_uses_shared_nfs_directory(self, tmp_path):
         """
-        Given repair starts
-        Then journal is initialized in a repair-specific temp directory
-        (not the staging dir, not the delta journal dir).
+        Given repair starts with dep_map_service providing shared NFS path (Bug #1041)
+        Then journal is initialized in the shared NFS directory (depmap-activity-journal).
         """
+        from unittest.mock import MagicMock
+
+        import unittest.mock as _mock
+
         from code_indexer.server.web.dependency_map_routes import (
             _run_repair_with_feedback,
         )
+
+        shared_journal_dir = tmp_path / ".scratch" / "depmap-activity-journal"
+        mock_dep_map_service = MagicMock()
+        mock_dep_map_service.get_activity_journal_dir.return_value = shared_journal_dir
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -314,19 +329,23 @@ class TestAC2ActivityJournalInitialization:
         journal.log = Mock()
         journal.finalize = Mock()
 
-        _run_repair_with_feedback(
-            output_dir=output_dir,
-            tracking_backend=tracking_backend,
-            job_tracker=job_tracker,
-            activity_journal=journal,
-        )
+        with _mock.patch(
+            "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
+            return_value=mock_dep_map_service,
+        ):
+            _run_repair_with_feedback(
+                output_dir=output_dir,
+                tracking_backend=tracking_backend,
+                job_tracker=job_tracker,
+                activity_journal=journal,
+            )
 
         journal.init.assert_called_once()
         init_path = journal.init.call_args[0][0]
         path_str = str(init_path)
-        # Must be a repair-specific path
-        assert "repair" in path_str.lower(), (
-            f"Expected journal path to contain 'repair' to distinguish from delta/full. "
+        # Bug #1041: Must use shared NFS path (depmap-activity-journal), not local temp path
+        assert "depmap-activity-journal" in path_str, (
+            f"Expected journal path to contain 'depmap-activity-journal' for cross-node visibility. "
             f"Got: {path_str}"
         )
 

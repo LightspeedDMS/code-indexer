@@ -303,6 +303,47 @@ class TestCopyToFinal:
         assert not (final_dir / "_activity.md").exists()
 
 
+class TestGetContentFromPath:
+    """get_content_from_path() reads journal content from an explicit path without init()."""
+
+    def test_get_content_from_path_file_exists_with_content(self, tmp_path):
+        """get_content_from_path() returns content and new offset when file has data."""
+        journal_file = tmp_path / "_activity.md"
+        journal_file.write_text("entry one\nentry two\n", encoding="utf-8")
+
+        content, new_offset = ActivityJournalService.get_content_from_path(
+            journal_file, 0
+        )
+
+        assert "entry one" in content
+        assert "entry two" in content
+        assert new_offset == journal_file.stat().st_size
+
+    def test_get_content_from_path_file_not_exist(self, tmp_path):
+        """get_content_from_path() returns ('', 0) when the file does not exist."""
+        missing_file = tmp_path / "nonexistent" / "_activity.md"
+
+        content, new_offset = ActivityJournalService.get_content_from_path(
+            missing_file, 0
+        )
+
+        assert content == ""
+        assert new_offset == 0
+
+    def test_get_content_from_path_offset_beyond_file_size(self, tmp_path):
+        """get_content_from_path() returns ('', offset) when offset >= file size."""
+        journal_file = tmp_path / "_activity.md"
+        journal_file.write_text("small content\n", encoding="utf-8")
+        file_size = journal_file.stat().st_size
+
+        content, new_offset = ActivityJournalService.get_content_from_path(
+            journal_file, file_size + 100
+        )
+
+        assert content == ""
+        assert new_offset == file_size + 100
+
+
 class TestThreadSafety:
     """Thread safety: concurrent writes do not corrupt the journal."""
 

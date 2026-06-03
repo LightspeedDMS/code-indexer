@@ -16,7 +16,6 @@ Deferred to future refactoring to avoid disrupting Story #193 acceptance criteri
 
 import json
 import logging
-import os
 import re
 import shutil
 import socket
@@ -194,8 +193,29 @@ class DependencyMapService:
                 / "cidx-meta"
                 / "dependency-map"
             )
-        except AttributeError:
-            # _golden_repos_manager is None or lacks golden_repos_dir (early startup)
+        except (AttributeError, TypeError):
+            # _golden_repos_manager is None, lacks golden_repos_dir, or returns
+            # a non-path type (e.g. Mock in tests). All are early-startup no-ops.
+            return None
+
+    def get_activity_journal_dir(self) -> Optional[Path]:
+        """Return the shared activity journal directory on NFS (.scratch/).
+
+        Returns a path under {golden_repos_dir}/.scratch/depmap-activity-journal/
+        which is visible to all cluster nodes via NFS mount.
+
+        Returns None when golden_repos_manager is not yet initialised (e.g. during
+        early startup before the manager is wired up).
+        """
+        try:
+            return (
+                Path(self._golden_repos_manager.golden_repos_dir)
+                / ".scratch"
+                / "depmap-activity-journal"
+            )
+        except (AttributeError, TypeError):
+            # _golden_repos_manager is None, lacks golden_repos_dir, or returns
+            # a non-path type (e.g. Mock in tests). All are early-startup no-ops.
             return None
 
     def set_repair_invoker_fn(
@@ -803,17 +823,23 @@ class DependencyMapService:
             # Save journal immediately to prevent loss if crash occurs before Pass 1
             self._save_journal(staging_dir, journal)
             # Story #329: Initialize activity journal AFTER staging dir cleanup
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                self._activity_journal.init(staging_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log(
                     f"Starting full analysis with {len(repo_list)} repositories"
                 )
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error: {e}")
         else:
-            # Resuming — init journal in existing staging dir (don't wipe)
+            # Resuming — init journal in shared NFS dir (don't wipe)
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                self._activity_journal.init(staging_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log("Resuming analysis")
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error (resume): {e}")
@@ -3003,11 +3029,11 @@ class DependencyMapService:
                 return None
 
             # Story #329: Initialize activity journal for this delta analysis run
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                delta_journal_dir = Path(
-                    os.path.expanduser("~/.tmp/depmap-delta-journal/")
-                )
-                self._activity_journal.init(delta_journal_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log("Starting delta analysis")
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error: {e}")
@@ -3550,11 +3576,11 @@ class DependencyMapService:
         config = self._config_manager.get_claude_integration_config()
         if not config or not config.refinement_enabled:
             logger.debug("Refinement disabled, skipping refinement cycle")
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                journal_dir = Path(
-                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
-                )
-                self._activity_journal.init(journal_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log(
                     "Refinement: disabled in config, skipping cycle"
                 )
@@ -3565,11 +3591,11 @@ class DependencyMapService:
         # AC7: Non-blocking lock to prevent concurrent writes with delta analysis
         if not self._lock.acquire(blocking=False):
             logger.info("Refinement cycle skipped - analysis already in progress")
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                journal_dir = Path(
-                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
-                )
-                self._activity_journal.init(journal_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log(
                     "Refinement: skipped - analysis already in progress"
                 )
@@ -3587,11 +3613,11 @@ class DependencyMapService:
         any_changed = False
         try:
             # Initialize activity journal for this refinement cycle run
+            # Bug #1041: Use shared NFS path so all cluster nodes can read it
             try:
-                journal_dir = Path(
-                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
-                )
-                self._activity_journal.init(journal_dir)
+                _shared_journal = self.get_activity_journal_dir()
+                if _shared_journal is not None:
+                    self._activity_journal.init(_shared_journal)
                 self._activity_journal.log("Starting refinement cycle")
             except Exception as e:
                 logger.debug(f"Non-fatal journal init error: {e}")
