@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.10] - 2026-06-03
+
+### Fixed
+- Bug #1046: `CowDaemonBackend._translate_to_daemon_path` (`clone_backend.py:315-335`) rejected the `golden_repos_dir` symlink path with `"is not under mount_point '/mnt/cow-storage' — cannot translate to daemon view"`, blocking every cluster activation after the Bug #1044 wiring fix made this code path reachable. Root cause: literal string `startswith` comparison with no symlink resolution; staging's `golden_repos_dir` is intentionally a symlink (`/home/jsbattig/.cidx-server/data/golden-repos -> /mnt/cow-storage/golden-repos`) to satisfy the XFS-reflink-same-filesystem constraint. Added `os.path.realpath()` resolution before the mount-point prefix check; the resolved path is now used for both the comparison and the daemon-side path computation.
+
+### Tests
+- New regression-guard suite `tests/unit/server/storage/shared/test_cow_daemon_backend_symlink_resolution_bug1046.py` (3 tests using real `os.symlink()` under `tmp_path` — zero mocking of the symlink layer per Anti-Mock rule). Test 1 confirmed RED before fix; all 3 pass after.
+
 ## [10.91.9] - 2026-06-03
 
 ### Fixed
