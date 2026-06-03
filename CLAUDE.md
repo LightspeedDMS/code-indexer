@@ -294,6 +294,12 @@ Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_rep
 
 **Invariant**: any refactor of `startup/lifespan.py` or `startup/service_init.py` MUST preserve the `arm._clone_backend = snapshot_manager._clone_backend` assignment. Regression guard at `tests/unit/server/startup/test_lifespan_clone_backend_wiring_bug1044.py` (source-text + source-order checks) will fail if removed.
 
+### Resumable Delta Dep-Map Analysis (Story #1053)
+
+`run_delta_analysis` is resumable across crashes via a **per-domain YAML frontmatter journal** — each `dependency-map/<domain>.md` carries its own `last_delta_applied` field; the frontmatter and body are written together in one atomic `os.replace`. No separate cursor file. Cluster correctness inherits from the existing `cidx-meta` `WriteLockManager` lock. Crash-durability scope is process crash / SIGKILL / restart / graceful reboot ONLY (NOT sudden power loss or NFS server crash).
+
+→ Full reference: `docs/depmap-resumable-delta-architecture.md`
+
 ### Database Migrations Must Be Backward Compatible
 
 Rolling restarts mean old and new nodes share schema during upgrade. MigrationRunner auto-runs on startup.

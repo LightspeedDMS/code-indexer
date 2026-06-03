@@ -2455,9 +2455,19 @@ class DependencyMapService:
         new_repos: List[Dict[str, Any]],
         removed_repos: List[str],
         config,
+        fingerprint: Optional[str] = None,
     ) -> List[str]:
         """
         Update all affected domain files (Story #193, AC5).
+
+        Story #1053: When *fingerprint* is supplied, per-domain frontmatter skip logic
+        is active.  Before invoking Claude for a domain, the existing .md file's YAML
+        frontmatter is read; if ``last_delta_applied == fingerprint`` the domain is
+        skipped and an activity-journal entry is emitted.  After a successful Claude
+        invocation the .md is written atomically via write_atomic with updated
+        frontmatter (``last_delta_applied = fingerprint``, ``last_applied_at = <now>``).
+        Operator-managed fields are preserved; any frontmatter echoed by Claude is
+        stripped before re-rendering.
 
         Args:
             affected_domains: Set of domain names to update
@@ -2466,10 +2476,20 @@ class DependencyMapService:
             new_repos: List of new repo dicts
             removed_repos: List of removed repo aliases
             config: Claude integration config
+            fingerprint: Optional delta fingerprint from compute_delta_fingerprint.
+                         When provided, enables per-domain frontmatter journal logic.
 
         Returns:
             List of error messages (empty if all successful)
         """
+        from datetime import datetime, timezone
+
+        from .dep_map_delta_journal import (
+            parse_frontmatter,
+            render_md,
+            write_atomic,
+        )
+
         errors: list[str] = []
         changed_aliases = [r["alias"] for r in changed_repos]
         new_aliases = [r["alias"] for r in new_repos]
@@ -2499,9 +2519,47 @@ class DependencyMapService:
                 break
             domain_file = dependency_map_dir / f"{domain_name}.md"
 
-            if not domain_file.exists():
-                logger.warning(f"Domain file not found: {domain_file}, skipping")
-                continue
+            # Story #1053: Per-domain frontmatter journal skip logic.
+            # Read existing file (or treat as empty for missing files — synthetic creation).
+            if domain_file.exists():
+                existing_text = domain_file.read_text()
+            else:
+                # Scenario 15: domain file missing — log synthetic creation intent and
+                # create an empty placeholder so _update_domain_file can read it.
+                logger.info(
+                    "Domain file missing for '%s' — synthetic creation", domain_name
+                )
+                existing_text = ""
+                try:
+                    domain_file.write_text("")
+                except Exception as create_exc:
+                    logger.error(
+                        "Cannot create placeholder for missing domain '%s': %s",
+                        domain_name,
+                        create_exc,
+                    )
+                    errors.append(
+                        f"{domain_name}: cannot create placeholder: {create_exc}"
+                    )
+                    continue
+
+            if fingerprint is not None:
+                fm, _body = parse_frontmatter(existing_text, domain_hint=domain_name)
+                if fm.get("last_delta_applied") == fingerprint:
+                    # Already processed in a prior run — skip.
+                    logger.info(
+                        "Skipping domain '%s' (%d/%d) — frontmatter matches current delta",
+                        domain_name,
+                        domain_idx + 1,
+                        total_affected,
+                    )
+                    try:
+                        self._activity_journal.log(
+                            f"Resume: skipping {domain_name} (already applied)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Non-fatal journal log error: {e}")
+                    continue
 
             try:
                 self._activity_journal.log(
@@ -2536,6 +2594,63 @@ class DependencyMapService:
                             f"{attempt}/{MAX_DOMAIN_RETRIES}: {exc}, retrying",
                         )
                     continue
+
+                if update_result == _DomainUpdateResult.WRITTEN:
+                    # Story #1053: Re-read what _update_domain_file wrote and wrap in
+                    # frontmatter journal.  If fingerprint is not provided (legacy path),
+                    # skip the frontmatter rewrap — the file was already written by the
+                    # caller via the old atomic_tmp pattern.
+                    if fingerprint is not None and domain_file.exists():
+                        try:
+                            written_text = domain_file.read_text()
+                            # The file written by _update_domain_file has:
+                            #   ---\n<system-managed frontmatter>\n---\n\n<claude_output>
+                            # where <claude_output> may itself start with a frontmatter
+                            # block if Claude echoed the file back (Scenario 9).
+                            # Strip the system-managed frontmatter first, then strip any
+                            # echoed frontmatter from Claude's output.
+                            _, after_system_fm = parse_frontmatter(
+                                written_text, domain_hint=domain_name
+                            )
+                            # Strip Claude-echoed frontmatter (double-frontmatter prevention).
+                            _, new_body = parse_frontmatter(
+                                after_system_fm, domain_hint=domain_name
+                            )
+
+                            # Scenario 14: reject empty/whitespace body — do not advance journal.
+                            if not new_body.strip():
+                                logger.error(
+                                    "Delta domain '%s': Claude returned empty/whitespace body "
+                                    "— not advancing frontmatter journal",
+                                    domain_name,
+                                )
+                                # Restore original content (do not leave empty file).
+                                if existing_text:
+                                    write_atomic(domain_file, existing_text)
+                                update_result = _DomainUpdateResult.FAILED
+                            else:
+                                # Preserve operator fields; overwrite only journal keys.
+                                orig_fm, _ = parse_frontmatter(
+                                    existing_text, domain_hint=domain_name
+                                )
+                                new_fm = {
+                                    k: v
+                                    for k, v in orig_fm.items()
+                                    if k
+                                    not in ("last_delta_applied", "last_applied_at")
+                                }
+                                new_fm["domain"] = domain_name
+                                new_fm["last_delta_applied"] = fingerprint
+                                new_fm["last_applied_at"] = datetime.now(
+                                    timezone.utc
+                                ).isoformat()
+                                write_atomic(domain_file, render_md(new_fm, new_body))
+                        except Exception as journal_exc:
+                            logger.warning(
+                                "Story #1053: frontmatter journal update failed for '%s': %s",
+                                domain_name,
+                                journal_exc,
+                            )
 
                 if update_result == _DomainUpdateResult.WRITTEN:
                     try:
@@ -3171,6 +3286,16 @@ class DependencyMapService:
                 all_repos, dep_map_dir=dependency_map_dir
             )
 
+            # Story #1053: Compute delta fingerprint for frontmatter journal.
+            from .dep_map_delta_journal import (
+                all_new_repos_have_domain_assignments,
+                compute_delta_fingerprint,
+            )
+
+            delta_fingerprint = compute_delta_fingerprint(
+                changed_repos, new_repos, removed_repos
+            )
+
             # Handle new repo domain discovery (AC6, Story #216)
             discovery_write_success = True
             if "__NEW_REPO_DISCOVERY__" in affected_domains:
@@ -3184,14 +3309,30 @@ class DependencyMapService:
                     if dependency_map_dir.exists()
                     else []
                 )
-                discovered, discovery_write_success = (
-                    self._discover_and_assign_new_repos(
-                        new_repos=new_repos,
-                        existing_domains=existing_domains,
-                        dependency_map_dir=dependency_map_dir,
-                        config=config,
+
+                # Story #1053 Phase C: new-repo discovery idempotency.
+                # If _domains.json already covers all new repos, skip the Claude call.
+                domains_json_path = dependency_map_dir / "_domains.json"
+                if all_new_repos_have_domain_assignments(new_repos, domains_json_path):
+                    logger.info(
+                        "Resume: skipping new-repo discovery — _domains.json covers all new repos"
                     )
-                )
+                    try:
+                        self._activity_journal.log(
+                            "Resume: skipping new-repo discovery (already complete)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Non-fatal journal log error: {e}")
+                    discovered: Set[str] = set()
+                else:
+                    discovered, discovery_write_success = (
+                        self._discover_and_assign_new_repos(
+                            new_repos=new_repos,
+                            existing_domains=existing_domains,
+                            dependency_map_dir=dependency_map_dir,
+                            config=config,
+                        )
+                    )
                 affected_domains.update(discovered)
 
             # Story #716: Discover and assign uncovered repos
@@ -3260,6 +3401,7 @@ class DependencyMapService:
                 new_repos,
                 removed_repos,
                 config,
+                fingerprint=delta_fingerprint,
             )
             merge_s = time.time() - t_merge_start
 
