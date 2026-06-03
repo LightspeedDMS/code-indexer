@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.3] - 2026-06-02
+
+### Fixed
+- Users page CRUD: extended the PRG (Post-Redirect-Get) fix from v10.91.2 to the 4 remaining POST handlers — `create_user`, `update_user_role`, `change_user_password`, `update_user_email`. All five Users-page POST handlers now return `RedirectResponse(303, "/admin/users?...")` on every code path, so the form interceptor in `base.html` does a real `window.location.href` navigation and HTMX initializes normally. Users table re-renders correctly after every CRUD operation, not just delete.
+- Extended `_USERS_PAGE_ERROR_MESSAGES` whitelist with 6 new error codes: `passwords_mismatch`, `invalid_role`, `cannot_demote_self`, `sso_password_change_denied`, `user_not_found`, `operation_failed`. Unknown codes still silently render no banner (XSS prevention).
+
+### Audited (no fix needed)
+- Other admin CRUD pages reviewed: `golden_repos.html`, `groups.html`, `ssh_keys.html`, `repos.html`, `config.html`, `self_monitoring.html`, `dependency_map.html`. None have the `hx-trigger="load"` + intercepted POST-form combination that triggers the `document.write` HTMX re-init bug, so PRG is not required for them.
+
 ## [10.91.2] - 2026-06-02
 
 ### Fixed
