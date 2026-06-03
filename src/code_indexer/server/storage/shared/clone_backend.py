@@ -13,6 +13,7 @@ Story #510 — CloneBackend Abstraction and CoW Daemon Integration.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -325,14 +326,22 @@ class CowDaemonBackend:
         """
         if not self._daemon_storage_path:
             return cidx_path
+        # Bug #1046: resolve symlinks before mount-point check. On staging the
+        # golden_repos_dir is a symlink (/home/.../golden-repos -> /mnt/cow-storage/golden-repos)
+        # to satisfy the XFS-reflink-same-filesystem constraint. Without realpath the
+        # literal startswith check rejected the symlink path even though its realpath
+        # is under mount_point, blocking every cluster activation.
+        resolved = os.path.realpath(cidx_path)
         if (
-            not cidx_path.startswith(self._mount_point + "/")
-            and cidx_path != self._mount_point
+            not resolved.startswith(self._mount_point + "/")
+            and resolved != self._mount_point
         ):
             raise ValueError(
-                f"CowDaemonBackend.create_clone_at_path: path '{cidx_path}' is not under mount_point '{self._mount_point}' — cannot translate to daemon view"
+                f"CowDaemonBackend.create_clone_at_path: path '{cidx_path}' "
+                f"(resolved '{resolved}') is not under mount_point '{self._mount_point}' "
+                f"— cannot translate to daemon view"
             )
-        return self._daemon_storage_path + cidx_path[len(self._mount_point) :]
+        return self._daemon_storage_path + resolved[len(self._mount_point) :]
 
     def _translate_from_daemon_path(self, daemon_clone_path: str) -> str:
         """Translate daemon-local clone_path returned by a job back to a CIDX mount-point path.
