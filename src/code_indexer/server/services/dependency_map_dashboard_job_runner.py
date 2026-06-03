@@ -74,7 +74,7 @@ class DependencyMapDashboardJobRunner:
                 )
 
             result = self._dashboard.get_job_status(progress_callback=callback)
-            self._cache.set_cached(json.dumps(result))
+            self._cache.set_cached(json.dumps(result, default=str))
             self._tracker.update_status(
                 job_id, status="completed", progress=_PCT_COMPLETE
             )
