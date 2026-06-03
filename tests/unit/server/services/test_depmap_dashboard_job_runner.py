@@ -44,13 +44,16 @@ class FakeDashboardService:
 
 
 class FakeTracker:
-    """Records update_status calls for assertion."""
+    """Records update_status and fail_job calls for assertion."""
 
     def __init__(self):
         self.calls: list = []  # [(job_id, kwargs), ...]
 
     def update_status(self, job_id: str, **kwargs) -> None:
         self.calls.append((job_id, dict(kwargs)))
+
+    def fail_job(self, job_id: str, error: str = "") -> None:
+        self.calls.append((job_id, {"status": "failed", "error": error}))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

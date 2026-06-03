@@ -57,19 +57,45 @@ def build_dep_map_dispatcher(
                 is used.
         analysis_model: Claude model name passed to ClaudeInvoker (default "opus").
         claude_soft_timeout_seconds: Optional inner shell timeout budget forwarded
-                to ClaudeInvoker. When None, ClaudeInvoker uses its own default.
-                Must be a positive int when provided (ClaudeInvoker enforces this).
+                to ClaudeInvoker. When None, derived from
+                ``config.dependency_map_pass_timeout_seconds`` if available;
+                otherwise ClaudeInvoker's own default applies. Must be a
+                positive int when provided directly (ClaudeInvoker enforces this).
 
     Returns:
         A fully initialised CliDispatcher.
     """
+    # Bug #1049 Option B: factory is the single point of truth for timeout.
+    # Explicit caller override is forwarded as-is (ClaudeInvoker validates it
+    # and raises ValueError for bad values — do NOT swallow those errors here).
+    # When no explicit override, derive from config.dependency_map_pass_timeout_seconds
+    # if the attribute exists and holds a valid positive int; otherwise let
+    # ClaudeInvoker use its own built-in default.
     if claude_soft_timeout_seconds is not None:
+        # Explicit override: forward unconditionally so ClaudeInvoker can enforce
+        # its own type/range contract (raises ValueError on 0, bool, float, etc.)
         claude_invoker = ClaudeInvoker(
             analysis_model=analysis_model,
             soft_timeout_seconds=claude_soft_timeout_seconds,
         )
     else:
-        claude_invoker = ClaudeInvoker(analysis_model=analysis_model)
+        config_timeout = (
+            getattr(config, "dependency_map_pass_timeout_seconds", None)
+            if config is not None
+            else None
+        )
+        if (
+            config_timeout is not None
+            and isinstance(config_timeout, int)
+            and not isinstance(config_timeout, bool)
+            and config_timeout > 0
+        ):
+            claude_invoker = ClaudeInvoker(
+                analysis_model=analysis_model,
+                soft_timeout_seconds=config_timeout,
+            )
+        else:
+            claude_invoker = ClaudeInvoker(analysis_model=analysis_model)
 
     codex_invoker = None
     codex_weight = 0.0
