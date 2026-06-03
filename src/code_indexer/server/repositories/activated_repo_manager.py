@@ -117,10 +117,17 @@ class ActivatedRepoManager:
             home_dir = Path.home()
             self.data_dir = str(home_dir / ".cidx-server" / "data")
 
-        self.activated_repos_dir = os.path.join(self.data_dir, "activated-repos")
-
-        # Ensure directory structure exists
-        os.makedirs(self.activated_repos_dir, exist_ok=True)
+        # Resolve any symlinks on the configured activated-repos directory so
+        # deactivation helpers (which open the dir with O_NOFOLLOW for
+        # security against tampering inside the tree) work correctly when
+        # operators deploy this path as a symlink — e.g. cluster setup where
+        # `~/.cidx-server/data/activated-repos -> /mnt/cow-storage/activated-repos`
+        # so the CoW daemon can clone into its managed filesystem.  The
+        # admin-controlled top-level path is safe to resolve; per-user/alias
+        # subpaths underneath still get O_NOFOLLOW protection.
+        configured_path = os.path.join(self.data_dir, "activated-repos")
+        os.makedirs(configured_path, exist_ok=True)
+        self.activated_repos_dir = os.path.realpath(configured_path)
 
         # Cluster mode: PostgreSQL connection pool (Bug #587)
         self._pool: Any = None
@@ -155,7 +162,10 @@ class ActivatedRepoManager:
         """Set NFS shared directory for activated repo clones in cluster mode."""
         shared_activated = Path(shared_dir) / "activated-repos"
         shared_activated.mkdir(parents=True, exist_ok=True)
-        self.activated_repos_dir = str(shared_activated)
+        # Same realpath rationale as __init__: deactivation helpers need a
+        # resolved path so O_NOFOLLOW on the admin-controlled top-level dir
+        # does not block legitimate symlinked deployments.
+        self.activated_repos_dir = os.path.realpath(str(shared_activated))
         self.logger.info(
             "ActivatedRepoManager: using shared storage at %s",
             self.activated_repos_dir,

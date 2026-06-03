@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.12] - 2026-06-03
+
+### Fixed
+- `ActivatedRepoManager.activated_repos_dir` now resolves symlinks (`os.path.realpath`) at construction (`__init__` and `set_shared_repos_dir`). Discovered during Bug #1044 staging E2E validation: clusters that deploy `~/.cidx-server/data/activated-repos` as a symlink to the CoW-managed storage (e.g. `-> /mnt/cow-storage/activated-repos`) hit `_fd_anchored_phase1_rename`'s `os.open(..., O_NOFOLLOW)` check on the top-level dir, which correctly refuses to follow the symlink and raises `Errno 20 Not a directory`. Deactivation jobs reported `success: true` but left workspaces on disk with 7 cleanup warnings. The admin-controlled top-level path is safe to resolve once at init; per-user/alias subpaths under it still get O_NOFOLLOW protection.
+
+### Tests
+- New regression-guard suite `tests/unit/server/repositories/test_activated_repos_dir_symlink_resolution.py` (3 tests using real `os.symlink()` — no mocks per Anti-Mock):
+  - Symlinked data_dir resolves to target on construction.
+  - Non-symlink direct directory continues to work.
+  - `set_shared_repos_dir` resolves symlinks too.
+
+## [10.91.11] - 2026-06-03
+
+### Fixed
+- Bug #1046 (extension): v10.91.10 added symlink resolution but only accepted paths under `mount_point`. On the CoW daemon host node (cluster node 23) the `golden-repos` symlink target is under `daemon_storage_path` directly (`/home/jsbattig/cow-storage/golden-repos`) — the bind-mount alias of the same XFS filesystem reached via the symlinked source rather than the mount point. v10.91.10 still rejected these resolved paths. v10.91.11 extends `_translate_to_daemon_path` to accept paths resolving under EITHER `mount_point` (translate to daemon-local form) OR `daemon_storage_path` (already in daemon-local form, return as-is).
+
+### Tests
+- Added 2 regression-guard tests to `tests/unit/server/storage/shared/test_cow_daemon_backend_symlink_resolution_bug1046.py`:
+  - `test_symlink_to_daemon_storage_path_passes_through` — symlink resolving under daemon_storage_path returns the resolved path unchanged.
+  - `test_direct_daemon_storage_path_passes_through` — direct daemon_storage_path entries pass through unchanged.
+  Real `os.symlink()` only — no mocks (Anti-Mock rule).
+
+## [10.91.10] - 2026-06-03
+
+### Fixed
+- Bug #1046: `CowDaemonBackend._translate_to_daemon_path` (`clone_backend.py:315-335`) rejected the `golden_repos_dir` symlink path with `"is not under mount_point '/mnt/cow-storage' — cannot translate to daemon view"`, blocking every cluster activation after the Bug #1044 wiring fix made this code path reachable. Root cause: literal string `startswith` comparison with no symlink resolution; staging's `golden_repos_dir` is intentionally a symlink (`/home/jsbattig/.cidx-server/data/golden-repos -> /mnt/cow-storage/golden-repos`) to satisfy the XFS-reflink-same-filesystem constraint. Added `os.path.realpath()` resolution before the mount-point prefix check; the resolved path is now used for both the comparison and the daemon-side path computation.
+
+### Tests
+- New regression-guard suite `tests/unit/server/storage/shared/test_cow_daemon_backend_symlink_resolution_bug1046.py` (3 tests using real `os.symlink()` under `tmp_path` — zero mocking of the symlink layer per Anti-Mock rule). Test 1 confirmed RED before fix; all 3 pass after.
+
+## [10.91.9] - 2026-06-03
+
+### Fixed
+- Bug #1044: Activation was completely broken because Story #1034 added a hard `clone_backend is None` guard to `ActivatedRepoManager._clone_with_copy_on_write` (activated_repo_manager.py:2643) but the lifespan wiring never injected `_clone_backend` into the `ActivatedRepoManager` reachable from `golden_repo_manager.activated_repo_manager`. Every activation raised `"ActivatedRepoManager._clone_with_copy_on_write invoked without clone_backend — wiring bug. Story #1034 Commit 4 requires clone_backend injection."`. Added `arm._clone_backend = snapshot_manager._clone_backend` to `lifespan.py` belt-and-suspenders block (lines 615-625), matching the existing Story #1034 pattern that injects `_snapshot_manager` into `GoldenRepoManager` and `RefreshScheduler`.
+
+### Tests
+- New regression-guard suite `tests/unit/server/startup/test_lifespan_clone_backend_wiring_bug1044.py` (6 tests: source-text guards, source-order guard, runtime simulation using real `ActivatedRepoManager` and real `VersionedSnapshotManager` via `build_snapshot_manager`).
+
+### Docs
+- Added "ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)" invariant to project CLAUDE.md "Critical Architecture Invariants" section.
+
 ## [10.91.3] - 2026-06-02
 
 ### Fixed

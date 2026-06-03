@@ -234,6 +234,14 @@ Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127
 
 Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_repo_path(alias)`. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
 
+### ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)
+
+`ActivatedRepoManager._clone_with_copy_on_write` routes CoW clones through `self._clone_backend.create_clone_at_path(...)` and hard-raises if `_clone_backend is None` (guard at `activated_repo_manager.py:2643`). The constructor declares `clone_backend: Optional[CloneBackend] = None`, so construction succeeds without it -- the failure only surfaces on the first activation.
+
+**Wiring is post-hoc in lifespan**, not at construction. In `startup/lifespan.py`, the `if snapshot_manager is not None:` block injects `snapshot_manager._clone_backend` into the ARM reachable from `golden_repo_manager.activated_repo_manager` -- matching the same belt-and-suspenders pattern used for `_snapshot_manager` on `GoldenRepoManager` and `RefreshScheduler`.
+
+**Invariant**: any refactor of `startup/lifespan.py` or `startup/service_init.py` MUST preserve the `arm._clone_backend = snapshot_manager._clone_backend` assignment. Regression guard at `tests/unit/server/startup/test_lifespan_clone_backend_wiring_bug1044.py` (source-text + source-order checks) will fail if removed.
+
 ### Database Migrations Must Be Backward Compatible
 
 Rolling restarts mean old and new nodes share schema during upgrade. MigrationRunner auto-runs on startup.

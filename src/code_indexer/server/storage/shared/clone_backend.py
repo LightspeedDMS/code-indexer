@@ -13,6 +13,7 @@ Story #510 — CloneBackend Abstraction and CoW Daemon Integration.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -325,14 +326,36 @@ class CowDaemonBackend:
         """
         if not self._daemon_storage_path:
             return cidx_path
+        # Bug #1046: resolve symlinks before path-prefix check, and accept
+        # paths under EITHER mount_point or daemon_storage_path.
+        #
+        # On NFS-client nodes (e.g. cluster node 20/22), the golden-repos
+        # symlink resolves under mount_point (/mnt/cow-storage/...), needs
+        # translation to daemon_storage_path form.
+        #
+        # On the CoW daemon host (e.g. cluster node 23), the same logical
+        # filesystem is reached via daemon_storage_path directly
+        # (/home/jsbattig/cow-storage/...) — the symlink resolves there
+        # because the local layout points to the source rather than the
+        # bind mount. Such paths are ALREADY in daemon-local form, return
+        # as-is without re-prefixing.
+        resolved = os.path.realpath(cidx_path)
         if (
-            not cidx_path.startswith(self._mount_point + "/")
-            and cidx_path != self._mount_point
+            resolved.startswith(self._daemon_storage_path + "/")
+            or resolved == self._daemon_storage_path
         ):
-            raise ValueError(
-                f"CowDaemonBackend.create_clone_at_path: path '{cidx_path}' is not under mount_point '{self._mount_point}' — cannot translate to daemon view"
-            )
-        return self._daemon_storage_path + cidx_path[len(self._mount_point) :]
+            return resolved
+        if (
+            resolved.startswith(self._mount_point + "/")
+            or resolved == self._mount_point
+        ):
+            return self._daemon_storage_path + resolved[len(self._mount_point) :]
+        raise ValueError(
+            f"CowDaemonBackend.create_clone_at_path: path '{cidx_path}' "
+            f"(resolved '{resolved}') is not under mount_point '{self._mount_point}' "
+            f"or daemon_storage_path '{self._daemon_storage_path}' "
+            f"— cannot translate to daemon view"
+        )
 
     def _translate_from_daemon_path(self, daemon_clone_path: str) -> str:
         """Translate daemon-local clone_path returned by a job back to a CIDX mount-point path.
