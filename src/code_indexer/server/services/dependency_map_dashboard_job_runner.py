@@ -81,5 +81,5 @@ class DependencyMapDashboardJobRunner:
         except Exception as e:
             logger.error("Dashboard job %s failed: %s", job_id, e)
             self._cache.mark_job_failed(str(e))
-            self._tracker.update_status(job_id, status="failed", error=str(e))
+            self._tracker.fail_job(job_id, error=str(e))
             raise
