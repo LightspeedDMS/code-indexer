@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.15] - 2026-06-03
+
+### Added
+- Story #1053: Resumable delta dep-map analysis via per-domain YAML frontmatter journal. Each `dependency-map/<domain>.md` carries its own `last_delta_applied: <fingerprint>` marker; frontmatter and body are written together in one atomic `os.replace` (tempfile + fsync + rename in the same parent directory — no cursor-vs-file ambiguity window). On crash/restart, the resumed run computes the same delta fingerprint and skips any domain whose frontmatter shows the current delta already applied. New-repo discovery is monolithic skip-or-redo: if `_domains.json` already covers every new repo alias, the discovery Claude CLI call is skipped entirely; if the JSON is missing, malformed, or wrong-shape, the call re-runs. Cluster correctness inherits from the existing `cidx-meta` `WriteLockManager` lock (atomic `O_CREAT|O_EXCL` on NFSv4). Crash-durability scope: process crash / SIGKILL / `systemctl restart` / graceful reboot — NOT sudden power loss or NFS server crash (the in-flight domain is re-processed on resume in those cases by design). 40 unit/integration tests covering all 16 acceptance criteria. New helper scripts `tests/e2e/manual/provision_delta_fixture.sh` and `tests/e2e/manual/audit_processes.sh` for the full process-tree-kill E2E test (Scenario 16).
+
+### Docs
+- New architecture reference: `docs/depmap-resumable-delta-architecture.md` (182 lines) documenting the 5 primitives, the resume loop, the lock dependency, the honest crash-durability scope, the 7-item rejected-approaches anti-regression list (no backup-by-N, no prompt context hint, no separate cursor file, no batched discovery, no fingerprint intersection, no `run_full_analysis` hardening, no parent-dir fsync), and production observability.
+- CLAUDE.md "Critical Architecture Invariants" gains a slim 5-line "Resumable Delta Dep-Map Analysis (Story #1053)" subsection pointing to the architecture doc.
+
+### Separate isolated commit (per Story #929 Security-Sensitive Commit Discipline)
+- `125d7568` "docs: harden Push-to-master Authorization rule" — rewrites the CLAUDE.md push-to-master rule with anti-extrapolation language, mandatory two-confirmation protocol, per-push per-version authorization scope, explicit /goal exclusion, and a "Past failures" paragraph documenting the v10.91.14 unauthorized-push incident verbatim. Permission/authorization rule change; isolated from feature work.
+
 ## [10.91.14] - 2026-06-03
 
 ### Fixed
