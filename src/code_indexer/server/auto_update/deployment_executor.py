@@ -2990,6 +2990,17 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 14.5: Bug #1052 - Ensure activated-repos symlink for CoW-daemon cluster (non-fatal)
+        if not self._ensure_activated_repos_symlink_for_cow_daemon():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-166",
+                    "activated-repos symlink setup failed - "
+                    "CoW-daemon activation may not function correctly",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Step 15: Ensure ~/.local/bin is in PATH in the systemd service unit (non-fatal)
         if not self._ensure_systemd_claude_path():
             logger.warning(
@@ -3610,6 +3621,107 @@ class DeploymentExecutor:
                 format_error_log(
                     "DEPLOY-GENERAL-163",
                     f"NFS research symlink setup failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    def _ensure_activated_repos_symlink_for_cow_daemon(self) -> bool:
+        """Bug #1052: Idempotently set up activated-repos symlink for CoW-daemon cluster nodes.
+
+        On CoW-daemon deployments, ~/.cidx-server/data/activated-repos must be a
+        symlink to {cow_daemon.mount_point}/activated-repos so that
+        CowDaemonBackend.create_clone_at_path() accepts destination paths as valid.
+
+        Story #1034 set up golden-repos but never activated-repos. This step closes
+        that gap so fresh cluster nodes provision correctly without manual SSH.
+
+        Non-fatal: any exception returns False with a WARNING.
+        Returns True in all handled cases (no-op, symlink created, real-dir warning).
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+
+            clone_backend = getattr(config, "clone_backend", "local") or "local"
+            if clone_backend != "cow-daemon":
+                logger.debug(
+                    "Bug #1052: clone_backend=%r, not cow-daemon — skipping activated-repos symlink setup",
+                    clone_backend,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            cow_cfg = getattr(config, "cow_daemon", None)
+            if cow_cfg is None or not getattr(cow_cfg, "mount_point", ""):
+                logger.warning(
+                    "Bug #1052: clone_backend=cow-daemon but cow_daemon config missing or "
+                    "mount_point empty — skipping activated-repos symlink setup",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            target = Path(cow_cfg.mount_point) / "activated-repos"
+            link_path = _cidx_data_dir / "data" / "activated-repos"
+
+            if link_path.is_symlink():
+                current_target = os.readlink(str(link_path))
+                if current_target == str(target):
+                    logger.debug(
+                        "Bug #1052: activated-repos symlink already correct: %s -> %s",
+                        link_path,
+                        target,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+                logger.warning(
+                    "Bug #1052: activated-repos symlink points to %s but expected %s "
+                    "— manual review needed",
+                    current_target,
+                    target,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            if link_path.exists():
+                # Real directory — do NOT move user data from the auto-updater.
+                logger.warning(
+                    "Bug #1052: activated-repos exists as real directory with content; "
+                    "manual migration required to enable CoW activation. "
+                    "Run: sudo systemctl stop cidx-server && "
+                    "mv %s %s.legacy.bug1052 && "
+                    "mkdir -p %s && "
+                    "ln -s %s %s && "
+                    "sudo systemctl start cidx-server",
+                    link_path,
+                    link_path,
+                    target,
+                    target,
+                    link_path,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            # link_path missing — create symlink
+            target.mkdir(parents=True, exist_ok=True)
+            link_path.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(target), str(link_path))
+            logger.info(
+                "Bug #1052: created activated-repos symlink %s -> %s",
+                link_path,
+                target,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-167",
+                    f"Bug #1052: activated-repos symlink setup failed: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )

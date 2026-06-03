@@ -261,6 +261,8 @@ Runtime settings belong in the Web UI Config Screen via `get_config_service().ge
 
 All systemd/env/config changes flow through auto-updater: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. Pattern: `_ensure_X_config()` -- idempotent check-then-apply. `CIDX_DATA_DIR` honored for IPC path alignment when server and auto-updater run as different OS users (Bug #879).
 
+**Bug #1052 (Step 14.5)**: `_ensure_activated_repos_symlink_for_cow_daemon()` -- on `clone_backend=cow-daemon` deployments, idempotently creates `~/.cidx-server/data/activated-repos -> {cow_daemon.mount_point}/activated-repos` symlink so `CowDaemonBackend.create_clone_at_path()` accepts activation destinations. No-op for local/ontap backends. If a real directory with user data already exists at the path, logs a structured WARNING with the manual migration command and returns without touching the data.
+
 ### Pace-Maker Pre-Invocation Guard (Story #997)
 
 Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step 12 in `DeploymentExecutor.execute()`). Fresh install sets master switch OFF. Updates never touch config.

@@ -177,14 +177,36 @@ class TestJobStatusPartialEndpoint:
     def test_job_status_partial_contains_health_info(
         self, client, admin_session_cookie
     ):
-        """AC2: Job status partial contains health badge information."""
-        response = client.get(
-            "/admin/partials/depmap-job-status",
-            cookies=admin_session_cookie,
-        )
+        """AC2: Job status partial renders health badge in STATE 1 fresh-cache view.
+
+        Story #684 reworked this endpoint into a 4-state machine
+        (fresh-cache / job-id-poll / running / submit-and-poll). The original
+        contract -- "response contains a health state string" -- is realised by
+        STATE 1 when a fresh cache row is present, which routes through
+        ``_render_complete_response`` and renders depmap_job_status.html with
+        the cached ``health`` field. We mock the cache backend to force STATE 1;
+        the downstream rendering is real.
+        """
+        import json
+        from unittest.mock import MagicMock, patch
+
+        cache = MagicMock()
+        cache.is_fresh.return_value = True
+        cache.get_cached.return_value = {
+            "result_json": json.dumps({"health": "Healthy", "color": "GREEN"})
+        }
+        _ROUTES = "code_indexer.server.web.dependency_map_routes"
+
+        with patch(f"{_ROUTES}._get_dashboard_cache_backend", return_value=cache):
+            response = client.get(
+                "/admin/partials/depmap-job-status",
+                cookies=admin_session_cookie,
+            )
+
         assert response.status_code == 200
-        # Should contain some health state text from the health model.
-        # Includes 5-state model states plus Story #342 content health states.
+        # Story #342 content-health merge can override the cached health field to
+        # Needs Repair / Unhealthy / Critical if dep_map_output_dir has anomalies;
+        # accept any recognised health state.
         health_states = [
             "Healthy",
             "Disabled",

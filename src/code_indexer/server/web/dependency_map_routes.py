@@ -27,7 +27,7 @@ from urllib.parse import quote
 
 from code_indexer import __version__ as _cidx_version
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from code_indexer.server.auth import dependencies
@@ -706,9 +706,7 @@ def depmap_job_status_partial(request: Request):
         if job is not None:
             if job.status == "completed":
                 if not _analysis_running:
-                    if cache_backend is not None and cache_backend.is_fresh(
-                        _DASHBOARD_CACHE_TTL_DEFAULT
-                    ):
+                    if cache_backend is not None:
                         cached = cache_backend.get_cached()
                         if cached is not None:
                             return _render_complete_response(request, session, cached)
@@ -749,6 +747,24 @@ def depmap_job_status_partial(request: Request):
     )
     if running_job_id:
         return _render_computing_response(request, running_job_id, tracker)
+
+    # STATE 3b: check dashboard SharedJobSentinel for a winner on another node.
+    # If another node holds the "dashboard" sentinel, attach to its job_id and
+    # render the computing partial WITHOUT submitting a new job.
+    _sentinel_dir_db = _get_dep_map_output_dir()
+    if _sentinel_dir_db is not None:
+        try:
+            from ..services.shared_job_sentinel import SharedJobSentinel as _SJS_DB
+
+            _sjs_db = _SJS_DB(
+                sentinel_dir=Path(_sentinel_dir_db),
+                stale_timeout_seconds=DASHBOARD_STALE_TIMEOUT_SECONDS,
+            )
+            _active_db = _sjs_db.read_active("dashboard")
+            if _active_db is not None:
+                return _render_computing_response(request, _active_db.job_id, tracker)
+        except Exception as _e3b:
+            logger.debug("STATE 3b dashboard sentinel read failed: %s", _e3b)
 
     # STATE 4: no cache, no in-flight job -- submit a new background dashboard job.
     # Dashboard jobs are lightweight (~1s) and already have dedup via
@@ -1507,7 +1523,7 @@ def trigger_dependency_map_repair(request: Request):
     thread = threading.Thread(target=_run_repair, daemon=True)
     thread.start()
 
-    return Response(status_code=204)
+    return JSONResponse(content={"success": True}, status_code=202)
 
 
 @dependency_map_router.post(
@@ -1643,7 +1659,10 @@ def trigger_dependency_map(
             if pre_claimed and sentinel_obj is not None:
                 sentinel_obj.release("analysis", expected_job_id=job_id)
             raise
-        return Response(status_code=204)
+        return JSONResponse(
+            content={"success": True, "job_id": job_id, "mode": mode},
+            status_code=202,
+        )
     else:  # delta
 
         def _run_delta():
@@ -1669,7 +1688,10 @@ def trigger_dependency_map(
             if pre_claimed and sentinel_obj is not None:
                 sentinel_obj.release("analysis", expected_job_id=job_id)
             raise
-        return Response(status_code=204)
+        return JSONResponse(
+            content={"success": True, "job_id": job_id, "mode": mode},
+            status_code=202,
+        )
 
 
 @dependency_map_router.post(
@@ -1753,4 +1775,4 @@ def trigger_refinement(request: Request):
     thread = threading.Thread(target=_run_refinement, daemon=True)
     thread.start()
 
-    return Response(status_code=204)
+    return JSONResponse(content={"success": True, "job_id": job_id}, status_code=202)

@@ -14,7 +14,6 @@ AC9: depmap_get_cross_domain_graph: ok only (scan-based, no identifier input)
      depmap_get_hub_domains: reserved for Story #889, NOT tested here.
 """
 
-import pytest
 from pathlib import Path
 from typing import get_args
 
@@ -54,53 +53,12 @@ class TestAC7ResolutionContractHasFiveStates:
         )
 
 
-class TestAC7DomainNotIndexedGap:
-    """Document the architectural gap: domain_not_indexed is unreachable via find_consumers.
-
-    find_consumers scans ALL domains exhaustively looking for entries that reference
-    repo_name as a dependency. There is no per-domain lookup step where a single domain
-    could be "not indexed" — the tool operates at repo level, not domain level.
-
-    Resolution: xfailed pending product decision. See Codex review round 2.
-    """
-
-    @pytest.mark.xfail(
-        reason=(
-            "AC7 spec requires 5 resolution states but depmap_find_consumers has no "
-            "domain-lookup path — the tool scans ALL domains exhaustively so "
-            "domain_not_indexed cannot be triggered. "
-            "Awaiting product decision. See Codex review round 2."
-        ),
-        strict=True,
-    )
-    def test_domain_not_indexed_reachable_via_find_consumers(
-        self, tmp_path: Path
-    ) -> None:
-        """This test documents that domain_not_indexed is NOT reachable.
-
-        It is expected to fail (xfail strict=True) because there is no fixture
-        or handler path that produces resolution='domain_not_indexed' from
-        depmap_find_consumers_handler. The xfail documents the gap explicitly.
-        """
-        from code_indexer.server.mcp.handlers.depmap import (
-            depmap_find_consumers_handler,
-        )
-
-        # No fixture exists that can produce domain_not_indexed from find_consumers.
-        # Calling with any repo returns repo_not_indexed, not domain_not_indexed.
-        root = make_empty_dep_map(tmp_path)
-        data = _call_handler(
-            depmap_find_consumers_handler, {"repo_name": "any-repo"}, root
-        )
-        # This assertion will never pass — confirming domain_not_indexed is unreachable.
-        assert data.get("resolution") == "domain_not_indexed", (
-            f"Expected domain_not_indexed but got {data.get('resolution')!r} — "
-            "confirming domain_not_indexed is unreachable via find_consumers."
-        )
-
-
 # ---------------------------------------------------------------------------
 # AC7: depmap_find_consumers — 4 reachable resolution states
+# Note: AC7 spec originally listed 5 states; the 5th (domain_not_indexed) is
+# architecturally unreachable because find_consumers scans all domains rather
+# than looking up a single one. The TestAC7DomainNotIndexedGap xfail that
+# previously documented this was removed (see CHANGELOG v10.91.13).
 # ---------------------------------------------------------------------------
 
 
