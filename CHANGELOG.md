@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.9] - 2026-06-03
+
+### Fixed
+- Bug #1044: Activation was completely broken because Story #1034 added a hard `clone_backend is None` guard to `ActivatedRepoManager._clone_with_copy_on_write` (activated_repo_manager.py:2643) but the lifespan wiring never injected `_clone_backend` into the `ActivatedRepoManager` reachable from `golden_repo_manager.activated_repo_manager`. Every activation raised `"ActivatedRepoManager._clone_with_copy_on_write invoked without clone_backend — wiring bug. Story #1034 Commit 4 requires clone_backend injection."`. Added `arm._clone_backend = snapshot_manager._clone_backend` to `lifespan.py` belt-and-suspenders block (lines 615-625), matching the existing Story #1034 pattern that injects `_snapshot_manager` into `GoldenRepoManager` and `RefreshScheduler`.
+
+### Tests
+- New regression-guard suite `tests/unit/server/startup/test_lifespan_clone_backend_wiring_bug1044.py` (6 tests: source-text guards, source-order guard, runtime simulation using real `ActivatedRepoManager` and real `VersionedSnapshotManager` via `build_snapshot_manager`).
+
+### Docs
+- Added "ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)" invariant to project CLAUDE.md "Critical Architecture Invariants" section.
+
 ## [10.91.3] - 2026-06-02
 
 ### Fixed
