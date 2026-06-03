@@ -49,6 +49,12 @@ Golden repositories (source code clones) must be accessible at the same filesyst
 - **NFS** (simple): Export a directory from one node, mount on all others. The install script installs `nfs-utils` (RHEL/Rocky) or `nfs-common` (Ubuntu/Debian) as a system dependency.
 - **CoW Storage Daemon** (recommended for non-production): Provides FlexClone-equivalent functionality using filesystem reflinks, with a REST API for clone lifecycle management and NFS for file access. See [CoW Storage Setup Guide](cow-storage-setup.md) for full instructions.
 
+**CRITICAL -- NFS mount options**: All NFS mounts MUST use `soft,timeo=30,retrans=3` (NOT `hard`). The `hard` option causes server threads to enter uninterruptible D-state (`nfs_wait_bit_killable`) on any NFS blip, permanently blocking dep-map analysis and other background jobs. The `soft` option returns EIO after timeout instead of blocking forever. Example fstab entry:
+
+```
+192.168.60.23:/path/to/export /mnt/cow-storage nfs4 soft,timeo=30,retrans=3,_netdev 0 0
+```
+
 ---
 
 ## Fresh Cluster Setup from Scratch

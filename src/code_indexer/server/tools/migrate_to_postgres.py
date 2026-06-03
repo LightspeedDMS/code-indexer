@@ -578,6 +578,42 @@ class SqliteToPostgresMigrator:
                     f"ALTER TABLE {table_name} ENABLE TRIGGER ALL"  # noqa: S608
                 )
             pg_conn.commit()
+
+            # Sync SERIAL sequences after migration to prevent PK collisions.
+            # Rows inserted with explicit IDs (from SQLite) don't advance the
+            # PG sequence. Without this, the next auto-increment insert reuses
+            # a low value that already exists (e.g. dependency_map_run_history).
+            if inserted > 0:
+                try:
+                    cur = pg_conn.cursor()
+                    cur.execute(
+                        "SELECT column_name, pg_get_serial_sequence(%s, column_name) "
+                        "FROM information_schema.columns "
+                        "WHERE table_name = %s AND table_schema = 'public' "
+                        "AND column_default LIKE 'nextval%%'",
+                        (table_name, table_name),
+                    )
+                    for col_name, seq_name in cur.fetchall():
+                        if seq_name:
+                            cur.execute(
+                                f"SELECT setval('{seq_name}', "  # noqa: S608
+                                f"COALESCE((SELECT MAX({col_name}) "
+                                f"FROM {table_name}), 0) + 1, false)"
+                            )
+                            logger.info(
+                                "Synced sequence %s for %s.%s",
+                                seq_name,
+                                table_name,
+                                col_name,
+                            )
+                    pg_conn.commit()
+                except Exception as seq_err:
+                    logger.warning(
+                        "Failed to sync sequences for %s: %s",
+                        table_name,
+                        seq_err,
+                    )
+                    pg_conn.rollback()
         except Exception:
             pg_conn.rollback()
             pg_conn.close()
