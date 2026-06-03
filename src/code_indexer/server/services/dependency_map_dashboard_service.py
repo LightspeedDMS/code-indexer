@@ -454,6 +454,11 @@ class DependencyMapDashboardService:
         if not iso_str:
             return None
 
+        if isinstance(iso_str, datetime):
+            if iso_str.tzinfo is None:
+                return iso_str.replace(tzinfo=timezone.utc)
+            return iso_str
+
         formats = [
             "%Y-%m-%dT%H:%M:%S.%f%z",
             "%Y-%m-%dT%H:%M:%S%z",
