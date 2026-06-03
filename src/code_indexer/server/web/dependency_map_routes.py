@@ -19,7 +19,7 @@ import threading
 import uuid as _uuid
 from datetime import datetime, datetime as _dt, timezone, timezone as _tz
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Optional, Set, Tuple, cast
 
 if TYPE_CHECKING:
     from code_indexer.server.services.shared_job_sentinel import SharedJobSentinel
@@ -259,17 +259,16 @@ _DASHBOARD_OP_TYPE = "dep_map_dashboard"
 DASHBOARD_STALE_TIMEOUT_SECONDS = 1800  # 30 minutes — dashboard sentinel stale recovery
 
 
-def _get_repair_journal_dir() -> Path:
+def _get_repair_journal_dir() -> Optional[Path]:
     """Return the repair activity journal directory.
 
-    Honors CIDX_DATA_DIR env var (Bug #879 IPC alignment).
-    Falls back to ~/.tmp when CIDX_DATA_DIR is unset.
+    Bug #1041: Returns shared NFS path from dep_map_service so all cluster
+    nodes can read it. Returns None when dep_map_service is unavailable.
     """
-    import os as _os
-
-    raw = _os.environ.get("CIDX_DATA_DIR", "").strip()
-    base = Path(raw) if raw else Path.home() / ".tmp"
-    return base / "depmap-repair-journal"
+    dep_map_service = _get_dep_map_service_from_state()
+    if dep_map_service is not None:
+        return cast(Optional[Path], dep_map_service.get_activity_journal_dir())
+    return None
 
 
 class _NullJobTracker:
@@ -548,8 +547,19 @@ def depmap_activity_journal_partial(request: Request, offset: int = 0):
     progress_info = ""
 
     if dep_map_service is not None:
-        journal = dep_map_service.activity_journal
-        content, new_offset = journal.get_content(offset)
+        # Bug #1041: Read from shared NFS path so any cluster node can serve the journal
+        shared_dir = dep_map_service.get_activity_journal_dir()
+        if shared_dir is not None:
+            journal_file = shared_dir / "_activity.md"
+            from ..services.activity_journal_service import ActivityJournalService
+
+            content, new_offset = ActivityJournalService.get_content_from_path(
+                journal_file, offset
+            )
+        else:
+            # Fallback to in-memory pointer (solo mode without golden_repos_manager)
+            journal = dep_map_service.activity_journal
+            content, new_offset = journal.get_content(offset)
         progress, progress_info = _get_progress_from_service(dep_map_service)
 
     html_content = _render_journal_html(content)
@@ -1395,8 +1405,9 @@ def _run_repair_with_feedback(
     """
 
     # AC2: Initialize journal in a repair-specific directory
+    # Bug #1041: journal_dir may be None when dep_map_service is unavailable
     journal_dir = _get_repair_journal_dir()
-    if activity_journal is not None:
+    if activity_journal is not None and journal_dir is not None:
         try:
             journal_dir.mkdir(parents=True, exist_ok=True)
             activity_journal.init(journal_dir)

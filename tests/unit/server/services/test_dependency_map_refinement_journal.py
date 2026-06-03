@@ -33,7 +33,6 @@ implementation behavior. All collaborators are mocked to avoid real I/O:
 """
 
 import json
-import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -499,10 +498,10 @@ class TestJournalErrorsNonFatal:
 
 
 class TestJournalInitDirectoryPath:
-    """Test 6: init() must use ~/.tmp/depmap-refinement-journal/ path."""
+    """Test 6: init() must use shared NFS path {golden_repos_dir}/.scratch/depmap-activity-journal/ (Bug #1041)."""
 
-    def test_journal_init_uses_refinement_journal_dir(self, tmp_path):
-        """init() must be called with a path containing 'depmap-refinement-journal'."""
+    def test_journal_init_uses_shared_nfs_journal_dir(self, tmp_path):
+        """init() must be called with the shared NFS path containing 'depmap-activity-journal'."""
         domains = [{"name": "domain-A"}]
         service, mock_journal = _make_service(tmp_path, domains)
 
@@ -510,30 +509,34 @@ class TestJournalInitDirectoryPath:
 
         mock_journal.init.assert_called_once()
         init_path = mock_journal.init.call_args[0][0]
-        assert "depmap-refinement-journal" in str(init_path), (
-            f"init() path must contain 'depmap-refinement-journal', got: {init_path}"
+        assert "depmap-activity-journal" in str(init_path), (
+            f"init() path must contain 'depmap-activity-journal', got: {init_path}"
         )
 
-    def test_journal_init_path_is_under_home_tmp(self, tmp_path):
-        """init() path must be under ~/.tmp/."""
+    def test_journal_init_path_is_under_golden_repos_scratch(self, tmp_path):
+        """init() path must be under {golden_repos_dir}/.scratch/ (Bug #1041 shared NFS path)."""
         domains = [{"name": "domain-A"}]
         service, mock_journal = _make_service(tmp_path, domains)
 
         service.run_refinement_cycle()
 
         init_path = mock_journal.init.call_args[0][0]
-        expected_prefix = os.path.expanduser("~/.tmp")
-        assert str(init_path).startswith(expected_prefix), (
-            f"init() path must start with '~/.tmp' (~={expected_prefix}), got: {init_path}"
+        # The golden_repos_dir is tmp_path / "write" (set in _make_service)
+        expected_parent = tmp_path / "write" / ".scratch"
+        assert str(init_path).startswith(str(expected_parent)), (
+            f"init() path must be under '{expected_parent}', got: {init_path}"
         )
 
-    def test_journal_init_path_matches_exact_pattern(self, tmp_path):
-        """init() path must exactly match ~/.tmp/depmap-refinement-journal/."""
+    def test_journal_init_path_matches_shared_nfs_pattern(self, tmp_path):
+        """init() path must exactly match {golden_repos_dir}/.scratch/depmap-activity-journal/ (Bug #1041)."""
         domains = [{"name": "domain-A"}]
         service, mock_journal = _make_service(tmp_path, domains)
 
         service.run_refinement_cycle()
 
         init_path = mock_journal.init.call_args[0][0]
-        expected = Path(os.path.expanduser("~/.tmp/depmap-refinement-journal/"))
-        assert init_path == expected, f"Expected exact path {expected}, got {init_path}"
+        # The golden_repos_dir is tmp_path / "write" (set in _make_service)
+        expected = tmp_path / "write" / ".scratch" / "depmap-activity-journal"
+        assert init_path == expected, (
+            f"Expected shared NFS path {expected}, got {init_path}"
+        )
