@@ -50,12 +50,26 @@ def _restore_dependency_globals():
 
 @pytest.fixture(autouse=True)
 def _bootstrap_server_database():
-    """Initialize SQLite schema and seed admin/admin before every test (function-scoped).
+    """Initialize SQLite schema, seed admin/admin, and ensure auth singletons.
 
     Function scope so that any test which deletes its tmp dir / cleans up the
     DB on teardown gets a fresh schema for the next test. Schema initialization
     is idempotent (CREATE TABLE IF NOT EXISTS), so the cost is just a few
-    millisecond per test.
+    milliseconds per test.
+
+    Singleton assignment rationale: tests in this directory hit form-based
+    `POST /login`, which checks `dependencies.user_manager` and returns 500
+    "User manager not available" if None. The companion `_restore_dependency_globals`
+    fixture (above) captures the pre-test singleton state and restores it on
+    teardown — which means if the first test in a session inherits a None
+    initial state, every subsequent test starts with None as well, and any
+    test fixture that does NOT trigger FastAPI lifespan (most tests in this
+    directory use `TestClient(app)` without `with`) cannot lazily initialize
+    the singletons. Assigning here ensures every test has a working
+    `dependencies.user_manager` regardless of lifespan and regardless of
+    save/restore order — bootstrap runs after the save, so the new value is
+    visible during the test; the restore on teardown is a no-op for the next
+    test because the next test's bootstrap overwrites it.
     """
     server_data_dir = os.environ.get(
         "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
@@ -68,8 +82,10 @@ def _bootstrap_server_database():
     schema.initialize_database()
 
     from code_indexer.server.auth.user_manager import UserManager
+    from code_indexer.server.auth import dependencies
 
     user_manager = UserManager(use_sqlite=True, db_path=str(db_path))
     user_manager.seed_initial_admin()
+    dependencies.user_manager = user_manager
 
     yield

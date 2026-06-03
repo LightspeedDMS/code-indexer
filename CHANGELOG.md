@@ -5,10 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.91.12] - 2026-06-03
+## [10.91.13] - 2026-06-03
 
 ### Fixed
-- `ActivatedRepoManager.activated_repos_dir` now resolves symlinks (`os.path.realpath`) at construction (`__init__` and `set_shared_repos_dir`). Discovered during Bug #1044 staging E2E validation: clusters that deploy `~/.cidx-server/data/activated-repos` as a symlink to the CoW-managed storage (e.g. `-> /mnt/cow-storage/activated-repos`) hit `_fd_anchored_phase1_rename`'s `os.open(..., O_NOFOLLOW)` check on the top-level dir, which correctly refuses to follow the symlink and raises `Errno 20 Not a directory`. Deactivation jobs reported `success: true` but left workspaces on disk with 7 cleanup warnings. The admin-controlled top-level path is safe to resolve once at init; per-user/alias subpaths under it still get O_NOFOLLOW protection.
+- Bug #1049: `build_dep_map_dispatcher` did not derive `claude_soft_timeout_seconds` from `config.dependency_map_pass_timeout_seconds`, so the inner shell `timeout <N> claude ...` command was always wrapped at `_DEFAULT_SOFT_TIMEOUT_SECONDS = 1800` regardless of operator setting. Operators raising `dependency_map_pass_timeout_seconds` to 18000 were silently capped at 30 minutes per pass. Factory now derives the value from config when the caller does not pass an explicit override; explicit override still wins. 3 regression-guard tests added at `tests/unit/server/services/test_dep_map_dispatcher_factory_timeout_config_bug1049.py`.
+- Bug #1051: 15 depmap-dashboard/sentinel/state-polling unit tests failing on development across 3 root causes:
+  - **Group A (4)**: `FakeTracker` test double in `tests/unit/server/services/test_depmap_dashboard_job_runner.py` lacked `fail_job` method after v10.91.6's `update_status(..., error=...) → fail_job(...)` change. Added the method + updated 4 `TestFailurePath::*` assertions.
+  - **Group B (8 + setup-error cascade)**: `tests/unit/server/web/conftest.py`'s autouse `_bootstrap_server_database` seeded admin/admin in SQLite but did NOT assign the new `UserManager` to `dependencies.user_manager`. Combined with `_restore_dependency_globals` saving/restoring a None-initial singleton, this caused `POST /login` to return 500 `User manager not available` on every test after the first, blocking ~15 sentinel/refinement/state-polling tests at fixture setup. Extended `_bootstrap_server_database` to assign the singleton.
+  - **Group C (3)**: production-logic drift in `src/code_indexer/server/web/dependency_map_routes.py` dashboard-partial handler — missing sentinel-held / claim-race / terminal-job guards before submitting a new `dep_map_dashboard` job or rendering the in-progress partial.
+
+### Tests
+- 121 previously-affected tests now pass; 0 failures across the targeted depmap dashboard sweep. (`os.path.realpath`) at construction (`__init__` and `set_shared_repos_dir`). Discovered during Bug #1044 staging E2E validation: clusters that deploy `~/.cidx-server/data/activated-repos` as a symlink to the CoW-managed storage (e.g. `-> /mnt/cow-storage/activated-repos`) hit `_fd_anchored_phase1_rename`'s `os.open(..., O_NOFOLLOW)` check on the top-level dir, which correctly refuses to follow the symlink and raises `Errno 20 Not a directory`. Deactivation jobs reported `success: true` but left workspaces on disk with 7 cleanup warnings. The admin-controlled top-level path is safe to resolve once at init; per-user/alias subpaths under it still get O_NOFOLLOW protection.
 
 ### Tests
 - New regression-guard suite `tests/unit/server/repositories/test_activated_repos_dir_symlink_resolution.py` (3 tests using real `os.symlink()` — no mocks per Anti-Mock):
