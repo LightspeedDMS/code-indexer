@@ -70,18 +70,22 @@ def _get_dashboard_service():
 
     try:
         config_service = get_config_service()
-        config_manager = config_service.config_manager
 
-        # Get tracking backend
-        server_dir = config_manager.server_dir
-        db_path = str(server_dir / "data" / "cidx_server.db")
-
-        from ..storage.sqlite_backends import DependencyMapTrackingBackend
-
-        tracking_backend = DependencyMapTrackingBackend(db_path)
-
-        # Get dependency map service from app state (may be None if disabled)
         dep_map_service = _get_dep_map_service_from_state()
+
+        # Use the tracking backend from the dep-map service -- correctly
+        # wired to PG in cluster mode by lifespan.py. Falls back to SQLite
+        # only in solo mode when dep_map_service is unavailable.
+        tracking_backend = None
+        if dep_map_service is not None:
+            tracking_backend = dep_map_service._tracking_backend
+        if tracking_backend is None:
+            config_manager = config_service.config_manager
+            server_dir = config_manager.server_dir
+            db_path = str(server_dir / "data" / "cidx_server.db")
+            from ..storage.sqlite_backends import DependencyMapTrackingBackend
+
+            tracking_backend = DependencyMapTrackingBackend(db_path)
 
         return DependencyMapDashboardService(
             tracking_backend=tracking_backend,
