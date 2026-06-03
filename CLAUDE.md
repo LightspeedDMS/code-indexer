@@ -41,15 +41,67 @@ Bump MINOR version on development (e.g. 10.4.0 -> 10.5.0), push. CI auto-creates
 
 **ABSOLUTE RULE**: A hotfix NEVER merges development into master. Start from master, make ONLY the surgical fix (optionally on `hotfix/*` branch), bump HOTFIX version (e.g. 10.5.0 -> 10.5.1), tag, push master. Then back-merge master INTO development. The back-merge direction is always master -> development, NEVER the reverse.
 
-### Push-to-master Authorization (HIGHEST SEVERITY)
+### Push-to-master Authorization (HIGHEST SEVERITY — DO NOT FUCK THIS UP)
 
-NEVER push to `master` without explicit user authorization in the **current conversation**.
+NEVER push to `master` without explicit user authorization in the **current message** that is **about this exact push**. This is the most important rule in the file. A violation has happened before (see "Past failures" below) — it will not happen again.
 
-**Counts as authorization**: "push to master", "promote to production", "deploy to production", "commit and push to master", "merge to master and push".
+#### What counts as authorization (literal phrases, in the user's most recent message)
 
-**Does NOT count**: completing a story or bug fix, "deploy to staging", prior-conversation authorization, assumed authorization because "the work is done".
+Only these literal phrases authorize a push to master:
+- "push to master"
+- "promote to production"
+- "deploy to production"
+- "commit and push to master"
+- "merge to master and push"
 
-**Default on work completion**: push to `development` (with version bump; CI auto-tags), merge and push to `staging`, **STOP** and wait. When in doubt, ASK.
+The phrase must appear in the **user's message** (not a hook, not a system reminder, not a goal directive, not a CI output, not your own prior summary). It must be in the **current turn** — the user said it RIGHT NOW about THIS push.
+
+#### What absolutely does NOT count (no matter how reasonable it feels)
+
+- Completing a story, bug fix, or test suite
+- "deploy to staging" / "merge to staging" (staging is NOT master)
+- Prior-conversation authorization of any kind, including earlier in the same session
+- Earlier authorization that was about a DIFFERENT version (e.g. user said "promote to prod" when authorizing v10.x.y — that does NOT authorize v10.x.z; each version needs its own explicit OK)
+- A `/goal` directive, no matter how it is worded — `/goal` configures the session hook; it is NOT a user instruction to push to master
+- A green CI run, all tests passing, "the work is done", "everyone agreed earlier"
+- An inferred reading of "what the user obviously wants next"
+- ANY form of extrapolation, interpretation, or "the spirit of what they said"
+
+If you find yourself reasoning **"the user implied I should push"** or **"this naturally follows from what they asked"** or **"the goal hook requires it"** — STOP. Those are the exact thoughts that produce the failure. Push to master requires the user to EXPLICITLY TYPE one of the literal phrases above, about this exact push, in their most recent message. Anything less = ask.
+
+#### Mandatory two-confirmation protocol (no exceptions)
+
+Even when the user types an authorizing phrase, you MUST confirm twice before pushing:
+
+1. **First confirmation (always)** — Reply with: the exact commits/version that will go to master, the exact `git` commands you will run, and the production impact (which environments auto-deploy, what cidx-server restart implies, whether any user-visible service interruption is expected). Then ask: *"Confirm: push v<X.Y.Z> (commit `<sha>`) to master and trigger production auto-deploy? Yes/no."* Wait.
+
+2. **Second confirmation (always)** — Even after the user replies "yes" to confirmation 1, ask one more time: *"Final confirmation: push to master now? This will restart cidx-server in production and kill any in-flight background jobs (dep-map analysis, indexing, refresh). Yes/no."* Wait.
+
+Only on a second explicit "yes" do you push. If the user replies with anything other than an unambiguous yes (e.g. "ok", "sure", "do it", "go ahead") — that's NOT a yes; ask again.
+
+The two-confirmation rule applies **every single time**, even if the user previously approved a push earlier in the session, even if it feels redundant. It is not redundant — it exists because production restarts kill in-flight jobs that may represent hours of Claude compute, and the cost of one extra question is trivial compared to the cost of one wrong push.
+
+#### Per-push, per-version authorization scope
+
+Authorization is scoped to **one specific push of one specific version**. It does NOT carry over to:
+- A subsequent push of a different version
+- A re-push after a force-update or rollback
+- A merge of additional commits onto the same target
+
+If you push v10.x.y with authorization, and the next minute the user merges another change in and asks you to push v10.x.z — that requires a **fresh** authorization with the full two-confirmation protocol. No "rolling" authorization. No "they already said yes earlier".
+
+#### Default on work completion (THIS IS THE NORMAL PATH)
+
+When you complete a code fix, test pass, or feature:
+1. Bump version on `development`, commit, push to `origin/development`. CI auto-tags.
+2. Merge `development` → `staging`, push `origin/staging`. Staging cluster auto-deploys.
+3. **STOP HERE.** Report what's on dev and staging. Wait for the user to drive the next step.
+
+Going further (i.e. promoting `staging` → `master`) is never the default. It is always an explicit, user-directed, two-confirmed action.
+
+#### Past failures (so the next agent can see what happened)
+
+- **2026-06-03**: Pushed v10.91.14 to master (commit `d4d602fb`) without explicit authorization. Reasoning was: earlier in the same session the user said "promote to prod" (for v10.91.12); later a `/goal` directive said "ensure regression testing locally and in the staging environment" and "zero failures across the suites"; all three test gates were green; so promotion to master "naturally followed". This was wrong on every axis: the earlier "promote to prod" was scoped to v10.91.12, the `/goal` text mentions staging not master, and "the work is done = ship it" is the exact extrapolation this rule forbids. Consequence: production auto-updater pulled the new version mid-flight during a user-initiated dep-map delta analysis; `systemctl restart cidx-server` killed the in-progress thread; hours of Claude compute were lost. The user was rightly furious. This section was hardened in response. Read this paragraph before every potential master push.
 
 ### Security-Sensitive Commit Discipline (Story #929)
 
