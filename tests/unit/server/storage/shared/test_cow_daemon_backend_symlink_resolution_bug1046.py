@@ -91,3 +91,48 @@ class TestTranslateToDaemonPathSymlinkResolution:
 
         with pytest.raises(ValueError, match="cannot translate to daemon view"):
             backend._translate_to_daemon_path(str(link_outside / "cidx-meta"))
+
+    def test_symlink_to_daemon_storage_path_passes_through(self, tmp_path):
+        """Daemon-host layout: symlink whose realpath resolves under daemon_storage_path.
+
+        Layout:
+          tmp_path/daemon-storage/golden-repos/   <- real directory (is daemon_storage_path)
+          tmp_path/link/                           <- symlink -> tmp_path/daemon-storage/golden-repos/
+
+        _translate_to_daemon_path(str(tmp_path/"link/cidx-meta")) must return the
+        resolved daemon-storage path unchanged — no re-prefixing with mount_point.
+        """
+        daemon_dir = tmp_path / "daemon-storage" / "golden-repos"
+        daemon_dir.mkdir(parents=True)
+
+        link_dir = tmp_path / "link"
+        os.symlink(str(daemon_dir), str(link_dir))
+
+        mount_point = str(tmp_path / "mount" / "golden-repos")
+        daemon_storage_path = str(daemon_dir)
+
+        backend = _make_backend(mount_point, daemon_storage_path)
+
+        symlink_path = str(link_dir / "cidx-meta")
+        result = backend._translate_to_daemon_path(symlink_path)
+
+        assert result == str(daemon_dir / "cidx-meta")
+
+    def test_direct_daemon_storage_path_passes_through(self, tmp_path):
+        """Daemon-host layout: literal (non-symlink) path under daemon_storage_path.
+
+        A path already under daemon_storage_path must be returned as-is without
+        mount_point translation.
+        """
+        daemon_dir = tmp_path / "daemon-storage" / "golden-repos"
+        daemon_dir.mkdir(parents=True)
+
+        mount_point = str(tmp_path / "mount" / "golden-repos")
+        daemon_storage_path = str(daemon_dir)
+
+        backend = _make_backend(mount_point, daemon_storage_path)
+
+        direct_path = str(daemon_dir / "some-repo")
+        result = backend._translate_to_daemon_path(direct_path)
+
+        assert result == direct_path

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.11] - 2026-06-03
+
+### Fixed
+- Bug #1046 (extension): v10.91.10 added symlink resolution but only accepted paths under `mount_point`. On the CoW daemon host node (cluster node 23) the `golden-repos` symlink target is under `daemon_storage_path` directly (`/home/jsbattig/cow-storage/golden-repos`) — the bind-mount alias of the same XFS filesystem reached via the symlinked source rather than the mount point. v10.91.10 still rejected these resolved paths. v10.91.11 extends `_translate_to_daemon_path` to accept paths resolving under EITHER `mount_point` (translate to daemon-local form) OR `daemon_storage_path` (already in daemon-local form, return as-is).
+
+### Tests
+- Added 2 regression-guard tests to `tests/unit/server/storage/shared/test_cow_daemon_backend_symlink_resolution_bug1046.py`:
+  - `test_symlink_to_daemon_storage_path_passes_through` — symlink resolving under daemon_storage_path returns the resolved path unchanged.
+  - `test_direct_daemon_storage_path_passes_through` — direct daemon_storage_path entries pass through unchanged.
+  Real `os.symlink()` only — no mocks (Anti-Mock rule).
+
 ## [10.91.10] - 2026-06-03
 
 ### Fixed
