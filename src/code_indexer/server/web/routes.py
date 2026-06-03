@@ -1087,6 +1087,12 @@ _USERS_PAGE_ERROR_MESSAGES = {
     "invalid_csrf": "Invalid CSRF token",
     "cannot_delete_self": "Cannot delete your own account",
     "user_manager_unavailable": "User manager not available",
+    "passwords_mismatch": "Passwords do not match",
+    "invalid_role": "Invalid role",
+    "cannot_demote_self": "Cannot demote your own admin account",
+    "sso_password_change_denied": "Cannot change password for SSO users. Authentication is managed by the identity provider.",
+    "user_not_found": "User not found",
+    "operation_failed": "Operation failed. Check input and try again.",
 }
 
 
@@ -1134,36 +1140,34 @@ def create_user(
     role: str = Form(...),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Create a new user."""
+    """Create a new user (PRG: redirects to /admin/users with status query)."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Validate password match
     if new_password != confirm_password:
-        return _create_users_page_response(
-            request, session, error_message="Passwords do not match"
+        return RedirectResponse(
+            url="/admin/users?error=passwords_mismatch", status_code=303
         )
 
     # Validate role
     try:
         role_enum = UserRole(role)
     except ValueError:
-        return _create_users_page_response(
-            request, session, error_message=f"Invalid role: {role}"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_role", status_code=303)
 
     # Create user
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
@@ -1201,13 +1205,14 @@ def create_user(
                 )
             )
 
-        return _create_users_page_response(
-            request,
-            session,
-            success_message=f"User '{new_username}' created successfully",
+        return RedirectResponse(
+            url=f"/admin/users?success=user_created&u={quote(new_username, safe='')}",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(
+            url="/admin/users?error=operation_failed", status_code=303
+        )
 
 
 @web_router.post(
@@ -1221,47 +1226,46 @@ def update_user_role(
     role: str = Form(...),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Update a user's role."""
+    """Update a user's role (PRG: redirects to /admin/users with status query)."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Prevent demoting self
     if username == session.username and role != "admin":
-        return _create_users_page_response(
-            request, session, error_message="Cannot demote your own admin account"
+        return RedirectResponse(
+            url="/admin/users?error=cannot_demote_self", status_code=303
         )
 
     # Validate role
     try:
         role_enum = UserRole(role)
     except ValueError:
-        return _create_users_page_response(
-            request, session, error_message=f"Invalid role: {role}"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_role", status_code=303)
 
     # Update user
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
         user_manager.update_user_role(username, role_enum)
-        return _create_users_page_response(
-            request,
-            session,
-            success_message=f"User '{username}' role updated successfully",
+        return RedirectResponse(
+            url=f"/admin/users?success=role_updated&u={quote(username, safe='')}",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(
+            url="/admin/users?error=operation_failed", status_code=303
+        )
 
 
 @web_router.post(
@@ -1276,46 +1280,46 @@ def change_user_password(
     confirm_password: str = Form(...),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Change a user's password (admin only)."""
+    """Change a user's password (admin only). PRG: redirects to /admin/users."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Validate password match
     if new_password != confirm_password:
-        return _create_users_page_response(
-            request, session, error_message="Passwords do not match"
+        return RedirectResponse(
+            url="/admin/users?error=passwords_mismatch", status_code=303
         )
 
     # Change password
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
         user_manager.change_password(username, new_password)
-        return _create_users_page_response(
-            request,
-            session,
-            success_message=f"Password for '{username}' changed successfully",
+        return RedirectResponse(
+            url=f"/admin/users?success=password_changed&u={quote(username, safe='')}",
+            status_code=303,
         )
     except SSOPasswordChangeError:
         # Bug #68: SSO users cannot change passwords locally
-        return _create_users_page_response(
-            request,
-            session,
-            error_message="Cannot change password for SSO users. Authentication is managed by the identity provider.",
+        return RedirectResponse(
+            url="/admin/users?error=sso_password_change_denied",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(
+            url="/admin/users?error=operation_failed", status_code=303
+        )
 
 
 @web_router.post(
@@ -1329,22 +1333,22 @@ def update_user_email(
     new_email: str = Form(""),
     csrf_token: Optional[str] = Form(None),
 ):
-    """Update a user's email (admin only). Empty string clears the email."""
+    """Update a user's email (admin only). Empty clears. PRG: redirects to /admin/users."""
+    from urllib.parse import quote
+
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
     # Validate CSRF token
     if not validate_login_csrf_token(request, csrf_token):
-        return _create_users_page_response(
-            request, session, error_message="Invalid CSRF token"
-        )
+        return RedirectResponse(url="/admin/users?error=invalid_csrf", status_code=303)
 
     # Update email
     user_manager = dependencies.user_manager
     if not user_manager:
-        return _create_users_page_response(
-            request, session, error_message="User manager not available"
+        return RedirectResponse(
+            url="/admin/users?error=user_manager_unavailable", status_code=303
         )
 
     try:
@@ -1354,13 +1358,14 @@ def update_user_email(
             username, new_email=email_value if email_value else None
         )
 
-        return _create_users_page_response(
-            request,
-            session,
-            success_message=f"Email for '{username}' updated successfully",
+        return RedirectResponse(
+            url=f"/admin/users?success=email_updated&u={quote(username, safe='')}",
+            status_code=303,
         )
-    except ValueError as e:
-        return _create_users_page_response(request, session, error_message=str(e))
+    except ValueError:
+        return RedirectResponse(
+            url="/admin/users?error=operation_failed", status_code=303
+        )
 
 
 @web_router.post(

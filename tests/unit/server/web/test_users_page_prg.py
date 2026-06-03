@@ -11,6 +11,8 @@ maps query-string status codes to user-facing messages. Unknown codes MUST be
 ignored to prevent stored/reflected XSS via the query string.
 """
 
+import pytest
+
 from code_indexer.server.web.routes import (
     _USERS_PAGE_ERROR_MESSAGES,
     _USERS_PAGE_SUCCESS_MESSAGES,
@@ -71,5 +73,28 @@ def test_known_error_codes_cover_expected_failures() -> None:
         "invalid_csrf",
         "cannot_delete_self",
         "user_manager_unavailable",
+        "passwords_mismatch",
+        "invalid_role",
+        "cannot_demote_self",
+        "sso_password_change_denied",
+        "user_not_found",
+        "operation_failed",
     }
     assert set(_USERS_PAGE_ERROR_MESSAGES.keys()) == expected
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "passwords_mismatch",
+        "invalid_role",
+        "cannot_demote_self",
+        "sso_password_change_denied",
+        "user_not_found",
+        "operation_failed",
+    ],
+)
+def test_resolve_new_error_codes_render_messages(code: str) -> None:
+    success, error = _resolve_users_page_messages(None, code, None)
+    assert success is None
+    assert error is not None and len(error) > 0
