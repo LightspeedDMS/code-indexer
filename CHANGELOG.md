@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.12] - 2026-06-03
+
+### Fixed
+- `ActivatedRepoManager.activated_repos_dir` now resolves symlinks (`os.path.realpath`) at construction (`__init__` and `set_shared_repos_dir`). Discovered during Bug #1044 staging E2E validation: clusters that deploy `~/.cidx-server/data/activated-repos` as a symlink to the CoW-managed storage (e.g. `-> /mnt/cow-storage/activated-repos`) hit `_fd_anchored_phase1_rename`'s `os.open(..., O_NOFOLLOW)` check on the top-level dir, which correctly refuses to follow the symlink and raises `Errno 20 Not a directory`. Deactivation jobs reported `success: true` but left workspaces on disk with 7 cleanup warnings. The admin-controlled top-level path is safe to resolve once at init; per-user/alias subpaths under it still get O_NOFOLLOW protection.
+
+### Tests
+- New regression-guard suite `tests/unit/server/repositories/test_activated_repos_dir_symlink_resolution.py` (3 tests using real `os.symlink()` — no mocks per Anti-Mock):
+  - Symlinked data_dir resolves to target on construction.
+  - Non-symlink direct directory continues to work.
+  - `set_shared_repos_dir` resolves symlinks too.
+
 ## [10.91.11] - 2026-06-03
 
 ### Fixed
