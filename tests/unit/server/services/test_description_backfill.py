@@ -3,7 +3,7 @@ Unit tests for startup description backfill sweep in DescriptionRefreshScheduler
 
 reconcile_terse_descriptions() is a one-shot sweep that runs at start()
 (after reconcile_broken_lifecycle_metadata()) to find golden repos with terse
-cidx-meta descriptions (body <= 500 chars) and route them asynchronously
+cidx-meta descriptions (body <= 200 chars) and route them asynchronously
 through LifecycleBatchRunner for regeneration.
 
 Fixes production gap: repos with short/broken descriptions never get regenerated
@@ -16,7 +16,7 @@ Test strategy:
 - Filesystem fixtures use tmp_path for real file I/O (Messi Rule #1 — anti-mock).
 
 Classes:
-  TestFindTerseDescriptionAliases  (5 tests) — file scanning logic
+  TestFindTerseDescriptionAliases  (7 tests) — file scanning logic (incl. bug #1064 boundary)
   TestReconcileTerseDescriptions   (3 tests) — orchestration + dispatch wiring
   TestStartCallsReconcileTerse     (1 test)  — wiring into start()
 """
@@ -36,7 +36,7 @@ SCHEDULER_MODULE = "code_indexer.server.services.description_refresh_scheduler"
 LOGGER_NAME = SCHEDULER_MODULE
 
 SHORT_BODY = "Short body"
-LONG_BODY = "x" * 501
+LONG_BODY = "x" * 201  # just above the 200-char terse threshold (bug #1064: was 501)
 
 
 def _make_cidx_meta_file(meta_dir: Path, alias: str, body: str) -> Path:
@@ -97,7 +97,7 @@ class TestFindTerseDescriptionAliases:
     """File scanning: which aliases are flagged as terse."""
 
     def test_find_terse_description_aliases_flags_short_body(self, tmp_path):
-        """cidx-meta file with body <= 500 chars is flagged as terse."""
+        """cidx-meta file with body <= 200 chars is flagged as terse (bug #1064: threshold was 500)."""
         sched = _make_scheduler_bare(tmp_path)
         _make_cidx_meta_file(tmp_path, "repo-a", SHORT_BODY)
 
@@ -107,7 +107,7 @@ class TestFindTerseDescriptionAliases:
         assert "repo-a" in result
 
     def test_find_terse_description_aliases_skips_adequate_body(self, tmp_path):
-        """cidx-meta file with body > 500 chars is NOT flagged."""
+        """cidx-meta file with body > 200 chars is NOT flagged (bug #1064: threshold was 500)."""
         sched = _make_scheduler_bare(tmp_path)
         _make_cidx_meta_file(tmp_path, "repo-b", LONG_BODY)
 
@@ -116,6 +116,42 @@ class TestFindTerseDescriptionAliases:
         assert result is not None
         assert "repo-b" not in result
         assert result == []
+
+    def test_find_terse_description_aliases_250_char_body_not_terse(self, tmp_path):
+        """Bug #1064 boundary: 250-char body is NOT terse at threshold=200.
+
+        Before the fix (threshold=500) this would have been flagged terse,
+        causing legitimate small-repo descriptions to be re-regenerated in
+        an infinite loop. At threshold=200, 250 chars > 200, so NOT terse.
+        """
+        sched = _make_scheduler_bare(tmp_path)
+        body_250 = "A" * 250  # 250 chars > 200 threshold → adequate
+        _make_cidx_meta_file(tmp_path, "small-lib", body_250)
+
+        result = sched._find_terse_description_aliases(["small-lib"])
+
+        assert result is not None
+        assert "small-lib" not in result, (
+            "250-char body must NOT be flagged terse at threshold=200 "
+            "(was incorrectly flagged under old threshold=500)"
+        )
+
+    def test_find_terse_description_aliases_150_char_body_is_terse(self, tmp_path):
+        """Bug #1064 boundary: 150-char body IS terse at threshold=200.
+
+        A 150-char description is barely a sentence — indicates a stub or
+        failed generation. Must be flagged for regeneration.
+        """
+        sched = _make_scheduler_bare(tmp_path)
+        body_150 = "B" * 150  # 150 chars <= 200 threshold → terse
+        _make_cidx_meta_file(tmp_path, "stub-repo", body_150)
+
+        result = sched._find_terse_description_aliases(["stub-repo"])
+
+        assert result is not None
+        assert "stub-repo" in result, (
+            "150-char body must be flagged terse at threshold=200"
+        )
 
     def test_find_terse_description_aliases_skips_missing_file(self, tmp_path):
         """Nonexistent cidx-meta file is silently skipped — not flagged, no error."""
@@ -148,7 +184,7 @@ class TestFindTerseDescriptionAliases:
         result = sched._find_terse_description_aliases(["repo-c"])
 
         assert result is not None
-        # SHORT_BODY is <= 500 chars so repo-c should be flagged
+        # SHORT_BODY is <= 200 chars so repo-c should be flagged
         assert "repo-c" in result
 
 

@@ -46,7 +46,11 @@ PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3
 # Description body length threshold for the startup backfill sweep.
 # Aliases whose cidx-meta body (stripped) is at or below this limit are
 # considered terse and queued for regeneration via LifecycleBatchRunner.
-TERSE_DESCRIPTION_MAX_CHARS = 500
+# Bug #1064: lowered from 500 to 200. At 500 the detector re-flagged
+# legitimately-concise small-repo descriptions (300-500 chars) on every
+# startup, causing an infinite regeneration loop. At 200 (barely a sentence)
+# only genuine stubs or failed generations are queued for regeneration.
+TERSE_DESCRIPTION_MAX_CHARS = 200
 
 
 def _build_claude_env() -> dict:
