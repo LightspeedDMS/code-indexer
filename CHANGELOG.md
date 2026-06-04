@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.3] - 2026-06-04
+
+### Fixed
+- Bug #1066: `RefreshScheduler._scheduler_loop` now uses a `_submit_failed` sentinel to track whether `_submit_refresh_job` raised a generic (non-`DuplicateJobError`) exception. `update_next_refresh` is only called on success or `DuplicateJobError`; on a transient failure the repo's `next_refresh` is left unchanged so the scheduler retries on the very next poll cycle instead of silently skipping a full refresh interval.
+
 ## [10.92.2] - 2026-06-04
 
 ### Fixed

@@ -934,31 +934,46 @@ class RefreshScheduler:
                     if now < next_refresh:
                         continue  # Not due yet
 
-                    # Repo is due for refresh — submit job
+                    # Repo is due for refresh — submit job.
+                    # Bug #1066: track whether a generic (non-DuplicateJobError)
+                    # exception occurred so we can skip next_refresh advancement.
+                    # Advancing on a transient failure would silently skip one full
+                    # refresh cycle; leaving next_refresh unchanged lets the scheduler
+                    # retry on the very next poll.
+                    _submit_failed = False
                     try:
                         self._submit_refresh_job(alias_name)
                     except DuplicateJobError:
                         # Job already running for this repo — expected when prior refresh
                         # is still in flight (possibly extended by a verification pass).
+                        # Advance next_refresh so we don't re-submit immediately after
+                        # the in-flight job completes.
                         logger.info(
                             f"Refresh skipped for {alias_name}: prior refresh still running "
                             f"(possibly extended by verification pass)"
                         )
                     except Exception as e:
+                        # Transient failure — do NOT advance next_refresh.
+                        # The repo remains overdue and will be retried on the next poll.
+                        _submit_failed = True
                         logger.error(
                             f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
                             exc_info=True,
                         )
 
-                    # Story #284 AC1: back-propagate next_refresh with jitter
-                    jitter = self._calculate_jitter(refresh_interval)
-                    new_next_refresh = now + refresh_interval + jitter
-                    try:
-                        self.registry.update_next_refresh(alias_name, new_next_refresh)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to persist next_refresh for {alias_name}: {e}"
-                        )
+                    # Story #284 AC1: back-propagate next_refresh with jitter.
+                    # Bug #1066: skip advancement when submit raised a generic exception.
+                    if not _submit_failed:
+                        jitter = self._calculate_jitter(refresh_interval)
+                        new_next_refresh = now + refresh_interval + jitter
+                        try:
+                            self.registry.update_next_refresh(
+                                alias_name, new_next_refresh
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to persist next_refresh for {alias_name}: {e}"
+                            )
 
                 # Bug #735: successful iteration — reset consecutive failure counter.
                 consecutive_failures = 0
