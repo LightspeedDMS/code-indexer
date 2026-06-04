@@ -51,6 +51,7 @@ from code_indexer.server.services.dep_map_repair_phase37 import (
     run_phase37,
 )
 from code_indexer.server.services.dep_map_repair_malformed_yaml import (
+    repair_single_malformed_yaml_anomaly,
     run_malformed_yaml_repairs,
 )
 from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
@@ -949,6 +950,8 @@ class DepMapRepairExecutor:
         """
         from pathlib import Path as _Path
 
+        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
+
         prompt_template_path = (
             _Path(__file__).parent.parent
             / "mcp"
@@ -956,22 +959,26 @@ class DepMapRepairExecutor:
             / "bidirectional_mismatch_audit.md"
         )
         journal = None if journal_disabled else RepairJournal()
-        audit_one_bidirectional_mismatch(
-            output_dir=output_dir,
-            anomaly=anomaly,
-            domains_json=domains_json,
-            invoke_llm_fn=self._invoke_llm_fn,
-            repo_path_resolver=self._repo_path_resolver,
-            journal=journal,
-            fixed=fixed,
-            errors=errors,
-            prompt_template_path=prompt_template_path,
-            dry_run=dry_run,
-            effective_mode=effective_mode,
-            would_be_writes=would_be_writes,
-            extra_verdict_counts=extra_verdict_counts,
-            extra_action_counts=extra_action_counts,
+        examples = (
+            [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples
         )
+        for example in examples:
+            audit_one_bidirectional_mismatch(
+                output_dir=output_dir,
+                anomaly=example,
+                domains_json=domains_json,
+                invoke_llm_fn=self._invoke_llm_fn,
+                repo_path_resolver=self._repo_path_resolver,
+                journal=journal,
+                fixed=fixed,
+                errors=errors,
+                prompt_template_path=prompt_template_path,
+                dry_run=dry_run,
+                effective_mode=effective_mode,
+                would_be_writes=would_be_writes,
+                extra_verdict_counts=extra_verdict_counts,
+                extra_action_counts=extra_action_counts,
+            )
 
     def _repair_self_loop(
         self,
@@ -986,7 +993,34 @@ class DepMapRepairExecutor:
         """Remove one SELF_LOOP row from a domain .md file and journal the repair.
 
         Delegates to phase37 step functions. Never raises (AC8). Idempotent (AC4).
+        Handles both AnomalyEntry and AnomalyAggregate (Bug #1054).
         """
+        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
+
+        examples = (
+            [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples
+        )
+        for example in examples:
+            self._repair_self_loop_one(
+                output_dir=output_dir,
+                anomaly=example,
+                fixed=fixed,
+                errors=errors,
+                journal_path=journal_path,
+                journal=journal,
+            )
+
+    def _repair_self_loop_one(
+        self,
+        output_dir: Path,
+        anomaly: "AnomalyEntry",
+        fixed: List[str],
+        errors: List[str],
+        *,
+        journal_path: Optional[Path] = None,
+        journal: Optional["RepairJournal"] = None,
+    ) -> None:
+        """Repair a single SELF_LOOP AnomalyEntry."""
         raw_file = anomaly.file
         if ".." in raw_file:
             errors.append(f"Phase 3.7: unsafe path rejected (traversal): {raw_file!r}")
@@ -1038,22 +1072,26 @@ class DepMapRepairExecutor:
 
         All logic lives in dep_map_repair_malformed_yaml.repair_single_malformed_yaml_anomaly.
         Domain lock is acquired inside rewrite_malformed_yaml_file (Story #917).
+        Handles both AnomalyEntry and AnomalyAggregate (Bug #1054).
         """
-        from code_indexer.server.services.dep_map_repair_malformed_yaml import (
-            repair_single_malformed_yaml_anomaly,
-        )
+        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
 
-        repair_single_malformed_yaml_anomaly(
-            output_dir,
-            anomaly,
-            self._load_domains_json(output_dir),
-            fixed,
-            errors,
-            domain_analyzer=self._domain_analyzer,
-            log_fn=self._log,
-            locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
-            is_safe_domain_name_fn=self._is_safe_domain_name,
+        examples = (
+            [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples
         )
+        domains_json = self._load_domains_json(output_dir)
+        for example in examples:
+            repair_single_malformed_yaml_anomaly(
+                output_dir,
+                example,
+                domains_json,
+                fixed,
+                errors,
+                domain_analyzer=self._domain_analyzer,
+                log_fn=self._log,
+                locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
+                is_safe_domain_name_fn=self._is_safe_domain_name,
+            )
 
     @staticmethod
     def _extract_prose_fragment(message: str) -> str:

@@ -2,16 +2,38 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 10.91.15** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
+[![CI/CD](https://img.shields.io/github/actions/workflow/status/LightspeedDMS/code-indexer/main.yml?branch=master&label=CI%2FCD)](https://github.com/LightspeedDMS/code-indexer/actions/workflows/main.yml) [![Release](https://img.shields.io/github/v/release/LightspeedDMS/code-indexer?sort=semver&color=blue)](https://github.com/LightspeedDMS/code-indexer/releases) [![Python](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/github/license/LightspeedDMS/code-indexer?color=green)](LICENSE)
+
+[Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v10.md) | [Architecture](docs/architecture.md)
 
 ## What is CIDX?
 
 CIDX combines semantic embeddings with traditional search to help you find code by meaning, not just keywords. Search your codebase with natural language queries like "authentication logic" or "database connection setup", trace symbol references with SCIP code intelligence, and explore git history semantically.
 
+- **Meaning, not keywords** -- natural-language queries powered by VoyageAI or Cohere embeddings, with full-text and regex search when you need exact matches.
+- **Precise navigation** -- SCIP code intelligence for definitions, references, call chains, and impact analysis across your codebase.
+- **Scales with you** -- run locally as a CLI, as a caching daemon, or as a multi-user server and cluster exposing REST and MCP APIs.
+
+<details>
+<summary>Table of Contents</summary>
+
+- [What is CIDX?](#what-is-cidx)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Key Features](#key-features)
+- [Operating Modes](#operating-modes)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
+
 ## Installation
 
 ```bash
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@master
 cidx --version
 ```
 
@@ -195,9 +217,13 @@ See: [Configuration Guide](docs/configuration.md)
 - [Migration to v8](docs/migration-to-v8.md) -- Upgrading from v7.x
 - [Changelog](CHANGELOG.md) -- Version history and release notes
 
+## Security
+
+Found a vulnerability? Please report it privately -- see [SECURITY.md](SECURITY.md). Do not open a public issue for security reports. The authentication stack, X-Ray evaluator sandbox, and multi-user deployment surfaces are documented under [docs/security/](docs/security/).
+
 ## Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing guidelines, and code quality standards.
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing guidelines, and code quality standards. Please also review our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 - **Bugs**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
 - **Features**: [GitHub Issues](https://github.com/LightspeedDMS/code-indexer/issues)
@@ -205,7 +231,7 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development se
 
 ## License
 
-MIT License - See repository for full license text.
+Released under the [MIT License](LICENSE).
 
 ---
 

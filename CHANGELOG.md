@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.16] - 2026-06-03
+
+### Fixed
+- Bug #1054: Phase 3.7 dep-map graph-channel repair no longer crashes with `'AnomalyAggregate' object has no attribute 'message'` when the hygiene-parser aggregates a per-type anomaly cluster that exceeds the example threshold. Root cause: `_audit_bidirectional_mismatch`, `_repair_self_loop`, and `_repair_malformed_yaml` in `dep_map_repair_executor.py` were forwarding the iteration value straight to their per-anomaly delegates, which read `anomaly.message` / `anomaly.file`. Story #911 AC6 had retrofitted the unwrap pattern into `_repair_garbage_domain_rejected` but the other three repair sites were missed. All three now apply the same `examples = [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples` unwrap and loop per example. 3 regression-guard tests at `tests/unit/server/services/test_dep_map_repair_aggregate_unwrap_bug1054.py` (AnomalyAggregate scenarios for each of the three handler types, asserting per-example dispatch and zero AttributeError).
+
 ## [10.91.15] - 2026-06-03
 
 ### Added
