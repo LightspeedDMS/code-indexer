@@ -364,36 +364,83 @@ class BackgroundJobManager:
             actor_username=resolved_actor,  # AC12: audit trail
         )
 
-        with self._lock:
-            # Bug #133: Check for duplicate operation on same repo
-            # This check MUST be inside the lock to prevent TOCTOU race conditions
-            if repo_alias:
-                conflict_job_id = self._check_operation_conflict(
-                    operation_type, repo_alias
-                )
-                if conflict_job_id:
-                    raise DuplicateJobError(operation_type, repo_alias, conflict_job_id)
-
-            self.jobs[job_id] = job
-
-        # Story #267 Component 3-4: Persist outside lock
-        self._persist_jobs(job_id=job_id)
-
-        # Story #311: Register with JobTracker for unified cross-service tracking
-        if self._job_tracker is not None:
+        # Bug #1065: For repo-scoped operations, use the cluster-atomic
+        # register_job_if_no_conflict gate (idx_active_job_per_repo partial
+        # unique index) BEFORE adding to in-memory state and BEFORE spawning
+        # any worker thread.  This replaces the legacy two-step TOCTOU pattern
+        # (in-process lock precheck + non-atomic register_job) which provided
+        # no real cross-node protection and swallowed constraint violations.
+        #
+        # For non-repo-scoped operations (repo_alias is None/empty) the old
+        # in-process gate is retained as a best-effort local guard, because
+        # the partial index predicate excludes NULL repo_alias rows.
+        if repo_alias and self._job_tracker is not None:
+            # Attempt atomic DB-layer claim.  DuplicateJobError propagates
+            # as a hard reject — no swallowing — before any thread is spawned.
+            # is_admin and actor_username are threaded directly into the atomic
+            # INSERT so no second write is needed (Bug #1065 AC12 fix).
             try:
-                self._job_tracker.register_job(
+                from code_indexer.server.services.job_tracker import (
+                    DuplicateJobError as _TrackerDuplicateJobError,
+                )
+
+                self._job_tracker.register_job_if_no_conflict(
                     job_id=job_id,
                     operation_type=operation_type,
                     username=submitter_username,
                     repo_alias=repo_alias,
+                    is_admin=is_admin,
+                    actor_username=resolved_actor,
                 )
-            except Exception:
-                logging.warning(
-                    f"JobTracker.register_job failed for {job_id} — "
-                    "continuing without tracker registration",
-                    exc_info=True,
-                )
+            except _TrackerDuplicateJobError as exc:
+                # Translate into the canonical DuplicateJobError that all
+                # callers of submit_job already catch.
+                raise DuplicateJobError(
+                    exc.operation_type,
+                    exc.repo_alias,
+                    exc.existing_job_id,
+                ) from exc
+
+            # Atomic claim succeeded: add to in-memory dict only.
+            # DB persistence was done atomically by register_job_if_no_conflict.
+            with self._lock:
+                self.jobs[job_id] = job
+
+        else:
+            # Non-repo-scoped path (repo_alias is None/empty) OR no job_tracker:
+            # retain the legacy in-process TOCTOU guard as a best-effort local
+            # dedup, then persist and optionally register with tracker.
+            with self._lock:
+                # Bug #133: Check for duplicate operation on same repo
+                if repo_alias:
+                    conflict_job_id = self._check_operation_conflict(
+                        operation_type, repo_alias
+                    )
+                    if conflict_job_id:
+                        raise DuplicateJobError(
+                            operation_type, repo_alias, conflict_job_id
+                        )
+
+                self.jobs[job_id] = job
+
+            # Story #267 Component 3-4: Persist outside lock
+            self._persist_jobs(job_id=job_id)
+
+            # Story #311: Register with JobTracker for unified cross-service tracking
+            if self._job_tracker is not None:
+                try:
+                    self._job_tracker.register_job(
+                        job_id=job_id,
+                        operation_type=operation_type,
+                        username=submitter_username,
+                        repo_alias=repo_alias,
+                    )
+                except Exception:
+                    logging.warning(
+                        f"JobTracker.register_job failed for {job_id} — "
+                        "continuing without tracker registration",
+                        exc_info=True,
+                    )
 
         # Execute job in background thread
         thread = threading.Thread(

@@ -253,6 +253,74 @@ class BackgroundJobsPostgresBackend:
             raise
         logger.debug("Saved background job: %s", job_id)
 
+    def atomic_claim_insert(
+        self,
+        job_id: str,
+        operation_type: str,
+        status: str,
+        created_at: str,
+        username: str,
+        progress: int,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_admin: bool = False,
+        cancelled: bool = False,
+        repo_alias: Optional[str] = None,
+        resolution_attempts: int = 0,
+        claude_actions: Optional[List[str]] = None,
+        failure_reason: Optional[str] = None,
+        extended_error: Optional[Dict[str, Any]] = None,
+        language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
+    ) -> None:
+        """Insert a new background job using a plain INSERT that surfaces violations.
+
+        The Postgres save_job already uses a plain INSERT (ON CONFLICT (job_id)
+        DO NOTHING covers only PK collisions, not the partial unique index
+        idx_active_job_per_repo). So duplicate active-job violations already raise
+        UniqueViolation. This method is the Protocol-compliant entry point that
+        job_tracker._atomic_insert_impl uses on the backend path.
+
+        Raises:
+            psycopg.errors.UniqueViolation: When idx_active_job_per_repo rejects
+                the INSERT due to a duplicate active job for (operation_type, repo_alias).
+        """
+        self.save_job(
+            job_id=job_id,
+            operation_type=operation_type,
+            status=status,
+            created_at=created_at,
+            username=username,
+            progress=progress,
+            started_at=started_at,
+            completed_at=completed_at,
+            result=result,
+            error=error,
+            is_admin=is_admin,
+            cancelled=cancelled,
+            repo_alias=repo_alias,
+            resolution_attempts=resolution_attempts,
+            claude_actions=claude_actions,
+            failure_reason=failure_reason,
+            extended_error=extended_error,
+            language_resolution_status=language_resolution_status,
+            current_phase=current_phase,
+            phase_detail=phase_detail,
+            progress_info=progress_info,
+            metadata=metadata,
+            executing_node=executing_node,
+            claimed_at=claimed_at,
+            actor_username=actor_username,
+        )
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Return job dict by job_id, or None if not found."""
         with self._pool.connection() as conn:

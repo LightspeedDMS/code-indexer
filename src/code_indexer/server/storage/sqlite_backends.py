@@ -2525,6 +2525,98 @@ class BackgroundJobsSqliteBackend:
         self._conn_manager.execute_atomic(operation)
         logger.debug(f"Saved background job: {job_id}")
 
+    def atomic_claim_insert(
+        self,
+        job_id: str,
+        operation_type: str,
+        status: str,
+        created_at: str,
+        username: str,
+        progress: int,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_admin: bool = False,
+        cancelled: bool = False,
+        repo_alias: Optional[str] = None,
+        resolution_attempts: int = 0,
+        claude_actions: Optional[List[str]] = None,
+        failure_reason: Optional[str] = None,
+        extended_error: Optional[Dict[str, Any]] = None,
+        language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
+    ) -> None:
+        """Insert a new background job using a plain INSERT (no OR IGNORE).
+
+        Unlike save_job which uses INSERT OR IGNORE, this method uses a plain
+        INSERT so that sqlite3.IntegrityError is raised when
+        idx_active_job_per_repo is violated by a duplicate pending/running row
+        for the same (operation_type, repo_alias). The caller translates this
+        into DuplicateJobError.
+
+        Do NOT modify save_job — its INSERT OR IGNORE is intentional for other
+        callers that must survive duplicate inserts.
+
+        Raises:
+            sqlite3.IntegrityError: When idx_active_job_per_repo rejects the
+                INSERT due to a duplicate active job for (operation_type, repo_alias).
+        """
+
+        def operation(conn):
+            conn.execute(
+                """INSERT INTO background_jobs
+                   (job_id, operation_type, status, created_at, started_at, completed_at,
+                    result, error, progress, username, is_admin, cancelled, repo_alias,
+                    resolution_attempts, claude_actions, failure_reason, extended_error,
+                    language_resolution_status, current_phase, phase_detail,
+                    progress_info, metadata, executing_node, claimed_at, actor_username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    job_id,
+                    operation_type,
+                    status,
+                    created_at,
+                    started_at,
+                    completed_at,
+                    json.dumps(result) if result else None,
+                    error,
+                    progress,
+                    username,
+                    1 if is_admin else 0,
+                    1 if cancelled else 0,
+                    repo_alias,
+                    resolution_attempts,
+                    json.dumps(claude_actions) if claude_actions else None,
+                    failure_reason,
+                    json.dumps(extended_error) if extended_error else None,
+                    (
+                        json.dumps(language_resolution_status)
+                        if language_resolution_status
+                        else None
+                    ),
+                    current_phase,
+                    phase_detail,
+                    json.dumps(progress_info)
+                    if isinstance(progress_info, dict)
+                    else progress_info,
+                    json.dumps(metadata) if metadata else None,
+                    executing_node,
+                    claimed_at,
+                    actor_username,
+                ),
+            )
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+        logger.debug(f"Atomic claim insert background job: {job_id}")
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get job details by job ID."""
         conn = self._conn_manager.get_connection()

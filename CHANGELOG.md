@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.2] - 2026-06-04
+
+### Fixed
+- Bug #1065: `BackgroundJobManager.submit_job` now routes repo-scoped operations through the cluster-atomic `JobTracker.register_job_if_no_conflict()` (honoring the `idx_active_job_per_repo` partial unique index) BEFORE spawning the worker thread. A duplicate raises `DuplicateJobError` as a hard reject instead of being swallowed. Previously the legacy TOCTOU precheck + non-atomic `register_job` + swallowed constraint violations let duplicate workers run in both solo and cluster modes.
+- Bug #1065: New `atomic_claim_insert` method added to the `BackgroundJobsBackend` Protocol and both SQLite and Postgres backend implementations. Uses a plain `INSERT` (no `OR IGNORE`, no conflict suppression of the partial unique index) so the `idx_active_job_per_repo` constraint violation actually raises and is translated to `DuplicateJobError`. The existing `save_job` `INSERT OR IGNORE` is unchanged for its other callers.
+- Bug #1065: `register_job_if_no_conflict` (and the underlying atomic insert) now persists `is_admin` and `actor_username` (Story #1032 AC12 audit trail) on the atomic claim path, fixing silent loss of those columns for repo-scoped jobs that previously went through the non-atomic code path.
+- Bug #1065: New regression tests at `tests/unit/server/repositories/test_submit_job_atomic_dedup.py` covering: atomic dedup rejects the second caller with `DuplicateJobError`, AC12 `is_admin`/`actor_username` columns are persisted via the atomic insert, and `INSERT OR IGNORE` swallow on `save_job` no longer silently hides duplicate violations. Updated tests in `test_background_job_manager_tracker.py`, `test_job_tracker_atomic_register.py`, and `test_job_tracker_bug892.py`.
+
 ## [10.92.1] - 2026-06-04
 
 ### Fixed
