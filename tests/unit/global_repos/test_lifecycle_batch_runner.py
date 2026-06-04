@@ -96,6 +96,10 @@ class _StubScheduler:
     """
     Configurable stub: acquire_sequence controls per-call results.
     If the sequence is exhausted, acquire_default is used.
+
+    acquire_by_key overrides acquire_sequence for deterministic
+    alias-keyed results — required when jitter randomises execution
+    order across concurrent workers (Bug #1056).
     """
 
     def __init__(
@@ -103,16 +107,21 @@ class _StubScheduler:
         log: _EventLog,
         acquire_default: bool = True,
         acquire_sequence: Optional[List[bool]] = None,
+        acquire_by_key: Optional[Dict[str, bool]] = None,
     ) -> None:
         self._log = log
         self._acquire_default = acquire_default
         self._acquire_sequence = list(acquire_sequence) if acquire_sequence else []
+        self._acquire_by_key: Dict[str, bool] = acquire_by_key or {}
         self.acquire_calls: List[tuple] = []
         self.release_calls: List[tuple] = []
 
     def acquire_write_lock(self, key: str, owner_name: str) -> bool:
         self.acquire_calls.append((key, owner_name))
-        if self._acquire_sequence:
+        # acquire_by_key takes precedence — alias-keyed, order-independent.
+        if key in self._acquire_by_key:
+            result = self._acquire_by_key[key]
+        elif self._acquire_sequence:
             result = self._acquire_sequence.pop(0)
         else:
             result = self._acquire_default
@@ -135,14 +144,21 @@ def _make_runner(
     log: _EventLog,
     acquire_default: bool = True,
     acquire_sequence: Optional[List[bool]] = None,
+    acquire_by_key: Optional[Dict[str, bool]] = None,
     sub_batch_size_override: Optional[int] = None,
 ) -> tuple:
     """
     Build a LifecycleBatchRunner with stub dependencies sharing the given log.
     Returns (runner, scheduler, job_tracker, debouncer).
+
+    acquire_by_key: alias-keyed lock results for deterministic behaviour
+    under jitter (Bug #1056).  Takes precedence over acquire_sequence.
     """
     scheduler = _StubScheduler(
-        log=log, acquire_default=acquire_default, acquire_sequence=acquire_sequence
+        log=log,
+        acquire_default=acquire_default,
+        acquire_sequence=acquire_sequence,
+        acquire_by_key=acquire_by_key,
     )
     job_tracker = _StubJobTracker(log=log)
     debouncer = _StubDebouncer(log=log)
@@ -308,10 +324,13 @@ def test_run_completes_despite_per_alias_lock_failure(golden_repos_dir: Path) ->
     for alias in aliases:
         (golden_repos_dir / alias).mkdir(exist_ok=True)
     log = _EventLog()
+    # Use acquire_by_key so lock results are alias-keyed, not call-order-dependent.
+    # Bug #1056 jitter randomises worker execution order; acquire_sequence would
+    # flap depending on which thread runs first.
     runner, scheduler, job_tracker, debouncer = _make_runner(
         golden_repos_dir,
         log,
-        acquire_sequence=[True, False, True],
+        acquire_by_key={"lifecycle:x": True, "lifecycle:y": False, "lifecycle:z": True},
         sub_batch_size_override=FORCED_SUB_BATCH_SIZE,
     )
 

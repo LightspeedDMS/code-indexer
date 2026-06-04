@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.0] - 2026-06-04
+
+### Added
+- Bug #1056: New shared helper `src/code_indexer/server/services/jittered_dispatcher.py` with two public functions and three module-level constants. `dispatch_parallel_with_jitter(items, *, concurrency, base_jitter_seconds, worker_fn)` submits items to a `ThreadPoolExecutor` where each worker thread sleeps `random.uniform(0, base_jitter_seconds)` before invoking the worker function, smoothing the thundering-herd burst of concurrent Claude CLI calls that all sites previously submitted in lockstep. `sleep_with_jitter(base_jitter_seconds)` provides the same randomised inter-iteration sleep for sequential loops. Both functions are no-ops when `base_jitter_seconds <= 0`. Constants: `DEFAULT_LIFECYCLE_DISPATCH_JITTER_SECONDS = 2.0`, `DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS = 2.0`, `DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS = 2.0`. 6 unit tests at `tests/unit/server/services/test_jittered_dispatcher_bug1056.py` and 3 integration tests at `tests/unit/server/services/test_dispatcher_integration_bug1056.py` covering all public behaviours.
+
+### Fixed
+- Bug #1056: `LifecycleBatchRunner._run_sub_batch` now delegates parallel repo dispatch to `dispatch_parallel_with_jitter` instead of submitting all futures in a tight loop via `ThreadPoolExecutor`. The `ThreadPoolExecutor` block and its dict-comprehension future map have been replaced with a single `dispatch_parallel_with_jitter` call; per-repo error handling semantics are preserved exactly (per-alias `Exception` logged at ERROR level and sub-batch continues; `BaseException` re-raised immediately).
+- Bug #1056: `DependencyMapService` Pass 2 per-domain loop now calls `sleep_with_jitter(DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS)` at the top of each iteration after the first (guarded by `domain_idx > 0`, positioned after the cancellation check and before per-domain work). Prevents all Claude CLI calls for N domains firing simultaneously when Pass 2 starts on a repo with many domains.
+- Bug #1056: `DepMapRepairExecutor` broken-domain repair loop now calls `sleep_with_jitter(DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS)` at the top of each iteration after the first (guarded by `anomaly_idx > 0` via `enumerate`). Prevents all Phase 3.7 re-analysis Claude CLI calls firing in lockstep when multiple domains need repair in a single pass.
+
 ## [10.91.17] - 2026-06-04
 
 ### Fixed
