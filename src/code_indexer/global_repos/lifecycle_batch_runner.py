@@ -16,7 +16,12 @@ import math
 import os
 import re
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+
+from code_indexer.server.services.jittered_dispatcher import (
+    DEFAULT_LIFECYCLE_DISPATCH_JITTER_SECONDS,
+    dispatch_parallel_with_jitter,
+)
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -546,26 +551,28 @@ class LifecycleBatchRunner:
         sub-batch — all repos in the batch are attempted. Only BaseException
         subclasses that are not Exception (e.g. KeyboardInterrupt) propagate.
         """
-        with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
-            futures = {
-                pool.submit(self._process_one_repo, alias, parent_job_id): alias
-                for alias in sub_batch
-            }
-            for future in as_completed(futures):
-                alias = futures[future]
-                exc = future.exception()
-                if exc is not None:
-                    if isinstance(exc, Exception):
-                        # Log the failure; the sub-batch continues for other repos.
-                        _logger.error(
-                            "lifecycle-runner: failed to process alias %r: %s: %s",
-                            alias,
-                            type(exc).__name__,
-                            exc,
-                        )
-                    else:
-                        # BaseException (e.g. KeyboardInterrupt) — re-raise immediately.
-                        raise exc
+        futures_list = dispatch_parallel_with_jitter(
+            sub_batch,
+            concurrency=self._concurrency,
+            base_jitter_seconds=DEFAULT_LIFECYCLE_DISPATCH_JITTER_SECONDS,
+            worker_fn=lambda alias: self._process_one_repo(alias, parent_job_id),
+        )
+        futures_to_alias = dict(zip(futures_list, sub_batch))
+        for future in as_completed(futures_list):
+            alias = futures_to_alias[future]
+            exc = future.exception()
+            if exc is not None:
+                if isinstance(exc, Exception):
+                    # Log the failure; the sub-batch continues for other repos.
+                    _logger.error(
+                        "lifecycle-runner: failed to process alias %r: %s: %s",
+                        alias,
+                        type(exc).__name__,
+                        exc,
+                    )
+                else:
+                    # BaseException (e.g. KeyboardInterrupt) — re-raise immediately.
+                    raise exc
 
     def _process_one_repo(self, alias: str, parent_job_id: str) -> None:
         """

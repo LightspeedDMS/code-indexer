@@ -33,6 +33,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
+from code_indexer.server.services.jittered_dispatcher import (
+    DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS,
+    sleep_with_jitter,
+)
+
 if TYPE_CHECKING:
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
 
@@ -429,7 +434,10 @@ class DepMapRepairExecutor:
 
         domain_list = self._load_domains_json(output_dir)
 
-        for anomaly in broken_domains:
+        for anomaly_idx, anomaly in enumerate(broken_domains):
+            # Bug #1056: jitter between Claude CLI calls to avoid thundering-herd.
+            if anomaly_idx > 0:
+                sleep_with_jitter(DEFAULT_PHASE37_DISPATCH_JITTER_SECONDS)
             domain_info = next(
                 (d for d in domain_list if d.get("name") == anomaly.domain), None
             )
