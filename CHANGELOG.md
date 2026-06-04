@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.1] - 2026-06-04
+
+### Fixed
+- Bug #1064: `TERSE_DESCRIPTION_MAX_CHARS` lowered from 500 to 200 in `description_refresh_scheduler.py`. Small-repo descriptions of 201-500 chars are legitimately concise — they were being re-flagged as terse on every scheduler startup and re-queued for regeneration in an infinite loop. At the new threshold of 200 (barely a sentence), only genuine stubs or failed generations are queued.
+
+### Changed
+- Bug #1064: `src/code_indexer/server/prompts/lifecycle_unified.md` description field instruction no longer requests a fixed 500-2000 character count. Replaced with quality/coverage-oriented guidance: cover purpose, domain(s), high-level capabilities, key technologies, and integration surface at the level of detail the repository actually warrants — a few sentences for a small library, several paragraphs for a large system. No padding, no truncation of real substance.
+
 ## [10.92.0] - 2026-06-04
 
 ### Added
