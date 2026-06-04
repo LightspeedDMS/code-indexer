@@ -245,6 +245,7 @@ class UnifiedResponseParser:
         cleaned = _clean_claude_output(raw)
         cleaned = cls._strip_code_fence(cleaned)
         cleaned = cls._strip_preamble(cleaned)
+        cleaned = cls._strip_postamble(cleaned)  # bug #1058
 
         try:
             obj = json.loads(cleaned)
@@ -315,6 +316,65 @@ class UnifiedResponseParser:
         brace_pos = text.find("{")
         if brace_pos > 0:
             return text[brace_pos:]
+        return text
+
+    @staticmethod
+    def _strip_postamble(text: str) -> str:
+        """
+        Strip any text after the closing '}' that balances the first '{'.
+
+        Symmetrically with _strip_preamble, Claude CLI may append trailing
+        prose after the JSON object (closing commentary, thinking-tag
+        remnants, follow-up offers).  This method finds the closing '}'
+        that balances the opening '{' selected by _strip_preamble and
+        returns the substring from '{' through that '}', discarding
+        everything that follows.
+
+        The scanner tracks whether it is inside a JSON string literal so
+        that braces embedded in string values are not mis-counted.
+        Escaped quotes (\\") inside strings are handled correctly so that
+        a backslash-escaped quote does not prematurely end the string state.
+
+        Returns the original text unchanged if:
+        - No '{' is present (defer to json.loads error path).
+        - The brace counter never reaches zero (unbalanced — defer to
+          json.loads "expecting object close" error path).
+
+        Idempotent: _strip_postamble(_strip_postamble(s)) == _strip_postamble(s).
+        """
+        start = text.find("{")
+        if start == -1:
+            return text
+
+        depth = 0
+        in_string = False
+        i = start
+        length = len(text)
+
+        while i < length:
+            ch = text[i]
+
+            if in_string:
+                if ch == "\\":
+                    # Skip the next character — it is escaped (handles \" and \\)
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_string = False
+            else:
+                if ch == '"':
+                    in_string = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        # Found the balancing close brace — truncate here
+                        return text[start : i + 1]
+
+            i += 1
+
+        # Brace counter never reached zero — unbalanced; let json.loads raise
         return text
 
     @staticmethod

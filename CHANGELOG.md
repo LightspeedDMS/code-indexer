@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.17] - 2026-06-04
+
+### Fixed
+- Bug #1058: `UnifiedResponseParser` no longer fails with `not valid JSON: Extra data` when Claude appends trailing prose after the JSON object. New `_strip_postamble` static method walks the string from the first `{`, tracking brace depth while ignoring braces inside JSON string literals (handles `\"` escaped quotes correctly), and truncates everything after the matching closing `}`. Applied in `parse()` immediately after `_strip_preamble`, symmetrically completing the preamble/postamble defence-in-depth pipeline. Previously caused 100% lifecycle-batch failure rate (17/17 calls failing in production) and a silent retry burn loop that consumed tokens with zero forward progress. 5 new unit tests at `tests/unit/server/services/test_unified_response_parser_postamble_bug1058.py` covering: trailing prose, preamble+postamble composition, brace-inside-string-literal, escaped-quote-then-brace, and code-fenced-JSON-with-trailing-prose.
+
 ## [10.91.16] - 2026-06-03
 
 ### Fixed
