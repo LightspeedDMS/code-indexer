@@ -37,7 +37,7 @@ pipx install git+https://github.com/LightspeedDMS/code-indexer.git@master
 cidx --version
 ```
 
-**Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key (or Cohere API key).
+**Requirements**: Python 3.9-3.12, 4GB+ RAM, VoyageAI API key (or Cohere API key).
 For platform-specific instructions, Windows setup, and troubleshooting, see [Installation Guide](docs/installation.md).
 
 ## Quick Start
@@ -76,12 +76,15 @@ See: [Architecture Guide](docs/architecture.md#dual-model-architecture-v88)
 
 ### Full-Text Search (FTS)
 
-Fast exact text matching with fuzzy search, regex support, and case sensitivity options. Up to 50x faster than grep with indexed searching.
+Fast exact text matching with fuzzy search, regex support, and case sensitivity options. Up to 50x faster than grep with indexed searching. Combine `--fts` with `--semantic` for hybrid search that fuses keyword and meaning-based ranking.
 
 ```bash
 cidx query "authenticate_user" --fts
 cidx query "test_.*" --fts --regex --language python
+cidx query "auth" --fts --semantic         # hybrid: keyword + semantic
 ```
+
+See: [Hybrid Search](docs/query-guide.md#hybrid-search)
 
 ### SCIP Code Intelligence
 
@@ -121,7 +124,7 @@ See: [Operating Modes Guide](docs/operating-modes.md#daemon-mode)
 
 ### AI Integration
 
-Connect AI assistants to CIDX for semantic search in conversations. Supports local CLI integration (Claude Code, Gemini, Codex) and remote MCP server endpoints (`/mcp` with JWT, `/mcp-public` unauthenticated).
+Connect AI assistants to CIDX for semantic search in conversations. Supports local CLI integration (Claude Code, Gemini, Codex, OpenCode, Q, Junie) and remote MCP server endpoints (`/mcp` with JWT, `/mcp-public` unauthenticated).
 
 ```bash
 cidx teach-ai --claude --project    # Local CLI integration
@@ -137,7 +140,7 @@ See: [Langfuse Trace Sync Guide](docs/langfuse-trace-sync.md)
 
 ### Inter-Repository Dependency Map
 
-Pre-computed semantic dependency map across all registered golden repos. Claude CLI pipeline analyzes source code, identifies domain-level relationships, and produces queryable documents for cross-repo discovery.
+A Claude-driven analysis pipeline maps domain-level relationships across all registered golden repos and stores them as a queryable, directed dependency graph. Through the server's MCP tools, AI agents can retrieve the full cross-domain graph, identify hub domains, find which domains consume a given domain, and detect stale domains that need re-analysis -- enabling cross-repository discovery and change-impact reasoning.
 
 See: [Meta-Repo Discovery Guide](docs/meta-repo-discovery.md)
 
@@ -162,7 +165,7 @@ See: [X-Ray Architecture](docs/xray-architecture.md) | [X-Ray Cookbook](docs/xra
 | **Server** | <1ms (cached) | Team collaboration, multi-user | [Server Deployment](docs/server-deployment.md) |
 | **Cluster** | <1ms (cached) | High availability, horizontal scaling | [Cluster Setup](docs/cluster-setup.md) |
 
-**Server Mode** provides multi-user access with OAuth 2.0/OIDC authentication, TOTP MFA, role-based permissions, REST API, MCP protocol, golden repository management, HNSW caching, and web administration. See [Operating Modes Guide](docs/operating-modes.md#server-mode) for the full feature set.
+**Server Mode** provides multi-user access with OAuth 2.0/OIDC authentication, TOTP MFA, role-based permissions, REST API, MCP protocol, golden repository management, cross-encoder reranking, semantic memory retrieval, inter-repository dependency mapping, HNSW caching, and web administration. See [Operating Modes Guide](docs/operating-modes.md#server-mode) for the full feature set.
 
 **Cluster Mode** extends Server Mode across multiple nodes sharing PostgreSQL with leader election, distributed job queuing, and cross-node configuration propagation. See [Cluster Architecture](docs/cluster-architecture.md).
 
