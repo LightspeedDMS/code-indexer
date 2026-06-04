@@ -43,7 +43,7 @@ CIDX has **two operational modes** (simplified from three in v7.x), each optimiz
 - Caches HNSW/FTS indexes in memory (daemon process)
 - Auto-starts on first query when enabled
 - Unix socket communication (`.code-indexer/daemon.sock`)
-- Faster queries (~5ms cached vs ~1s from disk)
+- Eliminates per-query HNSW/FTS index cold-load (warm in-process lookup ~5ms vs ~1s cold from disk); end-to-end query latency remains bounded by the embedding-provider round trip
 - Watch mode for real-time file change indexing
 - Container-free, runs as local process
 

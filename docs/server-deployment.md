@@ -115,15 +115,17 @@ The server includes automatic HNSW index caching for massive query performance i
 
 **Without Cache (CLI Mode)**:
 - Each query loads HNSW index from disk
-- Typical query time: 200-400ms (with OS page cache)
+- Typical HNSW lookup time: 200-400ms (with OS page cache)
 - Suitable for individual developers, single-user workflows
 
 **With Cache (Server Mode)**:
 - HNSW indexes cached in memory after first query
-- Cold query (cache miss): ~277ms
-- Warm query (cache hit): <1ms
-- Speedup: 100-1800x for repeated queries
+- Cold HNSW lookup (cache miss): ~277ms
+- Warm HNSW lookup (cache hit): <1ms
+- HNSW lookup speedup: 100-1800x for repeated queries
 - Suitable for multi-user teams, high-query workloads
+
+> **Note**: the numbers above measure the **in-process HNSW index lookup component only** (Story #526 cache benchmark). End-to-end query latency also includes the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere) on every query, plus HTTP and auth overhead in server / cluster modes. Treat these figures as cache-effectiveness signal, not user-observed query time.
 
 ### Cache Configuration Options
 
@@ -217,12 +219,14 @@ Response:
 
 #### Performance Expectations
 
-| Scenario | Response Time | Cache Status | Notes |
-|----------|---------------|--------------|-------|
+| Scenario | HNSW lookup | Cache Status | Notes |
+|----------|-------------|--------------|-------|
 | First query to repository | 200-400ms | Miss | Loads from disk, benefits from OS cache |
 | Subsequent queries (within TTL) | <1ms | Hit | Served from memory cache |
 | Query after TTL expiration | 200-400ms | Miss | Cache rebuild required |
 | Concurrent queries to same repo | <1ms | Hit | Shared cache across users |
+
+HNSW lookup is the in-process index-search component of a query. End-to-end query response time is dominated by the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere); the table above isolates the cache effect, not user-observed query speed.
 
 ### Troubleshooting Cache Issues
 

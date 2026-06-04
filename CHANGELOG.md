@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.91.17] - 2026-06-04
+
+### Fixed
+- Bug #1058: `UnifiedResponseParser` no longer fails with `not valid JSON: Extra data` when Claude appends trailing prose after the JSON object. New `_strip_postamble` static method walks the string from the first `{`, tracking brace depth while ignoring braces inside JSON string literals (handles `\"` escaped quotes correctly), and truncates everything after the matching closing `}`. Applied in `parse()` immediately after `_strip_preamble`, symmetrically completing the preamble/postamble defence-in-depth pipeline. Previously caused 100% lifecycle-batch failure rate (17/17 calls failing in production) and a silent retry burn loop that consumed tokens with zero forward progress. 5 new unit tests at `tests/unit/server/services/test_unified_response_parser_postamble_bug1058.py` covering: trailing prose, preamble+postamble composition, brace-inside-string-literal, escaped-quote-then-brace, and code-fenced-JSON-with-trailing-prose.
+- Bug #1059: `SharedJobSentinel.read_active()` no longer returns `None` for losers caught in the narrow race window between a winner's `os.open(O_CREAT|O_EXCL)` and the subsequent `os.write()` (Story #1035). Bounded retry: up to 3 attempts at 10ms intervals (~30ms worst-case loser-path latency, only when the race is hit; zero overhead in the common case). Preserves the Story #1035 O_CREAT|O_EXCL locking primitive — only the read path changed. Surfaced as a flaky `test_concurrent_claim_race_single_winner` under chunked-parallel `./server-fast-automation.sh` load, but also a real cluster-correctness fix: losers now reliably learn the winner's `job_id` so downstream code (dashboard sentinel display, dep-map analysis pre-flight at `web/dependency_map_routes.py::trigger_dependency_map`) can attribute the conflict correctly. 5 new unit tests at `tests/unit/server/services/test_shared_job_sentinel_read_active_retry_bug.py` covering: absent-file sanity, valid-file sanity, transient-empty-then-succeeds, persistent-corrupt-returns-None, and persistent-corrupt-warning-message.
+
 ## [10.91.16] - 2026-06-03
 
 ### Fixed

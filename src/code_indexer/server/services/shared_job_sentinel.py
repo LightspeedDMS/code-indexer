@@ -8,6 +8,7 @@ duplicate dep-map analysis jobs across cluster nodes.
 import json
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +23,14 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# Bug fix (companion to #1058 in v10.91.17): bounded retry for the transient
+# empty-file window in read_active() during a concurrent winner's try_claim()
+# between os.open(O_CREAT|O_EXCL) and os.write. 3 attempts × 10ms = ≤30ms
+# total worst-case latency on the loser code path, only when the race is hit.
+# Preserves the Story #1035 O_CREAT|O_EXCL locking primitive.
+_READ_ACTIVE_MAX_RETRIES = 3
+_READ_ACTIVE_RETRY_DELAY_S = 0.01
 
 
 class AnalysisAlreadyRunningError(Exception):
@@ -165,29 +174,44 @@ class SharedJobSentinel:
             )
 
     def read_active(self, op_type: str) -> Optional[SentinelInfo]:
-        """Return SentinelInfo for op_type, or None if absent or corrupt."""
-        sentinel_path = self._sentinel_dir / f"_active_{op_type}.lock"
-        try:
-            raw = sentinel_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
+        """Return SentinelInfo for op_type, or None if absent or persistently corrupt.
 
-        try:
-            data = json.loads(raw)
-            return SentinelInfo(
-                op_type=data["op_type"],
-                job_id=data["job_id"],
-                node_id=data["node_id"],
-                started_at=datetime.fromisoformat(data["started_at"]),
-            )
-        except (json.JSONDecodeError, KeyError, ValueError) as exc:
-            logger.warning(
-                "SharedJobSentinel.read_active: corrupt sentinel for op_type=%r, "
-                "treating as absent: %s",
-                op_type,
-                exc,
-            )
-            return None
+        Bounded retry on transient empty/corrupt content tolerates the narrow
+        window in a concurrent winner's try_claim() between os.open(O_CREAT|O_EXCL)
+        — which makes the file visible with 0 bytes — and the subsequent
+        os.write that populates it. Without retry, a loser thread that races into
+        this window reads an empty file, json.loads("") raises, and the loser
+        gets back None for the winner's identity. The locking primitive
+        (Story #1035 O_CREAT|O_EXCL invariant) is unchanged.
+        """
+        sentinel_path = self._sentinel_dir / f"_active_{op_type}.lock"
+        last_exc: Optional[Exception] = None
+        for attempt in range(_READ_ACTIVE_MAX_RETRIES):
+            try:
+                raw = sentinel_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return None
+            try:
+                data = json.loads(raw)
+                return SentinelInfo(
+                    op_type=data["op_type"],
+                    job_id=data["job_id"],
+                    node_id=data["node_id"],
+                    started_at=datetime.fromisoformat(data["started_at"]),
+                )
+            except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                last_exc = exc
+                if attempt < _READ_ACTIVE_MAX_RETRIES - 1:
+                    time.sleep(_READ_ACTIVE_RETRY_DELAY_S)
+                    continue
+        logger.warning(
+            "SharedJobSentinel.read_active: corrupt sentinel for op_type=%r after "
+            "%d retries, treating as absent: %s",
+            op_type,
+            _READ_ACTIVE_MAX_RETRIES,
+            last_exc,
+        )
+        return None
 
     def is_stale(self, info: SentinelInfo, timeout_seconds: int) -> bool:
         """Return True when (now - info.started_at) > timeout_seconds."""

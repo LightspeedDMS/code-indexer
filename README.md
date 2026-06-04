@@ -8,11 +8,12 @@ AI-powered semantic code search for your codebase. Find code by meaning, not jus
 
 ## What is CIDX?
 
-CIDX combines semantic embeddings with traditional search to help you find code by meaning, not just keywords. Search your codebase with natural language queries like "authentication logic" or "database connection setup", trace symbol references with SCIP code intelligence, and explore git history semantically.
+CIDX is an end-to-end code intelligence system for finding, navigating, and reasoning about source code by meaning rather than by tokens. It combines semantic search (VoyageAI or Cohere embeddings on an HNSW vector index, O(log N) lookups) with cross-encoder reranking (Voyage rerank-2.5 or Cohere rerank, applied after RRF coalescing) for quality-multiplied results, full-text and regex retrieval via Tantivy, SCIP-backed symbol navigation, AST-level structural search through tree-sitter, and git-history temporal search -- all running container-free out of `.code-indexer/`.
 
-- **Meaning, not keywords** -- natural-language queries powered by VoyageAI or Cohere embeddings, with full-text and regex search when you need exact matches.
-- **Precise navigation** -- SCIP code intelligence for definitions, references, call chains, and impact analysis across your codebase.
-- **Scales with you** -- run locally as a CLI, as a caching daemon, or as a multi-user server and cluster exposing REST and MCP APIs.
+- **Find code by meaning, by name, or by structure** -- natural-language queries ("authentication logic", "where the rate limiter rejects"), exact / regex / fuzzy FTS, SCIP definitions / references / call chains / dependency graphs / impact analysis, and X-Ray AST evaluators for structural patterns beyond text. Multimodal indexing pulls in diagrams and screenshots embedded in markdown and HTML automatically. A configurable cross-encoder reranking stage (Voyage rerank-2.5 or Cohere rerank) lifts the top-N from "semantically related" to "actually answers the query".
+- **Token-efficient for AI agents** -- X-Ray AST search lets an agent ask "find every method longer than 50 lines that catches and rethrows without logging" and get back the exact matching ranges instead of pulling whole files into context to scan. A user-defined Rust evaluator runs server-side in a sandbox over a tree-sitter AST and returns structured findings -- orders of magnitude cheaper in tokens than loading and re-parsing files in the agent's window. Combined with SCIP for precise symbol navigation and the multi-modal MCP surface, agents do less reading and more reasoning.
+- **Reason across time and across repos** -- commit-history semantic search with time-range and author filters, Langfuse trace sync that makes AI conversation history searchable alongside your code, and a Claude-driven inter-repository dependency map that builds a queryable cross-repo domain graph for change-impact reasoning.
+- **Scale from laptop to cluster** -- start as a CLI, upgrade to a watching daemon with in-process index caching, or deploy a multi-user Server with OAuth 2.0 / OIDC + TOTP MFA + step-up elevation, role-based permissions, REST + MCP APIs (`/mcp` with JWT, `/mcp-public` unauthenticated), semantic memory retrieval, golden-repository management, HNSW caching, and a web dashboard. Cluster mode shares state across nodes via PostgreSQL with leader election and distributed job queuing. Embeddings are multi-provider: VoyageAI or Cohere with primary-only, failover, parallel RRF fusion, or explicit-provider strategies.
 
 <details>
 <summary>Table of Contents</summary>
@@ -113,7 +114,7 @@ See: [Temporal Search Guide](docs/temporal-search.md)
 
 ### Real-Time Watch Mode
 
-Background daemon with in-memory caching for ~5ms queries (vs ~1s from disk) and automatic re-indexing on file changes.
+Background daemon with in-memory HNSW/FTS index caching (eliminating the per-invocation cold load) and automatic re-indexing on file changes. End-to-end query latency remains bounded by the embedding-provider round trip.
 
 ```bash
 cidx config --daemon && cidx start
@@ -158,12 +159,14 @@ See: [X-Ray Architecture](docs/xray-architecture.md) | [X-Ray Cookbook](docs/xra
 
 ## Operating Modes
 
-| Mode | Query Speed | Best For | Details |
-|------|-------------|----------|---------|
-| **CLI** | ~1s (disk) | Individual developers, quick searches | [Operating Modes](docs/operating-modes.md#cli-mode) |
-| **Daemon** | ~5ms (cached) | Active development, watch mode | [Operating Modes](docs/operating-modes.md#daemon-mode) |
-| **Server** | <1ms (cached) | Team collaboration, multi-user | [Server Deployment](docs/server-deployment.md) |
-| **Cluster** | <1ms (cached) | High availability, horizontal scaling | [Cluster Setup](docs/cluster-setup.md) |
+| Mode | Cache surface | Best For | Details |
+|------|---------------|----------|---------|
+| **CLI** | None (per-invocation cold load) | Individual developers, quick searches | [Operating Modes](docs/operating-modes.md#cli-mode) |
+| **Daemon** | In-process HNSW/FTS cache, single user | Active development, watch mode | [Operating Modes](docs/operating-modes.md#daemon-mode) |
+| **Server** | In-process HNSW/FTS cache, multi-user | Team collaboration, multi-user | [Server Deployment](docs/server-deployment.md) |
+| **Cluster** | Per-node HNSW/FTS cache, shared PostgreSQL state | High availability, horizontal scaling | [Cluster Setup](docs/cluster-setup.md) |
+
+End-to-end query latency is dominated by the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere); the cache surface column above describes only how each mode amortizes the in-process index lookup. See [Operating Modes Guide](docs/operating-modes.md) for measured HNSW lookup numbers and the methodology behind them.
 
 **Server Mode** provides multi-user access with OAuth 2.0/OIDC authentication, TOTP MFA, role-based permissions, REST API, MCP protocol, golden repository management, cross-encoder reranking, semantic memory retrieval, inter-repository dependency mapping, HNSW caching, and web administration. See [Operating Modes Guide](docs/operating-modes.md#server-mode) for the full feature set.
 
