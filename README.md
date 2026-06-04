@@ -113,7 +113,7 @@ See: [Temporal Search Guide](docs/temporal-search.md)
 
 ### Real-Time Watch Mode
 
-Background daemon with in-memory caching for ~5ms queries (vs ~1s from disk) and automatic re-indexing on file changes.
+Background daemon with in-memory HNSW/FTS index caching (eliminating the per-invocation cold load) and automatic re-indexing on file changes. End-to-end query latency remains bounded by the embedding-provider round trip.
 
 ```bash
 cidx config --daemon && cidx start
@@ -158,12 +158,14 @@ See: [X-Ray Architecture](docs/xray-architecture.md) | [X-Ray Cookbook](docs/xra
 
 ## Operating Modes
 
-| Mode | Query Speed | Best For | Details |
-|------|-------------|----------|---------|
-| **CLI** | ~1s (disk) | Individual developers, quick searches | [Operating Modes](docs/operating-modes.md#cli-mode) |
-| **Daemon** | ~5ms (cached) | Active development, watch mode | [Operating Modes](docs/operating-modes.md#daemon-mode) |
-| **Server** | <1ms (cached) | Team collaboration, multi-user | [Server Deployment](docs/server-deployment.md) |
-| **Cluster** | <1ms (cached) | High availability, horizontal scaling | [Cluster Setup](docs/cluster-setup.md) |
+| Mode | Cache surface | Best For | Details |
+|------|---------------|----------|---------|
+| **CLI** | None (per-invocation cold load) | Individual developers, quick searches | [Operating Modes](docs/operating-modes.md#cli-mode) |
+| **Daemon** | In-process HNSW/FTS cache, single user | Active development, watch mode | [Operating Modes](docs/operating-modes.md#daemon-mode) |
+| **Server** | In-process HNSW/FTS cache, multi-user | Team collaboration, multi-user | [Server Deployment](docs/server-deployment.md) |
+| **Cluster** | Per-node HNSW/FTS cache, shared PostgreSQL state | High availability, horizontal scaling | [Cluster Setup](docs/cluster-setup.md) |
+
+End-to-end query latency is dominated by the embedding-provider round trip (50–300ms typical for VoyageAI / Cohere); the cache surface column above describes only how each mode amortizes the in-process index lookup. See [Operating Modes Guide](docs/operating-modes.md) for measured HNSW lookup numbers and the methodology behind them.
 
 **Server Mode** provides multi-user access with OAuth 2.0/OIDC authentication, TOTP MFA, role-based permissions, REST API, MCP protocol, golden repository management, cross-encoder reranking, semantic memory retrieval, inter-repository dependency mapping, HNSW caching, and web administration. See [Operating Modes Guide](docs/operating-modes.md#server-mode) for the full feature set.
 
