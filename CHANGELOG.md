@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.93.4] - 2026-06-05
+
+### Fixed
+- Bug #1068: `DataRetentionScheduler` cross-backend cleanup consistency. PostgreSQL `sync_jobs` retention now deletes by `completed_at` with `status IN ('completed','failed')` (previously `created_at` with `status='completed'` only), matching the SQLite path — both backends now delete identical rows for the same retention intent (a job created long ago but completed recently is correctly KEPT). All five cleanup tables (logs, audit_logs, sync_jobs, dependency_map_tracking, background_jobs) were audited for column/status parity across both backends.
+- Bug #1068: cleanup is now per-table independent — a failure in one table no longer aborts the whole cycle and silently reports success. Each table's cleanup runs in its own try/except, per-table failures are recorded in the result (`failed_tables`) and surfaced in the JobTracker outcome (not just logged), so retention errors are visible instead of lingering. Confirmed no retention path references the non-existent `last_updated` column (the staging error was a transient rolling-deploy schema skew).
+
 ## [10.93.3] - 2026-06-05
 
 ### Fixed
