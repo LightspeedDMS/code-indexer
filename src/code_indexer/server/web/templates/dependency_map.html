@@ -294,9 +294,9 @@
     }
 })();
 </script>
-{% if is_admin %}
 <!-- Story #1062: Lifecycle Backfill Journal Panel -->
 <!-- Starts display:none; JS shows it when X-Backfill-Active=1; hides after server-side grace -->
+<!-- Already inside the outer is_admin block (admin-gated); no nested conditional needed -->
 <article id="lifecycle-backfill-panel" style="display: none; margin-top: 1rem;">
     <header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
