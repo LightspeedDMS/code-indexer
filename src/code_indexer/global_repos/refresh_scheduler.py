@@ -299,6 +299,40 @@ class RefreshScheduler:
         max_jitter = refresh_interval_seconds * self.JITTER_PERCENTAGE
         return random.uniform(-max_jitter, max_jitter)
 
+    def _count_active_refresh_jobs(self) -> int:
+        """Return the number of active (PENDING/RUNNING) refresh jobs.
+
+        Bug #1063 Part 1: delegates to BackgroundJobManager.count_active_refresh_jobs()
+        when a manager is configured; returns 0 in CLI mode (no manager).
+        """
+        if self.background_job_manager is None:
+            return 0
+        return int(self.background_job_manager.count_active_refresh_jobs())
+
+    def _get_refresh_budget(self) -> int:
+        """Compute how many refresh jobs can be submitted this poll cycle.
+
+        Bug #1063 Part 1: refresh budget = max_concurrent_refresh_jobs - active.
+        When no BackgroundJobManager is configured (CLI mode), returns a large
+        sentinel (all due repos can be submitted — CLI runs them synchronously).
+
+        Returns:
+            Non-negative integer: 0 means budget exhausted, >0 means slots available.
+        """
+        if self.background_job_manager is None:
+            # CLI mode: no concurrency gate — return a large cap so list_due_repos
+            # returns all due repos (same behaviour as before the fix).
+            return 10_000
+
+        # Retrieve max_concurrent_refresh_jobs from the manager's config
+        refresh_limit = getattr(
+            self.background_job_manager._background_jobs_config,
+            "max_concurrent_refresh_jobs",
+            max(1, self.background_job_manager.max_concurrent_jobs // 2),
+        )
+        active = self._count_active_refresh_jobs()
+        return int(max(0, refresh_limit - active))
+
     def _calculate_poll_interval(self, refresh_interval_seconds: int) -> float:
         """
         Calculate the background loop poll interval.
@@ -899,66 +933,74 @@ class RefreshScheduler:
                 if unscheduled:
                     self._assign_initial_spread(unscheduled, refresh_interval)
 
-                # Re-read to get freshly assigned next_refresh values
-                if unscheduled:
-                    repos = self.registry.list_global_repos()
-                    git_repos = [
-                        r
-                        for r in repos
-                        if r.get("alias_name")
-                        and _is_git_repo_url(r.get("repo_url", ""))
-                    ]
+                # Bug #1063 Part 1: capped oldest-first due-query.
+                # Compute how many refresh slots are free this cycle.
+                # max_concurrent_refresh_jobs defaults to max(1, max_bg_jobs // 2).
+                refresh_budget = self._get_refresh_budget()
+                if refresh_budget <= 0:
+                    logger.debug(
+                        "Refresh budget exhausted this cycle "
+                        f"(active={self._count_active_refresh_jobs()}); "
+                        "skipping submission pass."
+                    )
+                    # Still fall through to the per-repo loop below (will be empty)
 
-                # Check each repo individually against its next_refresh timestamp
                 now = time.time()
-                for repo in git_repos:
+                # list_due_repos returns oldest-first, capped at budget.
+                # Repos still unscheduled (NULL next_refresh) are excluded here —
+                # they were just given future timestamps by _assign_initial_spread.
+                due_repos = self.registry.list_due_repos(limit=refresh_budget, now=now)
+
+                for repo in due_repos:
                     if not self._running:
                         break
 
                     alias_name = repo.get("alias_name")
-                    next_refresh_str = repo.get("next_refresh")
 
-                    if next_refresh_str is None:
-                        # Still unscheduled after spread assignment — skip
+                    # Skip non-git repos (list_due_repos returns all repo types)
+                    if not _is_git_repo_url(repo.get("repo_url", "")):
                         continue
 
-                    try:
-                        next_refresh = float(next_refresh_str)
-                    except (ValueError, TypeError):
-                        logger.warning(
-                            f"Invalid next_refresh value for {alias_name}: "
-                            f"{next_refresh_str!r} — skipping"
-                        )
-                        continue
-
-                    if now < next_refresh:
-                        continue  # Not due yet
-
-                    # Repo is due for refresh — submit job
+                    # Repo is due for refresh — submit job.
+                    # Bug #1066: track whether a generic (non-DuplicateJobError)
+                    # exception occurred so we can skip next_refresh advancement.
+                    # Advancing on a transient failure would silently skip one full
+                    # refresh cycle; leaving next_refresh unchanged lets the scheduler
+                    # retry on the very next poll.
+                    _submit_failed = False
                     try:
                         self._submit_refresh_job(alias_name)
                     except DuplicateJobError:
                         # Job already running for this repo — expected when prior refresh
                         # is still in flight (possibly extended by a verification pass).
+                        # Advance next_refresh so we don't re-submit immediately after
+                        # the in-flight job completes.
                         logger.info(
                             f"Refresh skipped for {alias_name}: prior refresh still running "
                             f"(possibly extended by verification pass)"
                         )
                     except Exception as e:
+                        # Transient failure — do NOT advance next_refresh.
+                        # The repo remains overdue and will be retried on the next poll.
+                        _submit_failed = True
                         logger.error(
                             f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
                             exc_info=True,
                         )
 
-                    # Story #284 AC1: back-propagate next_refresh with jitter
-                    jitter = self._calculate_jitter(refresh_interval)
-                    new_next_refresh = now + refresh_interval + jitter
-                    try:
-                        self.registry.update_next_refresh(alias_name, new_next_refresh)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to persist next_refresh for {alias_name}: {e}"
-                        )
+                    # Story #284 AC1: back-propagate next_refresh with jitter.
+                    # Bug #1066: skip advancement when submit raised a generic exception.
+                    if not _submit_failed:
+                        jitter = self._calculate_jitter(refresh_interval)
+                        new_next_refresh = now + refresh_interval + jitter
+                        try:
+                            self.registry.update_next_refresh(
+                                alias_name, new_next_refresh
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to persist next_refresh for {alias_name}: {e}"
+                            )
 
                 # Bug #735: successful iteration — reset consecutive failure counter.
                 consecutive_failures = 0

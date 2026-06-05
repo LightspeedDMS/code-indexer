@@ -36,7 +36,7 @@ from unittest.mock import MagicMock
 
 _QUARANTINE_THRESHOLD = 3  # must match PROMPT_FAILURE_QUARANTINE_THRESHOLD in scheduler
 _PAST_TIME = "2000-01-01T00:00:00+00:00"  # always stale -- triggers get_stale_repos
-_REFRESH_INTERVAL_HOURS = 24  # bucket count for calculate_next_run()
+_REFRESH_INTERVAL_HOURS = 24  # interval hours passed to calculate_next_run()
 
 
 # ---------------------------------------------------------------------------

@@ -253,6 +253,74 @@ class BackgroundJobsPostgresBackend:
             raise
         logger.debug("Saved background job: %s", job_id)
 
+    def atomic_claim_insert(
+        self,
+        job_id: str,
+        operation_type: str,
+        status: str,
+        created_at: str,
+        username: str,
+        progress: int,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_admin: bool = False,
+        cancelled: bool = False,
+        repo_alias: Optional[str] = None,
+        resolution_attempts: int = 0,
+        claude_actions: Optional[List[str]] = None,
+        failure_reason: Optional[str] = None,
+        extended_error: Optional[Dict[str, Any]] = None,
+        language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
+    ) -> None:
+        """Insert a new background job using a plain INSERT that surfaces violations.
+
+        The Postgres save_job already uses a plain INSERT (ON CONFLICT (job_id)
+        DO NOTHING covers only PK collisions, not the partial unique index
+        idx_active_job_per_repo). So duplicate active-job violations already raise
+        UniqueViolation. This method is the Protocol-compliant entry point that
+        job_tracker._atomic_insert_impl uses on the backend path.
+
+        Raises:
+            psycopg.errors.UniqueViolation: When idx_active_job_per_repo rejects
+                the INSERT due to a duplicate active job for (operation_type, repo_alias).
+        """
+        self.save_job(
+            job_id=job_id,
+            operation_type=operation_type,
+            status=status,
+            created_at=created_at,
+            username=username,
+            progress=progress,
+            started_at=started_at,
+            completed_at=completed_at,
+            result=result,
+            error=error,
+            is_admin=is_admin,
+            cancelled=cancelled,
+            repo_alias=repo_alias,
+            resolution_attempts=resolution_attempts,
+            claude_actions=claude_actions,
+            failure_reason=failure_reason,
+            extended_error=extended_error,
+            language_resolution_status=language_resolution_status,
+            current_phase=current_phase,
+            phase_detail=phase_detail,
+            progress_info=progress_info,
+            metadata=metadata,
+            executing_node=executing_node,
+            claimed_at=claimed_at,
+            actor_username=actor_username,
+        )
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Return job dict by job_id, or None if not found."""
         with self._pool.connection() as conn:
@@ -365,22 +433,40 @@ class BackgroundJobsPostgresBackend:
                 rows = cur.fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def list_jobs_filtered(
-        self,
+    # Safety cap for list_job_ids_filtered: worst-case upper bound.
+    # At 14k jobs/day with 30-day retention the table holds ~420k rows; a cap
+    # of 50,000 is an order-of-magnitude ceiling that keeps the query bounded.
+    _JOB_IDS_CAP = 50_000
+
+    @staticmethod
+    def _build_jobs_filter_where(
         status: Optional[str] = None,
         operation_type: Optional[str] = None,
         search_text: Optional[str] = None,
+        username: Optional[str] = None,
         exclude_ids: Optional[Any] = None,
-        limit: Optional[int] = None,
-        offset: int = 0,
     ) -> tuple:
-        """
-        Return (list_of_job_dicts, total_count) with dynamic WHERE filters.
+        """Build the WHERE clause and params list for background_jobs queries.
 
-        Mirrors BackgroundJobsSqliteBackend.list_jobs_filtered() behaviour.
+        Uses %s paramstyle (PostgreSQL).  Returns (where_clause: str, params: list).
+        Both list_jobs_filtered and list_job_ids_filtered call this helper so
+        the filter logic cannot drift between the two methods.
+
+        Args:
+            status: Filter by exact status value
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match against repo_alias, username,
+                         operation_type, and error columns
+            username: When set, scope results to this owner's jobs (H2 non-admin)
+            exclude_ids: Set of job_ids to exclude
         """
         conditions: List[str] = []
         params: List[Any] = []
+
+        # H2: Non-admin username scoping for DB-stored completed jobs
+        if username is not None:
+            conditions.append("username = %s")
+            params.append(username)
 
         if status:
             conditions.append("status = %s")
@@ -404,6 +490,30 @@ class BackgroundJobsPostgresBackend:
             params.extend(exclude_list)
 
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        return where, params
+
+    def list_jobs_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        exclude_ids: Optional[Any] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        username: Optional[str] = None,
+    ) -> tuple:
+        """
+        Return (list_of_job_dicts, total_count) with dynamic WHERE filters.
+
+        Mirrors BackgroundJobsSqliteBackend.list_jobs_filtered() behaviour.
+        """
+        where, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+            exclude_ids=exclude_ids,
+        )
 
         # Total count (ignores limit/offset)
         count_sql = f"SELECT COUNT(*) FROM background_jobs{where}"
@@ -423,6 +533,46 @@ class BackgroundJobsPostgresBackend:
 
         jobs = [self._row_to_dict(r) for r in rows]
         return jobs, total_count
+
+    def list_job_ids_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        cap: Optional[int] = None,
+    ) -> set:
+        """Return the set of job_ids matching the given filters.
+
+        Uses the same WHERE clause as list_jobs_filtered (via
+        _build_jobs_filter_where) so the two methods cannot drift.
+
+        A safety cap (default _JOB_IDS_CAP = 50,000) is applied as LIMIT so
+        this query is always bounded regardless of table size.
+
+        Args:
+            status: Filter by exact status value
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match (same columns as list_jobs_filtered)
+            username: When set, scope results to this owner's jobs
+            cap: Override the default safety cap (for testing)
+
+        Returns:
+            set[str] of matching job_ids.
+        """
+        effective_cap = cap if cap is not None else self._JOB_IDS_CAP
+        where, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+        )
+        query = f"SELECT job_id FROM background_jobs{where} ORDER BY created_at DESC LIMIT %s"
+        params_with_cap = list(params) + [effective_cap]
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params_with_cap)
+                return {row[0] for row in cur.fetchall()}
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID. Returns True if a row was deleted."""

@@ -681,6 +681,17 @@ class BackgroundJobsConfig:
     # Default 8 (Story #1009: enlarged from 2 for burst concurrency)
     subprocess_max_workers: int = 8
 
+    # Bug #1063 Part 1: per-cycle refresh submission budget.
+    # Default -1 means "derive from max_concurrent_background_jobs // 2" in
+    # __post_init__. Set explicitly to override the derived default.
+    max_concurrent_refresh_jobs: int = -1
+
+    def __post_init__(self) -> None:
+        if self.max_concurrent_refresh_jobs < 0:
+            self.max_concurrent_refresh_jobs = max(
+                1, self.max_concurrent_background_jobs // 2
+            )
+
 
 @dataclass
 class DataRetentionConfig:
@@ -1730,11 +1741,15 @@ class ServerConfigManager:
             config_dict["background_jobs_config"].pop("cleanup_max_age_hours", None)
 
         # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
+        # Unknown keys are filtered for rolling-upgrade safety — same fields() pattern
+        # used for ClaudeIntegrationConfig, MemoryRetrievalConfig, CodexIntegrationConfig.
         if "background_jobs_config" in config_dict and isinstance(
             config_dict["background_jobs_config"], dict
         ):
+            _bg = config_dict["background_jobs_config"]
+            _bg_allowed = {f.name for f in fields(BackgroundJobsConfig)}
             config_dict["background_jobs_config"] = BackgroundJobsConfig(
-                **config_dict["background_jobs_config"]
+                **{k: v for k, v in _bg.items() if k in _bg_allowed}
             )
 
         # Story #32: Convert content_limits_config dict to ContentLimitsConfig

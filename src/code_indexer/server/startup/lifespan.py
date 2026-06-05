@@ -2742,6 +2742,21 @@ def make_lifespan(
 
         yield  # Server is now running
 
+        # Shutdown: Remove SQLiteLogHandler from root logger FIRST (Bug #1060).
+        # Must run before any other shutdown step that could raise and skip it.
+        # Symmetric with the install in startup: without this, the handler remains
+        # on the root logger after lifespan exits, tries to write to the now-deleted
+        # tmp DB, and silently drops subsequent log records from other tests.
+        # Idempotent: removeHandler is a no-op if the handler was never added.
+        _sqlite_handler = getattr(app.state, "sqlite_log_handler", None)
+        if _sqlite_handler is not None:
+            try:
+                logging.getLogger().removeHandler(_sqlite_handler)
+                _sqlite_handler.close()
+            except Exception as _slh_exc:
+                # Non-fatal: don't abort the remaining shutdown chain
+                pass
+
         # Story #1009: Shut down the MCP dispatch pool on server shutdown.
         _mcp_executor.shutdown(wait=False)
 

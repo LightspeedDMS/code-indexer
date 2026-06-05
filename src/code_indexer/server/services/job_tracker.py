@@ -365,6 +365,8 @@ class JobTracker:
         username: str,
         repo_alias: str,
         metadata: Optional[Dict[str, Any]] = None,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
     ) -> TrackedJob:
         """
         Atomically register a new pending job unless an active duplicate exists.
@@ -376,6 +378,11 @@ class JobTracker:
 
         repo_alias must be non-empty because the index predicate excludes
         NULL — passing None would silently disable the atomic gate.
+
+        Args:
+            is_admin: Whether this is an admin job (persisted to DB on INSERT).
+            actor_username: Who actually triggered the job (AC12 audit trail).
+                When None, the submitter (username) is the actor.
 
         Raises:
             ValueError: If any required string field is None, empty, or
@@ -398,7 +405,9 @@ class JobTracker:
             metadata=metadata,
         )
 
-        self._atomic_insert_or_raise(job)
+        self._atomic_insert_or_raise(
+            job, is_admin=is_admin, actor_username=actor_username
+        )
 
         with self._lock:
             self._active_jobs[job_id] = job
@@ -965,7 +974,12 @@ class JobTracker:
     # Private SQLite helpers
     # ------------------------------------------------------------------
 
-    def _atomic_insert_or_raise(self, job: TrackedJob) -> None:
+    def _atomic_insert_or_raise(
+        self,
+        job: TrackedJob,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
+    ) -> None:
         """
         Insert a job row atomically, translating a unique-index violation on
         idx_active_job_per_repo (Story #876 Phase C) into DuplicateJobError.
@@ -980,12 +994,18 @@ class JobTracker:
         If the lookup for the blocking row returns None, raises RuntimeError
         — treating an inconsistent database state as a hard error rather
         than substituting a fallback value (Messi Rule #2 anti-fallback).
+
+        Args:
+            is_admin: Persisted to the DB row on INSERT (AC12 audit trail).
+            actor_username: Persisted to the DB row on INSERT (AC12 audit trail).
         """
         assert job.repo_alias is not None, (
             "atomic insert requires non-null repo_alias — partial index excludes NULL"
         )
         try:
-            self._atomic_insert_impl(job)
+            self._atomic_insert_impl(
+                job, is_admin=is_admin, actor_username=actor_username
+            )
             return
         except (sqlite3.IntegrityError, _BackendUniqueViolation):
             pass
@@ -1005,7 +1025,12 @@ class JobTracker:
             existing_job_id=existing_id,
         )
 
-    def _atomic_insert_impl(self, job: TrackedJob) -> None:
+    def _atomic_insert_impl(
+        self,
+        job: TrackedJob,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
+    ) -> None:
         """
         Raw INSERT that surfaces partial-unique-index violations.
 
@@ -1014,10 +1039,19 @@ class JobTracker:
         narrow try/except that translates psycopg's IntegrityError /
         UniqueViolation into the _BackendUniqueViolation marker without
         importing psycopg. All other exceptions are re-raised.
+
+        Args:
+            is_admin: Persisted to the is_admin column (AC12 audit trail).
+            actor_username: Persisted to the actor_username column (AC12).
         """
         if self._backend is not None:
             try:
-                self._backend.save_job(
+                # Use atomic_claim_insert (plain INSERT, no OR IGNORE) so that
+                # sqlite3.IntegrityError / psycopg UniqueViolation propagates
+                # when idx_active_job_per_repo is violated.  save_job uses
+                # INSERT OR IGNORE which silently swallows the violation and
+                # makes the try/except below dead code (Bug #1065).
+                self._backend.atomic_claim_insert(
                     job_id=job.job_id,
                     operation_type=job.operation_type,
                     status=job.status,
@@ -1031,6 +1065,8 @@ class JobTracker:
                     repo_alias=job.repo_alias,
                     progress_info=job.progress_info,
                     metadata=job.metadata,
+                    is_admin=is_admin,
+                    actor_username=actor_username,
                 )
             except Exception as exc:
                 # Narrow detection: translate only the known unique-violation
@@ -1046,8 +1082,8 @@ class JobTracker:
                    (job_id, operation_type, status, created_at, started_at,
                     completed_at, result, error, progress, username,
                     is_admin, cancelled, repo_alias, resolution_attempts,
-                    progress_info, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)""",
+                    progress_info, metadata, actor_username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?)""",
                 (
                     job.job_id,
                     job.operation_type,
@@ -1059,9 +1095,11 @@ class JobTracker:
                     job.error,
                     job.progress,
                     job.username,
+                    1 if is_admin else 0,
                     job.repo_alias,
                     _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
+                    actor_username,
                 ),
             )
 
