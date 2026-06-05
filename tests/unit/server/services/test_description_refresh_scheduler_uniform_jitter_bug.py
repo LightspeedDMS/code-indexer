@@ -475,6 +475,75 @@ class TestStartSequence:
 
 
 # ---------------------------------------------------------------------------
+# In-memory backend for fast integration tests
+# ---------------------------------------------------------------------------
+
+
+class _InMemoryTrackingBackend:
+    """
+    Pure-Python in-memory replacement for DescriptionRefreshTrackingBackend.
+
+    Satisfies the interface used by _reconcile_stale_next_run_rows:
+      - get_all_tracking() -> List[Dict]
+      - upsert_tracking(repo_alias, **fields) -> None
+
+    Eliminates all SQLite I/O so the integration tests complete in milliseconds
+    regardless of system load.  This is the correct fix for the 15-second
+    pytest-timeout breach that caused TestFirstEnableDistribution to fail 2/2
+    under chunked-parallel server-fast execution.
+    """
+
+    def __init__(self, rows: list) -> None:
+        # rows is a list of dicts; each dict must have at least 'repo_alias'
+        self._store: dict = {r["repo_alias"]: dict(r) for r in rows}
+
+    def get_all_tracking(self) -> list:
+        return list(self._store.values())
+
+    def upsert_tracking(self, repo_alias: str, **fields) -> None:
+        if repo_alias not in self._store:
+            self._store[repo_alias] = {"repo_alias": repo_alias}
+        self._store[repo_alias].update(fields)
+
+    def get_next_run(self, alias: str):
+        return self._store.get(alias, {}).get("next_run")
+
+    def close(self) -> None:
+        pass
+
+
+def _make_scheduler_with_backend(tracking_backend, golden_backend=None):
+    """Return DescriptionRefreshScheduler wired with an injected tracking backend."""
+    from unittest.mock import MagicMock
+
+    from code_indexer.server.services.description_refresh_scheduler import (
+        DescriptionRefreshScheduler,
+    )
+    from code_indexer.server.utils.config_manager import (
+        ClaudeIntegrationConfig,
+        ServerConfig,
+    )
+
+    cfg = ServerConfig(server_dir="/tmp/fake-db-path")
+    cfg.claude_integration_config = ClaudeIntegrationConfig()
+    cfg.claude_integration_config.description_refresh_enabled = True
+    cfg.claude_integration_config.description_refresh_interval_hours = 24
+
+    mock_cm = MagicMock()
+    mock_cm.load_config.return_value = cfg
+
+    if golden_backend is None:
+        golden_backend = MagicMock()
+
+    return DescriptionRefreshScheduler(
+        db_path=None,
+        config_manager=mock_cm,
+        tracking_backend=tracking_backend,
+        golden_backend=golden_backend,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 5: Integration — first-enable: next tick sees at most a small constant
 # ---------------------------------------------------------------------------
 
@@ -487,16 +556,28 @@ class TestFirstEnableDistribution:
     (which queries next_run <= now) must see at most a small constant of due
     rows — NOT all 100.
 
-    Deterministic-seed approach
-    ---------------------------
-    Both positive tests use ``seeded_random`` fixture (seed=42) which patches
-    ``random.uniform`` in the scheduler module so results are:
+    Design: time-deterministic, load-invariant
+    ------------------------------------------
+    Both positive tests use:
 
-    * Reproducible — same 100 offsets every run, no flakiness.
-    * Fast — no wall-clock sleeping; the fixture replaces the live RNG.
-    * Verifiably uniform — with seed=42, 100 draws from Uniform(0, 86400)
-      produce max_bin=10 and spread=85626s (verified offline), well within
-      the max_bin<=20 and spread>=43200s bounds.
+    1. ``seeded_random`` fixture (seed=42) — patches ``random.uniform`` in the
+       scheduler module so the 100 offsets are reproducible across every run.
+
+    2. ``_InMemoryTrackingBackend`` — eliminates SQLite I/O (each upsert was
+       ~300ms × 100 = 30s, causing a 15-second pytest-timeout breach under
+       chunked-parallel server-fast load).  With in-memory storage the whole
+       reconcile finishes in <100ms regardless of system load.
+
+    3. ``reference_now`` pinned BEFORE reconcile — due-ness and offset
+       calculations use the same instant the scheduler used for new next_run
+       values, so elapsed real wall-clock between reconcile and assertion
+       cannot inflate either count.
+
+    Seed=42 properties (verified offline):
+      * min offset ≈ 561s, max offset ≈ 86187s, spread ≈ 85626s
+      * max_bin = 10 across 24 one-hour windows (≤ 20 required)
+      * No offset is < 0 even with a reference_now that is several minutes
+        behind the actual writes (safety margin ≈ 9 minutes).
 
     Regression guard against pre-#1061 behavior
     --------------------------------------------
@@ -521,38 +602,46 @@ class TestFirstEnableDistribution:
         seeded_rng = random.Random(42)
         monkeypatch.setattr(sched_mod.random, "uniform", seeded_rng.uniform)
 
-    def test_first_enable_100_stale_rows_few_immediately_due(
-        self, tmp_path, seeded_random
-    ):
+    def test_first_enable_100_stale_rows_few_immediately_due(self, seeded_random):
         """
         Seed 100 repos with NULL next_run.  After reconciliation, at most 5%
-        (5 repos) should have next_run <= now (i.e., be immediately due).
+        (5 repos) should have next_run <= reference_now (i.e., be immediately due).
 
-        With seed=42 uniform random across 24h, all 100 offsets are > 0
-        (verified: min offset ≈ 56s into the future), so immediately_due = 0.
-        The generous bound of 5 is preserved for real-RNG compatibility.
+        With seed=42 all 100 offsets are ≥ 561s into the future relative to the
+        moment calculate_next_run was called, so immediately_due = 0.
+        The generous bound of 5 is preserved for documentation clarity.
+
+        Time-determinism: reference_now is captured BEFORE reconcile, so it is
+        always earlier than the actual write timestamps.  No elapsed wall-clock
+        time between writes and assertion can cause a row to flip from future to
+        past.  This makes the test load-invariant.
         """
-        db = _make_db(tmp_path)
-        scheduler = _make_scheduler(db)
-
         n_repos = 100
-        for i in range(n_repos):
-            alias = f"fleet-repo-{i:03d}"
-            _seed_golden_repo(db, alias)
-            _seed_tracking_row(db, alias, None)  # all NULL = stale
+        rows = [
+            {"repo_alias": f"fleet-repo-{i:03d}", "next_run": None}
+            for i in range(n_repos)
+        ]
+        tracking = _InMemoryTrackingBackend(rows)
+        scheduler = _make_scheduler_with_backend(tracking)
+
+        # Pin reference_now BEFORE reconcile — all new next_run values will be
+        # computed relative to datetime.now() calls AFTER this point, so they
+        # are guaranteed to be >= reference_now + offset (offset >= 561s).
+        reference_now = datetime.now(timezone.utc)
 
         scheduler._reconcile_stale_next_run_rows()
 
-        now = datetime.now(timezone.utc)
+        # Count rows whose next_run <= reference_now (immediately due at the
+        # pre-reconcile instant).  With seed=42 this is always 0.
         immediately_due = 0
         for i in range(n_repos):
             alias = f"fleet-repo-{i:03d}"
-            nxt = _get_next_run(db, alias)
+            nxt = tracking.get_next_run(alias)
             if nxt is not None:
                 ts = datetime.fromisoformat(nxt)
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
-                if ts <= now:
+                if ts <= reference_now:
                     immediately_due += 1
 
         assert immediately_due <= 5, (
@@ -561,7 +650,7 @@ class TestFirstEnableDistribution:
         )
 
     def test_first_enable_100_past_rows_distributed_across_interval(
-        self, tmp_path, seeded_random
+        self, seeded_random
     ):
         """
         100 repos with past next_run, after reconciliation, should have their
@@ -569,31 +658,39 @@ class TestFirstEnableDistribution:
 
         With seed=42: spread=85626s (≥43200s), max_bin=10 (≤20).  Both bounds
         hold deterministically — no flakiness possible.
-        """
-        db = _make_db(tmp_path)
-        scheduler = _make_scheduler(db)
 
+        Time-determinism: reference_now is captured BEFORE reconcile.  Each
+        new next_run = datetime.now_at_write + offset_i, so
+        (next_run - reference_now) = (now_at_write - reference_now) + offset_i
+        ≥ offset_i (since now_at_write >= reference_now).  The spread and bin
+        assertions are on offsets relative to reference_now, which can only be
+        LARGER than the raw offset, preserving the ≥43200s spread guarantee.
+        """
         n_repos = 100
         interval_hours = 24
         past_ts = "2020-06-01T00:00:00+00:00"
 
-        for i in range(n_repos):
-            alias = f"spread-repo-{i:03d}"
-            _seed_golden_repo(db, alias)
-            _seed_tracking_row(db, alias, past_ts)
+        rows = [
+            {"repo_alias": f"spread-repo-{i:03d}", "next_run": past_ts}
+            for i in range(n_repos)
+        ]
+        tracking = _InMemoryTrackingBackend(rows)
+        scheduler = _make_scheduler_with_backend(tracking)
+
+        # Pin reference_now BEFORE reconcile (see docstring for why this is safe).
+        reference_now = datetime.now(timezone.utc)
 
         scheduler._reconcile_stale_next_run_rows()
 
-        now = datetime.now(timezone.utc)
         offsets: list[float] = []
         for i in range(n_repos):
             alias = f"spread-repo-{i:03d}"
-            nxt = _get_next_run(db, alias)
+            nxt = tracking.get_next_run(alias)
             assert nxt is not None
             ts = datetime.fromisoformat(nxt)
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
-            offsets.append((ts - now).total_seconds())
+            offsets.append((ts - reference_now).total_seconds())
 
         max_offset = max(offsets)
         min_offset = min(offsets)
