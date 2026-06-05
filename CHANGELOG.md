@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.6] - 2026-06-04
+
+### Fixed
+- Bug #1060: Leaked `SQLiteLogHandler` on the root logger after lifespan shutdown caused
+  silent log drops in subsequent tests. The actual root cause was NOT the originally-
+  hypothesized "database is locked" WAL contention (busy_timeout=30000 already handles
+  that). The real cause: `SQLiteLogHandler` is installed on the root logger during
+  lifespan startup via `logging.getLogger().addHandler(sqlite_handler)` but was never
+  removed on shutdown. After the lifespan exits and pytest deletes the tmp `logs.db`
+  directory, the stale handler remains on the root logger. Subsequent `logger.warning()`
+  calls in other tests hit the deleted DB and fail with `unable to open database file`,
+  silently dropping those log records and masking real test failures.
+  Fix: lifespan shutdown now calls `logging.getLogger().removeHandler(sqlite_handler)`
+  and `sqlite_handler.close()`, symmetric with the install at startup (idempotent/safe).
+  The removal is placed as the first action immediately after `yield` (in its own
+  try/except) so it runs robustly even if a later shutdown step raises.
+
 ## [10.92.5] - 2026-06-04
 
 ### Fixed

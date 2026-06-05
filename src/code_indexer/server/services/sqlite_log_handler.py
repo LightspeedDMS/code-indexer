@@ -312,8 +312,8 @@ class SQLiteLogHandler(logging.Handler):
                 ).execute_atomic(_do_insert)
 
         except Exception:
-            # Don't let logging failures crash the application
-            # Use handleError to report the issue
+            # Don't let logging failures crash the application;
+            # use handleError to report the issue via stderr (if raiseExceptions).
             self.handleError(record)
         finally:
             self._emit_guard.active = False
