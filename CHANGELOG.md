@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.93.3] - 2026-06-05
+
+### Fixed
+- Bug #1062: dependency-map admin page returned HTTP 500 due to an unclosed Jinja `{% if %}` block
+  in the backfill-cards partial template. The nested conditional was redundant — the outer block
+  already gates the cards to admin users — so it was removed entirely.
+
+### Removed
+- 5 stale MCPB removal-verification tests that referenced `src/code_indexer/mcpb`, a module
+  that no longer exists. The tests were validating the absence of a module that had already been
+  fully removed in a prior release; keeping them caused spurious failures on clean checkouts.
+
+## [10.93.2] - 2026-06-05
+
+### Added
+- Story #1055: `xray_search_batch` MCP tool — cross-repo multi-expression X-Ray sweep in ONE
+  background job. Runs a repos x scans matrix: every scan bundle (`driver_regex` + optional
+  `evaluator_code` or `pattern_name`) is applied to every resolved repository. Each match is tagged
+  with `repository_alias`, `scan_index`, and `pattern_name`. Returns exactly one `job_id` (not
+  `job_ids`). Limits: 50 aliases, 50 scan bundles, timeout [10, 7200]s, await_seconds [0, 30].
+  Global-alias fallback applied per alias. Unresolvable aliases become `error_level="repo"` errors;
+  partial jobs proceed over the resolved subset. Per-cell `pattern_name` resolution uses
+  `XrayPatternService` (repo-specific scope first, then `__any__/` fallback). Cancellation checked
+  between cells. Large results spill to PayloadCache. REST shim at `POST /api/xray/search/batch`.
+  45 new unit tests in `tests/unit/server/mcp/test_xray_search_batch_handler.py`.
+
+## [10.93.1] - 2026-06-05
+
+### Added
+- Story #1067: `frontmatter_verifier` module in `global_repos/` — non-raising single-file
+  and batch verification of cidx-meta lifecycle frontmatter. Reuses `UnifiedResponseParser._validate`
+  and `_validate_optional_sections` as the single source of truth for enum tables and required-key
+  lists (zero enum duplication). No description-length floor (bug #1064 established the [500,2000]
+  floor was fictional — any non-empty string passes). Structured `VerificationResult` (passed bool +
+  violations list) and `BatchReport` (valid/invalid counts + per-file detail). Batch never aborts on
+  a bad file. 95% test coverage across 6 Gherkin scenarios plus integration no-drift tests against
+  `UnifiedResponseParser`.
+
+## [10.93.0] - 2026-06-05
+
+### Added
+- Story #1062: live lifecycle and description backfill observability cards on /admin/dependency-map.
+  BackfillJournalService writes a shared-NFS `_activity.md` journal (append-only, offset-tracked)
+  and an atomic (fsync + os.replace) `_status.json` sidecar per namespace (lifecycle / description).
+  Two new HTMX partial routes (`GET /admin/partials/lifecycle-backfill-journal` and
+  `/admin/partials/description-backfill-journal`) return the journal fragment with a pinned
+  six-header contract (`X-Backfill-Active`, `X-Backfill-Total`, `X-Backfill-Done`,
+  `X-Backfill-Failed`, `X-Backfill-Completed-At`, `X-Journal-Offset`) plus server-side 30s
+  grace after completion before switching to idle polling.
+  `_backfill_in_progress` split into `_lifecycle_backfill_running` and
+  `_description_backfill_running` flags so both backfill types can run concurrently without
+  blocking each other.
+  `LifecycleBatchRunner` gains a `journal_callback` parameter for per-alias progress reporting;
+  first-run cidx-meta directory is now created with `mkdir -p` before journal writes.
+  Two frontend cards mirror the existing depmap-activity-panel polling pattern.
+
 ## [10.92.8] - 2026-06-05
 
 ### Fixed

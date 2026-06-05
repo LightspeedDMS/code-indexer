@@ -123,6 +123,7 @@ def _do_write(
 
     content = f"---\n{frontmatter_yaml}---\n\n{description_body}\n"
 
+    cidx_meta_path.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(cidx_meta_path))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -428,6 +429,7 @@ class LifecycleBatchRunner:
         estimated_seconds_per_repo: int = _DEFAULT_ESTIMATED_SECONDS_PER_REPO,
         sub_batch_size_override: Optional[int] = None,
         tracking_backend: Optional[Any] = None,
+        journal_callback: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         if not isinstance(golden_repos_dir, (str, os.PathLike)):
             raise ValueError(
@@ -465,6 +467,7 @@ class LifecycleBatchRunner:
         self._estimated_seconds_per_repo: int = estimated_seconds_per_repo
         self._sub_batch_size_override: Optional[int] = sub_batch_size_override
         self._tracking_backend: Optional[Any] = tracking_backend
+        self._journal_callback: Optional[Callable[[str, str], None]] = journal_callback
 
     @staticmethod
     def compute_sub_batch_size(
@@ -570,9 +573,29 @@ class LifecycleBatchRunner:
                         type(exc).__name__,
                         exc,
                     )
+                    if self._journal_callback is not None:
+                        try:
+                            self._journal_callback(
+                                alias,
+                                f"failed: {type(exc).__name__}: {exc}",
+                            )
+                        except Exception as cb_exc:
+                            _logger.debug(
+                                "lifecycle-runner: journal_callback raised (non-fatal): %s",
+                                cb_exc,
+                            )
                 else:
                     # BaseException (e.g. KeyboardInterrupt) — re-raise immediately.
                     raise exc
+            else:
+                if self._journal_callback is not None:
+                    try:
+                        self._journal_callback(alias, "succeeded")
+                    except Exception as cb_exc:
+                        _logger.debug(
+                            "lifecycle-runner: journal_callback raised (non-fatal): %s",
+                            cb_exc,
+                        )
 
     def _process_one_repo(self, alias: str, parent_job_id: str) -> None:
         """

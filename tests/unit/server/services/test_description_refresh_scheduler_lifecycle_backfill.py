@@ -64,9 +64,11 @@ def _make_scheduler_bare() -> Any:
     sched._refresh_scheduler = None
 
     # Required by _run_lifecycle_backfill_async() / _run_description_backfill_async()
+    # Story #1062: two separate events replace the old single _backfill_in_progress.
     sched._job_tracker = None
     sched._tracking_backend = MagicMock()
-    sched._backfill_in_progress = threading.Event()
+    sched._lifecycle_backfill_running = threading.Event()
+    sched._description_backfill_running = threading.Event()
 
     # Required by reconcile_broken_lifecycle_metadata() scan phase
     sched._golden_backend = MagicMock()

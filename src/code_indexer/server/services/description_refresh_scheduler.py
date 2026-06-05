@@ -213,7 +213,10 @@ class DescriptionRefreshScheduler:
         # Subsequent passes for the same repo downgrade the log to DEBUG so the
         # warning fires at most once per repo (re-armed after a successful refresh).
         self._warned_missing_desc: set = set()
-        self._backfill_in_progress = threading.Event()
+        # Story #1062: two separate events replacing the old single _backfill_in_progress.
+        # Each async path sets/clears its OWN event so one finishing does not clear the other.
+        self._lifecycle_backfill_running = threading.Event()
+        self._description_backfill_running = threading.Event()
         # Story #728 AC5: Bounded thread pool sized by max_concurrent_claude_cli config.
         # Prevents mass backfill from spawning N unbounded concurrent Claude CLI processes.
         # Canonical default comes from ClaudeIntegrationConfig to avoid duplication.
@@ -720,6 +723,9 @@ class DescriptionRefreshScheduler:
     def _run_description_backfill_async(self, aliases: List[str]) -> None:
         """Background worker: run LifecycleBatchRunner on terse-description aliases.
 
+        Story #1062: uses _description_backfill_running (not the removed _backfill_in_progress)
+        and drives BackfillJournalService for NFS-shared observability.
+
         Generates a UUID job_id, registers it with JobTracker (operation_type
         'description_backfill', username 'system'), then invokes
         LifecycleBatchRunner.run(aliases, parent_job_id=job_id) — which itself
@@ -729,7 +735,17 @@ class DescriptionRefreshScheduler:
         All exceptions are logged and swallowed — a sweep failure must not crash
         the daemon thread or leak back into scheduler startup.
         """
-        self._backfill_in_progress.set()
+        self._description_backfill_running.set()
+
+        # Story #1062: per-namespace NFS journal under {golden_repos_dir}/.scratch/
+        journal_svc = self._init_backfill_journal("description")
+        try:
+            journal_svc.start(total=len(aliases))
+        except Exception as exc:
+            logger.warning(
+                "Description backfill: journal start failed (degraded): %s", exc
+            )
+
         try:
             if self._job_tracker is None:
                 logger.error(
@@ -752,6 +768,21 @@ class DescriptionRefreshScheduler:
                 },
             )
 
+            def _journal_cb(alias: str, outcome: str) -> None:
+                try:
+                    success = not outcome.startswith("failed")
+                    reason = (
+                        outcome[len("failed: ") :]
+                        if outcome.startswith("failed: ")
+                        else None
+                    )
+                    journal_svc.update_alias(alias, success=success, reason=reason)
+                except Exception as cb_exc:
+                    logger.debug(
+                        "Description backfill: journal_cb failed (non-fatal): %s",
+                        cb_exc,
+                    )
+
             runner = LifecycleBatchRunner(
                 golden_repos_dir=self._golden_repos_dir,
                 job_tracker=self._job_tracker,
@@ -760,6 +791,7 @@ class DescriptionRefreshScheduler:
                 claude_cli_invoker=self._lifecycle_invoker,
                 tracking_backend=self._tracking_backend,
                 concurrency=self._get_lifecycle_concurrency(),
+                journal_callback=_journal_cb,
             )
             runner.run(aliases, parent_job_id=job_id)
             logger.info(
@@ -772,7 +804,58 @@ class DescriptionRefreshScheduler:
                 exc_info=True,
             )
         finally:
-            self._backfill_in_progress.clear()
+            try:
+                journal_svc.complete()
+            except Exception as exc:
+                logger.debug(
+                    "Description backfill: journal complete failed (non-fatal): %s", exc
+                )
+            self._description_backfill_running.clear()
+
+    _VALID_BACKFILL_NAMESPACES = frozenset({"lifecycle", "description"})
+
+    def _init_backfill_journal(self, namespace: str):
+        """Return a BackfillJournalService for *namespace* pointing to the shared NFS scratch dir.
+
+        Journal path: {golden_repos_dir}/.scratch/{namespace}-backfill-journal/
+        Mirrors the dep-map precedent: Bug #1041.
+
+        Namespace must be one of {"lifecycle", "description"} — validated before path
+        construction to prevent directory traversal or injection.
+
+        When golden_repos_dir is None/invalid (e.g. early startup), falls back to a path
+        under tempfile.gettempdir() so the caller never raises. The BackfillJournalService
+        init() failure-swallow contract (Scenario 6) then handles any NFS-gone errors
+        without aborting the backfill.
+        """
+        from code_indexer.server.services.backfill_journal_service import (
+            BackfillJournalService,
+        )
+        import tempfile
+
+        if namespace not in self._VALID_BACKFILL_NAMESPACES:
+            raise ValueError(
+                f"Invalid backfill namespace {namespace!r}. "
+                f"Must be one of {sorted(self._VALID_BACKFILL_NAMESPACES)}"
+            )
+
+        try:
+            grd = self._golden_repos_dir
+            if grd is None:
+                raise AttributeError("golden_repos_dir is None")
+            journal_dir = Path(grd) / ".scratch" / f"{namespace}-backfill-journal"
+        except (TypeError, AttributeError):
+            # golden_repos_dir is None or non-path — degrade to a temp-dir fallback
+            journal_dir = (
+                Path(tempfile.gettempdir()) / f"cidx-{namespace}-backfill-journal"
+            )
+            logger.warning(
+                "%s backfill: golden_repos_dir not set — journal will use fallback path %s",
+                namespace.capitalize(),
+                journal_dir,
+            )
+
+        return BackfillJournalService(namespace=namespace, journal_dir=journal_dir)
 
     def _check_lifecycle_backfill_wiring(self) -> bool:
         """Return True if all five lifecycle collaborators are wired; log WARNING and
@@ -853,6 +936,9 @@ class DescriptionRefreshScheduler:
     def _run_lifecycle_backfill_async(self, aliases: List[str]) -> None:
         """Background worker: run LifecycleBatchRunner on broken aliases.
 
+        Story #1062: uses _lifecycle_backfill_running (not the removed _backfill_in_progress)
+        and drives BackfillJournalService for NFS-shared observability.
+
         Generates a UUID job_id, registers it with JobTracker (operation_type
         'lifecycle_backfill', username 'system'), then invokes
         LifecycleBatchRunner.run(aliases, parent_job_id=job_id) — which itself
@@ -862,7 +948,17 @@ class DescriptionRefreshScheduler:
         All exceptions are logged and swallowed — a sweep failure must not crash
         the daemon thread or leak back into scheduler startup.
         """
-        self._backfill_in_progress.set()
+        self._lifecycle_backfill_running.set()
+
+        # Story #1062: per-namespace NFS journal under {golden_repos_dir}/.scratch/
+        journal_svc = self._init_backfill_journal("lifecycle")
+        try:
+            journal_svc.start(total=len(aliases))
+        except Exception as exc:
+            logger.warning(
+                "Lifecycle backfill: journal start failed (degraded): %s", exc
+            )
+
         try:
             if self._job_tracker is None:
                 logger.error(
@@ -882,6 +978,20 @@ class DescriptionRefreshScheduler:
                 metadata={"total": len(aliases), "source": "startup_backfill"},
             )
 
+            def _journal_cb(alias: str, outcome: str) -> None:
+                try:
+                    success = not outcome.startswith("failed")
+                    reason = (
+                        outcome[len("failed: ") :]
+                        if outcome.startswith("failed: ")
+                        else None
+                    )
+                    journal_svc.update_alias(alias, success=success, reason=reason)
+                except Exception as cb_exc:
+                    logger.debug(
+                        "Lifecycle backfill: journal_cb failed (non-fatal): %s", cb_exc
+                    )
+
             runner = LifecycleBatchRunner(
                 golden_repos_dir=self._golden_repos_dir,
                 job_tracker=self._job_tracker,
@@ -890,6 +1000,7 @@ class DescriptionRefreshScheduler:
                 claude_cli_invoker=self._lifecycle_invoker,
                 tracking_backend=self._tracking_backend,
                 concurrency=self._get_lifecycle_concurrency(),
+                journal_callback=_journal_cb,
             )
             runner.run(aliases, parent_job_id=job_id)
             logger.info(
@@ -902,7 +1013,13 @@ class DescriptionRefreshScheduler:
                 exc_info=True,
             )
         finally:
-            self._backfill_in_progress.clear()
+            try:
+                journal_svc.complete()
+            except Exception as exc:
+                logger.debug(
+                    "Lifecycle backfill: journal complete failed (non-fatal): %s", exc
+                )
+            self._lifecycle_backfill_running.clear()
 
     def on_refresh_complete(
         self,
@@ -1030,7 +1147,11 @@ class DescriptionRefreshScheduler:
         For each stale repo with changes, registers a description_refresh job in the
         job_tracker (if configured) and spawns a background thread (AC2, Story #313).
         """
-        if self._backfill_in_progress.is_set():
+        # Story #1062: guard checks BOTH separate events — skip if EITHER backfill is running.
+        if (
+            self._lifecycle_backfill_running.is_set()
+            or self._description_backfill_running.is_set()
+        ):
             logger.debug("Description refresh pass skipped: backfill in progress")
             return
 

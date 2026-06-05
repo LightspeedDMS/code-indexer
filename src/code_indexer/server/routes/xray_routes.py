@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, List, Optional, cast
+from typing import Any, List, Optional, Union, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
@@ -228,3 +229,136 @@ def xray_search(
     )
 
     return XRaySearchResponse(job_id=job_id)
+
+
+# ---------------------------------------------------------------------------
+# Batch request / response models (Story #1055)
+# ---------------------------------------------------------------------------
+
+
+class XRayBatchScanBundle(BaseModel):
+    """One scan bundle for xray_search_batch."""
+
+    driver_regex: str
+    evaluator_code: Optional[str] = None
+    pattern_name: Optional[str] = None
+    pattern_params: Optional[Any] = None
+    search_target: str = "content"
+    case_sensitive: bool = True
+    multiline: bool = False
+    pcre2: bool = False
+
+
+class XRayBatchSearchRequest(BaseModel):
+    """Pydantic request body for POST /api/xray/search/batch."""
+
+    repository_alias: Any  # str | list[str] -- validated by handler
+    scans: List[XRayBatchScanBundle]
+    max_results: Optional[int] = None
+    timeout_seconds: Optional[int] = None
+    await_seconds: Optional[float] = None
+
+
+class XRayBatchSearchResponse(BaseModel):
+    """HTTP 202 response body for POST /api/xray/search/batch."""
+
+    job_id: str
+
+
+# ---------------------------------------------------------------------------
+# Batch route handler (Story #1055)
+# ---------------------------------------------------------------------------
+
+# Map synchronous MCP error codes to HTTP status codes.
+_BATCH_ERROR_HTTP_STATUS = {
+    "auth_required": status.HTTP_403_FORBIDDEN,
+    "alias_required": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "scans_required": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "too_many_repositories": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "too_many_scans": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "timeout_out_of_range": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "await_seconds_out_of_range": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "driver_regex_required": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "mutually_exclusive_params": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "xray_evaluator_validation_failed": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "no_repositories_resolved": status.HTTP_404_NOT_FOUND,
+}
+
+
+@router.post(
+    "/search/batch",
+    response_model=XRayBatchSearchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def xray_search_batch(
+    body: XRayBatchSearchRequest,
+    user: User = Depends(get_current_user),
+) -> Union[XRayBatchSearchResponse, JSONResponse]:
+    """Submit a cross-repo multi-expression X-Ray batch job.
+
+    Delegates to handle_xray_search_batch (same logic as the MCP tool).
+    Returns HTTP 202 with {"job_id": "<uuid>"}; poll GET /api/jobs/{job_id}.
+
+    Error codes follow the NEW batch contract (not the legacy xray_search REST
+    shape which uses driver_regex, requires evaluator_code, and lacks pattern_name).
+    """
+    import json as _json
+
+    from code_indexer.server.mcp.handlers.xray_batch import handle_xray_search_batch
+
+    # Convert Pydantic model to the params dict expected by the MCP handler.
+    scans_list = [
+        {
+            "driver_regex": s.driver_regex,
+            "evaluator_code": s.evaluator_code,
+            "pattern_name": s.pattern_name,
+            "pattern_params": s.pattern_params,
+            "search_target": s.search_target,
+            "case_sensitive": s.case_sensitive,
+            "multiline": s.multiline,
+            "pcre2": s.pcre2,
+        }
+        for s in body.scans
+    ]
+
+    params: dict = {
+        "repository_alias": body.repository_alias,
+        "scans": scans_list,
+    }
+    if body.max_results is not None:
+        params["max_results"] = body.max_results
+    if body.timeout_seconds is not None:
+        params["timeout_seconds"] = body.timeout_seconds
+    if body.await_seconds is not None:
+        params["await_seconds"] = body.await_seconds
+
+    mcp_resp = handle_xray_search_batch(params, user)
+
+    # Unwrap MCP envelope.
+    try:
+        resp_data = _json.loads(mcp_resp["content"][0]["text"])
+    except (KeyError, IndexError, _json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error_code": "internal_error", "detail": str(exc)},
+        ) from exc
+
+    if "error" in resp_data:
+        error_code = resp_data["error"]
+        http_status = _BATCH_ERROR_HTTP_STATUS.get(
+            error_code, status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(
+            status_code=http_status,
+            detail=resp_data,
+        )
+
+    # Inline-result parity: when await_seconds > 0 and the job completed
+    # before the poll window expired, the MCP handler returns the full result
+    # dict (matches, errors, …) instead of {"job_id": …}.  In that case we
+    # return HTTP 200 with the complete result so REST callers get the same
+    # data without needing to poll.
+    if "job_id" not in resp_data:
+        return JSONResponse(content=resp_data, status_code=status.HTTP_200_OK)
+
+    return XRayBatchSearchResponse(job_id=resp_data["job_id"])

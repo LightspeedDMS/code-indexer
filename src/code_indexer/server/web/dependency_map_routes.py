@@ -580,6 +580,208 @@ def depmap_activity_journal_partial(request: Request, offset: int = 0):
     return response
 
 
+def _get_description_scheduler_from_state():
+    """Return the DescriptionRefreshScheduler from app state, or None if unavailable."""
+    try:
+        from code_indexer.server.app import app
+
+        return getattr(app.state, "description_refresh_scheduler", None)
+    except Exception:
+        return None
+
+
+def _backfill_journal_headers_from_service(
+    journal_svc,
+    offset: int,
+) -> dict:
+    """Build the pinned wire-contract response headers from a BackfillJournalService.
+
+    Reads the _status.json sidecar (source of truth) and the activity journal
+    (for new content since *offset*).
+
+    Returns a plain dict with keys:
+      X-Journal-Offset        - new byte offset
+      X-Backfill-Active       - "1" while running or within 30s grace, else "0"
+      X-Backfill-Total        - str(int)
+      X-Backfill-Done         - str(int)
+      X-Backfill-Failed       - str(int)
+      X-Backfill-Completed-At - ISO str or ""
+
+    Never raises — callers should not crash on sidecar absence.
+
+    Args:
+        journal_svc: BackfillJournalService instance (lifecycle or description).
+        offset: Current byte offset for incremental journal reads.
+    """
+    from code_indexer.server.services.activity_journal_service import (
+        ActivityJournalService,
+    )
+
+    # Read journal content since offset
+    journal_path = journal_svc.journal_path
+    new_offset = offset
+    if journal_path is not None:
+        _content, new_offset = ActivityJournalService.get_content_from_path(
+            journal_path, offset
+        )
+
+    # Read sidecar for status fields
+    status = journal_svc.get_status() or {}
+    is_active = journal_svc.is_active()
+
+    total = status.get("total", 0) or 0
+    done = status.get("done", 0) or 0
+    failed = status.get("failed", 0) or 0
+    completed_at = status.get("completed_at") or ""
+
+    return {
+        "X-Journal-Offset": str(new_offset),
+        "X-Backfill-Active": "1" if is_active else "0",
+        "X-Backfill-Total": str(total),
+        "X-Backfill-Done": str(done),
+        "X-Backfill-Failed": str(failed),
+        "X-Backfill-Completed-At": completed_at,
+    }
+
+
+def _lifecycle_backfill_journal_svc():
+    """Return the lifecycle BackfillJournalService from the scheduler, or build a fresh one."""
+    from code_indexer.server.services.backfill_journal_service import (
+        BackfillJournalService,
+    )
+
+    scheduler = _get_description_scheduler_from_state()
+    if scheduler is not None:
+        # Reuse the scheduler's helper to get the canonical path
+        try:
+            return scheduler._init_backfill_journal("lifecycle")
+        except Exception:
+            pass
+    # Fallback: can't surface journal content but avoids 500
+    import tempfile
+
+    return BackfillJournalService(
+        namespace="lifecycle",
+        journal_dir=Path(tempfile.gettempdir()) / "cidx-lifecycle-backfill-journal",
+    )
+
+
+def _description_backfill_journal_svc():
+    """Return the description BackfillJournalService from the scheduler, or build a fresh one."""
+    from code_indexer.server.services.backfill_journal_service import (
+        BackfillJournalService,
+    )
+
+    scheduler = _get_description_scheduler_from_state()
+    if scheduler is not None:
+        try:
+            return scheduler._init_backfill_journal("description")
+        except Exception:
+            pass
+    import tempfile
+
+    return BackfillJournalService(
+        namespace="description",
+        journal_dir=Path(tempfile.gettempdir()) / "cidx-description-backfill-journal",
+    )
+
+
+@dependency_map_router.get(
+    "/partials/lifecycle-backfill-journal", response_class=HTMLResponse
+)
+def lifecycle_backfill_journal_partial(request: Request, offset: int = 0):
+    """
+    HTMX partial for lifecycle backfill incremental journal content (Story #1062).
+
+    GET /admin/partials/lifecycle-backfill-journal?offset=N
+
+    Admin-only. Returns new journal entries since byte offset as HTML.
+    Response headers (always present, source of truth = _status.json sidecar):
+      X-Journal-Offset        - new byte offset for next poll
+      X-Backfill-Active       - "1" while running OR within 30s post-completion grace, else "0"
+      X-Backfill-Total        - integer (0 when no run recorded)
+      X-Backfill-Done         - integer
+      X-Backfill-Failed       - integer
+      X-Backfill-Completed-At - ISO timestamp or "" (empty when still running / never run)
+    Auth: admin session (mirrors depmap-activity-journal). 401 empty body when not admin.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    journal_svc = _lifecycle_backfill_journal_svc()
+
+    # Read journal content since offset for the HTML body
+    from code_indexer.server.services.activity_journal_service import (
+        ActivityJournalService,
+    )
+
+    journal_path = journal_svc.journal_path
+    content = ""
+    new_offset = offset
+    if journal_path is not None:
+        content, new_offset = ActivityJournalService.get_content_from_path(
+            journal_path, offset
+        )
+
+    html_content = _render_journal_html(content)
+    headers = _backfill_journal_headers_from_service(journal_svc, offset)
+    # Override offset since we already read it above
+    headers["X-Journal-Offset"] = str(new_offset)
+
+    response = HTMLResponse(content=html_content)
+    for key, value in headers.items():
+        response.headers[key] = value
+    return response
+
+
+@dependency_map_router.get(
+    "/partials/description-backfill-journal", response_class=HTMLResponse
+)
+def description_backfill_journal_partial(request: Request, offset: int = 0):
+    """
+    HTMX partial for description backfill incremental journal content (Story #1062).
+
+    GET /admin/partials/description-backfill-journal?offset=N
+
+    Admin-only. Returns new journal entries since byte offset as HTML.
+    Response headers (always present, source of truth = _status.json sidecar):
+      X-Journal-Offset        - new byte offset for next poll
+      X-Backfill-Active       - "1" while running OR within 30s post-completion grace, else "0"
+      X-Backfill-Total        - integer (0 when no run recorded)
+      X-Backfill-Done         - integer
+      X-Backfill-Failed       - integer
+      X-Backfill-Completed-At - ISO timestamp or "" (empty when still running / never run)
+    Auth: admin session (mirrors depmap-activity-journal). 401 empty body when not admin.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    journal_svc = _description_backfill_journal_svc()
+
+    from code_indexer.server.services.activity_journal_service import (
+        ActivityJournalService,
+    )
+
+    journal_path = journal_svc.journal_path
+    content = ""
+    new_offset = offset
+    if journal_path is not None:
+        content, new_offset = ActivityJournalService.get_content_from_path(
+            journal_path, offset
+        )
+
+    html_content = _render_journal_html(content)
+    headers = _backfill_journal_headers_from_service(journal_svc, offset)
+    headers["X-Journal-Offset"] = str(new_offset)
+
+    response = HTMLResponse(content=html_content)
+    for key, value in headers.items():
+        response.headers[key] = value
+    return response
+
+
 @dependency_map_router.get(
     "/partials/depmap-activity-panel", response_class=HTMLResponse
 )
