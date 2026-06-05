@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.4] - 2026-06-04
+
+### Fixed
+- Bug #1063 Part 1: `GlobalRepoManager.list_due_repos()` now accepts a `cap` argument and issues a `LIMIT`-bounded SQL query instead of loading all rows then slicing in Python. New `max_concurrent_refresh_jobs` field added to `BackgroundJobsConfig` (default 3). The scheduler uses `count_active_refresh_jobs()` to gate concurrent refreshes, preventing thundering-herd on large golden-repo registries.
+- Bug #1063 Part 2: `BackgroundJobManager._execute_job` now debounces `_persist_jobs` writes for intermediate progress ticks (coalescing within `PROGRESS_DEBOUNCE_INTERVAL = 0.5 s`), while still flushing immediately on terminal state (COMPLETED/FAILED/CANCELLED) and running `_check_db_cancellation` on every tick for responsive cancel latency.
+- Bug #1063 Part 3: `BackgroundJobManager` now uses a `threading.BoundedSemaphore(max_concurrent_background_jobs)` worker pool instead of spawning an unbounded thread per job. Pending jobs that arrive while the pool is full queue in `_pending_queue` and are dispatched by the releasing worker. Cancel of a pending job marks it CANCELLED before it ever starts; cancel of a running job sends SIGTERM to the child process.
+- Bug #1063 Part 4: `list_jobs()` and `get_jobs_for_display()` now hard-cap `page_size` at `MAX_PAGE_SIZE = 50` (module-level constant, importable). The DB query limit tracks the capped page_size, not the old 10000-row bulk-fetch sentinel. `_get_all_jobs()` in `routes.py` applies the same cap. Dashboard fetch is now O(page_size) instead of O(total_job_history).
+- Bug #1063 cleanup: `_MAX_DB_FETCH_FOR_PAGINATION` renamed to `_MAX_OP_TYPE_SCAN` to accurately describe its only remaining use site (`get_jobs_by_operation_and_params` full-op-type scan), since all pagination paths now use `MAX_PAGE_SIZE`.
+
+### Tests
+- Bug #1063: New test files `tests/unit/global_repos/test_bug1063_part1_capped_due_query.py`, `tests/unit/server/repositories/test_bug1063_part2_progress_debounce.py`, `tests/unit/server/repositories/test_bug1063_part3_bounded_worker_pool.py`, `tests/unit/server/repositories/test_bug1063_part4_dashboard_bounded_fetch.py` covering all four fix parts plus the Part 4G `_get_all_jobs` multi-page reachability test (Bug #736 / BLOCKING 3).
+- Bug #1065: `tests/unit/server/repositories/test_bug1063_part4_dashboard_bounded_fetch.py::TestGetAllJobsMergeReachability.test_all_jobs_reachable_exactly_once_with_partial_bg_page` long assertion strings wrapped to comply with ruff E501 line-length.
+
 ## [10.92.3] - 2026-06-04
 
 ### Fixed

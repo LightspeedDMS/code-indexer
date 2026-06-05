@@ -799,7 +799,9 @@ class TestAtomicPathInsertOrIgnoreSwallowsViolation:
             )
         # Must be an IntegrityError (or a wrapper of one).
         exc_type_name = type(exc_info.value).__name__
-        assert "IntegrityError" in exc_type_name or "Integrity" in str(exc_info.value), (
+        assert "IntegrityError" in exc_type_name or "Integrity" in str(
+            exc_info.value
+        ), (
             f"Expected IntegrityError from atomic_claim_insert, got "
             f"{exc_type_name}: {exc_info.value}"
         )

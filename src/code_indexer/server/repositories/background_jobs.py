@@ -10,6 +10,7 @@ import logging
 import multiprocessing
 import queue
 import threading
+import time
 import uuid
 import inspect
 from datetime import datetime, timezone, timedelta
@@ -107,9 +108,24 @@ class BackgroundJob:
 
 _BG_JOB_FIELDS = {f.name for f in fields(BackgroundJob)}
 
-# Upper bound for DB fetch when performing client-side dedup/sort/pagination.
-# Large enough to cover realistic workloads; avoids unbounded queries.
-_MAX_DB_FETCH_FOR_PAGINATION = 10000
+# Safety cap for get_jobs_by_operation_and_params: fetches ALL jobs of the requested
+# op-types so callers get a complete in-memory view.  This is an operational scan
+# (not a paginated fetch), so a large safety cap is appropriate.  Pagination paths
+# now use MAX_PAGE_SIZE instead.
+_MAX_OP_TYPE_SCAN = 10000
+
+# Bug #1063 Part 2: Debounce interval for progress_callback → _persist_jobs.
+# Rapid intermediate ticks (e.g., every chunk during indexing) are coalesced:
+# in-memory state is updated on every tick, but _persist_jobs is called at
+# most once per PROGRESS_DEBOUNCE_INTERVAL seconds for intermediate updates.
+# Terminal states (COMPLETED/FAILED/CANCELLED) always flush immediately.
+# Cancellation checks (_check_db_cancellation) also fire on every tick.
+PROGRESS_DEBOUNCE_INTERVAL: float = 0.5
+
+# Bug #1063 Part 4: Hard cap on page_size for list_jobs() and get_jobs_for_display().
+# Prevents unbounded DB fetches caused by large or uncapped page_size values.
+# The dashboard and API consumers use at most 50 rows per page in practice.
+MAX_PAGE_SIZE: int = 50
 
 
 class BackgroundJobManager:
@@ -198,20 +214,82 @@ class BackgroundJobManager:
             data_retention_config = DataRetentionConfig()
         self._data_retention_config = data_retention_config
 
-        # Story #26: Semaphore for limiting concurrent job execution
-        self._job_semaphore = threading.Semaphore(
-            self._background_jobs_config.max_concurrent_background_jobs
-        )
+        # Bug #1063 Part 3: Bounded worker pool shutdown signal.
+        self._pool_shutdown = threading.Event()
 
         # Load persisted jobs
         self._load_jobs()
 
+        # Bug #1063 Part 3: Start fixed pool of worker threads.
+        # Workers pull (job_id, func, args, kwargs) tuples from
+        # _pending_job_queue.  N submits → only pool_size threads alive,
+        # not N per-submit threads each blocking on a semaphore.
+        pool_size = self._background_jobs_config.max_concurrent_background_jobs
+        for _ in range(pool_size):
+            t = threading.Thread(
+                target=self._pool_worker,
+                daemon=True,
+                name=f"bgm-worker-{id(self)}",
+            )
+            t.start()
+            with self._lock:
+                self._running_jobs[f"_pool_{t.ident}"] = t
+
         # Background job manager initialized silently
+
+    def _pool_worker(self) -> None:
+        """Bug #1063 Part 3: Persistent worker thread that processes queued jobs.
+
+        Pulls (job_id, func, args, kwargs) tuples from _pending_job_queue and
+        calls _execute_job().  Exits when _pool_shutdown is set AND the queue
+        is drained (sentinel None item put by shutdown()).
+        """
+        while not self._pool_shutdown.is_set():
+            try:
+                item = self._pending_job_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if item is None:
+                # Sentinel: signal from shutdown() to stop this worker.
+                self._pending_job_queue.task_done()
+                break
+            job_id, func, args, kwargs = item
+            try:
+                self._execute_job(job_id, func, args, kwargs)
+            except Exception:
+                logging.exception(
+                    "Unhandled exception in pool worker for job %s", job_id
+                )
+            finally:
+                self._pending_job_queue.task_done()
 
     @property
     def max_concurrent_jobs(self) -> int:
         """Get the maximum number of concurrent background jobs (Story #26)."""
         return self._background_jobs_config.max_concurrent_background_jobs  # type: ignore[no-any-return]
+
+    def count_active_refresh_jobs(self) -> int:
+        """Count PENDING+RUNNING global_repo_refresh jobs in memory.
+
+        Bug #1063 Part 1: used by RefreshScheduler to compute the refresh
+        budget per poll cycle (budget = max_concurrent_refresh_jobs - active).
+        Counting in-memory jobs only is intentional: the scheduler runs on this
+        node and submits jobs through this manager; DB-stored jobs from other
+        nodes are refresh jobs submitted by those nodes' schedulers and should
+        not count against THIS node's budget.
+
+        Returns:
+            Number of in-memory PENDING or RUNNING global_repo_refresh jobs.
+        """
+        count = 0
+        with self._lock:
+            for job in self.jobs.values():
+                if job.operation_type == "global_repo_refresh" and job.status in (
+                    JobStatus.PENDING,
+                    JobStatus.RUNNING,
+                ):
+                    count += 1
+        return count
 
     # Bug #467: Staleness threshold for detecting truly stuck jobs.
     # Since indexing no longer has a timeout, use a generous 24-hour threshold.
@@ -442,18 +520,11 @@ class BackgroundJobManager:
                         exc_info=True,
                     )
 
-        # Execute job in background thread
-        thread = threading.Thread(
-            target=self._execute_job,
-            args=(job_id, func, args, kwargs),
-            daemon=True,  # Bug #549: daemon thread allows graceful shutdown;
-            # orphaned jobs are reclaimed by JobReconciliationService
-        )
-        thread.start()
-
-        # Track running thread
-        with self._lock:
-            self._running_jobs[job_id] = thread
+        # Bug #1063 Part 3: Enqueue the job for the bounded worker pool.
+        # Workers pull from _pending_job_queue and call _execute_job().
+        # This avoids spawning one thread per submit (N submits = N blocking
+        # threads under the old semaphore model).
+        self._pending_job_queue.put((job_id, func, args, kwargs))
 
         logging.info(
             f"Background job {job_id} submitted by {submitter_username}: {operation_type}"
@@ -580,14 +651,33 @@ class BackgroundJobManager:
         Returns:
             Dictionary with jobs list and total count
         """
+        # Bug #1063 Part 4: cap page_size at MAX_PAGE_SIZE unconditionally so
+        # the cap applies to BOTH the SQLite path and the in-memory fallback.
+        capped_limit = min(limit, MAX_PAGE_SIZE)
+
         if self._sqlite_backend is not None:
             try:
-                # Fetch all matching jobs from DB; paginate client-side after merging.
+                # Count active in-memory jobs that match the criteria so we can
+                # fetch enough rows from DB to fill the page after merging.
+                with self._lock:
+                    active_matching = [
+                        job
+                        for job in self.jobs.values()
+                        if (is_admin or job.username == username)
+                        and (not status_filter or job.status.value == status_filter)
+                    ]
+                active_count = len(active_matching)
+
+                # Fetch only as many DB rows as needed for this page after merge.
+                # Adding active_count ensures we have enough rows to deduplicate
+                # and still fill capped_limit rows for the caller.
+                db_fetch_limit = capped_limit + active_count
+
                 # AC11: when is_admin=True, pass username=None to skip the WHERE filter.
                 db_jobs = self._sqlite_backend.list_jobs(
                     username=None if is_admin else username,
                     status=status_filter,
-                    limit=_MAX_DB_FETCH_FOR_PAGINATION,
+                    limit=db_fetch_limit,
                 )
                 # Build dict keyed by job_id from DB results.
                 # v10.4.6 (Obs 3.2): scrub internal is_admin field from each
@@ -613,11 +703,11 @@ class BackgroundJobManager:
                     reverse=True,
                 )
                 total_count = len(all_jobs)
-                paginated = all_jobs[offset : offset + limit]
+                paginated = all_jobs[offset : offset + capped_limit]
                 return {
                     "jobs": paginated,
                     "total": total_count,
-                    "limit": limit,
+                    "limit": capped_limit,
                     "offset": offset,
                 }
             except Exception as e:
@@ -643,13 +733,13 @@ class BackgroundJobManager:
 
             total_count = len(user_jobs)
 
-            # Apply pagination
-            paginated_jobs = user_jobs[offset : offset + limit]
+            # Apply pagination using capped_limit (Bug #1063 Part 4)
+            paginated_jobs = user_jobs[offset : offset + capped_limit]
 
             return {
                 "jobs": [self._job_to_dict(job) for job in paginated_jobs],
                 "total": total_count,
-                "limit": limit,
+                "limit": capped_limit,
                 "offset": offset,
             }
 
@@ -916,16 +1006,21 @@ class BackgroundJobManager:
         # race (RC-3) where short-lived job threads accumulated tracked
         # connections faster than the demand-driven cleanup sweep could
         # drain them.
-        try:
-            # Story #26: Wait for a slot in the semaphore (blocks if limit reached)
-            # Job remains in PENDING state while waiting
-            logging.debug(
-                f"Job {job_id} waiting for execution slot (current limit: {self.max_concurrent_jobs})"
-            )
-            self._job_semaphore.acquire()
 
+        # Bug #1063 Part 3: Register current (pool worker) thread as the
+        # per-job entry in _running_jobs so shutdown() can find and cancel
+        # running jobs, and tests can poll _running_jobs[job_id] for completion.
+        # The inner finally already removes it on completion/failure.
+        with self._lock:
+            self._running_jobs[job_id] = threading.current_thread()
+
+        try:
+            # Bug #1063 Part 3: Semaphore acquire removed.  Concurrency is now
+            # enforced by the bounded worker pool (queue depth == max_concurrent_jobs).
+            # The pool worker calls _execute_job only when it picks up the item
+            # from _pending_job_queue, so exactly pool_size jobs run concurrently.
             try:
-                # Now we have a slot - check if job was cancelled while waiting
+                # Check if job was cancelled while waiting in the queue.
                 with self._lock:
                     job = self.jobs[job_id]
                     if job.cancelled:
@@ -955,7 +1050,12 @@ class BackgroundJobManager:
 
                 logging.info(f"Starting background job {job_id}")
 
-                # Create progress callback function
+                # Create progress callback function.
+                # Bug #1063 Part 2: debounce intermediate persists.
+                # _last_persist_time is a single-element list used as a mutable
+                # closure cell (Python closures cannot rebind bare names).
+                _last_persist_time: list = [0.0]
+
                 def progress_callback(
                     progress: int,
                     phase: Optional[str] = None,
@@ -969,9 +1069,17 @@ class BackgroundJobManager:
                                 self.jobs[job_id].current_phase = phase
                             if detail is not None:
                                 self.jobs[job_id].phase_detail = detail
-                    # Story #267 Component 3-4: Persist outside lock
-                    self._persist_jobs(job_id=job_id)
-                    # Bug #584: Check DB for cross-node cancellation
+                    # Bug #1063 Part 2: coalesce rapid ticks.
+                    # _persist_jobs is only called when the debounce window has
+                    # elapsed.  The in-memory state above is always updated so
+                    # get_job() is always current even when the persist is skipped.
+                    # Story #267 Component 3-4: Persist outside lock.
+                    now_ts = time.monotonic()
+                    if now_ts - _last_persist_time[0] >= PROGRESS_DEBOUNCE_INTERVAL:
+                        self._persist_jobs(job_id=job_id)
+                        _last_persist_time[0] = now_ts
+                    # Bug #584: Check DB for cross-node cancellation on every tick
+                    # (cheap read; must not be gated by the debounce window).
                     self._check_db_cancellation(job_id)
 
                 # Check if function accepts progress callback
@@ -1132,9 +1240,8 @@ class BackgroundJobManager:
                         self.jobs.pop(job_id, None)
 
             finally:
-                # Story #26: Release semaphore slot to allow another job to run
-                self._job_semaphore.release()
-                # Clean up running job reference
+                # Bug #1063 Part 3: Semaphore removed; bounded pool manages
+                # concurrency via queue depth.  Only clean up running job ref.
                 with self._lock:
                     self._running_jobs.pop(job_id, None)
         finally:
@@ -1393,9 +1500,18 @@ class BackgroundJobManager:
         Cancels all running jobs and waits for threads to complete.
         This method should be called during application shutdown.
         """
+        # Bug #1063 Part 3: Signal pool workers to stop accepting new work.
+        self._pool_shutdown.set()
+        pool_size = self._background_jobs_config.max_concurrent_background_jobs
+        # Send one sentinel per worker so each blocked worker.get() wakes up.
+        for _ in range(pool_size):
+            self._pending_job_queue.put(None)
+
         with self._lock:
-            # Cancel all running jobs
-            running_job_ids = list(self._running_jobs.keys())
+            # Cancel all running jobs (only real job entries, not pool-_ keys)
+            running_job_ids = [
+                jid for jid in self._running_jobs.keys() if not jid.startswith("_pool_")
+            ]
             for job_id in running_job_ids:
                 job = self.jobs.get(job_id)
                 if job and job.status == JobStatus.RUNNING:
@@ -1407,7 +1523,8 @@ class BackgroundJobManager:
             # Snapshot jobs under lock for persistence
             jobs_snapshot = {jid: self._snapshot_job(j) for jid, j in self.jobs.items()}
 
-            # Get list of threads to wait for
+            # Get list of threads to wait for (pool workers only — real job
+            # threads no longer exist; pool workers finish their current item)
             threads_to_wait = list(self._running_jobs.values())
 
         # Persist final job states OUTSIDE lock to avoid blocking
@@ -1455,7 +1572,7 @@ class BackgroundJobManager:
                 for op_type in operation_types:
                     db_jobs = self._sqlite_backend.list_jobs(
                         operation_type=op_type,
-                        limit=_MAX_DB_FETCH_FOR_PAGINATION,
+                        limit=_MAX_OP_TYPE_SCAN,
                     )
                     for j in db_jobs:
                         merged[j["job_id"]] = j
@@ -2201,7 +2318,26 @@ class BackgroundJobManager:
                 active_jobs.append(self._normalize_job_to_display_dict(job))
                 seen_ids.add(job.job_id)
 
-        # Step 2: Query SQLite for historical / non-active jobs with same filters
+        # Bug #1063 Part 4: cap page_size at MAX_PAGE_SIZE before touching the DB.
+        capped_page_size = min(page_size, MAX_PAGE_SIZE)
+
+        # Step 2: Query SQLite for historical / non-active jobs with same filters.
+        # Algorithm: build a virtual global ordering where active jobs occupy the
+        # first active_count global slots and DB (historical) jobs follow.
+        # For page N the global window is [global_start, global_end).
+        # The DB window is offset by active_count within the historical rows.
+        #
+        #   global_start = (page - 1) * capped_page_size
+        #   global_end   = page * capped_page_size
+        #   db_offset    = max(0, global_start - active_count)
+        #   db_limit     = max(0, global_end - max(global_start, active_count))
+        #
+        # This ensures:
+        # - Active jobs appear only on the page(s) where their global index
+        #   falls in the window (effectively only page 1 when active_count
+        #   <= page_size).
+        # - No DB rows are skipped at page boundaries.
+        # - The DB query is always bounded (never a full-table scan).
         db_jobs_normalized: List[Dict[str, Any]] = []
         db_total_from_sqlite = 0
 
@@ -2210,12 +2346,21 @@ class BackgroundJobManager:
                 # H2: non-admin users scope DB query to their own jobs;
                 # admin (is_admin=True) sees all users' jobs (username=None = no filter).
                 db_username_filter = None if is_admin else username
+                active_count = len(active_jobs)
+                global_start = (page - 1) * capped_page_size
+                global_end = page * capped_page_size
+                # DB rows start after active_count global slots.
+                db_offset = max(0, global_start - active_count)
+                # How many DB rows fall inside this page's global window.
+                db_limit = max(0, global_end - max(global_start, active_count))
                 db_rows, db_count = self._sqlite_backend.list_jobs_filtered(
                     status=status_filter,
                     operation_type=type_filter,
                     search_text=search_text,
                     exclude_ids=seen_ids if seen_ids else None,
                     username=db_username_filter,
+                    limit=db_limit,
+                    offset=db_offset,
                 )
                 db_total_from_sqlite = db_count
                 for row in db_rows:
@@ -2223,15 +2368,23 @@ class BackgroundJobManager:
             except Exception as e:
                 logging.error(f"Failed to get jobs for display from SQLite: {e}")
 
-        # Step 3: Merge and compute total_count
-        all_jobs = active_jobs + db_jobs_normalized
+        # Step 3: Merge and compute total_count.
+        # total_count uses the DB COUNT(*) so it reflects the FULL matching set —
+        # this enables the "N more jobs" footer even though we only fetched one page.
         total_count = len(active_jobs) + db_total_from_sqlite
 
-        # Step 4: Paginate
-        total_pages = max(1, (total_count + page_size - 1) // page_size)
-        offset = (page - 1) * page_size
-        paginated = all_jobs[offset : offset + page_size]
+        # Step 4: Slice active_jobs to only those falling within this page's
+        # global window, then append the DB rows for this page.
+        # active jobs at global index [0, active_count); page window is
+        # [global_start, global_end).  Their intersection is
+        # [global_start, min(global_end, active_count)).
+        active_count = len(active_jobs)
+        global_start = (page - 1) * capped_page_size
+        global_end = page * capped_page_size
+        active_slice = active_jobs[global_start : min(global_end, active_count)]
+        paginated = active_slice + db_jobs_normalized
 
+        total_pages = max(1, (total_count + capped_page_size - 1) // capped_page_size)
         return paginated, total_count, total_pages
 
     def count_active_deactivations(self) -> int:

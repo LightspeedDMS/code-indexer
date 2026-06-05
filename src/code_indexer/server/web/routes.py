@@ -4248,11 +4248,6 @@ def _apply_job_filters(
     return result
 
 
-# Upper bound for the "fetch all" call when merging with JobTracker results.
-# Job counts are bounded by retention policy (typically < 10 000 at any time).
-_MAX_JOBS_FOR_MERGE = 10_000
-
-
 def _get_all_jobs(
     status_filter: Optional[str] = None,
     type_filter: Optional[str] = None,
@@ -4270,10 +4265,15 @@ def _get_all_jobs(
     Bug #736: Also merges in JobTracker-only jobs (e.g. dependency_map_full /
     dependency_map_delta) that are not tracked by BackgroundJobManager.
     When a JobTracker instance is available:
-    1. Fetch all matching BG jobs (large page to avoid pre-pagination).
+    1. Fetch the BG page window for the current page from the BG manager.
     2. Fetch and filter all JobTracker jobs with the same criteria.
-    3. Deduplicate by job_id (BG manager record wins for shared IDs).
-    4. Re-paginate the merged list and recompute total_count / total_pages.
+    3. Deduplicate: for each tracker job, check if the BG manager knows about
+       it via a targeted per-ID existence check (bounded by tracker set size,
+       typically < 20 jobs).  BG manager record wins for shared IDs.
+    4. Compute total_count = bg_total + len(tracker-only extras).
+    5. Paginate: use a unified global ordering (BG jobs first, then extras).
+       For pages straddling the BG/extras boundary, combine the partial BG
+       page with extra slots filled from the extras list.
 
     AC11: is_admin parameter — when True (callers must opt-in explicitly,
     default is False), bypasses per-user scoping so admin sees all users'
@@ -4282,6 +4282,12 @@ def _get_all_jobs(
     Returns jobs from both tracking systems with consistent filtering and
     pagination.
     """
+    from code_indexer.server.repositories.background_jobs import (
+        MAX_PAGE_SIZE,
+    )
+
+    page_size = min(page_size, MAX_PAGE_SIZE)
+
     job_manager = _get_background_job_manager()
     if not job_manager:
         return [], 0, 1
@@ -4298,31 +4304,66 @@ def _get_all_jobs(
             is_admin=is_admin,
         )
 
-    # Fetch all matching BG jobs (un-paginated) so we can merge before slicing.
-    # AC11: pass is_admin so admin sees all users' jobs in the tracker-merge path.
-    all_bg_jobs, _bg_total, _bg_pages = job_manager.get_jobs_for_display(
+    # Step 1: fetch the BG page window for the requested page.
+    # get_jobs_for_display() uses COUNT(*) for bg_total — exact, no side-effects.
+    bg_page_jobs, bg_total, _bg_pages = job_manager.get_jobs_for_display(
         status_filter=status_filter,
         type_filter=type_filter,
         search_text=search,
-        page=1,
-        page_size=_MAX_JOBS_FOR_MERGE,
+        page=page,
+        page_size=page_size,
         is_admin=is_admin,
     )
 
-    seen_ids = {j["job_id"] for j in all_bg_jobs}
+    # Step 2: fetch tracker jobs (small bounded set — recent dep_map jobs only).
     tracker_jobs = _apply_job_filters(
         job_tracker.get_recent_jobs(),
         status_filter,
         type_filter,
         search,
     )
-    extra_jobs = [j for j in tracker_jobs if j["job_id"] not in seen_ids]
 
-    merged = list(all_bg_jobs) + extra_jobs
-    total_count = len(merged)
+    # Step 3: deduplicate — check each tracker job against the BG manager via a
+    # targeted per-ID existence check.  This is O(tracker_size) × O(1) per lookup
+    # (in-memory dict check + optional indexed DB query), NOT an unbounded table
+    # scan.  Tracker-only extras are those the BG manager does NOT know about.
+    extra_jobs = [
+        j
+        for j in tracker_jobs
+        if job_manager.get_job_status(j["job_id"], username="", is_admin=True) is None
+    ]
+
+    # Step 4: compute total and total_pages using the unified global ordering.
+    total_count = bg_total + len(extra_jobs)
     total_pages = max(1, (total_count + page_size - 1) // page_size)
-    offset = (page - 1) * page_size
-    paginated = merged[offset : offset + page_size]
+
+    # Step 5: paginate using unified global offset/length.
+    # Global ordering: BG jobs occupy positions 0..bg_total-1;
+    # tracker-only extras occupy positions bg_total..total_count-1.
+    #
+    # For the requested page:
+    #   global_start = (page-1) * page_size
+    #   global_end   = global_start + page_size
+    #
+    # BG contribution to this page:  positions global_start..min(global_end, bg_total)-1
+    #   → already returned by bg_page_jobs (exact window from get_jobs_for_display)
+    #
+    # Extras contribution to this page: positions max(0, global_start-bg_total)
+    #   ..max(0, global_end-bg_total)-1 within the extras list.
+    #
+    # This handles three cases correctly:
+    #   (a) Page is entirely within BG range: extras slice is empty → use bg_page_jobs.
+    #   (b) Page straddles BG/extras boundary: bg_page_jobs is partial; fill remaining
+    #       slots from extras[0:remaining].
+    #   (c) Page is entirely in extras range: bg_page_jobs is empty; slice extras.
+    global_start = (page - 1) * page_size
+    global_end = global_start + page_size
+
+    extras_start = max(0, global_start - bg_total)
+    extras_end = max(0, global_end - bg_total)
+    extras_slice = extra_jobs[extras_start:extras_end]
+
+    paginated = list(bg_page_jobs) + extras_slice
 
     return paginated, total_count, total_pages
 

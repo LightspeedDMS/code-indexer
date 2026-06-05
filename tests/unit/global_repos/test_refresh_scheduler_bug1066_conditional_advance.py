@@ -41,11 +41,24 @@ def _make_repo(alias_name: str, repo_url: str = "https://example.com/repo.git") 
     }
 
 
+def _configure_mock_registry_due(mock_registry: MagicMock, repos: list) -> None:
+    """Wire mock_registry so list_due_repos returns the given repos.
+
+    The refactored _scheduler_loop calls list_due_repos(limit=..., now=...) instead
+    of list_global_repos() + manual filtering. We keep list_global_repos returning
+    the same repos so the unscheduled-spread pass can also operate if needed.
+    """
+    mock_registry.list_global_repos.return_value = repos
+    # list_due_repos must honour the call: return repos regardless of limit/now
+    # so the loop actually processes them in tests.
+    mock_registry.list_due_repos.return_value = repos
+
+
 def _make_scheduler(
     tmp_path,
     mock_registry: MagicMock,
     mock_submit_side_effect=None,
-) -> "tuple[RefreshScheduler, MagicMock]":
+) -> RefreshScheduler:
     """
     Build a RefreshScheduler wired to a mock registry.
 
@@ -124,7 +137,7 @@ class TestGenericExceptionDoesNotAdvanceNextRefresh:
         """
         alias = "my-repo-global"
         mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [_make_repo(alias)]
+        _configure_mock_registry_due(mock_registry, [_make_repo(alias)])
 
         scheduler = _make_scheduler(tmp_path, mock_registry)
 
@@ -148,10 +161,10 @@ class TestGenericExceptionDoesNotAdvanceNextRefresh:
         alias_ok = "ok-repo-global"
         alias_fail = "fail-repo-global"
         mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [
-            _make_repo(alias_ok),
-            _make_repo(alias_fail),
-        ]
+        _configure_mock_registry_due(
+            mock_registry,
+            [_make_repo(alias_ok), _make_repo(alias_fail)],
+        )
 
         scheduler = _make_scheduler(tmp_path, mock_registry)
 
@@ -190,7 +203,7 @@ class TestSuccessAdvancesNextRefresh:
         """
         alias = "healthy-repo-global"
         mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [_make_repo(alias)]
+        _configure_mock_registry_due(mock_registry, [_make_repo(alias)])
 
         scheduler = _make_scheduler(tmp_path, mock_registry)
 
@@ -214,7 +227,7 @@ class TestSuccessAdvancesNextRefresh:
         alias = "timed-repo-global"
         interval = 3600
         mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [_make_repo(alias)]
+        _configure_mock_registry_due(mock_registry, [_make_repo(alias)])
 
         scheduler = _make_scheduler(tmp_path, mock_registry)
 
@@ -254,7 +267,7 @@ class TestDuplicateJobErrorAdvancesNextRefresh:
         """
         alias = "busy-repo-global"
         mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [_make_repo(alias)]
+        _configure_mock_registry_due(mock_registry, [_make_repo(alias)])
 
         scheduler = _make_scheduler(tmp_path, mock_registry)
 
@@ -289,6 +302,10 @@ class TestNotDueRepoNotAdvanced:
         """
         A repo with next_refresh in the future is skipped entirely;
         update_next_refresh must not be called for it.
+
+        In the refactored loop, list_due_repos() only returns repos that are due.
+        A future repo never appears in that list, so _submit_refresh_job is never
+        called and update_next_refresh is never called.
         """
         alias = "future-repo-global"
         future_repo = {
@@ -298,6 +315,8 @@ class TestNotDueRepoNotAdvanced:
         }
         mock_registry = MagicMock()
         mock_registry.list_global_repos.return_value = [future_repo]
+        # list_due_repos correctly returns empty for a future repo
+        mock_registry.list_due_repos.return_value = []
 
         scheduler = _make_scheduler(tmp_path, mock_registry)
 

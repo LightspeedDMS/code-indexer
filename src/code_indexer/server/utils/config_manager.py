@@ -681,6 +681,17 @@ class BackgroundJobsConfig:
     # Default 8 (Story #1009: enlarged from 2 for burst concurrency)
     subprocess_max_workers: int = 8
 
+    # Bug #1063 Part 1: per-cycle refresh submission budget.
+    # Default -1 means "derive from max_concurrent_background_jobs // 2" in
+    # __post_init__. Set explicitly to override the derived default.
+    max_concurrent_refresh_jobs: int = -1
+
+    def __post_init__(self) -> None:
+        if self.max_concurrent_refresh_jobs < 0:
+            self.max_concurrent_refresh_jobs = max(
+                1, self.max_concurrent_background_jobs // 2
+            )
+
 
 @dataclass
 class DataRetentionConfig:
