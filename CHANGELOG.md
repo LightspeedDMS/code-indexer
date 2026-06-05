@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.93.0] - 2026-06-05
+
+### Added
+- Story #1062: live lifecycle and description backfill observability cards on /admin/dependency-map.
+  BackfillJournalService writes a shared-NFS `_activity.md` journal (append-only, offset-tracked)
+  and an atomic (fsync + os.replace) `_status.json` sidecar per namespace (lifecycle / description).
+  Two new HTMX partial routes (`GET /admin/partials/lifecycle-backfill-journal` and
+  `/admin/partials/description-backfill-journal`) return the journal fragment with a pinned
+  six-header contract (`X-Backfill-Active`, `X-Backfill-Total`, `X-Backfill-Done`,
+  `X-Backfill-Failed`, `X-Backfill-Completed-At`, `X-Journal-Offset`) plus server-side 30s
+  grace after completion before switching to idle polling.
+  `_backfill_in_progress` split into `_lifecycle_backfill_running` and
+  `_description_backfill_running` flags so both backfill types can run concurrently without
+  blocking each other.
+  `LifecycleBatchRunner` gains a `journal_callback` parameter for per-alias progress reporting;
+  first-run cidx-meta directory is now created with `mkdir -p` before journal writes.
+  Two frontend cards mirror the existing depmap-activity-panel polling pattern.
+
 ## [10.92.8] - 2026-06-05
 
 ### Fixed
