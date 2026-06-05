@@ -2,11 +2,10 @@
 Description Refresh Scheduler (Story #190).
 
 Manages periodic description regeneration for golden repositories using
-hash-based bucket scheduling with jitter to distribute load evenly.
+uniform-random scheduling across the full interval to distribute load evenly.
 """
 
 import concurrent.futures
-import hashlib
 import json
 import logging
 import random
@@ -115,8 +114,8 @@ class DescriptionRefreshScheduler:
     """
     Scheduler for periodic repository description refresh.
 
-    Implements hash-based bucket scheduling with jitter to distribute
-    refresh jobs evenly across time intervals, preventing thundering herd.
+    Implements uniform-random scheduling across the full interval to distribute
+    refresh jobs evenly across time, preventing thundering herd.
     """
 
     def __init__(
@@ -248,15 +247,14 @@ class DescriptionRefreshScheduler:
             config.claude_integration_config.description_refresh_interval_hours
         )
 
-        # Calculate number of buckets (one per hour in interval)
-        buckets = interval_hours
-
         logger.info(
-            f"Description refresh scheduler started (interval: {interval_hours}h, {buckets} buckets)"
+            f"Description refresh scheduler started "
+            f"(interval: {interval_hours}h, uniform random across full interval)"
         )
 
         self._migrate_global_suffix_filenames()
         self.reconcile_orphan_tracking()
+        self._reconcile_stale_next_run_rows()
         self.reconcile_broken_lifecycle_metadata()
         self.reconcile_terse_descriptions()
 
@@ -281,10 +279,14 @@ class DescriptionRefreshScheduler:
         self, alias: str, interval_hours: Optional[int] = None
     ) -> str:
         """
-        Calculate next run time using hash-based bucket scheduling with jitter.
+        Calculate next run time using uniform random across the full interval.
+
+        Distributes refreshes evenly across the entire interval window so that
+        no thundering herd forms — not at steady-state, and not on first-enable
+        (when _reconcile_stale_next_run_rows re-slots all stale rows).
 
         Args:
-            alias: Repository alias (used for consistent bucketing)
+            alias: Repository alias (kept for API/log-line compatibility; unused in body)
             interval_hours: Interval in hours (defaults to config value)
 
         Returns:
@@ -293,24 +295,77 @@ class DescriptionRefreshScheduler:
         if interval_hours is None:
             interval_hours = self._get_interval_hours()
 
-        # Hash-based bucket assignment (deterministic for same alias)
-        bucket = int(hashlib.md5(alias.encode()).hexdigest(), 16) % interval_hours
+        offset_seconds = random.uniform(0, interval_hours * 3600)
+        return (
+            datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+        ).isoformat()
 
-        # Calculate next hour boundary
+    def _reconcile_stale_next_run_rows(self) -> int:
+        """One-shot sweep: recompute next_run for tracking rows that are NULL or in the past.
+
+        Called from start() AFTER reconcile_orphan_tracking() so orphan rows are
+        already gone before we iterate.  Rows with a valid FUTURE next_run are
+        preserved unchanged — this avoids disturbing repos that were already
+        spread across the interval by a previous start cycle.
+
+        Returns the number of rows recomputed. Self-defensive: any exception in the
+        sweep is logged and swallowed so scheduler startup cannot be blocked.
+        """
+        recomputed = 0
+        try:
+            rows = self._tracking_backend.get_all_tracking()
+        except Exception:
+            logger.error(
+                "Stale next_run reconciliation: get_all_tracking failed",
+                exc_info=True,
+            )
+            return 0
+
         now = datetime.now(timezone.utc)
-        next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
-        # Base time = next_hour + bucket offset
-        base_time = next_hour + timedelta(hours=bucket)
+        for row in rows:
+            alias = row.get("repo_alias")
+            if not alias:
+                continue
+            next_run = row.get("next_run")
+            # Recompute if NULL or already past (tz-aware comparison to avoid
+            # lexicographic-compare footgun with Postgres TIMESTAMPTZ in cluster mode).
+            if next_run is None:
+                is_stale = True
+            else:
+                try:
+                    next_run_dt = datetime.fromisoformat(str(next_run))
+                    if next_run_dt.tzinfo is None:
+                        next_run_dt = next_run_dt.replace(tzinfo=timezone.utc)
+                    is_stale = next_run_dt <= now
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Stale next_run reconciliation: unparseable next_run=%r for %s, recomputing",
+                        next_run,
+                        alias,
+                    )
+                    is_stale = True
+            if is_stale:
+                try:
+                    new_next_run = self.calculate_next_run(alias)
+                    self._tracking_backend.upsert_tracking(
+                        repo_alias=alias,
+                        next_run=new_next_run,
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    recomputed += 1
+                except Exception:
+                    logger.error(
+                        "Stale next_run reconciliation: upsert failed for %s",
+                        alias,
+                        exc_info=True,
+                    )
 
-        # Add jitter (0-30% of bucket size = 0-18 minutes for 1-hour buckets)
-        jitter_seconds = random.uniform(0, 3600 * 0.3)
-
-        final_time = base_time + timedelta(seconds=jitter_seconds)
-
-        logger.debug(f"Repo {alias} assigned to bucket {bucket}/{interval_hours}")
-
-        return final_time.isoformat()
+        logger.info(
+            "Stale next_run reconciliation: recomputed %d rows (uniform random across interval)",
+            recomputed,
+        )
+        return recomputed
 
     def has_changes_since_last_run(
         self, repo_path: str, tracking_record: Dict[str, Any]

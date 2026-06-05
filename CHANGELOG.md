@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.5] - 2026-06-04
+
+### Fixed
+- Bug #1061: `DescriptionRefreshScheduler.calculate_next_run` now uses pure uniform-random
+  across the full `description_refresh_interval_hours` window (mean spacing ~96s at 900
+  repos/24h) instead of hash-based bucket assignment + 18-minute in-bucket jitter that
+  clustered ~37 repos/hour into spikes. Dropped the dead hashlib bucket path entirely.
+- Bug #1061: Added `_reconcile_stale_next_run_rows()` called from `start()` after
+  `reconcile_orphan_tracking()`. Re-slots all NULL or past `next_run` rows on startup so
+  first-enable and long-disabled-restart no longer fire the whole fleet at once. Also fixes
+  the latent gap where NULL `next_run` rows never matched `WHERE next_run <= ?` and thus
+  were never due for scheduling.
+- Bug #1061: `_reconcile_stale_next_run_rows` now compares `next_run` as tz-aware datetimes
+  (parsing via `datetime.fromisoformat`, treating naive timestamps as UTC) instead of raw
+  string comparison, preventing the Postgres TIMESTAMPTZ lexicographic-compare footgun in
+  cluster mode.
+
+### Changed
+- `DescriptionRefreshScheduler.start()` log line now reads
+  "uniform random across full interval" (was "hash-based bucket scheduling with jitter").
+- Module and class docstrings updated to reflect uniform-random scheduling.
+
+### Tests
+- Bug #1061: `tests/unit/server/services/test_description_refresh_scheduler_uniform_jitter_bug.py`
+  covers `calculate_next_run` uniformity (Kolmogorov-Smirnov + histogram bin cap),
+  `_reconcile_stale_next_run_rows` (NULL recompute, past recompute, future preserved,
+  mixed rows, NULL rows never due, spread across full interval), and `start()` call-order
+  (orphan reconcile before stale reconcile before daemon thread).
+
 ## [10.92.4] - 2026-06-04
 
 ### Fixed
