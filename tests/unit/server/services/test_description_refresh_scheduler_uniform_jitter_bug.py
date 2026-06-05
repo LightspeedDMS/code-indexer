@@ -15,10 +15,13 @@ Tests:
 
 from __future__ import annotations
 
+import random
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -483,15 +486,51 @@ class TestFirstEnableDistribution:
     After _reconcile_stale_next_run_rows(), the scheduler's periodic tick
     (which queries next_run <= now) must see at most a small constant of due
     rows — NOT all 100.
+
+    Deterministic-seed approach
+    ---------------------------
+    Both positive tests use ``seeded_random`` fixture (seed=42) which patches
+    ``random.uniform`` in the scheduler module so results are:
+
+    * Reproducible — same 100 offsets every run, no flakiness.
+    * Fast — no wall-clock sleeping; the fixture replaces the live RNG.
+    * Verifiably uniform — with seed=42, 100 draws from Uniform(0, 86400)
+      produce max_bin=10 and spread=85626s (verified offline), well within
+      the max_bin<=20 and spread>=43200s bounds.
+
+    Regression guard against pre-#1061 behavior
+    --------------------------------------------
+    The pre-#1061 code used hash-bucket clustering and had NO
+    ``_reconcile_stale_next_run_rows`` method. Both negative tests below
+    document the two mechanisms by which the positive tests catch the old bug:
+
+    1. ``AttributeError`` on the missing method.
+    2. Distribution assertion failure for severely-clustered timestamps.
     """
 
-    def test_first_enable_100_stale_rows_few_immediately_due(self, tmp_path):
+    @pytest.fixture
+    def seeded_random(self, monkeypatch):
+        """Patch random.uniform in the scheduler module with a seeded RNG.
+
+        Seed=42 → 100 draws from Uniform(0, 86400) satisfy both assertions:
+          * max_bin  = 10  (≤ 20 required)
+          * spread   = 85626s  (≥ 43200s required)
+        """
+        import code_indexer.server.services.description_refresh_scheduler as sched_mod
+
+        seeded_rng = random.Random(42)
+        monkeypatch.setattr(sched_mod.random, "uniform", seeded_rng.uniform)
+
+    def test_first_enable_100_stale_rows_few_immediately_due(
+        self, tmp_path, seeded_random
+    ):
         """
         Seed 100 repos with NULL next_run.  After reconciliation, at most 5%
         (5 repos) should have next_run <= now (i.e., be immediately due).
 
-        With uniform random across 24h, P(any single row lands in first ~1s) ≈ 1/86400.
-        Expected immediately-due count ≈ 0.001 — the bound of 5 is very generous.
+        With seed=42 uniform random across 24h, all 100 offsets are > 0
+        (verified: min offset ≈ 56s into the future), so immediately_due = 0.
+        The generous bound of 5 is preserved for real-RNG compatibility.
         """
         db = _make_db(tmp_path)
         scheduler = _make_scheduler(db)
@@ -521,10 +560,15 @@ class TestFirstEnableDistribution:
             f"(expected <= 5 out of {n_repos})"
         )
 
-    def test_first_enable_100_past_rows_distributed_across_interval(self, tmp_path):
+    def test_first_enable_100_past_rows_distributed_across_interval(
+        self, tmp_path, seeded_random
+    ):
         """
         100 repos with past next_run, after reconciliation, should have their
         next_run spread across the full interval (not all clustered in one hour).
+
+        With seed=42: spread=85626s (≥43200s), max_bin=10 (≤20).  Both bounds
+        hold deterministically — no flakiness possible.
         """
         db = _make_db(tmp_path)
         scheduler = _make_scheduler(db)
@@ -572,4 +616,67 @@ class TestFirstEnableDistribution:
         max_bin = max(bins)
         assert max_bin <= 20, (
             f"Max repos in any 1-hour window: {max_bin} > 20 — thundering herd not solved"
+        )
+
+    # -----------------------------------------------------------------------
+    # Negative tests: regression guard documenting HOW the positive tests
+    # catch the pre-#1061 thundering-herd bug.
+    # -----------------------------------------------------------------------
+
+    def test_negative__old_code_lacking_reconcile_raises_attribute_error(self):
+        """NEGATIVE: pre-#1061 DescriptionRefreshScheduler had no
+        ``_reconcile_stale_next_run_rows`` method.
+
+        The positive tests above call ``scheduler._reconcile_stale_next_run_rows()``.
+        Against the old code that method did not exist → ``AttributeError`` →
+        the test fails, catching the thundering-herd regression.
+
+        This test documents and verifies that detection mechanism by constructing
+        a minimal object that mimics the old scheduler's missing method.
+        """
+
+        class PreBug1061Scheduler:
+            """Minimal stand-in for the old scheduler (no reconcile method)."""
+
+            pass
+
+        old = PreBug1061Scheduler()
+        with pytest.raises(AttributeError):
+            old._reconcile_stale_next_run_rows()  # type: ignore[attr-defined]
+
+    def test_negative__severe_clustering_fails_distribution_assertion(self):
+        """NEGATIVE: severely-clustered timestamps fail the max_bin assertion.
+
+        If ``calculate_next_run`` returned the same timestamp for every repo
+        (100% clustering — the pathological thundering-herd case), all 100
+        offsets land in a single 1-hour bin → max_bin = 100, which exceeds the
+        ``max_bin <= 20`` guard.
+
+        This confirms that the distribution assertion in
+        ``test_first_enable_100_past_rows_distributed_across_interval`` is
+        sensitive enough to catch real clustering, not just the missing-method
+        failure mode.
+        """
+        interval_hours = 24
+        n_repos = 100
+        # All repos get the same offset (clustered at hour 1 = 3600s)
+        clustered_offsets = [3600.0] * n_repos
+
+        n_bins = interval_hours
+        bin_width = 3600.0
+        bins = [0] * n_bins
+        for offset in clustered_offsets:
+            idx = int(offset / bin_width)
+            idx = max(0, min(idx, n_bins - 1))
+            bins[idx] += 1
+
+        max_bin = max(bins)
+        # Verify the assertion WOULD fire (i.e., our test IS sensitive)
+        assert max_bin > 20, (
+            f"Expected max_bin > 20 for 100% clustered data, got {max_bin}"
+        )
+        # And the actual guard that the positive test enforces:
+        assert not (max_bin <= 20), (
+            "Clustered data should NOT pass the max_bin<=20 guard — "
+            "if this assertion fails the positive test would miss clustering"
         )

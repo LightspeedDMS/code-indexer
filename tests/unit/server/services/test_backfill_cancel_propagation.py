@@ -41,7 +41,8 @@ def _make_db_with_background_jobs_table() -> str:
             extended_error TEXT,
             language_resolution_status TEXT,
             progress_info TEXT,
-            metadata TEXT
+            metadata TEXT,
+            actor_username TEXT
         )"""
         )
     return db_path
