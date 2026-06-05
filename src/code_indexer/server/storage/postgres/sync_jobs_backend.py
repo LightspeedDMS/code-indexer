@@ -231,20 +231,27 @@ class SyncJobsPostgresBackend:
         return count
 
     def cleanup_old_completed(self, cutoff_iso: str) -> int:
-        """Delete completed sync jobs older than cutoff_iso.
+        """Delete completed or failed sync jobs older than cutoff_iso.
+
+        Bug #1068: must filter by completed_at (not created_at) and must include
+        both 'completed' and 'failed' statuses to match the SQLite retention path.
 
         Args:
-            cutoff_iso: ISO 8601 timestamp; completed jobs before this are deleted.
+            cutoff_iso: ISO 8601 timestamp; jobs whose completed_at is before this
+                        are deleted (provided their status is 'completed' or 'failed').
 
         Returns:
             Number of rows deleted.
         """
         with self._pool.connection() as conn:
-            result = conn.execute(
-                "DELETE FROM sync_jobs WHERE status = 'completed' AND created_at < %s",
-                (cutoff_iso,),
-            )
-            deleted = result.rowcount if result.rowcount else 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM sync_jobs"
+                    " WHERE status IN ('completed', 'failed')"
+                    " AND completed_at < %s",
+                    (cutoff_iso,),
+                )
+                deleted: int = cur.rowcount if cur.rowcount else 0
             conn.commit()
         return deleted
 
