@@ -984,7 +984,7 @@ class TestNonRepoHeadingExclusion:
     """
 
     def test_outgoing_and_incoming_not_in_unchanged_repos(self, analyzer):
-        """
+        r"""
         Finding 1: ### Outgoing and ### Incoming headings in Cross-Domain
         Connections MUST NOT appear as repo aliases in the unchanged repos set.
 
@@ -1193,14 +1193,24 @@ class TestInvokeDeltaMergeFile:
         assert result is None
         assert not list(tmp_path.glob("_delta_merge_*.md"))
 
-    def test_mtime_unchanged_returns_none(self, analyzer, tmp_path):
-        """When subprocess does not modify the file, returns None."""
+    def test_mtime_unchanged_returns_delta_noop(self, analyzer, tmp_path):
+        """
+        Bug #1069: when subprocess does not modify the file, returns _DELTA_NOOP
+        (not None).  Returning None wrongly triggered the retry loop.
+        """
+        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+
         with patch(_SUBPROCESS_PATH, side_effect=_make_no_edit_side_effect()):
             result = self._call(analyzer, tmp_path)
-        assert result is None
+        assert result is _DELTA_NOOP
 
-    def test_identical_content_returns_none(self, analyzer, tmp_path):
-        """When subprocess writes back identical content, returns None (no-op)."""
+    def test_identical_content_returns_delta_noop(self, analyzer, tmp_path):
+        """
+        Bug #1069: when subprocess writes back identical content, returns
+        _DELTA_NOOP (not None).  Returning None wrongly triggered the retry loop.
+        """
+        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+
         with patch(
             _SUBPROCESS_PATH,
             side_effect=_make_edit_side_effect(
@@ -1208,7 +1218,7 @@ class TestInvokeDeltaMergeFile:
             ),
         ):
             result = self._call(analyzer, tmp_path, existing=_EXISTING_DELTA)
-        assert result is None
+        assert result is _DELTA_NOOP
 
     def test_temp_file_cleaned_up_on_success(self, analyzer, tmp_path):
         """Temp file is removed after a successful operation."""
@@ -1278,6 +1288,97 @@ class TestInvokeRefinementFile:
         ):
             self._call(analyzer, tmp_path)
         assert not list(tmp_path.glob("_refinement_*.md"))
+
+
+class TestInvokeDeltaMergeFileBug1069:
+    """
+    Bug #1069 regression tests — invoke_delta_merge_file must distinguish
+    legitimate no-ops (return _DELTA_NOOP) from genuine failures (return None).
+
+    Before the fix all three situations returned None, causing the retry loop
+    in _update_affected_domains to re-invoke Claude up to MAX_DOMAIN_RETRIES
+    times for cases that were actually no-ops.
+    """
+
+    def _call(self, analyzer, tmp_path, existing=_EXISTING_DELTA):
+        return analyzer.invoke_delta_merge_file(
+            domain_name="test",
+            existing_content=existing,
+            merge_prompt="merge prompt",
+            timeout=_TEST_TIMEOUT,
+            max_turns=_TEST_MAX_TURNS,
+            temp_dir=tmp_path,
+        )
+
+    def test_mtime_unchanged_returns_delta_noop(self, analyzer, tmp_path):
+        """
+        Bug #1069 case 2: when the dispatcher runs successfully but leaves the
+        temp file mtime unchanged (Claude made no edit and did NOT print
+        FILE_UNCHANGED), invoke_delta_merge_file must return _DELTA_NOOP, not
+        None.  Returning None caused wrongful retries (each retry = new Claude
+        agentic call costing ~20 min).
+        """
+        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+
+        with patch(_SUBPROCESS_PATH, side_effect=_make_no_edit_side_effect()):
+            result = self._call(analyzer, tmp_path)
+        assert result is _DELTA_NOOP, (
+            f"Expected _DELTA_NOOP for mtime-unchanged (no-op), got {result!r}. "
+            "This would trigger wrongful Claude retries (bug #1069)."
+        )
+
+    def test_identical_content_returns_delta_noop(self, analyzer, tmp_path):
+        """
+        Bug #1069 case 3: when the dispatcher writes back byte-identical content
+        (mtime changes but content == existing), invoke_delta_merge_file must
+        return _DELTA_NOOP, not None.
+        """
+        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_delta_merge_*.md", _EXISTING_DELTA, tmp_path
+            ),
+        ):
+            result = self._call(analyzer, tmp_path, existing=_EXISTING_DELTA)
+        assert result is _DELTA_NOOP, (
+            f"Expected _DELTA_NOOP for byte-identical content (no-op), got {result!r}. "
+            "This would trigger wrongful Claude retries (bug #1069)."
+        )
+
+    def test_dispatch_exception_returns_none(self, analyzer, tmp_path):
+        """
+        Bug #1069 case 1: when the dispatcher raises an exception, return None
+        so the retry loop treats it as a retryable failure.  Must NOT be
+        changed to _DELTA_NOOP.
+        """
+        with patch(_SUBPROCESS_PATH, side_effect=RuntimeError("dispatcher blew up")):
+            result = self._call(analyzer, tmp_path)
+        assert result is None, (
+            f"Expected None for dispatch exception (retryable failure), got {result!r}."
+        )
+
+    def test_file_unchanged_sentinel_still_returns_delta_noop(self, analyzer, tmp_path):
+        """
+        Existing behaviour preserved: when Claude prints FILE_UNCHANGED in stdout
+        and does not edit the file, invoke_delta_merge_file must still return
+        _DELTA_NOOP.
+        """
+        from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+
+        def _file_unchanged_stdout(*args, **kwargs):
+            import subprocess as _sp
+
+            return _sp.CompletedProcess(
+                args=[], returncode=0, stdout="FILE_UNCHANGED", stderr=""
+            )
+
+        with patch(_SUBPROCESS_PATH, side_effect=_file_unchanged_stdout):
+            result = self._call(analyzer, tmp_path)
+        assert result is _DELTA_NOOP, (
+            f"Expected _DELTA_NOOP when FILE_UNCHANGED sentinel in stdout, got {result!r}."
+        )
 
 
 class TestCleanupTempFile:
