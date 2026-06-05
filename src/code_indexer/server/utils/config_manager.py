@@ -1741,11 +1741,15 @@ class ServerConfigManager:
             config_dict["background_jobs_config"].pop("cleanup_max_age_hours", None)
 
         # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
+        # Unknown keys are filtered for rolling-upgrade safety — same fields() pattern
+        # used for ClaudeIntegrationConfig, MemoryRetrievalConfig, CodexIntegrationConfig.
         if "background_jobs_config" in config_dict and isinstance(
             config_dict["background_jobs_config"], dict
         ):
+            _bg = config_dict["background_jobs_config"]
+            _bg_allowed = {f.name for f in fields(BackgroundJobsConfig)}
             config_dict["background_jobs_config"] = BackgroundJobsConfig(
-                **config_dict["background_jobs_config"]
+                **{k: v for k, v in _bg.items() if k in _bg_allowed}
             )
 
         # Story #32: Convert content_limits_config dict to ContentLimitsConfig
