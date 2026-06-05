@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.93.1] - 2026-06-05
+
+### Added
+- Story #1067: `frontmatter_verifier` module in `global_repos/` — non-raising single-file
+  and batch verification of cidx-meta lifecycle frontmatter. Reuses `UnifiedResponseParser._validate`
+  and `_validate_optional_sections` as the single source of truth for enum tables and required-key
+  lists (zero enum duplication). No description-length floor (bug #1064 established the [500,2000]
+  floor was fictional — any non-empty string passes). Structured `VerificationResult` (passed bool +
+  violations list) and `BatchReport` (valid/invalid counts + per-file detail). Batch never aborts on
+  a bad file. 95% test coverage across 6 Gherkin scenarios plus integration no-drift tests against
+  `UnifiedResponseParser`.
+
 ## [10.93.0] - 2026-06-05
 
 ### Added
