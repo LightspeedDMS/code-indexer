@@ -2819,6 +2819,67 @@ class BackgroundJobsSqliteBackend:
         cursor = conn.execute(query, params)
         return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    @staticmethod
+    def _build_jobs_filter_where(
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        exclude_ids: Optional[set] = None,
+    ) -> tuple:
+        """Build the WHERE clause and params list for background_jobs queries.
+
+        Returns (where_clause: str, params: List[Any]).  The where_clause is
+        either empty or starts with ' WHERE '.  Both list_jobs_filtered and
+        list_job_ids_filtered call this helper so the filter logic cannot drift
+        between the two methods.
+
+        Args:
+            status: Filter by exact status value (e.g. 'completed', 'failed')
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match against repo_alias, username,
+                         operation_type, and error columns
+            username: When set, scope results to this owner's jobs (H2 non-admin)
+            exclude_ids: Set of job_ids to exclude
+        """
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        # H2: Non-admin username scoping for DB-stored completed jobs
+        if username is not None:
+            conditions.append("username = ?")
+            params.append(username)
+
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        if operation_type:
+            conditions.append("operation_type = ?")
+            params.append(operation_type)
+
+        if search_text:
+            # Case-insensitive LIKE across key text columns
+            like_pattern = f"%{search_text}%"
+            conditions.append(
+                "(LOWER(repo_alias) LIKE LOWER(?)"
+                " OR LOWER(username) LIKE LOWER(?)"
+                " OR LOWER(operation_type) LIKE LOWER(?)"
+                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?))"
+            )
+            params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
+
+        if exclude_ids:
+            placeholders = ",".join("?" * len(exclude_ids))
+            conditions.append(f"job_id NOT IN ({placeholders})")
+            params.extend(list(exclude_ids))
+
+        where_clause = ""
+        if conditions:
+            where_clause = " WHERE " + " AND ".join(conditions)
+
+        return where_clause, params
+
     def list_jobs_filtered(
         self,
         status: Optional[str] = None,
@@ -2857,41 +2918,13 @@ class BackgroundJobsSqliteBackend:
                                 executing_node, claimed_at, actor_username
                          FROM background_jobs"""
 
-        conditions: List[str] = []
-        params: List[Any] = []
-
-        # H2: Non-admin username scoping for DB-stored completed jobs
-        if username is not None:
-            conditions.append("username = ?")
-            params.append(username)
-
-        if status:
-            conditions.append("status = ?")
-            params.append(status)
-
-        if operation_type:
-            conditions.append("operation_type = ?")
-            params.append(operation_type)
-
-        if search_text:
-            # Case-insensitive LIKE across key text columns
-            like_pattern = f"%{search_text}%"
-            conditions.append(
-                "(LOWER(repo_alias) LIKE LOWER(?)"
-                " OR LOWER(username) LIKE LOWER(?)"
-                " OR LOWER(operation_type) LIKE LOWER(?)"
-                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?))"
-            )
-            params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
-
-        if exclude_ids:
-            placeholders = ",".join("?" * len(exclude_ids))
-            conditions.append(f"job_id NOT IN ({placeholders})")
-            params.extend(list(exclude_ids))
-
-        where_clause = ""
-        if conditions:
-            where_clause = " WHERE " + " AND ".join(conditions)
+        where_clause, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+            exclude_ids=exclude_ids,
+        )
 
         # Count query (no LIMIT/OFFSET) for accurate total
         count_query = f"SELECT COUNT(*) FROM background_jobs{where_clause}"
@@ -2910,6 +2943,52 @@ class BackgroundJobsSqliteBackend:
         jobs = [self._row_to_dict(row) for row in cursor.fetchall()]
 
         return jobs, total_count
+
+    # Safety cap for list_job_ids_filtered: worst-case upper bound.
+    # At 14k jobs/day with 30-day retention the table holds ~420k rows; a cap
+    # of 50,000 is an order-of-magnitude ceiling that keeps the query bounded.
+    _JOB_IDS_CAP = 50_000
+
+    def list_job_ids_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        cap: Optional[int] = None,
+    ) -> set:
+        """Return the set of job_ids matching the given filters.
+
+        Uses the same WHERE clause as list_jobs_filtered (via
+        _build_jobs_filter_where) so the two methods cannot drift.
+
+        A safety cap (default _JOB_IDS_CAP = 50,000) is applied as LIMIT so
+        this query is always bounded regardless of table size.
+
+        Args:
+            status: Filter by exact status value
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match (same columns as list_jobs_filtered)
+            username: When set, scope results to this owner's jobs
+            cap: Override the default safety cap (for testing)
+
+        Returns:
+            set[str] of matching job_ids.
+        """
+        conn = self._conn_manager.get_connection()
+        effective_cap = cap if cap is not None else self._JOB_IDS_CAP
+
+        where_clause, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+        )
+
+        query = f"SELECT job_id FROM background_jobs{where_clause} ORDER BY created_at DESC LIMIT ?"
+        params_with_cap = list(params) + [effective_cap]
+        cursor = conn.execute(query, params_with_cap)
+        return {row[0] for row in cursor.fetchall()}
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID."""

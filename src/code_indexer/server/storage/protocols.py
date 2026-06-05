@@ -253,7 +253,17 @@ class BackgroundJobsBackend(Protocol):
         exclude_ids: Optional[Any] = None,
         limit: Optional[int] = None,
         offset: int = 0,
+        username: Optional[str] = None,
     ) -> tuple: ...
+
+    def list_job_ids_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        cap: Optional[int] = None,
+    ) -> set: ...
 
     def delete_job(self, job_id: str) -> bool: ...
 

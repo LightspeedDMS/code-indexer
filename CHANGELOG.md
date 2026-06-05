@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.7] - 2026-06-05
+
+### Fixed
+- Bug #1063 follow-up: `_get_all_jobs` (jobs dashboard) tracker/BG merge dedup was
+  regressed — tracker-only dep-map jobs vanished (Bug #736 regression), and the first
+  fix attempt would have either re-dropped jobs or done O(history) per-page DB fetches.
+  Final fix: dedup tracker jobs against a single bounded id-only query
+  (`list_job_ids_filtered`, shared WHERE-builder with `list_jobs_filtered`,
+  `ORDER BY created_at DESC LIMIT 50000`) so tracker-only jobs appear, jobs in both
+  appear exactly once, total_count is page-consistent, and only ONE id query runs per
+  view regardless of jobs-table size. Also fixed missing `username` scoping in the
+  Postgres `list_jobs_filtered` (parity with SQLite). ORDER BY hardening added to both
+  SQLite and Postgres `list_job_ids_filtered` so the capped 50,000 ids are always the
+  newest rows, guaranteeing any tracker-visible (<=24h-recent) job is inside the id-set
+  regardless of daily volume or physical row order.
+- Bug #1065 follow-up: three test fixtures (`dep_map_tracking/conftest.py`,
+  `test_golden_repo_manager_lifecycle_hook.py`,
+  `test_add_golden_repo_unified_lifecycle.py`) hand-rolled a `background_jobs` table
+  missing the `actor_username` column that #1065's atomic INSERT writes (production has
+  it via the `_migrate_background_jobs_actor_username` migration); added the column to
+  the fixtures so they no longer fail when the INSERT runs.
+
 ## [10.92.6] - 2026-06-04
 
 ### Fixed

@@ -4306,7 +4306,7 @@ def _get_all_jobs(
 
     # Step 1: fetch the BG page window for the requested page.
     # get_jobs_for_display() uses COUNT(*) for bg_total — exact, no side-effects.
-    bg_page_jobs, bg_total, _bg_pages = job_manager.get_jobs_for_display(
+    bg_page_jobs, bg_total, bg_total_pages = job_manager.get_jobs_for_display(
         status_filter=status_filter,
         type_filter=type_filter,
         search_text=search,
@@ -4323,15 +4323,36 @@ def _get_all_jobs(
         search,
     )
 
-    # Step 3: deduplicate — check each tracker job against the BG manager via a
-    # targeted per-ID existence check.  This is O(tracker_size) × O(1) per lookup
-    # (in-memory dict check + optional indexed DB query), NOT an unbounded table
-    # scan.  Tracker-only extras are those the BG manager does NOT know about.
-    extra_jobs = [
-        j
-        for j in tracker_jobs
-        if job_manager.get_job_status(j["job_id"], username="", is_admin=True) is None
-    ]
+    # Step 3: deduplicate — exclude tracker jobs whose job_id appears in ANY BG
+    # row, not just the current page.  Building only the current page's id set
+    # causes cross-page duplicates: a tracker job whose id is a BG job on page 1
+    # would appear again as an "extra" on page 2.
+    #
+    # Fix: one bounded id-only query via list_display_job_ids() returns the full
+    # set of matching job_ids in a SINGLE DB round-trip, regardless of how many
+    # pages the result set spans.  At 14k jobs/day × 30-day retention the table
+    # holds ~420k rows; list_display_job_ids applies a 50,000-row safety cap.
+    # This is O(1) queries — never O(bg_total_pages).
+    #
+    # username=None here because _get_all_jobs is called from the admin /jobs
+    # route with is_admin=True, so the dedup id set must span all users.  The
+    # username passed to get_jobs_for_display above is already scoped via
+    # is_admin, ensuring the page window and id set use the same effective scope.
+    #
+    # We do NOT use job_manager.get_job_status() per tracker job because that
+    # method also finds tracker-only rows stored in background_jobs and would
+    # wrongly exclude them (Bug #736 / Bug #1063 context).
+    bg_id_set = job_manager.list_display_job_ids(
+        status_filter=status_filter,
+        type_filter=type_filter,
+        search_text=search,
+        username=None,
+    )
+    # Union with active/in-memory ids from the current page (bg_page_jobs may
+    # include jobs that are still in memory and not yet in the DB id set).
+    all_bg_display_ids: set = bg_id_set | {j["job_id"] for j in bg_page_jobs}
+
+    extra_jobs = [j for j in tracker_jobs if j["job_id"] not in all_bg_display_ids]
 
     # Step 4: compute total and total_pages using the unified global ordering.
     total_count = bg_total + len(extra_jobs)

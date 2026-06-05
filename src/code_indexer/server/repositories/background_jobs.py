@@ -2387,6 +2387,49 @@ class BackgroundJobManager:
         total_pages = max(1, (total_count + capped_page_size - 1) // capped_page_size)
         return paginated, total_count, total_pages
 
+    def list_display_job_ids(
+        self,
+        status_filter: Optional[str] = None,
+        type_filter: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+    ) -> set:
+        """Return the set of all job_ids visible to the display layer for the given filters.
+
+        Uses list_job_ids_filtered on the storage backend so only ONE DB round-trip
+        is needed regardless of how many pages the result set spans.  This replaces
+        the old all-pages loop in routes._get_all_jobs() which issued ~bg_total_pages
+        DB round-trips per render (O(bg_total / page_size) = ~8,400 at 30-day retention).
+
+        A safety cap of 50,000 is applied inside list_job_ids_filtered so the query
+        is always bounded.
+
+        Returns empty set (not raises) when no backend is available or on backend error,
+        so callers always get a usable result for the dedup logic.
+
+        Args:
+            status_filter: Filter by exact status value
+            type_filter: Filter by exact operation_type value
+            search_text: Case-insensitive substring filter (same columns as display)
+            username: When provided, scope to this user's jobs (non-admin path)
+
+        Returns:
+            set of matching job_ids (str), or empty set when no backend is available.
+        """
+        if not self._sqlite_backend:
+            return set()
+        try:
+            result: set = self._sqlite_backend.list_job_ids_filtered(
+                status=status_filter,
+                operation_type=type_filter,
+                search_text=search_text,
+                username=username,
+            )
+            return result
+        except Exception as e:
+            logging.error(f"Failed to get display job ids from backend: {e}")
+            return set()
+
     def count_active_deactivations(self) -> int:
         """Count PENDING+RUNNING deactivate_repository jobs across all users.
 
