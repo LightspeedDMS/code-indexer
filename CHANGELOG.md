@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.93.3] - 2026-06-05
+
+### Fixed
+- Bug #1062: dependency-map admin page returned HTTP 500 due to an unclosed Jinja `{% if %}` block
+  in the backfill-cards partial template. The nested conditional was redundant — the outer block
+  already gates the cards to admin users — so it was removed entirely.
+
+### Removed
+- 5 stale MCPB removal-verification tests that referenced `src/code_indexer/mcpb`, a module
+  that no longer exists. The tests were validating the absence of a module that had already been
+  fully removed in a prior release; keeping them caused spurious failures on clean checkouts.
+
 ## [10.93.2] - 2026-06-05
 
 ### Added
