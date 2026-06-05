@@ -458,3 +458,388 @@ class TestMalformedBody:
             app.dependency_overrides.clear()
 
         assert resp.status_code in (400, 422)
+
+
+# ---------------------------------------------------------------------------
+# REST tests: POST /api/xray/search/batch (Story #1055)
+# ---------------------------------------------------------------------------
+
+VALID_EVAL = "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { vec![] }"
+
+VALID_BATCH_BODY: dict[str, Any] = {
+    "repository_alias": "myrepo-global",
+    "scans": [
+        {
+            "driver_regex": r"def ",
+            "evaluator_code": VALID_EVAL,
+            "search_target": "content",
+        }
+    ],
+}
+
+
+def _batch_err_code(response_body: dict) -> Optional[str]:
+    """Extract error from batch HTTPException detail envelope."""
+    detail = response_body.get("detail", {})
+    if isinstance(detail, dict):
+        return detail.get("error") or detail.get("error_code")
+    return None
+
+
+def _patch_batch_bjm(job_id: str = "batch-job-id"):
+    """Mock BackgroundJobManager in xray_batch module."""
+    mock_bjm = MagicMock()
+    mock_bjm.submit_job.return_value = job_id
+    return patch(
+        "code_indexer.server.mcp.handlers.xray_batch._get_background_job_manager",
+        return_value=mock_bjm,
+    ), mock_bjm
+
+
+def _patch_batch_repo_found(path: str = "/some/repo/path"):
+    return patch(
+        "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+        return_value=path,
+    )
+
+
+def _patch_batch_repo_not_found():
+    return patch(
+        "code_indexer.server.mcp.handlers.xray_batch._resolve_repo_path",
+        return_value=None,
+    )
+
+
+def _patch_batch_arm_grm():
+    return patch(
+        "code_indexer.server.mcp.handlers.xray_batch._get_arm_and_grm",
+        return_value=(None, None),
+    )
+
+
+def _patch_batch_cidx_meta():
+    from pathlib import Path
+
+    return patch(
+        "code_indexer.server.mcp.handlers.xray_batch._get_cidx_meta_path",
+        return_value=Path("/cidx-meta"),
+    )
+
+
+class TestXrayBatchRestEndpoint:
+    """REST tests for POST /api/xray/search/batch (Story #1055)."""
+
+    # ------------------------------------------------------------------
+    # Happy path: 202 with job_id
+    # ------------------------------------------------------------------
+
+    def test_batch_post_returns_202_with_job_id(self, app, client):
+        """Valid request returns HTTP 202 with {'job_id': '<id>'}."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        bjm_patch, mock_bjm = _patch_batch_bjm("batch-1")
+
+        try:
+            with (
+                _patch_batch_repo_found(),
+                _patch_batch_arm_grm(),
+                _patch_batch_bjm("batch-1")[0],
+                _patch_batch_cidx_meta(),
+            ):
+                resp = client.post("/api/xray/search/batch", json=VALID_BATCH_BODY)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 202
+        assert resp.json()["job_id"] == "batch-1"
+
+    def test_batch_operation_type_is_xray_search_batch(self, app, client):
+        """submit_job is called with operation_type='xray_search_batch'."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        bjm_patch, mock_bjm = _patch_batch_bjm("batch-op")
+
+        try:
+            with (
+                _patch_batch_repo_found(),
+                _patch_batch_arm_grm(),
+                bjm_patch,
+                _patch_batch_cidx_meta(),
+            ):
+                client.post("/api/xray/search/batch", json=VALID_BATCH_BODY)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert mock_bjm.submit_job.called
+        kwargs = mock_bjm.submit_job.call_args.kwargs
+        assert kwargs.get("operation_type") == "xray_search_batch"
+
+    def test_batch_repo_alias_none_in_submit_job(self, app, client):
+        """submit_job is called with repo_alias=None (no per-repo dedup)."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        bjm_patch, mock_bjm = _patch_batch_bjm("batch-alias-none")
+
+        try:
+            with (
+                _patch_batch_repo_found(),
+                _patch_batch_arm_grm(),
+                bjm_patch,
+                _patch_batch_cidx_meta(),
+            ):
+                client.post("/api/xray/search/batch", json=VALID_BATCH_BODY)
+        finally:
+            app.dependency_overrides.clear()
+
+        kwargs = mock_bjm.submit_job.call_args.kwargs
+        assert kwargs.get("repo_alias") is None
+
+    # ------------------------------------------------------------------
+    # Auth: 401 (no auth header) — FastAPI dependency raises 401
+    # ------------------------------------------------------------------
+
+    def test_batch_no_auth_returns_401(self, client):
+        """Request without Authorization returns 401."""
+        resp = client.post("/api/xray/search/batch", json=VALID_BATCH_BODY)
+        assert resp.status_code == 401
+
+    # ------------------------------------------------------------------
+    # Auth: 403 (missing permission)
+    # ------------------------------------------------------------------
+
+    def test_batch_no_permission_returns_403(self, app, client):
+        """User without query_repos returns 403."""
+        user_no_perm = MagicMock(spec=User)
+        user_no_perm.has_permission.return_value = False
+        user_no_perm.username = "limited"
+        app.dependency_overrides[get_current_user] = lambda: user_no_perm
+
+        try:
+            resp = client.post("/api/xray/search/batch", json=VALID_BATCH_BODY)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 403
+        assert _batch_err_code(resp.json()) == "auth_required"
+
+    # ------------------------------------------------------------------
+    # Validation: 422 for structural errors
+    # ------------------------------------------------------------------
+
+    def test_batch_missing_alias_returns_422(self, app, client):
+        """Missing repository_alias returns 422 alias_required."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {**VALID_BATCH_BODY}
+        del body["repository_alias"]
+
+        try:
+            # Pydantic will reject the body itself (missing required field)
+            resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        # Pydantic validates repository_alias as required; 422 from FastAPI
+        assert resp.status_code == 422
+
+    def test_batch_empty_alias_string_returns_422(self, app, client):
+        """Empty repository_alias string returns 422 alias_required."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {**VALID_BATCH_BODY, "repository_alias": ""}
+
+        try:
+            with _patch_batch_arm_grm():
+                resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _batch_err_code(resp.json()) == "alias_required"
+
+    def test_batch_missing_scans_returns_422(self, app, client):
+        """Missing scans field returns 422 (Pydantic required field)."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {"repository_alias": "myrepo-global"}
+
+        try:
+            resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        # Pydantic validates scans as required; 422 from FastAPI
+        assert resp.status_code == 422
+
+    def test_batch_empty_scans_returns_422(self, app, client):
+        """Empty scans list returns 422 scans_required."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {**VALID_BATCH_BODY, "scans": []}
+
+        try:
+            with _patch_batch_arm_grm():
+                resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _batch_err_code(resp.json()) == "scans_required"
+
+    def test_batch_too_many_repositories_returns_422(self, app, client):
+        """51 aliases returns 422 too_many_repositories."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {
+            **VALID_BATCH_BODY,
+            "repository_alias": [f"repo-{i}" for i in range(51)],
+        }
+
+        try:
+            with _patch_batch_arm_grm():
+                resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _batch_err_code(resp.json()) == "too_many_repositories"
+
+    def test_batch_too_many_scans_returns_422(self, app, client):
+        """51 scans returns 422 too_many_scans."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        scans = [{"driver_regex": "x", "search_target": "content"} for _ in range(51)]
+        body = {**VALID_BATCH_BODY, "scans": scans}
+
+        try:
+            with _patch_batch_arm_grm():
+                resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _batch_err_code(resp.json()) == "too_many_scans"
+
+    def test_batch_bad_evaluator_returns_422(self, app, client):
+        """Invalid evaluator code returns 422 xray_evaluator_validation_failed."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {
+            **VALID_BATCH_BODY,
+            "scans": [
+                {
+                    "driver_regex": "x",
+                    "evaluator_code": "fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> { unsafe { vec![] } }",
+                    "search_target": "content",
+                }
+            ],
+        }
+
+        try:
+            with _patch_batch_arm_grm():
+                resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _batch_err_code(resp.json()) == "xray_evaluator_validation_failed"
+
+    def test_batch_mutually_exclusive_params_returns_422(self, app, client):
+        """Both evaluator_code and pattern_name returns 422 mutually_exclusive_params."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {
+            **VALID_BATCH_BODY,
+            "scans": [
+                {
+                    "driver_regex": "x",
+                    "evaluator_code": VALID_EVAL,
+                    "pattern_name": "catch-rethrow",
+                }
+            ],
+        }
+
+        try:
+            with _patch_batch_arm_grm():
+                resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _batch_err_code(resp.json()) == "mutually_exclusive_params"
+
+    def test_batch_timeout_out_of_range_returns_422(self, app, client):
+        """timeout_seconds=5 returns 422 timeout_out_of_range."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+        body = {**VALID_BATCH_BODY, "timeout_seconds": 5}
+
+        try:
+            with _patch_batch_arm_grm():
+                resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        assert _batch_err_code(resp.json()) == "timeout_out_of_range"
+
+    # ------------------------------------------------------------------
+    # Repo not found: 404
+    # ------------------------------------------------------------------
+
+    def test_batch_unknown_repo_returns_404(self, app, client):
+        """Unknown alias returns 404 no_repositories_resolved."""
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+
+        try:
+            with _patch_batch_repo_not_found(), _patch_batch_arm_grm():
+                resp = client.post("/api/xray/search/batch", json=VALID_BATCH_BODY)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 404
+        assert _batch_err_code(resp.json()) == "no_repositories_resolved"
+
+    # ------------------------------------------------------------------
+    # Inline-result parity: 200 with full result when job completes inline
+    # ------------------------------------------------------------------
+
+    def test_batch_inline_result_returns_200_with_full_result(self, app, client):
+        """When await_seconds > 0 and job completes inline, returns HTTP 200
+        with the full batch result dict (not job_id).  This is the REST parity
+        fix for Story #1055: the REST route must not KeyError on resp_data['job_id']
+        when the MCP handler returns an inline result.
+        """
+        import json
+
+        app.dependency_overrides[get_current_user] = lambda: NORMAL_USER
+
+        inline_result = {
+            "matches": [{"file_path": "a.py", "line_number": 1}],
+            "errors": [],
+            "evaluation_errors": [],
+            "total_repos": 1,
+            "total_scans": 1,
+            "total_cells": 1,
+            "repos_completed": 1,
+            "partial": False,
+            "timeout": False,
+            "cancelled": False,
+            "truncated": False,
+            "has_more": False,
+            "cache_handle": None,
+        }
+
+        # Patch handle_xray_search_batch to return the MCP envelope wrapping
+        # the inline result directly (simulates await_seconds completing).
+        mcp_envelope = {
+            "content": [{"type": "text", "text": json.dumps(inline_result)}]
+        }
+
+        body = {**VALID_BATCH_BODY, "await_seconds": 5.0}
+
+        try:
+            # The route imports handle_xray_search_batch locally at call time,
+            # so patch it in the xray_batch module namespace.
+            with patch(
+                "code_indexer.server.mcp.handlers.xray_batch.handle_xray_search_batch",
+                return_value=mcp_envelope,
+            ):
+                resp = client.post("/api/xray/search/batch", json=body)
+        finally:
+            app.dependency_overrides.clear()
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "matches" in data
+        assert "errors" in data
+        assert data["total_repos"] == 1
+        assert "job_id" not in data

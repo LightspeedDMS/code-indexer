@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.93.2] - 2026-06-05
+
+### Added
+- Story #1055: `xray_search_batch` MCP tool — cross-repo multi-expression X-Ray sweep in ONE
+  background job. Runs a repos x scans matrix: every scan bundle (`driver_regex` + optional
+  `evaluator_code` or `pattern_name`) is applied to every resolved repository. Each match is tagged
+  with `repository_alias`, `scan_index`, and `pattern_name`. Returns exactly one `job_id` (not
+  `job_ids`). Limits: 50 aliases, 50 scan bundles, timeout [10, 7200]s, await_seconds [0, 30].
+  Global-alias fallback applied per alias. Unresolvable aliases become `error_level="repo"` errors;
+  partial jobs proceed over the resolved subset. Per-cell `pattern_name` resolution uses
+  `XrayPatternService` (repo-specific scope first, then `__any__/` fallback). Cancellation checked
+  between cells. Large results spill to PayloadCache. REST shim at `POST /api/xray/search/batch`.
+  45 new unit tests in `tests/unit/server/mcp/test_xray_search_batch_handler.py`.
+
 ## [10.93.1] - 2026-06-05
 
 ### Added
