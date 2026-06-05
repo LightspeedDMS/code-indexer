@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.92.8] - 2026-06-05
+
+### Fixed
+- Config-loader hardening: `_dict_to_server_config` now filters unknown keys before
+  constructing `BackgroundJobsConfig` (matching the existing pattern for other sub-configs),
+  so config drift or version downgrade no longer crashes the description-refresh scheduler
+  loop with `unexpected keyword argument 'max_concurrent_refresh_jobs'`.
+- Jobs-dashboard tracker/BG merge: replaced the per-page dedup (which dropped tracker-only
+  dep-map jobs — Bug #736 regression — and could O(history)-fetch) with a single bounded
+  id-only query (`list_job_ids_filtered`, shared WHERE-builder, ORDER BY created_at DESC
+  LIMIT 50000); Postgres `list_jobs_filtered` gained username scoping for parity.
+- Test-suite robustness: added `actor_username` to hand-rolled `background_jobs` fixtures
+  (8 files) so Bug #1065's atomic INSERT works; deterministic in-memory backend for
+  description-scheduler first-enable tests (were breaching the 15s server-fast timeout);
+  adapted refresh_scheduler collision_log tests to the `list_due_repos` API.
+
 ## [10.92.7] - 2026-06-05
 
 ### Fixed
