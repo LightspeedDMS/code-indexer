@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.94.0] - 2026-06-05
+
+### Fixed
+- Bug #1069: dep-map delta retry money-pit. `invoke_delta_merge_file` returned `None` for three distinct situations — genuine dispatch failure, mtime-unchanged (Claude ran but made no edit), and byte-identical content — and `DependencyMapService._update_domain_file` mapped every `None` to `FAILED`, retrying up to `MAX_DOMAIN_RETRIES` (3) times. Each retry is a fresh ~20-minute Opus call, so a domain that legitimately needs no change burned 3x the cost (observed live on staging: `llm-observability-trace-archives` re-explored from scratch three times, producing zero change). The two no-op cases now return `_DELTA_NOOP` (-> `NOOP` -> loop breaks, no retry); only genuine dispatch failures return `None` and retry. A regression test asserts a no-op domain dispatches the subprocess exactly once (not three times), and a genuine failure still retries `MAX_DOMAIN_RETRIES` times.
+- Bug #1069: `_dispatch_via_flow` now raises on `result.success is False` so genuine dispatch failures propagate to each caller's `except` block instead of falling through and being misclassified as a no-op. This also closes a latent silent-failure in the new-domain path, where a failed dispatch previously wrote an empty/garbage domain file and reported success.
+
 ## [10.93.4] - 2026-06-05
 
 ### Fixed

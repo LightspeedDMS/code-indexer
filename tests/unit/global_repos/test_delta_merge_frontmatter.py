@@ -215,15 +215,20 @@ def test_invoke_delta_merge_file_temp_file_body_only(
 # ---------------------------------------------------------------------------
 
 
-def test_no_op_edit_with_frontmatter_existing_returns_none(analyzer, tmp_path):
+def test_no_op_edit_with_frontmatter_existing_returns_delta_noop(analyzer, tmp_path):
     """When the caller passes body-only existing_content and Claude returns the same
-    body (no changes), invoke_delta_merge_file must return None (no-op short-circuit).
+    body (no changes), invoke_delta_merge_file must return _DELTA_NOOP (bug #1069).
 
     Bug #834 regression: the comparison baseline in _read_file_if_changed must be
     body-only (not body-with-frontmatter).  If the comparison used full content
     (frontmatter + body), `updated.strip() == existing.strip()` would evaluate False
     even when nothing changed, causing spurious rewrites.
+
+    Bug #1069 update: identical content is a legitimate no-op, so _DELTA_NOOP is
+    returned instead of None to prevent the service retry loop from re-invoking Claude.
     """
+    from code_indexer.global_repos.dependency_map_analyzer import _DELTA_NOOP
+
     body_only = "# Cloud Infrastructure\n\nExisting analysis without frontmatter."
 
     def _noop_side_effect(*args, **kwargs):
@@ -247,7 +252,9 @@ def test_no_op_edit_with_frontmatter_existing_returns_none(analyzer, tmp_path):
             temp_dir=tmp_path,
         )
 
-    assert result is None, f"Expected None for no-op edit, got: {result!r}"
+    assert result is _DELTA_NOOP, (
+        f"Expected _DELTA_NOOP for no-op edit (bug #1069), got: {result!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
