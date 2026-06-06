@@ -15,7 +15,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from unittest.mock import patch
 
 import pytest
@@ -119,7 +119,7 @@ def _register_xray_job_with_child(
     job_id: str,
     username: str = _OWNER_USERNAME,
     operation_type: str = _OPERATION_TYPE,
-    repo_alias: str = _REPO_ALIAS,
+    repo_alias: Optional[str] = None,
 ) -> _FakeProcess:
     """Register an xray job in JobTracker only (bypassing bjm.submit_job) and
     attach a fake child process to bjm._child_processes.

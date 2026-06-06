@@ -631,7 +631,8 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
         job_id=job_id,
         operation_type="xray_search",
         username=user.username,
-        repo_alias=repo_alias_parsed,
+        repo_alias=None,  # NULL bypasses idx_active_job_per_repo; xray is read-only
+        metadata={"repo_alias": repo_alias_parsed},
     )
 
     def job_fn() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
@@ -1082,7 +1083,8 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
         job_id=job_id,
         operation_type="xray_explore",
         username=user.username,
-        repo_alias=repo_alias_parsed,
+        repo_alias=None,  # NULL bypasses idx_active_job_per_repo; xray is read-only
+        metadata={"repo_alias": repo_alias_parsed},
     )
 
     _explore_fn = _make_xray_explore_job_fn(
