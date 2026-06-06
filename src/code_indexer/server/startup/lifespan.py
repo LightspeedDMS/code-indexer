@@ -956,6 +956,11 @@ def make_lifespan(
                 ),
                 job_tracker=job_tracker,
                 mcp_registration_service=mcp_registration_service,
+                golden_backend=(
+                    backend_registry.golden_repo_metadata
+                    if backend_registry is not None
+                    else None
+                ),
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove
