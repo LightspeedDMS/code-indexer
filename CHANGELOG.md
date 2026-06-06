@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.99.0] - 2026-06-06
+
+### Fixed
+- Bug #1073: `xray_search` and `xray_explore` handlers called `register_job()` with `repo_alias=repo_alias_parsed` (non-NULL), which triggered the `idx_active_job_per_repo` partial unique index (`WHERE status IN ('pending','running') AND repo_alias IS NOT NULL`) at INSERT level on both SQLite and PostgreSQL. On PostgreSQL cluster (staging, NFS-backed repos) where xray ops take seconds, every concurrent call beyond the first raised `UniqueViolation` — a 100% failure rate for parallel xray stress tests on the same repo. Fix: both call sites now pass `repo_alias=None` (the designed escape hatch — NULL values are excluded by the index predicate) with `metadata={"repo_alias": repo_alias_parsed}` preserving the alias for observability. Incomplete follow-up to Bug #1070.
+
 ## [10.98.0] - 2026-06-06
 
 ### Fixed

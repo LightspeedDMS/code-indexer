@@ -382,3 +382,63 @@ class TestBackgroundJobsConfigXraySlot:
         assert config.xray_max_concurrent_jobs == 20, (
             f"xray_max_concurrent_jobs default must be 20, got {config.xray_max_concurrent_jobs}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: register_job must pass repo_alias=None (Bug #1073)
+# ---------------------------------------------------------------------------
+
+
+class TestXrayRegisterJobNullRepoAlias:
+    """xray register_job must pass repo_alias=None to bypass idx_active_job_per_repo.
+
+    Bug #1073: passing repo_alias=repo_alias_parsed caused UniqueViolation on
+    PostgreSQL when concurrent xray calls were made on the same repo, because
+    idx_active_job_per_repo serializes rows where repo_alias IS NOT NULL.
+    xray is read-only — the escape hatch (repo_alias=None) must always be used.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "handler_name, params",
+        [
+            ("handle_xray_search", VALID_SEARCH_PARAMS),
+            ("handle_xray_explore", VALID_EXPLORE_PARAMS),
+        ],
+    )
+    async def test_handler_registers_with_null_repo_alias(
+        self, handler_name: str, params: Dict[str, Any]
+    ) -> None:
+        """Both xray handlers must call register_job with repo_alias explicitly None."""
+        import code_indexer.server.mcp.handlers.xray as xray_mod
+
+        user = _make_user(UserRole.NORMAL_USER)
+        mock_jt = MagicMock()
+        mock_jt.register_job.return_value = MagicMock()
+
+        with _patched_xray_env(mock_job_tracker=mock_jt, success_future_count=1) as (
+            _bjm,
+            _jt,
+            _xe,
+            _loop,
+        ):
+            handler = getattr(xray_mod, handler_name)
+            await handler(params.copy(), user)
+
+        assert mock_jt.register_job.called, "register_job must be called"
+        call_kwargs = mock_jt.register_job.call_args.kwargs
+        assert "repo_alias" in call_kwargs, (
+            f"Bug #1073: {handler_name} must pass repo_alias as an explicit keyword "
+            f"argument to register_job; kwargs were: {call_kwargs}"
+        )
+        assert call_kwargs["repo_alias"] is None, (
+            f"Bug #1073: {handler_name} must pass repo_alias=None to register_job "
+            f"to bypass idx_active_job_per_repo; "
+            f"got repo_alias={call_kwargs['repo_alias']!r}"
+        )
+        metadata = call_kwargs.get("metadata") or {}
+        assert metadata.get("repo_alias") == params["repository_alias"], (
+            f"Bug #1073: {handler_name} must preserve repo alias in metadata so it "
+            f"remains observable; expected metadata['repo_alias']={params['repository_alias']!r}, "
+            f"got metadata={metadata!r}"
+        )
