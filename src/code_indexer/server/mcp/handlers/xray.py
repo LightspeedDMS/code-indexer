@@ -174,15 +174,13 @@ def _get_xray_executor() -> ThreadPoolExecutor:
     """
     app = getattr(_utils.app_module, "app", None)
     if app is None:
-        raise RuntimeError(
-            "xray_executor not available: app is not configured"
-        )
+        raise RuntimeError("xray_executor not available: app is not configured")
     executor = getattr(app.state, "xray_executor", None)
     if executor is None:
         raise RuntimeError(
             "xray_executor not available: set_xray_executor() was not called during startup"
         )
-    return executor
+    return cast(ThreadPoolExecutor, executor)
 
 
 def _get_job_tracker() -> Any:
@@ -1095,7 +1093,9 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
     )
 
     def _explore_worker() -> Dict[str, Any]:
-        return _explore_fn(None)  # no progress_callback
+        # _make_xray_explore_job_fn is no-untyped-def so mypy infers Any;
+        # cast is safe — the function contract always returns Dict[str, Any].
+        return cast(Dict[str, Any], _explore_fn(None))
 
     future = loop.run_in_executor(xray_executor, _explore_worker)
 

@@ -240,10 +240,12 @@ def make_lifespan(
         from code_indexer.server.utils.config_manager import (
             BackgroundJobsConfig as _BackgroundJobsConfig,
         )
+
         _xray_pool_size = _BackgroundJobsConfig().xray_max_concurrent_jobs
         _xray_executor = ThreadPoolExecutor(max_workers=_xray_pool_size)
         app.state.xray_executor = _xray_executor
         from code_indexer.server.mcp.handlers.xray import set_xray_executor
+
         set_xray_executor(_xray_executor)
         logger.info(
             f"xray executor started (max_workers={_xray_pool_size}) (Bug #1070)",

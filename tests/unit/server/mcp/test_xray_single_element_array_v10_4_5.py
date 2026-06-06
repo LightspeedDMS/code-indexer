@@ -111,9 +111,7 @@ async def _invoke_handler(handler_name: str, repo_alias: Any) -> Dict[str, Any]:
         patch.object(
             _xray_module, "_get_background_job_manager", return_value=mock_bjm
         ),
-        patch.object(
-            _xray_module, "_get_job_tracker", return_value=mock_job_tracker
-        ),
+        patch.object(_xray_module, "_get_job_tracker", return_value=mock_job_tracker),
         patch.object(
             _xray_module, "_get_xray_executor", return_value=mock_xray_executor
         ),

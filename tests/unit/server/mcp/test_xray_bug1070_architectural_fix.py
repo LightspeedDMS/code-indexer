@@ -22,7 +22,7 @@ import json
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Generator
+from typing import Any, Dict, Generator, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -45,7 +45,8 @@ def _make_user(role: UserRole = UserRole.NORMAL_USER) -> User:
 
 
 def _parse_response(result: Dict[str, Any]) -> Dict[str, Any]:
-    return json.loads(result["content"][0]["text"])
+    # json.loads returns Any; cast is safe — MCP responses always produce a dict here.
+    return cast(Dict[str, Any], json.loads(result["content"][0]["text"]))
 
 
 VALID_SEARCH_PARAMS: Dict[str, Any] = {
@@ -128,8 +129,8 @@ def _patched_xray_env(
         patch("asyncio.get_running_loop") as mock_loop,
     ):
         mock_validate.return_value = MagicMock(ok=True)
-        mock_loop.return_value.run_in_executor.side_effect = (
-            lambda *a, **kw: next(future_iter)
+        mock_loop.return_value.run_in_executor.side_effect = lambda *a, **kw: next(
+            future_iter
         )
         yield mock_bjm, mock_job_tracker, mock_xray_executor, mock_loop
 
@@ -271,9 +272,11 @@ class TestXrayConcurrentSameRepoNoConflict:
         )
 
         error_responses = [
-            _parse_response(r)
+            # cast safe: isinstance guard above ensures r is not BaseException here
+            _parse_response(cast(Dict[str, Any], r))
             for r in results
-            if not isinstance(r, Exception) and "error" in _parse_response(r)
+            if not isinstance(r, Exception)
+            and "error" in _parse_response(cast(Dict[str, Any], r))
         ]
         assert len(error_responses) == 0, (
             f"Bug #1070: {len(error_responses)} concurrent xray_search calls returned errors:\n"
@@ -309,9 +312,11 @@ class TestXrayConcurrentSameRepoNoConflict:
         )
 
         error_responses = [
-            _parse_response(r)
+            # cast safe: isinstance guard above ensures r is not BaseException here
+            _parse_response(cast(Dict[str, Any], r))
             for r in results
-            if not isinstance(r, Exception) and "error" in _parse_response(r)
+            if not isinstance(r, Exception)
+            and "error" in _parse_response(cast(Dict[str, Any], r))
         ]
         assert len(error_responses) == 0, (
             f"Bug #1070: {len(error_responses)} concurrent xray_explore calls returned errors:\n"

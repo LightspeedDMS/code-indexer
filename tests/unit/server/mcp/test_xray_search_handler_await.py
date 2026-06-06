@@ -24,10 +24,10 @@ from code_indexer.server.auth.user_manager import UserRole
 
 # Named constants — avoids magic numbers in test bodies
 _AWAIT_ABOVE_CAP = int(_AWAIT_SECONDS_MAX) + 1  # 46 when cap is 45.0
-_AWAIT_INLINE_SECONDS = 5       # positive; future must resolve within window
-_AWAIT_PENDING_SECONDS = 0.1    # tiny window; pending future will not resolve
-_AWAIT_NEGATIVE = -1            # below minimum 0.0
-_ELAPSED_STUB = 0.1             # stub elapsed_seconds in inline result payloads
+_AWAIT_INLINE_SECONDS = 5  # positive; future must resolve within window
+_AWAIT_PENDING_SECONDS = 0.1  # tiny window; pending future will not resolve
+_AWAIT_NEGATIVE = -1  # below minimum 0.0
+_ELAPSED_STUB = 0.1  # stub elapsed_seconds in inline result payloads
 
 
 def _make_inline_result() -> Dict[str, Any]:
@@ -100,9 +100,9 @@ class TestXraySearchHandlerAwaitSeconds:
 import pytest as _pytest  # noqa: E402
 
 # Float boundary constants (precise float values, not cast from int)
-_FLOAT_AT_CAP = float(_AWAIT_SECONDS_MAX)           # 45.0 — boundary (accepted)
+_FLOAT_AT_CAP = float(_AWAIT_SECONDS_MAX)  # 45.0 — boundary (accepted)
 _FLOAT_JUST_ABOVE_CAP = _AWAIT_SECONDS_MAX + 0.001  # 45.001 — just over (rejected)
-_FLOAT_NEGATIVE = -0.001                             # smallest negative (rejected)
+_FLOAT_NEGATIVE = -0.001  # smallest negative (rejected)
 
 
 class TestXraySearchHandlerAwaitSecondsV2:
@@ -126,8 +126,8 @@ class TestXraySearchHandlerAwaitSecondsV2:
     )
     async def test_valid_await_seconds_accepted(self, value: float) -> None:
         """Float and int values within [0.0, 45.0] are accepted (no error)."""
-        pending: asyncio.Future[object] = asyncio.get_event_loop().create_future()
-        data = await _run_with_await(value, pending)
+        resolved = _make_resolved_future(_make_inline_result())
+        data = await _run_with_await(value, resolved)
         assert data.get("error") != "await_seconds_invalid", (
             f"await_seconds={value!r} must be accepted, got error: {data!r}"
         )

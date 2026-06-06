@@ -874,7 +874,10 @@ class BackgroundJobManager:
             tracked_job = self._job_tracker.get_job(job_id)
             if tracked_job is not None:
                 if not is_admin and tracked_job.username != username:
-                    return {"success": False, "message": "Job not found or not authorized"}
+                    return {
+                        "success": False,
+                        "message": "Job not found or not authorized",
+                    }
                 self._terminate_child_processes(job_id)
                 self._job_tracker.fail_job(job_id, "cancelled")
                 logging.info(

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.98.0] - 2026-06-06
+
+### Fixed
+- Bug #1070: `xray_search` and `xray_explore` MCP handlers were routed through `BackgroundJobManager.submit_job()`, which serializes all per-repo jobs behind a `register_job_if_no_conflict` gate — preventing concurrent xray calls on the same repo and causing unnecessary queue contention. Fix: both handlers are now `async def` and route compute to a dedicated 20-worker `ThreadPoolExecutor` (`xray_executor`, wired in lifespan), using `job_tracker.register_job()` directly (read-only; no conflict gate needed). The async `_await_xray_future` helper replaces the old synchronous `time.sleep` polling loop — no `_mcp_executor` thread is held during the wait. `_AWAIT_SECONDS_MAX` lowered from 120.0 to 45.0 to stay comfortably under the ALB 60 s hard timeout. `cancel_job` extended to handle xray jobs (absent from `self.jobs`, reached via `_child_processes` + `JobTracker`). New test coverage: architectural fix (concurrent calls, no serialization), cancel path, await-seconds validation, params, and lifespan executor-wiring.
+
 ## [10.97.0] - 2026-06-05
 
 ### Fixed

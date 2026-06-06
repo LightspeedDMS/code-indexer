@@ -37,9 +37,13 @@ async def _capture_engine_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
             job_fn = mock_loop.run_in_executor.call_args[0][1]
             with patch(
                 "code_indexer.xray.search_engine.XRaySearchEngine.run",
-                side_effect=lambda **kw: captured.update(kw) or {
-                    "matches": [], "evaluation_errors": [],
-                    "files_processed": 0, "files_total": 0, "elapsed_seconds": 0.0,
+                side_effect=lambda **kw: captured.update(kw)
+                or {
+                    "matches": [],
+                    "evaluation_errors": [],
+                    "files_processed": 0,
+                    "files_total": 0,
+                    "elapsed_seconds": 0.0,
                 },
             ):
                 job_fn()  # NO arguments — single-repo path (Bug #1070)
@@ -172,8 +176,12 @@ class TestXraySearchHandlerNewParams:
             ({"path": "src/"}, "path", "src/"),
         ],
         ids=[
-            "case_sensitive_true", "case_sensitive_false",
-            "context_lines_5", "multiline_true", "pcre2_true", "path_src",
+            "case_sensitive_true",
+            "case_sensitive_false",
+            "context_lines_5",
+            "multiline_true",
+            "pcre2_true",
+            "path_src",
         ],
     )
     async def test_param_forwarded_to_engine(
@@ -194,8 +202,13 @@ class TestXraySearchHandlerNewParams:
             ("pcre2", False),
             ("path", None),
         ],
-        ids=["case_sensitive_default", "context_lines_default",
-             "multiline_default", "pcre2_default", "path_default"],
+        ids=[
+            "case_sensitive_default",
+            "context_lines_default",
+            "multiline_default",
+            "pcre2_default",
+            "path_default",
+        ],
     )
     async def test_param_default_forwarded(self, kwarg: str, default: object) -> None:
         """Omitted params reach engine with the documented default value."""
