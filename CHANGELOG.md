@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.95.0] - 2026-06-05
+
+### Fixed
+- Scheduler config-load-ordering bug (cluster/postgres mode): the Description Refresh Scheduler and Dependency Map Scheduler read their enabled flags (`description_refresh_enabled` / `dependency_map_enabled`) from `config_service.get_config()` at `start()` time, but `ConfigService.set_connection_pool()` (which loads runtime config from the PG `server_config` table via `_load_runtime_from_pg`) was only called much later in `lifespan.py` (~line 2264). So at scheduler `start()` the config returned bootstrap defaults (both flags false), and the one-shot startup sweeps (`reconcile_terse_descriptions`, `reconcile_broken_lifecycle_metadata`) were permanently skipped even when the operator had enabled the feature in the Web UI — and the dep-map scheduler read disabled across restarts. Fix: set the ConfigService PG pool EARLY (before the scheduler inits) in postgres mode, so `get_config()` returns merged runtime config at `start()`. The late call is kept (belt-and-suspenders; `start_config_reload` is idempotent). Solo/SQLite mode is unaffected (postgres-gated). Regression tests assert the source-order invariant (early `set_connection_pool` precedes both scheduler constructions).
+
 ## [10.94.0] - 2026-06-05
 
 ### Fixed

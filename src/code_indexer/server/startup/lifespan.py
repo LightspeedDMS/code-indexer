@@ -840,6 +840,44 @@ def make_lifespan(
                 )
             )
 
+        # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
+        # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
+        # _load_runtime_from_pg() which loads claude_integration_config flags (e.g.
+        # description_refresh_enabled, dependency_map_enabled) from the PG server_config
+        # table.  Without this early call those flags stay at bootstrap defaults (False)
+        # when the schedulers below call config_service.get_config() -- permanently
+        # skipping the one-shot startup backfill sweeps even when the operator has
+        # enabled the features in the Web UI.
+        # The late set_connection_pool + start_config_reload call in the cluster block
+        # (~line 2264) is kept for belt-and-suspenders (start_config_reload is
+        # idempotent via its internal _reload_thread.is_alive() guard).
+        if storage_mode == "postgres" and backend_registry is not None:
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                _early_config_pool = (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if _early_config_pool is not None:
+                    get_config_service().set_connection_pool(_early_config_pool)
+                    logger.info(
+                        "APP-GENERAL-052: ConfigService PG pool set early — "
+                        "scheduler inits will read merged runtime config",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+            except Exception as _early_pool_exc:
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-053",
+                        f"Early ConfigService pool set failed (schedulers will use "
+                        f"bootstrap defaults): {_early_pool_exc}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Startup: Initialize Scheduled Catch-Up Service (Story #23, AC6)
         scheduled_catchup_service = None
         logger.info(
