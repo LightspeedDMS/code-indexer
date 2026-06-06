@@ -236,6 +236,20 @@ def make_lifespan(
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Bug #1070: Dedicated xray executor isolated from BJM's 5-worker pool.
+        from code_indexer.server.utils.config_manager import (
+            BackgroundJobsConfig as _BackgroundJobsConfig,
+        )
+        _xray_pool_size = _BackgroundJobsConfig().xray_max_concurrent_jobs
+        _xray_executor = ThreadPoolExecutor(max_workers=_xray_pool_size)
+        app.state.xray_executor = _xray_executor
+        from code_indexer.server.mcp.handlers.xray import set_xray_executor
+        set_xray_executor(_xray_executor)
+        logger.info(
+            f"xray executor started (max_workers={_xray_pool_size}) (Bug #1070)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
         logger.info(
             "Server startup: Initializing SQLite database schema",
@@ -2802,6 +2816,8 @@ def make_lifespan(
 
         # Story #1009: Shut down the MCP dispatch pool on server shutdown.
         _mcp_executor.shutdown(wait=False)
+        # Bug #1070: Shut down the dedicated xray executor.
+        _xray_executor.shutdown(wait=False)
 
         # Prevent test pollution across repeated TestClient/lifespan cycles:
         # the FastAPI lifespan instantiates a real TOTPService and stores it in

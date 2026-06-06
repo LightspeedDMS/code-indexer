@@ -864,6 +864,25 @@ class BackgroundJobManager:
             logging.info(f"Job {job_id} cancelled by user {username}")
             return {"success": True, "message": "Job cancelled successfully"}
 
+        # Bug #1070 Workstream A: xray jobs bypass submit_job and are never placed in
+        # self.jobs. They register only in JobTracker + self._child_processes. Catch them
+        # here (before the SQLite cross-node path) so _terminate_child_processes is called.
+        with self._child_processes_lock:
+            has_local_children = job_id in self._child_processes
+
+        if has_local_children and self._job_tracker is not None:
+            tracked_job = self._job_tracker.get_job(job_id)
+            if tracked_job is not None:
+                if not is_admin and tracked_job.username != username:
+                    return {"success": False, "message": "Job not found or not authorized"}
+                self._terminate_child_processes(job_id)
+                self._job_tracker.fail_job(job_id, "cancelled")
+                logging.info(
+                    f"Job {job_id} (xray local) cancelled and child processes terminated "
+                    f"by user {username}"
+                )
+                return {"success": True, "message": "Job cancelled successfully"}
+
         # Job not in memory — check DB backend for cross-node jobs
         if self._sqlite_backend is not None:
             try:

@@ -13,13 +13,58 @@ Mocking strategy:
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, cast
+from typing import Any, Dict, Generator, Optional, cast
 from unittest.mock import MagicMock, patch
 
-
 from code_indexer.server.auth.user_manager import User, UserRole
+from code_indexer.server.mcp.handlers.xray import _AWAIT_SECONDS_MAX  # re-export for split files
+
+
+def _make_resolved_future(result: dict) -> "asyncio.Future":
+    """Resolved future carrying `result` (for inline await tests)."""
+    f: asyncio.Future = asyncio.Future()
+    f.set_result(result)
+    return f
+
+
+@contextmanager
+def _xray_single_repo_env(resolved_future: "Optional[asyncio.Future]" = None) -> Generator:
+    """Patch infra boundaries for the single-repo Bug #1070 path.
+
+    Yields (mock_bjm, mock_job_tracker, mock_xray_executor, mock_loop) where
+    mock_loop.run_in_executor is the call-recording mock returning the future.
+    If resolved_future is None, a PENDING future is used (job_fn capture pattern).
+    """
+    mock_bjm = MagicMock()
+    mock_jt = MagicMock()
+    mock_jt.register_job.return_value = MagicMock()
+    mock_exec = MagicMock()
+    mock_app = MagicMock()
+    mock_app.background_job_manager = mock_bjm
+    mock_app.activated_repo_manager = None
+    mock_app.golden_repo_manager = None
+
+    if resolved_future is None:
+        resolved_future = asyncio.Future()  # pending; capture-only tests use call_args
+
+    loop_instance = MagicMock()
+    loop_instance.run_in_executor.return_value = resolved_future
+
+    with (
+        patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
+        patch("code_indexer.server.mcp.handlers.xray._resolve_repo_path", return_value="/fake/repo/path"),
+        patch("code_indexer.server.mcp.handlers.xray._get_background_job_manager", return_value=mock_bjm),
+        patch("code_indexer.server.mcp.handlers.xray._get_job_tracker", return_value=mock_jt),
+        patch("code_indexer.server.mcp.handlers.xray._get_xray_executor", return_value=mock_exec),
+        patch("code_indexer.server.mcp.handlers.xray.validate_rust_evaluator") as mock_validate,
+        patch("asyncio.get_running_loop", return_value=loop_instance),
+    ):
+        mock_validate.return_value = MagicMock(ok=True)
+        yield mock_bjm, mock_jt, mock_exec, loop_instance
 
 
 # ---------------------------------------------------------------------------

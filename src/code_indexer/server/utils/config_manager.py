@@ -686,6 +686,12 @@ class BackgroundJobsConfig:
     # __post_init__. Set explicitly to override the derived default.
     max_concurrent_refresh_jobs: int = -1
 
+    # Bug #1070: dedicated xray executor pool size.
+    # xray_search and xray_explore are read-only and must NOT share the 5-worker
+    # BJM pool with refresh/indexing/depmap. This dedicated pool serves only xray
+    # compute and allows up to 20 concurrent xray jobs without starvation.
+    xray_max_concurrent_jobs: int = 20
+
     def __post_init__(self) -> None:
         if self.max_concurrent_refresh_jobs < 0:
             self.max_concurrent_refresh_jobs = max(
