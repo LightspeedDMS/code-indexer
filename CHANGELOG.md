@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.96.0] - 2026-06-05
+
+### Fixed
+- Scheduler golden-backend cluster-wiring bug: `DescriptionRefreshScheduler` defaulted its golden-repo backend to local SQLite (`GoldenRepoMetadataSqliteBackend`) when no `golden_backend` was injected, and `lifespan.py` constructed it without one. In cluster/postgres mode the golden repos live in PostgreSQL (`golden_repos_metadata`, 15 repos on staging) but local SQLite had only 1 stale row, so the description backfill, lifecycle backfill, and description scheduled refresh saw 1 repo instead of all cluster repos — these features were non-functional in cluster/production (the startup sweep logged "1 aliases clean"). Fix: inject `backend_registry.golden_repo_metadata` (the storage factory already creates the correct per-mode backend — SQLite solo, Postgres cluster) into the scheduler. Solo mode is byte-for-byte identical (same SQLite backend at the same db path). Verified the PG and SQLite `GoldenRepoMetadataBackend.list_repos()`/`get_repo()` contracts match (both `List[Dict]`/`Optional[Dict]` keyed on `alias`, with `clone_path`). Found while validating the v10.95.0 config-load-ordering fix on staging.
+
 ## [10.95.0] - 2026-06-05
 
 ### Fixed
