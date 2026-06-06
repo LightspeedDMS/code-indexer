@@ -351,6 +351,7 @@ class BackgroundJobsPostgresBackend:
             "claude_actions",
             "extended_error",
             "language_resolution_status",
+            "metadata",
         }
         updates: List[str] = []
         params: List[Any] = []

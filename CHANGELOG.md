@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.97.0] - 2026-06-05
+
+### Fixed
+- PostgreSQL `background_jobs` metadata serialization: `BackgroundJobsPostgresBackend.update_job` json.dumps'd only `result`/`claude_actions`/`extended_error`/`language_resolution_status` — `metadata` was missing from its `_JSON_FIELDS`, even though INSERT and READ both serialize/deserialize it. So updating a job that carries a `metadata` dict raised `psycopg.ProgrammingError: cannot adapt type 'dict'`. The lifecycle/description backfill jobs register with a metadata dict (dep-map jobs don't), so every backfill job crashed instantly in cluster mode (`0 succeeded, 0 failed`) — the third bug blocking these features in production. Fix: add `metadata` to `update_job`'s `_JSON_FIELDS`, aligning PG with the already-correct SQLite backend (which includes metadata in its update json_fields). Found while validating the v10.95.0/v10.96.0 fixes on staging.
+
 ## [10.96.0] - 2026-06-05
 
 ### Fixed

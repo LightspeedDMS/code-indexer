@@ -362,6 +362,162 @@ class TestUpdateJob:
 
         cur.execute.assert_not_called()
 
+    def test_update_job_serialises_metadata_dict_as_json(self):
+        """
+        Bug #1064: metadata dict passed to update_job() was bound as a raw Python
+        dict instead of a JSON string, causing psycopg ProgrammingError in PG
+        cluster mode.
+
+        Given a metadata dict passed to update_job()
+        When update_job() is called
+        Then the metadata parameter bound to the SQL placeholder is a JSON string,
+        NOT a raw dict.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool()
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        metadata_dict = {"job_type": "lifecycle_backfill", "batch_size": 50}
+        backend.update_job("job-1", metadata=metadata_dict)
+
+        cur.execute.assert_called_once()
+        _, params = cur.execute.call_args[0]
+        # params[0] is the metadata value; params[1] is job_id
+        assert isinstance(params[0], str), (
+            f"metadata must be serialised as a JSON string, not {type(params[0]).__name__!r}. "
+            "Raw dict binding causes psycopg ProgrammingError in cluster/PG mode."
+        )
+        assert json.loads(params[0]) == metadata_dict, (
+            "Deserialising the bound metadata string must reproduce the original dict."
+        )
+
+    def test_metadata_in_json_fields_regression_guard(self):
+        """
+        Regression guard for bug #1064: 'metadata' must be in _ALLOWED_JOB_COLUMNS
+        (structural invariant) AND update_job must serialise dict metadata as a
+        JSON string in bound params (behavioural invariant).
+
+        This test will fail if:
+        - 'metadata' is removed from _ALLOWED_JOB_COLUMNS, or
+        - 'metadata' is removed from the _JSON_FIELDS set inside update_job.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+            _ALLOWED_JOB_COLUMNS,
+        )
+
+        # Structural guard: metadata must be an allowed column.
+        assert "metadata" in _ALLOWED_JOB_COLUMNS, (
+            "'metadata' must be in _ALLOWED_JOB_COLUMNS (bug #1064 regression guard). "
+            "Without it, update_job() raises ValueError before reaching serialisation."
+        )
+
+        # Behavioural guard: update_job must serialise dict metadata, not bind raw dict.
+        pool, conn, cur = _make_pool()
+        backend = BackgroundJobsPostgresBackend(pool)
+        backend.update_job("job-reg", metadata={"key": "value"})
+
+        _, params = cur.execute.call_args[0]
+        assert isinstance(params[0], str), (
+            "'metadata' must be in _JSON_FIELDS in update_job (bug #1064). "
+            "If this fails, 'metadata' was removed from _JSON_FIELDS and the "
+            "psycopg dict-binding ProgrammingError will reappear in cluster/PG mode."
+        )
+        assert json.loads(params[0]) == {"key": "value"}
+
+
+# ---------------------------------------------------------------------------
+# Helpers for SQLite round-trip tests
+# ---------------------------------------------------------------------------
+
+
+def _make_sqlite_backend(tmp_path, filename: str):
+    """Create an initialised SQLite backend at tmp_path/filename."""
+    from code_indexer.server.storage.database_manager import DatabaseSchema
+    from code_indexer.server.storage.sqlite_backends import BackgroundJobsSqliteBackend
+
+    db_path = tmp_path / filename
+    DatabaseSchema(db_path=str(db_path)).initialize_database()
+    return BackgroundJobsSqliteBackend(str(db_path))
+
+
+# ---------------------------------------------------------------------------
+# update_job metadata round-trip (SQLite — no live PG needed)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateJobMetadataRoundTrip:
+    """
+    Round-trip symmetry: a job with dict metadata can be inserted, then updated
+    (status change preserving metadata), then read back with metadata intact.
+
+    Uses the SQLite backend so no live PostgreSQL is needed.  This mirrors the
+    INSERT/UPDATE/READ symmetry that was broken on the PG backend (bug #1064).
+    """
+
+    def test_metadata_survives_insert_update_get_roundtrip(self, tmp_path):
+        """
+        Given a job saved with dict metadata
+        When update_job() is called to change status (metadata unchanged)
+        And get_job() is called afterwards
+        Then the metadata dict is intact and equals the original value.
+        """
+        backend = _make_sqlite_backend(tmp_path, "metadata_roundtrip.db")
+
+        original_metadata = {"job_type": "description_backfill", "batch_size": 100}
+        backend.save_job(
+            job_id="rt-job-1",
+            operation_type="description_backfill",
+            status="running",
+            created_at="2026-06-04T00:00:00Z",
+            username="admin",
+            progress=0,
+            metadata=original_metadata,
+        )
+
+        # Update status only — metadata must be untouched.
+        backend.update_job("rt-job-1", status="completed", progress=100)
+
+        job = backend.get_job("rt-job-1")
+        assert job is not None
+        assert job["metadata"] == original_metadata, (
+            f"metadata must survive insert→update→get round-trip. "
+            f"Expected {original_metadata!r}, got {job['metadata']!r}."
+        )
+
+    def test_metadata_update_via_update_job_is_readable(self, tmp_path):
+        """
+        Given a job saved without metadata
+        When update_job() is called with a dict metadata
+        And get_job() is called afterwards
+        Then the metadata dict is readable and equals the value set by update_job().
+
+        This directly tests the UPDATE serialisation path for dict metadata.
+        """
+        backend = _make_sqlite_backend(tmp_path, "metadata_update.db")
+
+        backend.save_job(
+            job_id="rt-job-2",
+            operation_type="lifecycle_backfill",
+            status="running",
+            created_at="2026-06-04T00:00:00Z",
+            username="admin",
+            progress=0,
+        )
+
+        updated_metadata = {"phase": "backfill", "processed": 42}
+        backend.update_job("rt-job-2", metadata=updated_metadata)
+
+        job = backend.get_job("rt-job-2")
+        assert job is not None
+        assert job["metadata"] == updated_metadata, (
+            f"metadata written by update_job() must be readable via get_job(). "
+            f"Expected {updated_metadata!r}, got {job['metadata']!r}."
+        )
+
 
 # ---------------------------------------------------------------------------
 # list_jobs
