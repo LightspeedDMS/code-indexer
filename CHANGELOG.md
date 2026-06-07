@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.104.0] - 2026-06-07
+
+### Fixed
+- Bug #1072: SSH key registration was not cluster-aware. In PostgreSQL cluster mode, `SSHKeyManager` wrote keys only to the node-local SQLite store and the registering node's `~/.ssh` (storing a `private_path`, never the private key content), so the cluster sync service (`SSHKeySyncService`, which distributes private keys from shared PG to every node's `~/.ssh`) had nothing to distribute. Net effect: an SSH key registered on one node worked only there; git ops on other nodes failed with `Permission denied (publickey)` (e.g. cidx-meta backup push silently degraded to single-node). Fix: the private key content is now encrypted at rest in shared PG and distributed cluster-wide. (1) New `private_key` column on `ssh_keys` (migration `027`, PG + SQLite, nullable/backward-compatible). (2) `SSHKeyManager` is cluster-aware via `set_cluster_dependencies(pg_backend, fernet)` (injected in lifespan): on registration it reads the generated private key, encrypts it with a cluster Fernet key (new `ssh_key_encryption_key` in `cluster_secrets`, same trust model as the MFA key), and persists the ciphertext to PG. (3) `SSHKeySyncService` decrypts before writing each node's `~/.ssh/<key>` at `0600`; undecryptable keys are logged and skipped, never written corrupt. (4) `delete_key` now also removes the key from PG in cluster mode (prevents resurrection on the next sync); `create_key` is an idempotent upsert (`ON CONFLICT (name) DO UPDATE`) so re-registration populates the encrypted blob without a primary-key collision. New shared helper `cluster_key_provider.load_or_create_fernet_key`. Operational note: existing `ssh_keys` rows have `private_key = NULL` after migration; re-register affected keys to populate the encrypted content for cross-node distribution.
+
 ## [10.103.0] - 2026-06-07
 
 ### Fixed

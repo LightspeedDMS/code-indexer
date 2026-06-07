@@ -47,6 +47,7 @@ class SSHKeysPostgresBackend:
         email: Optional[str] = None,
         description: Optional[str] = None,
         is_imported: bool = False,
+        private_key: Optional[str] = None,
     ) -> None:
         """Create a new SSH key record."""
         now = datetime.now(timezone.utc).isoformat()
@@ -54,8 +55,19 @@ class SSHKeysPostgresBackend:
             conn.execute(
                 """INSERT INTO ssh_keys
                    (name, fingerprint, key_type, private_path, public_path,
-                    public_key, email, description, created_at, is_imported)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    public_key, email, description, created_at, is_imported,
+                    private_key)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (name) DO UPDATE SET
+                     fingerprint = EXCLUDED.fingerprint,
+                     key_type = EXCLUDED.key_type,
+                     private_path = EXCLUDED.private_path,
+                     public_path = EXCLUDED.public_path,
+                     public_key = EXCLUDED.public_key,
+                     email = EXCLUDED.email,
+                     description = EXCLUDED.description,
+                     is_imported = EXCLUDED.is_imported,
+                     private_key = EXCLUDED.private_key""",
                 (
                     name,
                     fingerprint,
@@ -67,6 +79,7 @@ class SSHKeysPostgresBackend:
                     description,
                     now,
                     is_imported,
+                    private_key,
                 ),
             )
         logger.info(f"Created SSH key: {name}")
@@ -76,7 +89,8 @@ class SSHKeysPostgresBackend:
         with self._pool.connection() as conn:
             cursor = conn.execute(
                 """SELECT name, fingerprint, key_type, private_path, public_path,
-                          public_key, email, description, created_at, imported_at, is_imported
+                          public_key, email, description, created_at, imported_at, is_imported,
+                          private_key
                    FROM ssh_keys WHERE name = %s""",
                 (name,),
             )
@@ -98,6 +112,7 @@ class SSHKeysPostgresBackend:
                 "imported_at": row[9],
                 "is_imported": bool(row[10]),
                 "hosts": hosts,
+                "private_key": row[11],
             }
         )
 
@@ -140,7 +155,8 @@ class SSHKeysPostgresBackend:
         with self._pool.connection() as conn:
             cursor = conn.execute(
                 """SELECT name, fingerprint, key_type, private_path, public_path,
-                          public_key, email, description, created_at, imported_at, is_imported
+                          public_key, email, description, created_at, imported_at, is_imported,
+                          private_key
                    FROM ssh_keys"""
             )
             rows = cursor.fetchall()
@@ -163,6 +179,7 @@ class SSHKeysPostgresBackend:
                             "imported_at": row[9],
                             "is_imported": bool(row[10]),
                             "hosts": hosts,
+                            "private_key": row[11],
                         }
                     )
                 )

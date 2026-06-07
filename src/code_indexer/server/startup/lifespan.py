@@ -2453,10 +2453,16 @@ def make_lifespan(
                         _cluster_pool
                     )
 
-                    # Bug #581: Sync SSH keys from PG to local ~/.ssh/
+                    # Bug #581 / Bug #1072: Sync SSH keys from PG to local ~/.ssh/
                     try:
                         from code_indexer.server.services.ssh_key_sync_service import (
                             SSHKeySyncService,
+                        )
+                        from code_indexer.server.services.cluster_key_provider import (
+                            load_or_create_fernet_key,
+                        )
+                        from code_indexer.server.services.ssh_key_manager import (
+                            SSHKeyManager,
                         )
 
                         _ssh_backend = (
@@ -2465,7 +2471,24 @@ def make_lifespan(
                             else None
                         )
                         assert _ssh_backend is not None
-                        _ssh_sync = SSHKeySyncService(ssh_keys_backend=_ssh_backend)
+
+                        # Bug #1072: Load (or race-safely create) the Fernet key
+                        # used to encrypt/decrypt SSH private keys in cluster mode.
+                        _ssh_fernet = load_or_create_fernet_key(
+                            _cluster_pool, "ssh_key_encryption_key"
+                        )
+
+                        # Bug #1072: Wire cluster deps into SSHKeyManager so that
+                        # future key registrations encrypt the private content to PG.
+                        SSHKeyManager.set_cluster_dependencies(
+                            _ssh_backend, _ssh_fernet
+                        )
+
+                        # Bug #1072: Pass fernet to sync service so it decrypts
+                        # private keys read from PG before writing to ~/.ssh/.
+                        _ssh_sync = SSHKeySyncService(
+                            ssh_keys_backend=_ssh_backend, fernet=_ssh_fernet
+                        )
                         _sync_result = _ssh_sync.sync()
                         logger.info(
                             "Bug #581: SSH key sync complete: %d written, %d removed, %d unchanged",
