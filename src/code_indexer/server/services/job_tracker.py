@@ -624,10 +624,70 @@ class JobTracker:
         with self._lock:
             return list(self._active_jobs.values())
 
+    @staticmethod
+    def _build_exclusion_where_clause(exclude_types: List[str]) -> tuple:
+        """
+        Return (sql_fragment, params_tuple) for NULL-safe operation_type exclusion.
+
+        Uses IS NULL guard so rows with NULL operation_type are never silently
+        dropped (SQL NULL NOT IN (...) evaluates to UNKNOWN, not FALSE).
+
+        Raises:
+            ValueError: If exclude_types is empty (caller must check truthiness).
+        """
+        if not exclude_types:
+            raise ValueError("exclude_types must be non-empty")
+        placeholders = ",".join("?" * len(exclude_types))
+        fragment = f"(operation_type IS NULL OR operation_type NOT IN ({placeholders}))"
+        return fragment, tuple(exclude_types)
+
+    def _query_sqlite_recent_jobs(
+        self,
+        seen_ids: set,
+        cutoff_iso: Optional[str],
+        limit: int,
+        exclude_operation_types: Optional[List[str]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute the SQLite historical query and return job dicts not in seen_ids.
+
+        Updates seen_ids in-place for each accepted row to prevent intra-query
+        duplicates. Caller is responsible for pre-validating limit > 0.
+        """
+        conn = self._conn_manager.get_connection()
+        where_parts: List[str] = []
+        params: List[Any] = []
+
+        if cutoff_iso:
+            where_parts.append("created_at >= ?")
+            params.append(cutoff_iso)
+
+        if exclude_operation_types:
+            excl_fragment, excl_params = self._build_exclusion_where_clause(
+                exclude_operation_types
+            )
+            where_parts.append(excl_fragment)
+            params.extend(excl_params)
+
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        sql = (
+            f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
+            f"{where_clause} ORDER BY created_at DESC LIMIT ?"
+        )
+        params.append(limit)
+        rows: List[Dict[str, Any]] = []
+        for row in conn.execute(sql, params).fetchall():
+            job = _row_to_tracked_job(row)
+            if job.job_id not in seen_ids:
+                seen_ids.add(job.job_id)
+                rows.append(_tracked_job_to_dict(job))
+        return rows
+
     def get_recent_jobs(
         self,
         limit: int = 20,
         time_filter: str = "24h",
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Merge active in-memory jobs + recent historical jobs from the store.
@@ -636,20 +696,34 @@ class JobTracker:
         Historical jobs are filtered by created_at within the time window.
 
         Args:
-            limit: Maximum number of historical records from the store.
+            limit: Maximum number of historical records from the store (> 0).
             time_filter: "1h", "24h", "7d", "30d", or "all".
+            exclude_operation_types: Optional list of operation_type values to
+                omit (e.g. ["xray_search", "xray_explore"]). None returns all.
 
         Returns:
             List of job dicts (most-recently-created first), deduped by job_id.
+
+        Raises:
+            ValueError: If limit is not a positive integer.
         """
-        # Collect active jobs first (always included)
+        if limit <= 0:
+            raise ValueError(f"limit must be a positive integer, got {limit}")
+
         with self._lock:
-            active_snapshot = list(self._active_jobs.values())
+            active_snapshot = [
+                _tracked_job_to_dict(j) for j in self._active_jobs.values()
+            ]
 
-        seen_ids = {j.job_id for j in active_snapshot}
-        result = [_tracked_job_to_dict(j) for j in active_snapshot]
+        if exclude_operation_types:
+            excl_set = set(exclude_operation_types)
+            active_snapshot = [
+                j for j in active_snapshot if j.get("operation_type") not in excl_set
+            ]
 
-        # Compute cutoff ISO string
+        seen_ids = {j["job_id"] for j in active_snapshot}
+        result = list(active_snapshot)
+
         cutoff_iso: Optional[str] = None
         if time_filter != "all":
             delta_map = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}
@@ -658,8 +732,10 @@ class JobTracker:
             cutoff_iso = cutoff.isoformat()
 
         if self._backend is not None:
-            # Fetch from backend and filter client-side by cutoff
-            historical = self._backend.list_jobs(limit=limit)
+            historical = self._backend.list_jobs(
+                limit=limit,
+                exclude_operation_types=exclude_operation_types or None,
+            )
             for job_dict in historical:
                 if job_dict["job_id"] in seen_ids:
                     continue
@@ -670,29 +746,11 @@ class JobTracker:
             result.sort(key=_status_priority_sort_key)
             return result
 
-        # Query SQLite for historical jobs
-        conn = self._conn_manager.get_connection()
-        if cutoff_iso:
-            sql = (
-                f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
-                "WHERE created_at >= ? "
-                "ORDER BY created_at DESC LIMIT ?"
+        result.extend(
+            self._query_sqlite_recent_jobs(
+                seen_ids, cutoff_iso, limit, exclude_operation_types
             )
-            cursor = conn.execute(sql, (cutoff_iso, limit))
-        else:
-            sql = (
-                f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
-                "ORDER BY created_at DESC LIMIT ?"
-            )
-            cursor = conn.execute(sql, (limit,))
-
-        for row in cursor.fetchall():
-            job = _row_to_tracked_job(row)
-            if job.job_id not in seen_ids:
-                seen_ids.add(job.job_id)
-                result.append(_tracked_job_to_dict(job))
-
-        # Story #328: Sort with running/pending jobs first, then by time
+        )
         result.sort(key=_status_priority_sort_key)
         return result
 
