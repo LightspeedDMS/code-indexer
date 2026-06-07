@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.100.0] - 2026-06-06
+
+### Fixed
+- Bug #1074: Multi-repo `xray_search` and `xray_explore` fan-out paths still called `bjm.submit_job(repo_alias=single_alias)`, which routes through `register_job_if_no_conflict` and enforces `idx_active_job_per_repo`. Concurrent multi-repo xray calls sharing any single alias got `DuplicateJobError` → 409. Fix: both multi-repo loops now use `job_tracker.register_job(repo_alias=None, metadata={"repo_alias": alias})` + `xray_executor`, identical to the single-repo fix from Bug #1073. Also hardened `_make_xray_explore_job_fn` with `try/finally` around the engine call so `bjm.unregister_child_processes` is always invoked even on exception (pre-existing child-process leak, now consistent with the search path).
+
 ## [10.99.0] - 2026-06-06
 
 ### Fixed
