@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 class SSHKeySyncService:
     """Syncs SSH keys from a backend (PG/SQLite) to local filesystem."""
 
-    def __init__(self, ssh_keys_backend: Any, ssh_dir: str = "~/.ssh") -> None:
+    def __init__(
+        self,
+        ssh_keys_backend: Any,
+        ssh_dir: str = "~/.ssh",
+        fernet: Any = None,
+    ) -> None:
         """
         Initialize the sync service.
 
@@ -32,10 +37,14 @@ class SSHKeySyncService:
                               (or public_key), private_path, public_path.
             ssh_dir: Directory to write SSH key files into.
                      Defaults to ~/.ssh (expanded at init time).
+            fernet: Optional Fernet instance used to decrypt private key content
+                    stored encrypted in the backend (cluster mode).  When None
+                    the private key bytes are written as-is (solo/SQLite mode).
         """
         self._backend = ssh_keys_backend
         self._ssh_dir = Path(ssh_dir).expanduser()
         self._manifest_file = self._ssh_dir / ".cidx-ssh-keys.json"
+        self._fernet = fernet
 
     # ------------------------------------------------------------------
     # Public API
@@ -72,9 +81,18 @@ class SSHKeySyncService:
         for key_data in backend_keys:
             name = key_data["name"]
             try:
-                private_key = key_data.get("private_key") or key_data.get(
-                    "private_key_content"
-                )
+                private_key = key_data.get("private_key")
+                if private_key and self._fernet is not None:
+                    try:
+                        private_key = self._fernet.decrypt(
+                            private_key.encode()
+                        ).decode()
+                    except Exception as exc:
+                        logger.error(
+                            f"Failed to decrypt SSH private key '{name}': {exc}"
+                        )
+                        errors.append(f"{name}: decrypt failed: {exc}")
+                        continue
                 public_key = key_data.get("public_key")
 
                 private_path = self._ssh_dir / name

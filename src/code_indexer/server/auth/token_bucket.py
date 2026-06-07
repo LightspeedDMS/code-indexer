@@ -11,6 +11,11 @@ import threading
 import time
 from typing import Any, Dict, Optional, Tuple, Callable
 
+try:
+    from psycopg.rows import tuple_row as _psycopg_tuple_row
+except ImportError:  # psycopg not installed (e.g. CLI-only mode)
+    _psycopg_tuple_row = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 _TOKEN_COST = 1.0  # Token units consumed per request
@@ -110,11 +115,19 @@ class TokenBucketManager:
         now = time.time()
         with self._pool.connection() as conn:
             self._pg_ensure_row(conn, username, now)
-            row = conn.execute(
-                "SELECT tokens, last_refill FROM token_bucket_state WHERE username = %s",
-                (username,),
-            ).fetchone()
-            tokens, last_refill = row[0], row[1]
+            cursor_kwargs: dict = {}
+            if _psycopg_tuple_row is not None:
+                cursor_kwargs["row_factory"] = _psycopg_tuple_row
+            with conn.cursor(**cursor_kwargs) as cur:
+                cur.execute(
+                    "SELECT tokens, last_refill FROM token_bucket_state WHERE username = %s",
+                    (username,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                tokens, last_refill = float(self.capacity), now
+            else:
+                tokens, last_refill = row[0], row[1]
             elapsed = max(0.0, now - last_refill)
             tokens = min(float(self.capacity), tokens + elapsed * self.refill_rate)
             if tokens >= _TOKEN_COST:

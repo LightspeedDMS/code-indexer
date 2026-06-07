@@ -1553,6 +1553,7 @@ class SSHKeysSqliteBackend:
         email: Optional[str] = None,
         description: Optional[str] = None,
         is_imported: bool = False,
+        private_key: Optional[str] = None,
     ) -> None:
         """Create a new SSH key record."""
         now = datetime.now(timezone.utc).isoformat()
@@ -1560,7 +1561,18 @@ class SSHKeysSqliteBackend:
         def operation(conn):
             conn.execute(
                 """INSERT INTO ssh_keys (name, fingerprint, key_type, private_path, public_path,
-                   public_key, email, description, created_at, is_imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   public_key, email, description, created_at, is_imported,
+                   private_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     fingerprint = excluded.fingerprint,
+                     key_type = excluded.key_type,
+                     private_path = excluded.private_path,
+                     public_path = excluded.public_path,
+                     public_key = excluded.public_key,
+                     email = excluded.email,
+                     description = excluded.description,
+                     is_imported = excluded.is_imported,
+                     private_key = excluded.private_key""",
                 (
                     name,
                     fingerprint,
@@ -1572,6 +1584,7 @@ class SSHKeysSqliteBackend:
                     description,
                     now,
                     is_imported,
+                    private_key,
                 ),
             )
             return None
@@ -1584,7 +1597,8 @@ class SSHKeysSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT name, fingerprint, key_type, private_path, public_path, public_key,
-               email, description, created_at, imported_at, is_imported FROM ssh_keys WHERE name = ?""",
+               email, description, created_at, imported_at, is_imported,
+               private_key FROM ssh_keys WHERE name = ?""",
             (name,),
         )
         row = cursor.fetchone()
@@ -1604,6 +1618,7 @@ class SSHKeysSqliteBackend:
             "imported_at": row[9],
             "is_imported": bool(row[10]),
             "hosts": hosts,
+            "private_key": row[11],
         }
 
     def _get_hosts_for_key(self, conn: Any, key_name: str) -> list:
@@ -1655,7 +1670,8 @@ class SSHKeysSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT name, fingerprint, key_type, private_path, public_path, public_key,
-               email, description, created_at, imported_at, is_imported FROM ssh_keys"""
+               email, description, created_at, imported_at, is_imported,
+               private_key FROM ssh_keys"""
         )
         results = []
         for row in cursor.fetchall():
@@ -1675,6 +1691,7 @@ class SSHKeysSqliteBackend:
                     "imported_at": row[9],
                     "is_imported": bool(row[10]),
                     "hosts": hosts,
+                    "private_key": row[11],
                 }
             )
         return results
