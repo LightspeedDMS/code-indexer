@@ -14,7 +14,7 @@ import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Callable, Dict, Optional, cast
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.xray.sandbox import validate_rust_evaluator
@@ -489,10 +489,49 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
 
         # ------------------------------------------------------------------
         # 6. Submit one background job per alias
+        # Bug #1074: use register_job(repo_alias=None) + xray_executor to bypass
+        # idx_active_job_per_repo and the 5-worker BJM pool (mirrors single-repo
+        # fix from Bug #1073).
         # ------------------------------------------------------------------
         bjm_multi = _get_background_job_manager()
+        job_tracker_multi = _get_job_tracker()
+        xray_executor_multi = _get_xray_executor()
+        loop_multi = asyncio.get_running_loop()
         job_ids: list = []
         errors: list = []
+
+        def _make_search_job_fn(  # type: ignore[no-untyped-def]
+            rp: Path, t: int, jid: str, bjm: Any
+        ):
+            def _job() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
+                from code_indexer.xray.search_engine import XRaySearchEngine as _E
+
+                def _on_spawned(proc) -> None:  # type: ignore[no-untyped-def]
+                    bjm.register_child_process(jid, proc)
+
+                try:
+                    result = _E().run(
+                        repo_path=rp,
+                        driver_regex=driver_regex,
+                        evaluator_code=evaluator_code,
+                        search_target=search_target,
+                        include_patterns=list(include_patterns),
+                        exclude_patterns=list(exclude_patterns),
+                        case_sensitive=case_sensitive,
+                        context_lines=context_lines,
+                        multiline=multiline,
+                        pcre2=pcre2,
+                        path=path,
+                        timeout_seconds=t,
+                        progress_callback=None,
+                        max_files=max_results,
+                        on_process_spawned=_on_spawned,
+                    )
+                finally:
+                    bjm.unregister_child_processes(jid)
+                return _truncate_xray_result(result)
+
+            return _job
 
         for single_alias in repo_alias_parsed:
             single_path_str = _resolve_repo_path(single_alias)
@@ -507,47 +546,33 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                 continue
 
             single_repo_path = Path(single_path_str)
-            timeout_capture = effective_timeout_multi
-
-            def _make_job_fn(rp: Path, t: int, jid_holder: list):  # type: ignore[no-untyped-def]
-                def _job(progress_callback):  # type: ignore[no-untyped-def]
-                    from code_indexer.xray.search_engine import XRaySearchEngine as _E
-
-                    def _on_spawned(proc):  # type: ignore[no-untyped-def]
-                        if jid_holder:
-                            bjm_multi.register_child_process(jid_holder[0], proc)
-
-                    result = _E().run(
-                        repo_path=rp,
-                        driver_regex=driver_regex,
-                        evaluator_code=evaluator_code,
-                        search_target=search_target,
-                        include_patterns=list(include_patterns),
-                        exclude_patterns=list(exclude_patterns),
-                        case_sensitive=case_sensitive,
-                        context_lines=context_lines,
-                        multiline=multiline,
-                        pcre2=pcre2,
-                        path=path,
-                        timeout_seconds=t,
-                        progress_callback=progress_callback,
-                        max_files=max_results,
-                        on_process_spawned=_on_spawned,
-                    )
-                    if jid_holder:
-                        bjm_multi.unregister_child_processes(jid_holder[0])
-                    return _truncate_xray_result(result)
-
-                return _job
-
-            _jid_holder: list = []
-            jid: str = bjm_multi.submit_job(
+            jid = str(uuid.uuid4())
+            job_tracker_multi.register_job(
+                job_id=jid,
                 operation_type="xray_search",
-                func=_make_job_fn(single_repo_path, timeout_capture, _jid_holder),
-                submitter_username=user.username,
-                repo_alias=single_alias,
+                username=user.username,
+                repo_alias=None,  # NULL bypasses idx_active_job_per_repo; xray is read-only
+                metadata={"repo_alias": single_alias},
             )
-            _jid_holder.append(jid)
+
+            _job_fn = _make_search_job_fn(
+                single_repo_path, effective_timeout_multi, jid, bjm_multi
+            )
+            _future = loop_multi.run_in_executor(xray_executor_multi, _job_fn)
+
+            def _make_search_done_cb(j: str) -> Any:  # type: ignore[no-untyped-def]
+                def _cb(fut: "asyncio.Future[Any]") -> None:  # type: ignore[no-untyped-def]
+                    if fut.cancelled() or (
+                        not fut.cancelled() and fut.exception() is not None
+                    ):
+                        exc = fut.exception() if not fut.cancelled() else None
+                        job_tracker_multi.fail_job(j, str(exc) if exc else "cancelled")
+                    else:
+                        job_tracker_multi.complete_job(j, fut.result())
+
+                return _cb
+
+            _future.add_done_callback(_make_search_done_cb(jid))
             job_ids.append(jid)
 
         return _mcp_response({"job_ids": job_ids, "errors": errors})
@@ -719,35 +744,99 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
             if bjm is not None and job_id_holder:
                 bjm.register_child_process(job_id_holder[0], proc)
 
-        result = _Engine().run(
-            repo_path=repo_path,
-            driver_regex=driver_regex,
-            evaluator_code=evaluator_code,
-            search_target=search_target,
-            include_patterns=list(include_patterns),
-            exclude_patterns=list(exclude_patterns),
-            case_sensitive=case_sensitive,
-            context_lines=context_lines,
-            multiline=multiline,
-            pcre2=pcre2,
-            path=path,
-            timeout_seconds=effective_timeout,
-            progress_callback=progress_callback,
-            max_files=max_results,
-            include_ast_debug=True,
-            max_debug_nodes=max_debug_nodes,
-            on_process_spawned=_on_spawned,
-        )
-        if bjm is not None and job_id_holder:
-            bjm.unregister_child_processes(job_id_holder[0])
+        try:
+            result = _Engine().run(
+                repo_path=repo_path,
+                driver_regex=driver_regex,
+                evaluator_code=evaluator_code,
+                search_target=search_target,
+                include_patterns=list(include_patterns),
+                exclude_patterns=list(exclude_patterns),
+                case_sensitive=case_sensitive,
+                context_lines=context_lines,
+                multiline=multiline,
+                pcre2=pcre2,
+                path=path,
+                timeout_seconds=effective_timeout,
+                progress_callback=progress_callback,
+                max_files=max_results,
+                include_ast_debug=True,
+                max_debug_nodes=max_debug_nodes,
+                on_process_spawned=_on_spawned,
+            )
+        finally:
+            if bjm is not None and job_id_holder:
+                bjm.unregister_child_processes(job_id_holder[0])
         return result
 
     return job_fn
 
 
-def _submit_xray_explore_omni(  # type: ignore[no-untyped-def]
+def _make_explore_done_cb_omni(
+    job_id: str,
+    # job_tracker typed Any: JobTracker lives in server.repositories which cannot be
+    # imported here without a circular import. Interface (fail_job/complete_job) is stable.
+    job_tracker: Any,
+) -> Callable[["asyncio.Future[Any]"], None]:
+    """Factory: return a done-callback that updates job_tracker lifecycle for omni explore."""
+
+    def _cb(fut: "asyncio.Future[Any]") -> None:
+        if fut.cancelled() or (not fut.cancelled() and fut.exception() is not None):
+            exc = fut.exception() if not fut.cancelled() else None
+            job_tracker.fail_job(job_id, str(exc) if exc else "cancelled")
+        else:
+            job_tracker.complete_job(job_id, fut.result())
+
+    return _cb
+
+
+def _submit_one_explore_omni(
+    single_alias: str,
+    user: User,
+    bjm: Any,  # BJM typed Any: same circular-import constraint as job_tracker
+    loop: asyncio.AbstractEventLoop,
+    job_tracker: Any,  # circular import constraint — see _make_explore_done_cb_omni
+    xray_executor: ThreadPoolExecutor,
+    explore_fn_kwargs: Dict[str, Any],
+) -> Optional[str]:
+    """Register, build, and submit one xray_explore job for a single alias.
+
+    Returns the new job_id on success, or None if the alias cannot be resolved.
+    Separated from _submit_xray_explore_omni to keep each function under 50 lines.
+    """
+    single_path_str = _resolve_repo_path(single_alias)
+    if single_path_str is None:
+        return None
+
+    jid = str(uuid.uuid4())
+    job_tracker.register_job(
+        job_id=jid,
+        operation_type="xray_explore",
+        username=user.username,
+        repo_alias=None,  # NULL bypasses idx_active_job_per_repo; xray is read-only
+        metadata={"repo_alias": single_alias},
+    )
+
+    _explore_fn = _make_xray_explore_job_fn(
+        repo_path=Path(single_path_str),
+        job_id_holder=[jid],
+        bjm=bjm,
+        **explore_fn_kwargs,
+    )
+
+    def _worker() -> Dict[str, Any]:
+        # cast: _make_xray_explore_job_fn is no-untyped-def so fn(None) returns Any;
+        # safe — the function contract always produces Dict[str, Any].
+        return cast(Dict[str, Any], _explore_fn(None))
+
+    _future = loop.run_in_executor(xray_executor, _worker)
+    _future.add_done_callback(_make_explore_done_cb_omni(jid, job_tracker))
+    return jid
+
+
+def _submit_xray_explore_omni(
     aliases: list,
-    user: "Any",
+    user: User,
     driver_regex: str,
     evaluator_code: str,
     search_target: str,
@@ -757,23 +846,51 @@ def _submit_xray_explore_omni(  # type: ignore[no-untyped-def]
     context_lines: int,
     multiline: bool,
     pcre2: bool,
-    path: "Optional[str]",
+    path: Optional[str],
     effective_timeout: int,
-    max_results: "Optional[int]",
+    max_results: Optional[int],
     max_debug_nodes: int,
+    loop: asyncio.AbstractEventLoop,
+    job_tracker: Any,  # circular import constraint — see _make_explore_done_cb_omni
+    xray_executor: ThreadPoolExecutor,
 ) -> Dict[str, Any]:
-    """Submit one xray_explore background job per alias.
+    """Submit one xray_explore background job per alias (Bug #1074 fix).
 
-    Extracted from handle_xray_explore to keep that handler concise.
     Returns a {job_ids, errors} response dict (not yet wrapped in _mcp_response).
+    Uses register_job(repo_alias=None) + xray_executor to bypass idx_active_job_per_repo
+    and the 5-worker BJM pool (mirrors single-repo Bug #1073 fix).
     """
     bjm = _get_background_job_manager()
     job_ids: list = []
     errors: list = []
 
+    explore_fn_kwargs: Dict[str, Any] = dict(
+        driver_regex=driver_regex,
+        evaluator_code=evaluator_code,
+        search_target=search_target,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+        case_sensitive=case_sensitive,
+        context_lines=context_lines,
+        multiline=multiline,
+        pcre2=pcre2,
+        path=path,
+        effective_timeout=effective_timeout,
+        max_results=max_results,
+        max_debug_nodes=max_debug_nodes,
+    )
+
     for single_alias in aliases:
-        single_path_str = _resolve_repo_path(single_alias)
-        if single_path_str is None:
+        jid = _submit_one_explore_omni(
+            single_alias=single_alias,
+            user=user,
+            bjm=bjm,
+            loop=loop,
+            job_tracker=job_tracker,
+            xray_executor=xray_executor,
+            explore_fn_kwargs=explore_fn_kwargs,
+        )
+        if jid is None:
             errors.append(
                 {
                     "repository_alias": single_alias,
@@ -781,34 +898,8 @@ def _submit_xray_explore_omni(  # type: ignore[no-untyped-def]
                     "message": f"Repository alias {single_alias!r} not found",
                 }
             )
-            continue
-
-        _jid_holder: list = []
-        jid: str = bjm.submit_job(
-            operation_type="xray_explore",
-            func=_make_xray_explore_job_fn(
-                repo_path=Path(single_path_str),
-                driver_regex=driver_regex,
-                evaluator_code=evaluator_code,
-                search_target=search_target,
-                include_patterns=include_patterns,
-                exclude_patterns=exclude_patterns,
-                case_sensitive=case_sensitive,
-                context_lines=context_lines,
-                multiline=multiline,
-                pcre2=pcre2,
-                path=path,
-                effective_timeout=effective_timeout,
-                max_results=max_results,
-                max_debug_nodes=max_debug_nodes,
-                job_id_holder=_jid_holder,
-                bjm=bjm,
-            ),
-            submitter_username=user.username,
-            repo_alias=single_alias,
-        )
-        _jid_holder.append(jid)
-        job_ids.append(jid)
+        else:
+            job_ids.append(jid)
 
     return {"job_ids": job_ids, "errors": errors}
 
@@ -1037,9 +1128,17 @@ async def handle_xray_explore(params: Dict[str, Any], user: User) -> Dict[str, A
                     "message": "repository_alias must not be empty",
                 }
             )
+        _omni_loop = asyncio.get_running_loop()
+        _omni_jt = _get_job_tracker()
+        _omni_xe = _get_xray_executor()
         return _mcp_response(
             _submit_xray_explore_omni(
-                aliases=repo_alias_parsed, user=user, **explore_kwargs
+                aliases=repo_alias_parsed,
+                user=user,
+                loop=_omni_loop,
+                job_tracker=_omni_jt,
+                xray_executor=_omni_xe,
+                **explore_kwargs,
             )
         )
 
