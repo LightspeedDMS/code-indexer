@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.102.0] - 2026-06-06
+
+### Fixed
+- Bug #1075: `BackgroundJobsPostgresBackend._row_to_dict()` called `json.loads()` directly on the `metadata` column (JSONB), bypassing the `_json_col()` helper already used for all other JSON columns. psycopg3 auto-deserializes JSONB to Python dicts before returning rows, so `json.loads(dict)` raised `TypeError`. This broke `get_job_details` and `cancel_job` for all xray jobs (which are only in PG, never in BJM's in-memory cache). Fix: use `_json_col()`. Also removes the `and row[19]` falsy guard — `_json_col` handles `None` correctly and the old guard would silently coerce `{}` to `None`.
+- Bug #1076: `SyncJobsPostgresBackend._row_to_dict()` had the identical defect for five JSONB columns (`phases`, `phase_weights`, `progress_history`, `recovery_checkpoint`, `analytics_data`). Added `_json_col()` helper and replaced all five `json.loads(row[N]) if row[N] else None` calls.
+
 ## [10.101.0] - 2026-06-06
 
 ### Changed

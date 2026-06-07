@@ -120,7 +120,7 @@ class BackgroundJobsPostgresBackend:
             "extended_error": _json_col(row[16]),
             "language_resolution_status": _json_col(row[17]),
             "progress_info": row[18] if len(row) > 18 else None,
-            "metadata": json.loads(row[19]) if len(row) > 19 and row[19] else None,
+            "metadata": _json_col(row[19]) if len(row) > 19 else None,
             "executing_node": row[20] if len(row) > 20 else None,
             "claimed_at": row[21] if len(row) > 21 else None,
             "current_phase": row[22] if len(row) > 22 else None,
