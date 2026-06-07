@@ -317,7 +317,7 @@ The server validates evaluator code against a security whitelist before compilat
 
 > **Termination guarantee**: infinite loops in your evaluator hit the sandbox hard timeout (HARD_TIMEOUT_SECONDS = 5.0 s) and surface as `EvaluatorTimeout` in `evaluation_errors[]`. The sandbox timeout is the authoritative termination boundary.
 
-### Cookbook: 15 worked patterns
+### Cookbook: 17 worked patterns
 
 Each example is a complete `evaluator_code` value. All patterns return `Vec<EvalFinding>`. Structure evaluators by walking DOWN from the root node using `descendants_of_kind`.
 
@@ -618,6 +618,51 @@ Each example is a complete `evaluator_code` value. All patterns return `Vec<Eval
     }
     ```
 
+16. **C functions with deeply-nested control flow** (per-function branch density -- C uses `function_definition`, `if_statement`, `for_statement`, `while_statement`):
+    ```rust
+    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for f in node.descendants_of_kind("function_definition") {
+            let ifs = f.descendants_of_kind("if_statement").len();
+            let fors = f.descendants_of_kind("for_statement").len();
+            let whiles = f.descendants_of_kind("while_statement").len();
+            let total = ifs + fors + whiles;
+            if total >= 8 {
+                findings.push(EvalFinding {
+                    pattern: "c_deep_control_flow".to_string(),
+                    line: f.start_line,
+                    snippet: format!("ifs={} fors={} whiles={} total={}", ifs, fors, whiles, total),
+                });
+            }
+        }
+        findings
+    }
+    ```
+
+17. **C++ empty `catch` blocks** (swallowed exceptions -- C++ uses `try_statement` with `catch_clause`; an empty handler contains no `call_expression`, `if_statement`, `for_statement`, `while_statement`, or nested `try_statement`):
+    ```rust
+    fn evaluate_node(node: &OwnedNode) -> Vec<EvalFinding> {
+        let mut findings = Vec::new();
+        for try_stmt in node.descendants_of_kind("try_statement") {
+            for catch in try_stmt.descendants_of_kind("catch_clause") {
+                let has_body = catch.has_descendant_of_kind("call_expression")
+                    || catch.has_descendant_of_kind("if_statement")
+                    || catch.has_descendant_of_kind("for_statement")
+                    || catch.has_descendant_of_kind("while_statement")
+                    || catch.has_descendant_of_kind("try_statement");
+                if !has_body {
+                    findings.push(EvalFinding {
+                        pattern: "cpp_empty_catch".to_string(),
+                        line: catch.start_line,
+                        snippet: catch.text().chars().take(80).collect(),
+                    });
+                }
+            }
+        }
+        findings
+    }
+    ```
+
 ### Common cross-language node type names
 
 tree-sitter node type names differ between languages. Use this table as a starting reference for the general-purpose languages. Bash, HTML, CSS, HCL/Terraform, YAML, SQL, XML, and Groovy are also supported but have limited overlap with the constructs below -- use `xray_dump_ast` to discover their node types.
@@ -634,6 +679,24 @@ tree-sitter node type names differ between languages. Use this table as a starti
 | Variable declaration | `assignment` (no separate decl) | `local_variable_declaration` | `lexical_declaration` (`let`/`const`) / `variable_declaration` (`var`) | `var_declaration` / `short_var_declaration` | `property_declaration` | `local_declaration_statement` |
 | String literal | `string` | `string_literal` | `string` | `interpreted_string_literal` | `string_literal` | `string_literal` |
 | Comment | `comment` | `line_comment` / `block_comment` | `comment` | `comment` | `line_comment` / `block_comment` | `comment` |
+
+C and C++ (verified against tree-sitter-c 0.24.2 and tree-sitter-cpp 0.23.4) share most node kinds. The root node is `translation_unit` in both.
+
+| Construct | C | C++ |
+|-----------|---|-----|
+| Function definition | `function_definition` | `function_definition` |
+| Function call | `call_expression` | `call_expression` |
+| Struct / class | `struct_specifier` | `class_specifier` (also `struct_specifier`) |
+| Namespace | (none) | `namespace_definition` |
+| Template | (none) | `template_declaration` |
+| If statement | `if_statement` | `if_statement` |
+| For loop | `for_statement` | `for_statement` |
+| While loop | `while_statement` | `while_statement` |
+| Try / catch | (none -- C has no exceptions) | `try_statement` / `catch_clause` |
+| String literal | `string_literal` | `string_literal` |
+| Comment | `comment` | `comment` |
+
+For other C/C++ constructs not listed above (variable declarations, preprocessor directives, etc.), use `xray_dump_ast`.
 
 The fastest way to discover the exact type names for a construct is to use `xray_dump_ast` on a small example file in the language, or consult the tree-sitter grammar repository for that language.
 

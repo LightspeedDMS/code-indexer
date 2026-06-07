@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.105.0] - 2026-06-07
+
+### Added
+- Story #1077: C and C++ language support for xray AST search, across BOTH the Python `AstSearchEngine` (Phase 1) and the Rust `xray-core`/`xray-cli` (Phase 2). Rust xray-core now supports 17 languages (was 15) via new `tree-sitter-c` (0.24.2) and `tree-sitter-cpp` (0.23.4) grammar crates; the Python engine supports 12 (was 10) using the C/C++ grammars already bundled in `tree-sitter-languages`. Extension mapping: C = `.c`, `.h`; C++ = `.cc`, `.cpp`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.hxx`, `.h++` (`.h` maps to C per GitHub-Linguist; a C++ header named `.h` parses under the C grammar and may yield ERROR nodes on C++-only syntax — name C++ headers `.hpp`/`.hh`/`.hxx`/`.h++`). The auto-updater rebuilds `xray-cli` on deploy (DeploymentExecutor Step 16), so no deploy-plumbing change is needed. Verified node kinds: `translation_unit`, `function_definition`, `call_expression`, `struct_specifier` (C), `class_specifier`/`namespace_definition`/`template_declaration` (C++), `if_statement`/`for_statement`/`while_statement`, `try_statement`/`catch_clause` (C++), `string_literal`, `comment`. Adds two C/C++ playbook examples to the xray_search tool docs (both live-verified through `xray-cli`), a verified cross-language node-type table, 8 new test fixtures (c/cpp x smoke/realistic/advanced/pathological), and Rust integration tests asserting zero-ERROR parse + exact node kinds. Lazy-load invariant preserved (tree-sitter not imported at CLI startup).
+
 ## [10.104.0] - 2026-06-07
 
 ### Fixed
