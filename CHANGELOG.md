@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.101.0] - 2026-06-06
+
+### Changed
+- xray jobs (`xray_search`, `xray_explore`) are now excluded from the dashboard recent-jobs panel. They remain fully tracked (cancel still works) but no longer clutter the 20-slot recent-jobs list with "Unknown" repo entries. Exclusion is pushed into SQL on both SQLite and PostgreSQL backends so `LIMIT` fires after filtering — dashboard fills correctly even under heavy xray traffic. Adds `exclude_operation_types` param to `get_recent_jobs()` in `JobTracker` and `list_jobs()` in both storage backends.
+
 ## [10.100.0] - 2026-06-06
 
 ### Fixed

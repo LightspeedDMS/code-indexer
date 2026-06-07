@@ -406,6 +406,7 @@ class BackgroundJobsPostgresBackend:
         operation_type: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """List background jobs with optional filtering and pagination."""
         conditions: List[str] = []
@@ -420,6 +421,12 @@ class BackgroundJobsPostgresBackend:
         if operation_type:
             conditions.append("operation_type = %s")
             params.append(operation_type)
+        if exclude_operation_types:
+            placeholders = ", ".join(["%s"] * len(exclude_operation_types))
+            conditions.append(
+                f"(operation_type IS NULL OR operation_type NOT IN ({placeholders}))"
+            )
+            params.extend(exclude_operation_types)
 
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (

@@ -2786,6 +2786,7 @@ class BackgroundJobsSqliteBackend:
         operation_type: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """List background jobs with optional filtering and pagination."""
         conn = self._conn_manager.get_connection()
@@ -2809,6 +2810,12 @@ class BackgroundJobsSqliteBackend:
         if operation_type:
             conditions.append("operation_type = ?")
             params.append(operation_type)
+        if exclude_operation_types:
+            placeholders = ", ".join(["?"] * len(exclude_operation_types))
+            conditions.append(
+                f"(operation_type IS NULL OR operation_type NOT IN ({placeholders}))"
+            )
+            params.extend(exclude_operation_types)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)

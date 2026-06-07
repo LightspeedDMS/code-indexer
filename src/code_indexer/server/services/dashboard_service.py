@@ -496,7 +496,9 @@ class DashboardService:
             job_tracker = self._get_job_tracker()
             if job_tracker is not None:
                 recent_jobs_data = job_tracker.get_recent_jobs(
-                    limit=20, time_filter=time_filter
+                    limit=20,
+                    time_filter=time_filter,
+                    exclude_operation_types=["xray_search", "xray_explore"],
                 )
             else:
                 # Story #541 AC5/AC6: Use time-filtered recent jobs with limit of 20
