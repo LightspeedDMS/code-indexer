@@ -11,7 +11,7 @@ PG methods use %s placeholders translated to ? for SQLite compat via FakePool.
 import logging
 import sqlite3
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Optional
 
 import pytest
 
@@ -21,28 +21,56 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+def _translate_sql(sql: str) -> str:
+    """Translate PG-style SQL to SQLite equivalents."""
+    sql = sql.replace("%s", "?")
+    sql = sql.replace("EXCLUDED.", "excluded.")
+    sql = sql.replace("LEAST(", "MIN(")
+    return sql
+
+
 class FakeCursor:
-    def __init__(self, cursor: sqlite3.Cursor) -> None:
-        self._cursor = cursor
+    """Context-manager cursor backed by a sqlite3.Connection."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._sqlite_cursor: Optional[sqlite3.Cursor] = None
+
+    def execute(self, sql: str, params=None) -> "FakeCursor":
+        sql = _translate_sql(sql)
+        if params is not None:
+            self._sqlite_cursor = self._conn.execute(sql, params)
+        else:
+            self._sqlite_cursor = self._conn.execute(sql)
+        return self
 
     def fetchone(self):
-        return self._cursor.fetchone()
+        if self._sqlite_cursor is None:
+            return None
+        return self._sqlite_cursor.fetchone()
 
     def fetchall(self):
-        return self._cursor.fetchall()
+        if self._sqlite_cursor is None:
+            return []
+        return self._sqlite_cursor.fetchall()
+
+    def __enter__(self) -> "FakeCursor":
+        return self
+
+    def __exit__(self, *args) -> None:
+        pass
 
 
 class FakeConnection:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def execute(self, sql: str, params=None):
-        sql = sql.replace("%s", "?")
-        sql = sql.replace("EXCLUDED.", "excluded.")
-        sql = sql.replace("LEAST(", "MIN(")
-        if params is not None:
-            return FakeCursor(self._conn.execute(sql, params))
-        return FakeCursor(self._conn.execute(sql))
+    def execute(self, sql: str, params=None) -> FakeCursor:
+        return FakeCursor(self._conn).execute(sql, params)
+
+    def cursor(self, row_factory=None) -> FakeCursor:
+        """Return a context-manager cursor (row_factory ignored; SQLite returns tuples)."""
+        return FakeCursor(self._conn)
 
     def commit(self):
         self._conn.commit()

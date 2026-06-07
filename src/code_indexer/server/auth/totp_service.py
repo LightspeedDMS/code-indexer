@@ -23,9 +23,10 @@ import qrcode
 from cryptography.fernet import Fernet, InvalidToken
 
 try:
-    from psycopg.rows import dict_row
+    from psycopg.rows import dict_row, tuple_row
 except ImportError:  # psycopg3 not installed (standalone mode)
     dict_row = None  # type: ignore[assignment,misc]
+    tuple_row = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -476,10 +477,13 @@ class TOTPService:
                 conn.commit()
                 if cursor.rowcount == 0:
                     return False
-                remaining = conn.execute(
-                    "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = %s AND used_at IS NULL",
-                    (username,),
-                ).fetchone()[0]
+                with conn.cursor(row_factory=tuple_row) as cnt_cur:
+                    cnt_cur.execute(
+                        "SELECT COUNT(*) FROM user_recovery_codes"
+                        " WHERE user_id = %s AND used_at IS NULL",
+                        (username,),
+                    )
+                    remaining = cnt_cur.fetchone()[0]
                 logger.info(
                     "Recovery code used for %s. %d codes remaining.",
                     username,

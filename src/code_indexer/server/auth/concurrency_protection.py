@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Generator, Optional
 
 import psycopg
+from psycopg.rows import tuple_row
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ class PasswordChangeConcurrencyProtection:
         cm = self._pool.connection()
         conn = cm.__enter__()
         try:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=tuple_row) as cur:
                 cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (lock_key,))
                 acquired = cur.fetchone()[0]
 
@@ -197,7 +198,7 @@ class PasswordChangeConcurrencyProtection:
         lock_key = f"password_change_{username}"
         try:
             with self._pool.connection() as conn:
-                with conn.cursor() as cur:
+                with conn.cursor(row_factory=tuple_row) as cur:
                     cur.execute(
                         "SELECT pg_try_advisory_lock(hashtext(%s))", (lock_key,)
                     )

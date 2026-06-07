@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.103.0] - 2026-06-07
+
+### Fixed
+- Bug #1071: Intermittent `POST /auth/login` HTTP 500 (`KeyError: 0`) on PostgreSQL cluster nodes. Root cause: `ElevatedSessionManager._PgBackend.touch_atomic*` mutated `conn.row_factory = dict_row` directly on a SHARED pooled psycopg3 connection. psycopg_pool does not reset `row_factory` on connection return, so that dict_row factory persisted and polluted the next borrower; any code reading a row positionally (`row[0]`) on the polluted connection then crashed with `KeyError: 0`. Observed 24 times on staging over 4 days. Fix attacks the bug at its source AND defensively pins all readers: (1) `elevated_session_manager` now uses a scoped `conn.cursor(row_factory=dict_row)` that never mutates the shared connection; (2) `token_bucket._pg_consume`, `rate_limiter` (PasswordChange), `oauth_rate_limiter` (Token + Register), `concurrency_protection` (advisory lock), and `totp_service.verify_recovery_code` all now pin `conn.cursor(row_factory=tuple_row)` for positional reads. `login_rate_limiter` was already immune. New regression coverage: `test_row_factory_pollution_bug1071.py`, `test_token_bucket_pg_row_factory_bug1071.py`, `test_rate_limiter_pg_row_factory_bug1071.py`.
+
 ## [10.102.0] - 2026-06-06
 
 ### Fixed
