@@ -2,8 +2,8 @@
 name: get_file_content
 category: search
 required_permission: query_repos
-tl_dr: Read file content with metadata and token-based pagination to avoid exhaustion.
-slim_description: "Read file content from an indexed repository with token-based pagination (default ~5000 tokens per response)."
+tl_dr: Read file content with metadata and line-offset pagination to avoid context exhaustion.
+slim_description: "Read file content from an indexed repository with line-offset pagination (default ~5000 tokens / ~200-250 lines per response)."
 inputSchema:
   type: object
   properties:
@@ -104,6 +104,17 @@ outputSchema:
           - string
           - 'null'
           description: Helpful message with suggested offset value to continue reading (null if no more content).
+        next_offset:
+          type:
+          - integer
+          - 'null'
+          description: >
+            Line number to pass as offset in the next call to continue reading
+            (equals offset + returned_lines). Null when has_more is false (no
+            more content). This is the canonical pagination cursor -- always
+            prefer next_offset over manually computing offset + returned_lines.
+            cache_handle / byte-envelope pagination are retired; next_offset is
+            the single pagination signal for this tool (Bug #1080).
     error:
       type: string
       description: Error message if failed
@@ -111,12 +122,19 @@ outputSchema:
   - success
 ---
 
-Read file content from an indexed repository with token-based pagination. Default returns FIRST CHUNK ONLY (up to ~5000 tokens, ~200-250 lines), NOT the entire file.
+Read file content from an indexed repository with line-offset pagination. Default returns FIRST CHUNK ONLY (up to ~5000 tokens, ~200-250 lines), NOT the entire file.
 
-PAGINATION: Check metadata.requires_pagination in response. If true, call again with offset from metadata.pagination_hint. Repeat until requires_pagination=false.
+PAGINATION CONTRACT (Bug #1080 - line-offset only): Check metadata.has_more in response. If true, call again with offset=metadata.next_offset. Repeat until has_more=false. All pagination is line-based -- no byte-envelopes, no cache_handle, no page numbers.
+
+- metadata.next_offset: canonical next-page cursor (offset + returned_lines, or null when done)
+- metadata.returned_lines: number of complete lines in this response (never cut mid-line)
+- metadata.has_more: true if more lines exist beyond the returned range
+- metadata.truncated: true if content was cut by the token budget (same as has_more when token limit fires)
+
+BUDGET OVERRUN: A single line larger than the token budget is always returned whole (one-response overrun is allowed to guarantee termination).
 
 QUICK START: get_file_content(repository_alias='backend-global', file_path='src/auth.py') returns first ~250 lines.
-For next chunk: get_file_content(repository_alias='backend-global', file_path='src/auth.py', offset=251, limit=250)
+For next chunk: get_file_content(repository_alias='backend-global', file_path='src/auth.py', offset=metadata.next_offset)
 
 TOKEN BUDGET: ~5000 tokens max per response. Small files returned completely. Large files chunked automatically. metadata.estimated_tokens shows actual size.
 

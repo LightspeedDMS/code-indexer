@@ -160,12 +160,20 @@ class TestMcpHandlerSkipTruncation:
 
 
 class TestTruncationHelperIntegration:
-    """Test TruncationHelper receives full content and generates cache_handle."""
+    """Test Bug #1080 line-aware pagination contract for get_file_content.
 
-    def test_truncation_helper_receives_full_content(
-        self, mock_user, mock_payload_cache
-    ):
-        """Verify TruncationHelper receives full (untruncated) content."""
+    TruncationHelper byte-envelope path is RETIRED for get_file_content.
+    Pagination is purely line-offset based (_read_chunk in files.py).
+    cache_handle is always None; payload_cache.store is never called.
+    """
+
+    def test_payload_cache_not_used_for_large_file(self, mock_user, mock_payload_cache):
+        """Bug #1080: TruncationHelper is retired for file content.
+
+        Previously tested that TruncationHelper.truncate_and_cache received full
+        content.  Under the new contract _read_chunk handles truncation without
+        touching PayloadCache, so payload_cache.store must NOT be called.
+        """
         from code_indexer.server.mcp import handlers
 
         large_content = "# Line content here\n" * LARGE_FILE_LINES
@@ -188,14 +196,27 @@ class TestTruncationHelperIntegration:
                 )
 
                 params = {"repository_alias": "test-repo", "file_path": "large_file.py"}
-                handlers.get_file_content(params, mock_user)
+                mcp_response = handlers.get_file_content(params, mock_user)
 
-                mock_payload_cache.store.assert_called_once()
-                stored_content = mock_payload_cache.store.call_args[0][0]
-                assert stored_content == large_content
+                # Bug #1080 new contract: PayloadCache NOT used for file content.
+                mock_payload_cache.store.assert_not_called()
 
-    def test_cache_handle_returned_for_large_file(self, mock_user, mock_payload_cache):
-        """Verify cache_handle is returned in response when content is truncated."""
+                # Line-aware pagination fields must be present.
+                data = _extract_response_data(mcp_response)
+                assert data.get("cache_handle") is None
+                assert data.get("has_more") is True
+                assert data.get("truncated") is True
+                metadata = data.get("metadata", {})
+                assert metadata.get("returned_lines", 0) > 0
+                assert metadata.get("next_offset") is not None
+
+    def test_cache_handle_is_none_for_large_file(self, mock_user, mock_payload_cache):
+        """Bug #1080: cache_handle is always None for file content (byte-envelope retired).
+
+        Previously tested that cache_handle == "cache-handle-xyz" was returned.
+        Under the new contract the response always carries cache_handle=None and
+        pagination advances via next_offset (line-offset based, self-contained).
+        """
         from code_indexer.server.mcp import handlers
 
         large_content = "# Line content here\n" * HUGE_FILE_LINES
@@ -222,9 +243,16 @@ class TestTruncationHelperIntegration:
                 mcp_response = handlers.get_file_content(params, mock_user)
 
                 data = _extract_response_data(mcp_response)
-                assert data.get("cache_handle") == "cache-handle-xyz"
+                # cache_handle is retired — must always be None.
+                assert data.get("cache_handle") is None
+                # Line-based truncation signals must be set.
                 assert data.get("truncated") is True
                 assert data.get("has_more") is True
+                # next_offset advances the caller to the next chunk.
+                metadata = data.get("metadata", {})
+                assert metadata.get("next_offset") is not None
+                assert isinstance(metadata.get("next_offset"), int)
+                assert metadata.get("next_offset") > 1
 
 
 class TestBackwardCompatibility:

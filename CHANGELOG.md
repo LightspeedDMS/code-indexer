@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.111.0] - 2026-06-08
+
+### Removed
+- Bug #1081 (cleanup, no behavior change): Deleted the orphaned `handle_git_diff` MCP handler in `git_read.py`. It was registered-then-overwritten dead code -- the live `git_diff` tool is the separate `git_diff` function (Story #686, diff-line pagination); `handle_git_diff` had zero runtime callers and was only reachable via a registry line immediately overwritten by the live variant. Removed its definition, its dead registration line, its re-exports from `handlers/__init__.py` and `_legacy.py`, and the test that drove it (`test_git_diff_truncation.py`, which exercised the byte-envelope cache_handle path retired in #1080). The dead-handler-based git_diff cases in `test_bug1080_git_coherence.py` (`_call_git_diff` / `TestGitDiffCoherence`) were also removed -- the live `git_diff` pagination coherence is covered by the #1080 manual front-door E2E. `handle_git_log` (the live omni-fan-out worker) and `handle_git_blame` are untouched.
+
+### Fixed
+- Bug #1081 (doc accuracy): `git_diff.md` outputSchema now matches the live `git_diff` handler exactly -- `success`, `diff_text`, `files_changed`, `lines_returned`, `total_lines`, `has_more`, `next_offset`, `offset`, `limit`, `error`. Removed the stale dead-handler fields it previously advertised (`from_revision`, `to_revision`, `files`, `total_insertions`, `total_deletions`, `stat_summary`) that the live tool never returns. MCP clients reading the `git_diff` output schema now see the true response shape.
+
+## [10.110.0] - 2026-06-08
+
+### Fixed
+- Bug #1080 (fix): Incoherent pagination across the MCP content tools. These tools stacked TWO pagination axes on one payload -- a domain-unit axis (file lines / commits / diff-lines) AND a byte/char "envelope" (TruncationHelper + PayloadCache) -- with no reconciliation. The body was byte-cut (`content[:max_chars]`, often mid-line) while line metadata was computed against the PRE-truncation full slice, and `has_more` was overwritten with the byte-envelope value, so a single response could report `next_offset==null` (line axis: done) yet `has_more==true`/`total_pages>1` (byte axis: more) -- clients could not paginate by the documented offsets. Fix collapses to a SINGLE domain-unit axis: a new line-aware, token-bounded `_read_chunk` in `get_file_content` selects WHOLE lines only (never `content[:max_chars]` mid-line), splitting on `\n` exactly to match the service's `\n`-based `total_lines` count (`str.splitlines()` would over-split on `\f`/`\v`/`\x85`/etc. and break the `returned_lines <= total_lines` invariant), and recomputes `returned_lines`/`next_offset`/`has_more`/`truncated` FROM the actually-returned content. A single line larger than the whole budget is emitted WHOLE (the only allowed one-response budget overrun) so pagination always terminates with a strictly-advancing `next_offset`. The byte envelope (`cache_handle`/`total_pages`) is RETIRED for `get_file_content`, `git_diff`, `git_log`, `git_blame` (now `null`/`0`). NOTE for MCP clients: paginate these four tools by the domain `offset`/`next_offset`, NOT by `cache_handle`/`total_pages` (that path is gone for these tools). The `search_code`/`scip_*`/`xray_*` per-field 2000-char preview is intentionally UNCHANGED (clean item-count axis, regression-guarded). Validated front-door (REST/MCP) E2E: byte-for-byte gap-free reconstruction (`get_file_content` 33 pages == file sha256; `git_diff` == full unpaginated diff; `git_log` all 5539 commits, no dup/drop; `git_blame` contiguous 1..N). Pre-existing dead-code / doc-mismatch (`git_diff.md` outputSchema still advertises dead-handler stat fields; orphaned `handle_git_diff`) tracked separately as #1081.
+
 ## [10.109.0] - 2026-06-08
 
 ### Changed

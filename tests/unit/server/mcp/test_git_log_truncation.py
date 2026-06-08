@@ -156,10 +156,12 @@ class TestGitLogTruncationWithCacheHandle:
             yield
 
     def test_large_log_returns_cache_handle(self, mock_user, mock_payload_cache):
-        """Verify large log returns cache_handle when truncated.
+        """Bug #1080 Finding #3: byte-envelope retired for git_log.
 
-        Story #35 AC1: When git log exceeds git_log_max_tokens, store full log
-        in PayloadCache and return cache_handle.
+        cache_handle is always None; payload_cache.store is never called.
+        Story #35 AC1 superseded: log returned in full, no byte-cut caching.
+        Zeroed fields: truncated=False, has_more=False, total_pages=0,
+        total_tokens=0, preview_tokens=0.
         """
         from code_indexer.server.mcp import handlers
 
@@ -202,12 +204,13 @@ class TestGitLogTruncationWithCacheHandle:
             data = _extract_response_data(result)
 
             assert data["success"] is True
-            assert data.get("cache_handle") == "cache-handle-log-123"
-            assert data.get("truncated") is True  # TOKEN-based truncation
-            assert data.get("has_more") is True
-            assert data.get("total_tokens") > 0  # type: ignore[operator]
-            assert data.get("preview_tokens") > 0  # type: ignore[operator]
-            assert data.get("total_pages") >= 1  # type: ignore[operator]
+            assert data.get("cache_handle") is None
+            assert data.get("truncated") is False
+            assert data.get("has_more") is False
+            assert data.get("total_pages") == 0
+            assert data.get("total_tokens") == 0
+            assert data.get("preview_tokens") == 0
+            mock_payload_cache.store.assert_not_called()
 
     def test_small_log_no_truncation(self, mock_user, mock_payload_cache):
         """Verify small log returns no cache_handle when not truncated.
@@ -322,9 +325,9 @@ class TestGitLogTruncationWithCacheHandle:
                 assert field in data, f"Missing required field: {field}"
 
     def test_log_stores_serialized_json_in_cache(self, mock_user, mock_payload_cache):
-        """Verify full log is serialized to JSON and stored in cache.
+        """Bug #1080 Finding #3: byte-envelope retired — cache.store is never called.
 
-        Story #35 AC4: Full log result should be JSON-serialized and stored.
+        Story #35 AC4 superseded: full log returned directly, no JSON caching.
         """
         from code_indexer.server.mcp import handlers
 
@@ -362,14 +365,8 @@ class TestGitLogTruncationWithCacheHandle:
                 mock_user,
             )
 
-            # Verify cache.store was called with a string (serialized JSON)
-            mock_payload_cache.store.assert_called_once()
-            stored_content = mock_payload_cache.store.call_args[0][0]
-
-            # Verify stored content is valid JSON
-            stored_data = json.loads(stored_content)
-            assert "commits" in stored_data
-            assert "total_count" in stored_data
+            # Bug #1080: byte-envelope retired — store must never be called.
+            mock_payload_cache.store.assert_not_called()
 
     def test_log_no_cache_when_payload_cache_unavailable(self, mock_user):
         """Verify log returns without truncation when cache is unavailable.
@@ -510,12 +507,12 @@ class TestGitLogTruncationHelperIntegration:
     def test_uses_truncation_helper_with_log_content_type(
         self, mock_user, mock_payload_cache
     ):
-        """Verify TruncationHelper is called with content_type='log'.
+        """Bug #1080 Finding #3: byte-envelope retired — TruncationHelper never called.
 
-        Story #35: Ensures correct token limit is applied (git_log_max_tokens).
+        Story #35 superseded: no token-limit caching for git_log.
+        Verifies payload_cache.store is not called regardless of log size.
         """
         from code_indexer.server.mcp import handlers
-        from code_indexer.server.cache.truncation_helper import TruncationResult
 
         large_log_result = _mock_git_log_result(num_commits=100, body_lines=50)
 
@@ -531,9 +528,6 @@ class TestGitLogTruncationHelperIntegration:
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
-            patch(
-                "code_indexer.server.cache.truncation_helper.TruncationHelper"
-            ) as mock_truncation_helper_class,
         ):
             mock_dir.return_value = "/fake/golden/repos"
             mock_resolve.return_value = "/fake/repo/path"
@@ -547,22 +541,6 @@ class TestGitLogTruncationHelperIntegration:
             config = _mock_config_service(LOW_TOKEN_LIMIT)
             mock_config_svc.return_value.get_config.return_value = config
 
-            # Set up mock TruncationHelper (Epic #48: sync, not async)
-            mock_truncation_result = TruncationResult(
-                preview='{"commits": [], ...}',
-                cache_handle="cache-handle-xyz",
-                truncated=True,
-                original_tokens=5000,
-                preview_tokens=100,
-                total_pages=5,
-                has_more=True,
-            )
-            mock_truncation_helper = MagicMock()
-            mock_truncation_helper.truncate_and_cache = Mock(
-                return_value=mock_truncation_result
-            )
-            mock_truncation_helper_class.return_value = mock_truncation_helper
-
             handlers.handle_git_log(
                 {
                     "repository_alias": "test-repo",
@@ -570,7 +548,5 @@ class TestGitLogTruncationHelperIntegration:
                 mock_user,
             )
 
-            # Verify TruncationHelper was called with content_type="log"
-            mock_truncation_helper.truncate_and_cache.assert_called_once()
-            call_kwargs = mock_truncation_helper.truncate_and_cache.call_args[1]
-            assert call_kwargs.get("content_type") == "log"
+            # Bug #1080: byte-envelope retired — store must never be called.
+            mock_payload_cache.store.assert_not_called()
