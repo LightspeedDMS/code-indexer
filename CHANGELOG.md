@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.107.0] - 2026-06-07
+
+### Fixed
+- Bug #1078 (REAL root cause): Semantic-search concurrency collapse on the server was caused by **logging-lock contention**, not provider rate-limiting. `SQLiteLogHandler.emit()` performed a synchronous SQLite write (`execute_atomic` -> `get_connection`) WHILE holding the Python logging handler lock; every per-query INFO log (amplified by the dual-provider "parallel" query strategy) serialized on that lock. Proven by py-spy thread dumps: under a 16-concurrent semantic burst, 32 request threads were parked on `logging/__init__.py:901` `Handler.acquire()` while the holder was stuck in `emit -> get_connection`; zero HTTP 429s occurred. Fix: `SQLiteLogHandler` is now non-blocking -- `emit()` extracts fields and enqueues onto a bounded in-memory queue (`maxsize=10000`), and a dedicated daemon writer thread (`sqlite-log-writer`) drains it to the DB, so the handler lock is never held during I/O (mirrors the existing `ApiMetricsService` writer pattern). On queue saturation, ERROR/CRITICAL records get a bounded blocking enqueue (never silently lost); lower-severity records drop with an observable `dropped_count` + throttled stderr warning (anti-silent-failure). Hot-path per-query INFO logs (e.g. `backend_factory.py` "Creating FilesystemBackend", `semantic_query_manager` routing/strategy logs) demoted to DEBUG. `close()` flushes the queue and joins the writer. Validation (real VoyageAI, single-worker server): 48 concurrent requests -> 48/48 HTTP 200, 0 timeouts, 0 threads on the logging lock, post-burst recovery 0.45s (baseline: 40/40 timeouts + worker hang). Why local (SQLite) collapsed but staging (PostgreSQL) did not: SQLite's single-writer + connection-manager contention wedges under concurrent log writes; PostgreSQL tolerates them. The v10.106.0 ProviderConcurrencyGovernor is retained as independent hardening but is NOT the fix for this stall.
+
 ## [10.106.0] - 2026-06-07
 
 ### Fixed

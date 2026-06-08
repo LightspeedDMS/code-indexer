@@ -205,6 +205,7 @@ class TestSQLiteLogHandlerCleanup:
             exc_info=None,
         )
         handler.emit(record)
+        handler.close()  # flush async writer thread before reading the DB
 
         # Verify it was written to the DB
         conn = sqlite3.connect(str(tmp_path / "test_logs.db"))
@@ -213,7 +214,6 @@ class TestSQLiteLogHandlerCleanup:
 
         assert len(rows) == 1
         assert "Test message" in rows[0][0]
-        handler.close()
 
 
 class TestEmitUsesExecuteAtomic:
@@ -265,9 +265,11 @@ class TestEmitUsesExecuteAtomic:
 
         try:
             handler.emit(record)
+            # close() flushes the async writer thread BEFORE we restore the patch
+            # so the tracking shim captures the execute_atomic call from the writer.
+            handler.close()
         finally:
             real_manager.execute_atomic = real_execute_atomic
-            handler.close()
 
         assert len(atomic_calls) >= 1, (
             "emit() must call execute_atomic() for the INSERT; "
@@ -451,6 +453,11 @@ class TestReentryDeadlockRegression:
             finally:
                 test_completed.set()
 
+        # Bug #1078 note: emit() is now async — it only enqueues and returns.
+        # The execute_atomic call happens on the writer thread.  We must keep
+        # the patches alive until close() drains the writer, otherwise
+        # execute_atomic_with_cleanup is never reached and recursive_attempted
+        # is never set.
         with (
             patch.object(manager, "_cleanup_stale_connections", patched_cleanup),
             patch.object(manager, "execute_atomic", execute_atomic_with_cleanup),
@@ -460,9 +467,11 @@ class TestReentryDeadlockRegression:
         ):
             worker = threading.Thread(target=run_emit, daemon=True)
             worker.start()
+            # Wait for emit() to enqueue the record (fast, non-blocking now)
             completed = test_completed.wait(timeout=DEADLOCK_TIMEOUT_SECONDS)
-
-        handler.close()
+            # Flush the writer thread while patches are still active so the
+            # execute_atomic shim (and thus patched_cleanup) is actually called.
+            handler.close()
 
         assert recursive_attempted.is_set(), (
             "Patched cleanup was never called — test setup error"
@@ -514,15 +523,17 @@ class TestReentryDeadlockRegression:
             exc_info=None,
         )
 
-        try:
-            with (
-                patch.object(manager, "_cleanup_stale_connections", cleanup_fn),
-                patch.object(manager, "execute_atomic", execute_atomic_with_cleanup),
-                patch.object(type(manager), "_last_global_cleanup", 0.0),
-            ):
-                handler.emit(outer)
-        finally:
-            handler.close()
+        # Bug #1078 note: emit() is now async — the execute_atomic call happens
+        # on the writer thread.  close() must be called inside the with block
+        # so execute_atomic_with_cleanup (and thus the inner emit) fires while
+        # the re-entry guard is active on the writer thread.
+        with (
+            patch.object(manager, "_cleanup_stale_connections", cleanup_fn),
+            patch.object(manager, "execute_atomic", execute_atomic_with_cleanup),
+            patch.object(type(manager), "_last_global_cleanup", 0.0),
+        ):
+            handler.emit(outer)
+            handler.close()  # flush writer thread while patches are active
 
         messages = self._read_log_messages(db_path)
         assert any("Outer record" in m for m in messages), (

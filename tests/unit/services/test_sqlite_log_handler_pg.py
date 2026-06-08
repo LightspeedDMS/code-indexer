@@ -57,6 +57,7 @@ class TestSQLiteLogHandlerPGMode:
             "test", logging.INFO, "", 0, "Test message", (), None
         )
         handler.emit(record)
+        handler.close()  # flush async writer thread before asserting
 
         assert len(backend.calls) >= 1, "emit() should delegate to backend"
 
