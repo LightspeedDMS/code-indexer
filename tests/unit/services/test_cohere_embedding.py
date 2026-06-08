@@ -308,7 +308,7 @@ class TestCohereBatchSplitting:
         # embed-v4.0 expects 1536 dims — use correct dimensions so _validate_embeddings passes
         _COHERE_EMBED_V4_DIMS = 1536
 
-        def capture_request(texts, input_type="search_document"):
+        def capture_request(texts, input_type="search_document", *, retry=True):
             captured_batches.append(len(texts))
             return {
                 "embeddings": {
@@ -704,6 +704,7 @@ def _setup_filesystem_store(tmp_path):
     store.logger = MagicMock()
     store.base_path = tmp_path
     store.hnsw_index_cache = None
+    store.id_index_cache = None
     store._id_index = {}
     store._id_index_lock = threading.Lock()
 
@@ -906,14 +907,23 @@ class TestCohereRetryDelayCapBug602:
 
     def test_retry_after_header_capped_at_300s(self, cohere_provider):
         """A 429 response with Retry-After: 86400 must sleep at most 300s."""
+        import httpx
         from unittest.mock import MagicMock, patch
 
         mock_response_429 = MagicMock()
         mock_response_429.status_code = 429
         mock_response_429.headers = {"retry-after": "86400"}
+        # Production calls response.raise_for_status() — must raise so the retry
+        # branch is exercised. Mirror the pattern used in test_5xx_backoff_capped_at_300s.
+        mock_response_429.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "429 Too Many Requests",
+            request=MagicMock(),
+            response=mock_response_429,
+        )
 
         mock_response_ok = MagicMock()
         mock_response_ok.status_code = 200
+        mock_response_ok.raise_for_status.return_value = None
         mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()

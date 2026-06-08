@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.109.0] - 2026-06-08
+
+### Changed
+- Bug #1078 (tuning): default `query_provider_max_concurrency` (the per-provider serving-path embedding/rerank concurrency cap K) raised from 8 to 16. A 3-runs-per-K benchmark sweep (K=8/16/32 at concurrency 8/20/50, single worker, real VoyageAI) found K=16 is the diminishing-returns knee: vs K=8 it cut conc-50 p50 latency ~20% (2221->1780ms) and raised throughput ~9% (14.3->15.6 rps), while K=32 showed no benefit and slight regression. High-concurrency throughput is ultimately capped by the provider round-trip + single-worker GIL (~13-16 rps regardless of K), so K governs how efficiently the queue drains. NOTE: K is PER PROCESS — a 3-node cluster now runs up to 3x16=48 concurrent provider calls (was 3x8=24); ensure this stays within the provider account's concurrent-request budget (still operator-tunable via the runtime config field). Real-provider regression test updated (EXPECTED_K=16, C=24) and re-confirmed: in_flight_high_water_mark==16, 0 errors, no hang.
+
+## [10.108.0] - 2026-06-08
+
+### Performance
+- Bug #1078 (perf): id_index is now cached cross-query, mirroring the HNSW index cache. Previously a fresh `FilesystemVectorStore` was created per query, so its per-instance id_index cache never persisted and `_load_id_index` re-deserialized the id_index from disk on EVERY query -- rebuilding thousands of `pathlib.Path` objects in pure Python. A GIL-only py-spy profile showed this id_index deserialization was ~33% of all GIL-holding time, serializing concurrent queries on the single worker. New `IdIndexCache` (`server/cache/id_index_cache.py`, mirrors `HNSWIndexCache`: TTL, per-key load dedup, `invalidate`/`invalidate_prefix`/`clear`) is a process-global singleton (`get_global_id_index_cache()`) wired in via `FilesystemBackend.get_vector_store_client()` in server mode (gated on the HNSW cache being present; CLI/standalone keeps the per-instance dict, unchanged). The id_index cache is invalidated wherever the HNSW cache is invalidated (index rebuild/refresh), so a refresh never serves a stale path mapping. Measured (voyage-only, single worker, real provider): concurrency-8 semantic latency dropped from ~929ms to ~426ms (-54%, 2.2x); id_index load 316ms->8ms, with a cascade (less GIL contention) cutting embed 533->288ms, HNSW-cache-hit 88->13ms, and per-query setup 143->76ms. Single-query latency also improved 359->274ms.
+
 ## [10.107.0] - 2026-06-07
 
 ### Fixed

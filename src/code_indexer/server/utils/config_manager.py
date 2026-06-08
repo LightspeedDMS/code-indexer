@@ -1214,10 +1214,13 @@ class ServerConfig:
     pace_maker_mode: str = "disabled"
 
     # Bug #1078 Phase 1 - Per-budget concurrency cap for serving-path embedding/rerank calls.
-    # Controls the BoundedSemaphore K in ProviderConcurrencyGovernor. Default 8 allows up to
-    # 8 concurrent voyage (or cohere) HTTP calls per process; excess callers queue up to
-    # acquire_timeout seconds then receive GovernorBusyError. Runtime (DB-backed), not bootstrap.
-    query_provider_max_concurrency: int = 8
+    # Controls the BoundedSemaphore K in ProviderConcurrencyGovernor. Default 16 — diminishing-
+    # returns knee from the Bug #1078 3-run K-sweep (K=16 best conc-50 latency/throughput;
+    # K=32 regresses). K is PER PROCESS, so a 3-node cluster runs up to 3x this many concurrent
+    # provider calls — keep within the provider's concurrent-request budget.
+    # Excess callers queue up to acquire_timeout seconds then receive GovernorBusyError.
+    # Runtime (DB-backed), not bootstrap.
+    query_provider_max_concurrency: int = 16
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
