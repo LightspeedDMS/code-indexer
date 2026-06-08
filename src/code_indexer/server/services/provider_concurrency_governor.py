@@ -1,43 +1,68 @@
-"""ProviderConcurrencyGovernor — per-budget concurrency limiter (Bug #1078 Phase 1).
+"""ProviderConcurrencyGovernor — per-LANE adaptive concurrency limiter.
 
-Prevents semantic-search concurrency collapse by gating all serving-path
-embedding and rerank HTTP calls through a per-budget BoundedSemaphore.
+Bug #1078 Phase 1 introduced this governor with 2 per-PROVIDER budgets
+("voyage", "cohere"), each a fixed ``threading.BoundedSemaphore(K)``. Story
+#1079 Phase B+C refines it into **4 independent per-LANE budgets**:
+
+    voyage:embed   voyage:rerank   cohere:embed   cohere:rerank
+
+Each lane owns its own:
+  - ``ResizableLimiter`` (NOT a BoundedSemaphore) — a runtime-resizable
+    concurrency limiter whose ``in_flight``/``high_water`` are the SINGLE SOURCE
+    OF TRUTH for that lane's concurrency telemetry.
+  - ``AimdController`` — additive-increase / multiplicative-decrease adaptive K.
+    A success grows K (slowly, after a threshold); a 429 halves K. The
+    controller drives the limiter via ``set_limit``.
+  - one ``ProviderHealthMonitor`` sinbin health key.
+
+Lanes are FULLY INDEPENDENT: a 429 on one lane's AIMD never changes another
+lane's K, because each lane has its own limiter+condition+AIMD.
 
 Design principles:
-- One semaphore per account-level rate budget: "voyage" and "cohere".
-  Voyage embedding AND Voyage rerank share the "voyage" semaphore because
-  they share the same VoyageAI account rate limit.
-- Sinbin pre-check: if ANY mapped ProviderHealthMonitor health key is
-  sinbinned, raise ProviderSinbinnedError FAST without consuming a slot.
-- K (max concurrency per budget) comes from server runtime config field
-  ``query_provider_max_concurrency`` (default 16), read once at construction.
-- Expose ``in_flight_high_water_mark`` and ``acquire_wait_count`` per budget
-  for test assertions and observability.
+- Sinbin pre-check: if the lane's mapped health key is sinbinned, raise
+  ProviderSinbinnedError FAST without consuming a slot.
+- Initial K is seeded from server runtime config field
+  ``query_provider_max_concurrency`` (default 8 when unset/unreadable), then
+  CLAMPED into ``[K_MIN, K_MAX]`` = [8, 32].
+- Telemetry: ``in_flight_high_water_mark`` reads each lane's ResizableLimiter
+  ``high_water`` (single source of truth). ``acquire_wait_count`` is a
+  governor-maintained contention counter (the limiter does not track waits).
 
 Call-site pattern (sleep is OUTSIDE the slot — see provider_backoff.py):
-    execute_with_backoff(lambda: governor.execute(budget, do_http, acquire_timeout=...))
+    execute_with_backoff(lambda: governor.execute(lane, do_http, acquire_timeout=...))
 """
 
 import logging
 import threading
-from typing import Callable, Dict, List, Optional, TypeVar
+from typing import Callable, Dict, Optional, TypeVar
+
+from code_indexer.server.services.aimd_controller import AimdController
+from code_indexer.server.services.resizable_limiter import (
+    K_MIN,
+    ResizableLimiter,
+)
+from code_indexer.services.provider_backoff import is_rate_limited
 
 logger = logging.getLogger(__name__)
 
-# Default max-concurrency per budget (overridden via server runtime config).
-_DEFAULT_MAX_CONCURRENCY: int = 16
+# Default seed for the initial per-lane K when server runtime config is
+# unavailable/unreadable. Per Story #1079 this defaults to the AIMD floor
+# (K_MIN = 8); the constructor additionally clamps any seed into [K_MIN, K_MAX].
+_DEFAULT_MAX_CONCURRENCY: int = K_MIN
 
-# Budget -> list of ProviderHealthMonitor health keys to check before acquiring.
-_BUDGET_HEALTH_KEYS: Dict[str, List[str]] = {
-    "voyage": ["voyage-ai", "voyage-reranker"],
-    "cohere": ["cohere", "cohere-reranker"],
+# Lane -> the single ProviderHealthMonitor health key to check before acquiring.
+_LANE_HEALTH_KEY: Dict[str, str] = {
+    "voyage:embed": "voyage-ai",
+    "voyage:rerank": "voyage-reranker",
+    "cohere:embed": "cohere",
+    "cohere:rerank": "cohere-reranker",
 }
 
 T = TypeVar("T")
 
 
 class GovernorBusyError(RuntimeError):
-    """Raised when all slots for a budget are occupied and acquire_timeout is exceeded."""
+    """Raised when all slots for a lane are occupied and acquire_timeout is exceeded."""
 
     def __init__(self, budget: str, timeout: float) -> None:
         self.budget = budget
@@ -48,24 +73,22 @@ class GovernorBusyError(RuntimeError):
 
 
 class ProviderSinbinnedError(RuntimeError):
-    """Raised when a provider budget is sinbinned — fast-fail without consuming a slot."""
+    """Raised when a lane is sinbinned — fast-fail without consuming a slot."""
 
     def __init__(self, budget: str, health_key: str) -> None:
         self.budget = budget
         self.health_key = health_key
         super().__init__(
-            f"Provider budget {budget!r} sinbinned (health key: {health_key!r})"
+            f"Provider lane {budget!r} sinbinned (health key: {health_key!r})"
         )
 
 
 class ProviderConcurrencyGovernor:
-    """Thread-safe per-budget BoundedSemaphore governor.
+    """Thread-safe 4-lane adaptive concurrency governor.
 
     Singleton (``get_instance()`` / ``reset_instance()``), mirroring the
-    ProviderHealthMonitor singleton pattern.
-
-    Construct directly (bypassing singleton) in tests by calling the
-    constructor with an explicit ``max_concurrency``.
+    ProviderHealthMonitor singleton pattern. Construct directly (bypassing the
+    singleton) in tests with an explicit ``max_concurrency`` seed.
     """
 
     _instance: Optional["ProviderConcurrencyGovernor"] = None
@@ -74,17 +97,20 @@ class ProviderConcurrencyGovernor:
     def __init__(self, max_concurrency: Optional[int] = None) -> None:
         if max_concurrency is None:
             max_concurrency = self._read_config_concurrency()
-        self._k: int = max_concurrency
-        # One BoundedSemaphore per budget
-        self._semaphores: Dict[str, threading.BoundedSemaphore] = {
-            budget: threading.BoundedSemaphore(self._k)
-            for budget in _BUDGET_HEALTH_KEYS
+        # One ResizableLimiter + AimdController per lane. ResizableLimiter clamps
+        # the seed into [K_MIN, K_MAX] internally; AimdController seeds its K from
+        # the limiter's (clamped) limit, so the two always agree at construction.
+        self._limiters: Dict[str, ResizableLimiter] = {
+            lane: ResizableLimiter(initial=max_concurrency) for lane in _LANE_HEALTH_KEY
         }
-        # Telemetry counters — all reads/writes under self._stats_lock
+        self._aimd: Dict[str, AimdController] = {
+            lane: AimdController(limiter=self._limiters[lane])
+            for lane in _LANE_HEALTH_KEY
+        }
+        # acquire_wait_count stays governor-maintained (the limiter does not
+        # track contention). in_flight/high_water come from the limiters.
         self._stats_lock = threading.Lock()
-        self._in_flight: Dict[str, int] = {b: 0 for b in _BUDGET_HEALTH_KEYS}
-        self._high_water: Dict[str, int] = {b: 0 for b in _BUDGET_HEALTH_KEYS}
-        self._wait_count: Dict[str, int] = {b: 0 for b in _BUDGET_HEALTH_KEYS}
+        self._wait_count: Dict[str, int] = {lane: 0 for lane in _LANE_HEALTH_KEY}
 
     # ------------------------------------------------------------------
     # Singleton interface
@@ -105,6 +131,14 @@ class ProviderConcurrencyGovernor:
             cls._instance = None
 
     # ------------------------------------------------------------------
+    # Introspection (used by tests + observability)
+    # ------------------------------------------------------------------
+
+    def aimd(self, budget: str) -> AimdController:
+        """Return the AimdController for a lane (raises KeyError for unknown lane)."""
+        return self._aimd[budget]
+
+    # ------------------------------------------------------------------
     # Core API
     # ------------------------------------------------------------------
 
@@ -115,66 +149,64 @@ class ProviderConcurrencyGovernor:
         *,
         acquire_timeout: float,
     ) -> T:
-        """Gate a single HTTP attempt through the budget semaphore.
+        """Gate a single HTTP attempt through the lane's ResizableLimiter.
 
         Steps:
-          1. Validate budget key (raises KeyError for unknown budgets).
-          2. Sinbin pre-check: if ANY mapped health key is sinbinned, raise
+          1. Validate lane key (raises KeyError for unknown lanes).
+          2. Sinbin pre-check: if the lane's health key is sinbinned, raise
              ProviderSinbinnedError immediately WITHOUT consuming a slot.
-          3. Probe current in-flight count; if already at K, this acquire will
-             block — record it as a waited acquire.
-          4. Try to acquire the semaphore within acquire_timeout seconds.
-             If the timeout elapses, raise GovernorBusyError.
-          5. Run fn() (one HTTP attempt). Release slot in finally.
+          3. Probe in-flight; if already at K, record a waited acquire.
+          4. Acquire the limiter within acquire_timeout; on timeout raise
+             GovernorBusyError (bounded failure, never a hang).
+          5. Run fn() (one HTTP attempt). On success: aimd.record(success=True).
+             On a rate-limited exc (is_rate_limited): aimd.record(success=False)
+             then re-raise. Release the slot in finally.
 
         Args:
-            budget: One of "voyage" or "cohere".
-            fn: Zero-argument callable performing ONE HTTP call. Its return
-                value is propagated to the caller.
-            acquire_timeout: Seconds to wait for a slot before raising
-                GovernorBusyError.
+            budget: One of the 4 lanes: "voyage:embed", "voyage:rerank",
+                "cohere:embed", "cohere:rerank".
+            fn: Zero-argument callable performing ONE HTTP call.
+            acquire_timeout: Seconds to wait for a slot before GovernorBusyError.
 
         Returns:
             Whatever fn() returns.
 
         Raises:
-            KeyError: Unknown budget.
-            ProviderSinbinnedError: Budget is sinbinned (no slot consumed).
+            KeyError: Unknown lane.
+            ProviderSinbinnedError: Lane is sinbinned (no slot consumed).
             GovernorBusyError: acquire_timeout elapsed before a slot was free.
-            Any exception raised by fn() (slot is released in finally).
+            Any exception raised by fn() (slot released in finally; a 429 also
+            triggers an AIMD multiplicative decrease before re-raising).
         """
-        if budget not in _BUDGET_HEALTH_KEYS:
-            raise KeyError(f"Unknown governor budget {budget!r}")
+        if budget not in _LANE_HEALTH_KEY:
+            raise KeyError(f"Unknown governor lane {budget!r}")
 
-        # Step 2: sinbin pre-check — fast-fail without a slot
+        # Step 2: sinbin pre-check — fast-fail without a slot.
         self._check_sinbin(budget)
 
-        # Step 3: detect contention before acquiring.
-        # If in_flight is already at K, this acquire will have to wait.
-        with self._stats_lock:
-            will_wait = self._in_flight[budget] >= self._k
+        limiter = self._limiters[budget]
 
-        if will_wait:
+        # Step 3: detect contention before acquiring.
+        if limiter.in_flight >= limiter.limit:
             self._record_waited(budget)
 
-        # Step 4: acquire semaphore
-        sem = self._semaphores[budget]
-        acquired = sem.acquire(blocking=True, timeout=acquire_timeout)
-        if not acquired:
+        # Step 4: acquire the lane limiter.
+        if not limiter.acquire(timeout=acquire_timeout):
             raise GovernorBusyError(budget, acquire_timeout)
 
-        # Update in-flight and high-water under stats lock
-        with self._stats_lock:
-            self._in_flight[budget] += 1
-            if self._in_flight[budget] > self._high_water[budget]:
-                self._high_water[budget] = self._in_flight[budget]
-
+        aimd = self._aimd[budget]
         try:
-            return fn()
+            result = fn()
+            aimd.record(success=True)
+            return result
+        except BaseException as exc:
+            # Per 429 ATTEMPT: multiplicative decrease via the lane's AIMD. Only
+            # canonically-classified rate-limit signals count (Phase A).
+            if is_rate_limited(exc):
+                aimd.record(success=False)
+            raise
         finally:
-            with self._stats_lock:
-                self._in_flight[budget] -= 1
-            sem.release()
+            limiter.release()
 
     # ------------------------------------------------------------------
     # Telemetry properties
@@ -182,13 +214,16 @@ class ProviderConcurrencyGovernor:
 
     @property
     def in_flight_high_water_mark(self) -> Dict[str, int]:
-        """Per-budget peak concurrent in-flight count (for test assertions)."""
-        with self._stats_lock:
-            return dict(self._high_water)
+        """Per-lane peak concurrent in-flight count.
+
+        SINGLE SOURCE OF TRUTH: read directly from each lane's ResizableLimiter
+        ``high_water`` rather than a parallel hand-incremented governor counter.
+        """
+        return {lane: lim.high_water for lane, lim in self._limiters.items()}
 
     @property
     def acquire_wait_count(self) -> Dict[str, int]:
-        """Per-budget count of acquisitions that had to wait (contention count)."""
+        """Per-lane count of acquisitions that had to wait (contention count)."""
         with self._stats_lock:
             return dict(self._wait_count)
 
@@ -197,16 +232,16 @@ class ProviderConcurrencyGovernor:
     # ------------------------------------------------------------------
 
     def _check_sinbin(self, budget: str) -> None:
-        """Raise ProviderSinbinnedError if any mapped health key is sinbinned."""
+        """Raise ProviderSinbinnedError if the lane's health key is sinbinned."""
         from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
         monitor = ProviderHealthMonitor.get_instance()
-        for key in _BUDGET_HEALTH_KEYS[budget]:
-            if monitor.is_sinbinned(key):
-                raise ProviderSinbinnedError(budget, key)
+        key = _LANE_HEALTH_KEY[budget]
+        if monitor.is_sinbinned(key):
+            raise ProviderSinbinnedError(budget, key)
 
     def _record_waited(self, budget: str) -> None:
-        """Increment wait_count for a budget (contention detected before acquire)."""
+        """Increment wait_count for a lane (contention detected before acquire)."""
         with self._stats_lock:
             self._wait_count[budget] += 1
 
@@ -214,8 +249,9 @@ class ProviderConcurrencyGovernor:
     def _read_config_concurrency() -> int:
         """Read query_provider_max_concurrency from server runtime config.
 
-        Falls back to _DEFAULT_MAX_CONCURRENCY on any error (config not yet
-        initialized, missing field, test context, etc.).
+        Falls back to _DEFAULT_MAX_CONCURRENCY (= K_MIN = 8) on any error (config
+        not yet initialized, missing field, test context, etc.). The returned
+        value is clamped into [K_MIN, K_MAX] by the constructor.
         """
         try:
             from code_indexer.server.services.config_service import get_config_service

@@ -24,14 +24,22 @@ _GOVERNOR_ACQUIRE_TIMEOUT_SECS: float = 30.0
 
 
 def _get_embedding_budget(provider: Any) -> str:
-    """Map an embedding provider instance to its governor budget key.
+    """Map an embedding provider instance to its governor EMBED-lane key.
 
-    Returns "cohere" for CohereEmbeddingProvider instances and "voyage" for
-    everything else (VoyageAIClient and any future Voyage-backed providers).
+    Story #1079 Phase B+C: the governor is now 4-lane. Embedding calls route to
+    the ``:embed`` lane of the provider:
+      - "cohere:embed" for CohereEmbeddingProvider instances,
+      - "voyage:embed" for everything else (VoyageAIClient and any future
+        Voyage-backed providers).
+    Rerank calls use the ``:rerank`` lanes (see mcp/reranking.py).
     """
     from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
 
-    return "cohere" if isinstance(provider, CohereEmbeddingProvider) else "voyage"
+    return (
+        "cohere:embed"
+        if isinstance(provider, CohereEmbeddingProvider)
+        else "voyage:embed"
+    )
 
 
 def governed_query_embedding(
