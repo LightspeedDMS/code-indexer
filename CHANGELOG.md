@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.108.0] - 2026-06-08
+
+### Performance
+- Bug #1078 (perf): id_index is now cached cross-query, mirroring the HNSW index cache. Previously a fresh `FilesystemVectorStore` was created per query, so its per-instance id_index cache never persisted and `_load_id_index` re-deserialized the id_index from disk on EVERY query -- rebuilding thousands of `pathlib.Path` objects in pure Python. A GIL-only py-spy profile showed this id_index deserialization was ~33% of all GIL-holding time, serializing concurrent queries on the single worker. New `IdIndexCache` (`server/cache/id_index_cache.py`, mirrors `HNSWIndexCache`: TTL, per-key load dedup, `invalidate`/`invalidate_prefix`/`clear`) is a process-global singleton (`get_global_id_index_cache()`) wired in via `FilesystemBackend.get_vector_store_client()` in server mode (gated on the HNSW cache being present; CLI/standalone keeps the per-instance dict, unchanged). The id_index cache is invalidated wherever the HNSW cache is invalidated (index rebuild/refresh), so a refresh never serves a stale path mapping. Measured (voyage-only, single worker, real provider): concurrency-8 semantic latency dropped from ~929ms to ~426ms (-54%, 2.2x); id_index load 316ms->8ms, with a cascade (less GIL contention) cutting embed 533->288ms, HNSW-cache-hit 88->13ms, and per-query setup 143->76ms. Single-query latency also improved 359->274ms.
+
 ## [10.107.0] - 2026-06-07
 
 ### Fixed

@@ -125,16 +125,27 @@ class FilesystemBackend(VectorStoreBackend):
         For filesystem backend, this returns a FilesystemVectorStore instance.
 
         Story #526: Passes hnsw_index_cache to enable server-side caching.
+        Bug #1078: Passes id_index_cache (global singleton) when in server mode
+                   (indicated by hnsw_index_cache being set), otherwise None.
 
         Returns:
             FilesystemVectorStore instance configured for this project
         """
         from ..storage.filesystem_vector_store import FilesystemVectorStore
 
+        # Bug #1078: server mode (hnsw_index_cache present) -> inject id_index cache.
+        # Local import avoids pulling server modules into CLI startup path.
+        id_index_cache = None
+        if self.hnsw_index_cache is not None:
+            from ..server.cache.id_index_cache import get_global_id_index_cache
+
+            id_index_cache = get_global_id_index_cache()
+
         return FilesystemVectorStore(
             base_path=self.vectors_dir,
             project_root=self.project_root,
             hnsw_index_cache=self.hnsw_index_cache,
+            id_index_cache=id_index_cache,
         )
 
     def health_check(self) -> bool:

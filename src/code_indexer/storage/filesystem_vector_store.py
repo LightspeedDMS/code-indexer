@@ -217,6 +217,7 @@ class FilesystemVectorStore:
         base_path: Path,
         project_root: Optional[Path] = None,
         hnsw_index_cache: Optional[Any] = None,
+        id_index_cache: Optional[Any] = None,
     ):
         """Initialize filesystem vector store.
 
@@ -224,6 +225,7 @@ class FilesystemVectorStore:
             base_path: Base directory for all collections
             project_root: Root directory of the project being indexed (for git operations)
             hnsw_index_cache: Optional HNSW index cache for server-side performance (Story #526)
+            id_index_cache: Optional id_index cache for server-side performance (Bug #1078)
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -269,6 +271,10 @@ class FilesystemVectorStore:
         # Story #526: Server-side HNSW index cache for 1800x performance improvement
         # When set, caches hnswlib.Index objects with TTL-based eviction
         self.hnsw_index_cache = hnsw_index_cache
+
+        # Bug #1078: Server-side id_index cache to eliminate per-query pathlib deserialization
+        # (~33% GIL time). Mirrors HNSW cache pattern. None in CLI/standalone mode.
+        self.id_index_cache = id_index_cache
 
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}
@@ -698,6 +704,9 @@ class FilesystemVectorStore:
         # Invalidate HNSW cache if present (server-side cache must be refreshed)
         if self.hnsw_index_cache is not None:
             self.hnsw_index_cache.invalidate(str(collection_path))
+        # Bug #1078: invalidate id_index cache in lockstep with HNSW (same rebuild event)
+        if self.id_index_cache is not None:
+            self.id_index_cache.invalidate(str(collection_path))
 
         self.logger.info(
             f"Filtered HNSW rebuild complete for '{collection_name}': "
@@ -2456,12 +2465,19 @@ class FilesystemVectorStore:
 
             # Load ID index in same thread (parallel with embedding generation)
             t_id = time.time()
-            with self._id_index_lock:
-                if collection_name not in self._id_index:
-                    self._id_index[collection_name] = self._load_id_index(
-                        collection_name
-                    )
-                id_index = self._id_index[collection_name]
+            if self.id_index_cache is not None:
+                # Bug #1078: use shared cross-query cache (server mode)
+                id_index = self.id_index_cache.get_or_load(
+                    str(collection_path.resolve()),
+                    lambda: self._load_id_index(collection_name),
+                )
+            else:
+                with self._id_index_lock:
+                    if collection_name not in self._id_index:
+                        self._id_index[collection_name] = self._load_id_index(
+                            collection_name
+                        )
+                    id_index = self._id_index[collection_name]
             id_load_ms = (time.time() - t_id) * 1000
 
             return hnsw_index, id_index, hnsw_load_ms, id_load_ms
