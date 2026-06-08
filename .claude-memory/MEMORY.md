@@ -26,6 +26,7 @@
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - ALWAYS switch to development branch before committing — never commit on master/staging
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it
 - [feedback_lint_before_commit.md](feedback_lint_before_commit.md) - Run ruff check/format/mypy BEFORE staging — pre-commit hook is safety net, not primary
+- [feedback_version_bump_must_be_push_tip.md](feedback_version_bump_must_be_push_tip.md) - The __init__.py version-bump commit MUST be the tip of its push or CI skips tag creation (compares HEAD~1..HEAD)
 - [feedback_check_running_jobs_before_restart.md](feedback_check_running_jobs_before_restart.md) - NEVER restart cidx-server without checking for active long-running jobs
 - [feedback_ruff_black_version_alignment.md](feedback_ruff_black_version_alignment.md) - Pre-commit ruff version must match system ruff; server-fast-automation uses ruff format
 - [feedback_no_unnecessary_questions.md](feedback_no_unnecessary_questions.md) - Never stop for obvious next steps — only stop if genuinely blocked
