@@ -39,8 +39,8 @@ inputSchema:
       minimum: 0
     limit:
       type: integer
-      description: 'Maximum number of diff lines to return. Default: 500. Range: 1-5000. Use for paginating large diffs. Response
-        includes has_more and next_offset.'
+      description: 'Maximum number of diff lines to return. Default: 500. Response includes has_more and next_offset; pass next_offset
+        back as offset to fetch the next page.'
       default: 500
       minimum: 1
       maximum: 5000

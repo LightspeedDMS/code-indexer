@@ -399,58 +399,21 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "rerank_time_ms": 0,
             }
 
-        # Story #35: Build full log result for potential caching
-        full_log_data = {
-            "commits": commits,
-            "total_count": result.total_count,
-        }
-
-        # Story #35: Apply token-based truncation with cache handle support
-        payload_cache = getattr(
-            _handler_utils.app_module.app.state, "payload_cache", None
-        )
-        config_service = get_config_service()
-        content_limits = config_service.get_config().content_limits_config
-
-        # Initialize truncation fields
-        cache_handle = None
-        truncated = False
-        total_tokens = 0
-        preview_tokens = 0
-        total_pages = 0
-        has_more = False
-
-        # Serialize log result to JSON for token counting and caching
-        log_json = json_module.dumps(full_log_data)
-
-        if payload_cache is not None and log_json and content_limits is not None:
-            from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-            truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = truncation_helper.truncate_and_cache(
-                content=log_json,
-                content_type="log",
-            )
-
-            cache_handle = truncation_result.cache_handle
-            truncated = truncation_result.truncated
-            total_tokens = truncation_result.original_tokens
-            preview_tokens = truncation_result.preview_tokens
-            total_pages = truncation_result.total_pages
-            has_more = truncation_result.has_more
-
+        # Bug #1080 (Finding #3): byte-envelope (TruncationHelper / cache_handle) is fully
+        # retired for git_log.  All requested commits are always returned in full; the
+        # byte-cut preview/cache_handle pattern has no navigable continuation axis for
+        # clients and so is incoherent.  has_more/total_pages remain False/0.
         return _mcp_response(
             {
                 "success": True,
                 "commits": commits,
                 "total_count": result.total_count,
-                # Story #35: Truncation metadata fields
-                "cache_handle": cache_handle,
-                "truncated": truncated,
-                "total_tokens": total_tokens,
-                "preview_tokens": preview_tokens,
-                "total_pages": total_pages,
-                "has_more": has_more,
+                "cache_handle": None,
+                "truncated": False,
+                "total_tokens": 0,
+                "preview_tokens": 0,
+                "total_pages": 0,
+                "has_more": False,
                 # Story #660: Reranking telemetry
                 "query_metadata": {
                     "reranker_used": _rerank_meta["reranker_used"],
@@ -731,50 +694,10 @@ def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             for f in result.files
         ]
 
-        # Story #34: Build full diff result for potential caching
-        full_diff_data = {
-            "from_revision": result.from_revision,
-            "to_revision": result.to_revision,
-            "files": files,
-            "total_insertions": result.total_insertions,
-            "total_deletions": result.total_deletions,
-            "stat_summary": result.stat_summary,
-        }
-
-        # Story #34: Apply token-based truncation with cache handle support
-        payload_cache = getattr(
-            _handler_utils.app_module.app.state, "payload_cache", None
-        )
-        config_service = get_config_service()
-        content_limits = config_service.get_config().content_limits_config
-
-        # Initialize truncation fields
-        cache_handle = None
-        truncated = False
-        total_tokens = 0
-        preview_tokens = 0
-        total_pages = 0
-        has_more = False
-
-        # Serialize diff result to JSON for token counting and caching
-        diff_json = json_module.dumps(full_diff_data)
-
-        if payload_cache is not None and diff_json and content_limits is not None:
-            from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-            truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = truncation_helper.truncate_and_cache(
-                content=diff_json,
-                content_type="diff",
-            )
-
-            cache_handle = truncation_result.cache_handle
-            truncated = truncation_result.truncated
-            total_tokens = truncation_result.original_tokens
-            preview_tokens = truncation_result.preview_tokens
-            total_pages = truncation_result.total_pages
-            has_more = truncation_result.has_more
-
+        # Bug #1080 (Finding #3): byte-envelope (TruncationHelper / cache_handle) is fully
+        # retired for git_diff.  All diff records are always returned in full; the
+        # byte-cut preview/cache_handle pattern has no navigable continuation axis for
+        # clients and so is incoherent.  has_more/total_pages remain False/0.
         return _mcp_response(
             {
                 "success": True,
@@ -784,13 +707,12 @@ def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "total_insertions": result.total_insertions,
                 "total_deletions": result.total_deletions,
                 "stat_summary": result.stat_summary,
-                # Story #34: Truncation metadata fields
-                "cache_handle": cache_handle,
-                "truncated": truncated,
-                "total_tokens": total_tokens,
-                "preview_tokens": preview_tokens,
-                "total_pages": total_pages,
-                "has_more": has_more,
+                "cache_handle": None,
+                "truncated": False,
+                "total_tokens": 0,
+                "preview_tokens": 0,
+                "total_pages": 0,
+                "has_more": False,
             }
         )
 
@@ -853,64 +775,18 @@ def _serialize_blame_lines(blame_lines: list) -> List[dict]:
     ]
 
 
-def _apply_blame_truncation(
-    lines: List[dict], payload_cache: Any, content_limits: Any
-) -> tuple:
-    """Run PayloadCache + TruncationHelper on blame lines, returning (preview_lines, meta).
-
-    When payload_cache or content_limits is unavailable, logs a warning and gracefully
-    returns (full_lines, _BLAME_TRUNC_ZERO). This fallback is intentional: truncation
-    infrastructure may not be configured in all deployments, and failing hard would
-    break all blame responses on those deployments.
-    """
-    if payload_cache is None or content_limits is None:
-        logger.warning(
-            "Blame truncation infrastructure unavailable "
-            "(payload_cache=%s content_limits=%s); returning full response",
-            payload_cache is None,
-            content_limits is None,
-        )
-        return lines, _BLAME_TRUNC_ZERO.copy()
-
-    blame_json = json_module.dumps({"lines": lines})
-    from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-    tr = TruncationHelper(payload_cache, content_limits).truncate_and_cache(
-        content=blame_json,
-        content_type="blame",
-    )
-    preview_lines = (
-        json_module.loads(tr.preview).get("lines", lines) if tr.truncated else lines
-    )
-    return preview_lines, {
-        "cache_handle": tr.cache_handle,
-        "truncated": tr.truncated,
-        "total_tokens": tr.original_tokens,
-        "preview_tokens": tr.preview_tokens,
-        "total_pages": tr.total_pages,
-        "has_more": tr.has_more,
-    }
-
-
 def _build_git_blame_response(
     result: Any, lines: List[dict], total_lines: int, handler_utils: Any
 ) -> dict:
-    """Build the success response dict for git_blame, applying truncation when needed.
+    """Build the success response dict for git_blame.
 
-    When total_lines exceeds BLAME_TRUNCATION_LINE_THRESHOLD, fetches payload_cache
-    from app.state (may be None — _apply_blame_truncation logs a warning and falls
-    back to the full response in that deployment-specific case) and runs TruncationHelper.
+    Bug #1080 (Finding #3): byte-envelope (TruncationHelper / cache_handle) is fully
+    retired for git_blame.  All requested blame lines are returned in full; the
+    byte-cut preview/cache_handle pattern has no navigable continuation axis and is
+    incoherent.  The BLAME_TRUNCATION_LINE_THRESHOLD branch is removed — all responses
+    use _BLAME_TRUNC_ZERO (cache_handle=None, truncated=False, has_more=False).
     """
-    if total_lines > BLAME_TRUNCATION_LINE_THRESHOLD:
-        payload_cache = getattr(
-            handler_utils.app_module.app.state, "payload_cache", None
-        )
-        content_limits = get_config_service().get_config().content_limits_config
-        response_lines, trunc_meta = _apply_blame_truncation(
-            lines, payload_cache, content_limits
-        )
-    else:
-        response_lines, trunc_meta = lines, _BLAME_TRUNC_ZERO.copy()
+    response_lines, trunc_meta = lines, _BLAME_TRUNC_ZERO.copy()
 
     return {
         "success": True,

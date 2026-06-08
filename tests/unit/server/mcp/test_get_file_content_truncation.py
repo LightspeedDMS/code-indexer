@@ -259,7 +259,7 @@ class TestGetFileContentGlobalRepoTruncation:
     def test_global_repo_truncation_applies_cache_handle(
         self, mock_user, mock_global_repo_setup
     ):
-        """AC2: Global repo path uses get_file_content_by_path with truncation."""
+        """Bug #1080: get_file_content_by_path is called; cache_handle is None (byte-envelope retired)."""
         from code_indexer.server.mcp import handlers
 
         mock_service, mock_app = mock_global_repo_setup
@@ -327,12 +327,12 @@ class TestGetFileContentGlobalRepoTruncation:
             # Verify global repo path was used
             mock_service.get_file_content_by_path.assert_called_once()
 
-            # Verify truncation was applied
             assert data.get("success") is True
+            # Bug #1080: byte-envelope retired — cache_handle is always None.
             cache_handle = data.get("cache_handle") or data.get("metadata", {}).get(
                 "cache_handle"
             )
-            assert cache_handle == "global_cache_handle_xyz"
+            assert cache_handle is None
 
     def test_global_repo_small_file_no_truncation(
         self, mock_user, mock_global_repo_setup

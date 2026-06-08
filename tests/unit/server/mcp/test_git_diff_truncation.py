@@ -143,10 +143,10 @@ class TestGitDiffTruncationWithCacheHandle:
             yield
 
     def test_large_diff_returns_cache_handle(self, mock_user, mock_payload_cache):
-        """Verify large diff returns cache_handle when truncated.
+        """Bug #1080 Finding #3: byte-envelope retired for git_diff.
 
-        Story #34 AC1: When git diff exceeds git_diff_max_tokens, store full diff
-        in PayloadCache and return cache_handle.
+        cache_handle is always None; payload_cache.store is never called.
+        Story #34 AC1 is superseded: diff is returned in full, no byte-cut caching.
         """
         from code_indexer.server.mcp import handlers
 
@@ -190,12 +190,12 @@ class TestGitDiffTruncationWithCacheHandle:
             data = _extract_response_data(result)
 
             assert data["success"] is True
-            assert data.get("cache_handle") == "cache-handle-diff-123"
-            assert data.get("truncated") is True
-            assert data.get("has_more") is True
-            assert data.get("total_tokens") > 0  # type: ignore[operator]
-            assert data.get("preview_tokens") > 0  # type: ignore[operator]
-            assert data.get("total_pages") >= 1  # type: ignore[operator]
+            # Bug #1080 Finding #3: byte-envelope fully retired.
+            assert data.get("cache_handle") is None
+            assert data.get("truncated") is False
+            assert data.get("has_more") is False
+            assert data.get("total_pages") == 0
+            mock_payload_cache.store.assert_not_called()
 
     def test_small_diff_no_truncation(self, mock_user, mock_payload_cache):
         """Verify small diff returns no cache_handle when not truncated.
@@ -316,9 +316,9 @@ class TestGitDiffTruncationWithCacheHandle:
                 assert field in data, f"Missing required field: {field}"
 
     def test_diff_stores_serialized_json_in_cache(self, mock_user, mock_payload_cache):
-        """Verify full diff is serialized to JSON and stored in cache.
+        """Bug #1080 Finding #3: payload_cache.store must NOT be called for git_diff.
 
-        Story #34 AC4: Full diff result should be JSON-serialized and stored.
+        Story #34 AC4 is superseded: byte-envelope caching is retired.
         """
         from code_indexer.server.mcp import handlers
 
@@ -357,15 +357,8 @@ class TestGitDiffTruncationWithCacheHandle:
                 mock_user,
             )
 
-            # Verify cache.store was called with a string (serialized JSON)
-            mock_payload_cache.store.assert_called_once()
-            stored_content = mock_payload_cache.store.call_args[0][0]
-
-            # Verify stored content is valid JSON
-            stored_data = json.loads(stored_content)
-            assert "files" in stored_data
-            assert "from_revision" in stored_data
-            assert "to_revision" in stored_data
+            # Bug #1080 Finding #3: byte-envelope fully retired — store must NOT be called.
+            mock_payload_cache.store.assert_not_called()
 
     def test_diff_no_cache_when_payload_cache_unavailable(self, mock_user):
         """Verify diff returns without truncation when cache is unavailable.
@@ -504,12 +497,13 @@ class TestGitDiffTruncationHelperIntegration:
     def test_uses_truncation_helper_with_diff_content_type(
         self, mock_user, mock_payload_cache
     ):
-        """Verify TruncationHelper is called with content_type='diff'.
+        """Bug #1080 Finding #3: TruncationHelper / payload_cache.store not called for git_diff.
 
-        Story #34: Ensures correct token limit is applied (git_diff_max_tokens).
+        Story #34 originally required TruncationHelper with content_type='diff'.
+        That contract is superseded: the byte-envelope is fully retired and
+        payload_cache.store must never be invoked for git_diff responses.
         """
         from code_indexer.server.mcp import handlers
-        from code_indexer.server.cache.truncation_helper import TruncationResult
 
         large_diff_result = _mock_git_diff_result(num_files=50, lines_per_hunk=100)
 
@@ -525,9 +519,6 @@ class TestGitDiffTruncationHelperIntegration:
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
-            patch(
-                "code_indexer.server.cache.truncation_helper.TruncationHelper"
-            ) as mock_truncation_helper_class,
         ):
             mock_dir.return_value = "/fake/golden/repos"
             mock_resolve.return_value = "/fake/repo/path"
@@ -541,22 +532,6 @@ class TestGitDiffTruncationHelperIntegration:
             config = _mock_config_service(LOW_TOKEN_LIMIT)
             mock_config_svc.return_value.get_config.return_value = config
 
-            # Set up mock TruncationHelper
-            mock_truncation_result = TruncationResult(
-                preview='{"files": [], ...}',
-                cache_handle="cache-handle-xyz",
-                truncated=True,
-                original_tokens=5000,
-                preview_tokens=100,
-                total_pages=5,
-                has_more=True,
-            )
-            mock_truncation_helper = MagicMock()
-            mock_truncation_helper.truncate_and_cache = Mock(
-                return_value=mock_truncation_result
-            )
-            mock_truncation_helper_class.return_value = mock_truncation_helper
-
             handlers.handle_git_diff(
                 {
                     "repository_alias": "test-repo",
@@ -565,7 +540,5 @@ class TestGitDiffTruncationHelperIntegration:
                 mock_user,
             )
 
-            # Verify TruncationHelper was called with content_type="diff"
-            mock_truncation_helper.truncate_and_cache.assert_called_once()
-            call_kwargs = mock_truncation_helper.truncate_and_cache.call_args[1]
-            assert call_kwargs.get("content_type") == "diff"
+            # Byte-envelope retired: PayloadCache.store must NOT be called.
+            mock_payload_cache.store.assert_not_called()

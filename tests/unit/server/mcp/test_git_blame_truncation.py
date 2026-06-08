@@ -11,7 +11,7 @@ Tests that handle_git_blame():
 import json
 from contextlib import contextmanager
 from datetime import datetime
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -129,28 +129,18 @@ class TestGitBlameTruncation:
     """Tests for blame response truncation in handle_git_blame."""
 
     def test_large_blame_response_is_truncated(self, mock_user):
-        """When blame has >200 lines and payload_cache available, truncation metadata is returned."""
+        """Bug #1080 Finding #3: byte-envelope retired for git_blame.
+
+        Large blame is returned in full; truncated=False, cache_handle=None.
+        _apply_blame_truncation removed; _BLAME_TRUNC_ZERO used unconditionally.
+        """
         blame_result = _make_blame_result(LARGE_LINE_COUNT)
-
-        mock_payload_cache = MagicMock()
-        mock_payload_cache.store = Mock(return_value="cache-handle-blame-456")
-
-        mock_truncation_result = MagicMock()
-        mock_truncation_result.cache_handle = "cache-handle-blame-456"
-        mock_truncation_result.truncated = True
-        mock_truncation_result.original_tokens = 5000
-        mock_truncation_result.preview_tokens = 500
-        mock_truncation_result.total_pages = 10
-        mock_truncation_result.has_more = True
-        # preview must be a valid JSON string so _apply_blame_truncation can parse it
-        mock_truncation_result.preview = json.dumps({"lines": []})
 
         args = {"repository_alias": "my-repo", "path": "src/file.py"}
 
         with _blame_handler_context(
             get_blame_return_value=blame_result,
-            payload_cache=mock_payload_cache,
-            truncation_result=mock_truncation_result,
+            payload_cache=None,
         ):
             from code_indexer.server.mcp.handlers.git_read import handle_git_blame
 
@@ -158,8 +148,8 @@ class TestGitBlameTruncation:
 
         result = json.loads(response["content"][0]["text"])
         assert result["success"] is True
-        assert result["truncated"] is True
-        assert result["cache_handle"] == "cache-handle-blame-456"
+        assert result["truncated"] is False
+        assert result["cache_handle"] is None
         assert result["total_lines"] == LARGE_LINE_COUNT
 
     def test_small_blame_response_passes_through(self, mock_user):
