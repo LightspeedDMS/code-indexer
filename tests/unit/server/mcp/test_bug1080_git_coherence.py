@@ -71,44 +71,6 @@ def _extract(mcp_response: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _make_diff_result(num_files: int = 1) -> object:
-    @dataclass
-    class Hunk:
-        old_start: int = 1
-        old_count: int = 3
-        new_start: int = 1
-        new_count: int = 3
-        content: str = "@@ -1,3 +1,3 @@\n-old\n+new\n ctx\n"
-
-    @dataclass
-    class FileDiff:
-        path: str = "file.py"
-        old_path: str = None  # type: ignore[assignment]
-        status: str = "modified"
-        insertions: int = 3
-        deletions: int = 3
-        hunks: list = None  # type: ignore[assignment]
-
-        def __post_init__(self):
-            if self.hunks is None:
-                self.hunks = [Hunk()]
-
-    @dataclass
-    class DiffResult:
-        from_revision: str = "abc123"
-        to_revision: str = "def456"
-        files: list = None  # type: ignore[assignment]
-        total_insertions: int = 3
-        total_deletions: int = 3
-        stat_summary: str = "1 file changed"
-
-        def __post_init__(self):
-            if self.files is None:
-                self.files = [FileDiff(path=f"f{i}.py") for i in range(num_files)]
-
-    return DiffResult()
-
-
 def _make_log_result(num_commits: int) -> object:
     @dataclass
     class Commit:
@@ -166,34 +128,6 @@ def _make_blame_result(num_lines: int) -> object:
 # ---------------------------------------------------------------------------
 # Call helpers — use handlers facade + _utils.app_module mock (correct pattern)
 # ---------------------------------------------------------------------------
-
-
-def _call_git_diff(num_files: int, token_limit: int) -> dict:
-    from code_indexer.server.mcp.handlers.git_read import handle_git_diff
-
-    with (
-        patch("code_indexer.server.mcp.handlers.git_read._get_legacy") as mock_leg,
-        patch(
-            "code_indexer.global_repos.git_operations.GitOperationsService"
-        ) as mock_git,
-        patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
-        patch(
-            "code_indexer.server.mcp.handlers.git_read.get_config_service"
-        ) as mock_cfg,
-    ):
-        mock_leg.return_value._resolve_git_repo_path.return_value = ("/fake/repo", None)
-        mock_git.return_value.get_diff.return_value = _make_diff_result(num_files)
-        mock_app.app.state.payload_cache = _mock_payload_cache()
-        mock_app.activated_repo_manager = None
-        mock_app.golden_repo_manager = None
-        mock_cfg.return_value.get_config.return_value = _mock_cfg(token_limit)
-
-        return _extract(
-            handle_git_diff(
-                {"repository_alias": "r", "from_revision": "a", "to_revision": "b"},
-                _user(),
-            )
-        )
 
 
 def _call_git_log(num_commits: int, token_limit: int) -> dict:
@@ -307,30 +241,6 @@ def _call_git_blame_large_mocked_truncation(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-
-class TestGitDiffCoherence:
-    def test_small_diff_has_more_false_total_pages_zero(self):
-        data = _call_git_diff(num_files=1, token_limit=NORMAL_TOKEN_LIMIT)
-        assert data["success"] is True
-        assert data.get("has_more") is False
-        assert data.get("total_pages", 0) == 0
-
-    def test_large_diff_has_more_false_total_pages_zero_after_fix(self):
-        """
-        Large diff JSON exceeds byte budget.
-        Bug: has_more=True, total_pages>1 from byte-envelope.
-        Fix: has_more=False, total_pages=0 (byte-envelope retired).
-        """
-        data = _call_git_diff(num_files=10, token_limit=TINY_TOKEN_LIMIT)
-        assert data["success"] is True
-        assert data.get("has_more") is False, (
-            f"has_more={data.get('has_more')} total_pages={data.get('total_pages')} — "
-            "byte-envelope must not override domain has_more for git_diff"
-        )
-        assert data.get("total_pages", 0) == 0, (
-            f"total_pages={data.get('total_pages')} — must be 0 after byte-envelope retired"
-        )
 
 
 class TestGitLogCoherence:

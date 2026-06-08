@@ -426,7 +426,6 @@ from .git_read import (  # noqa: F401, E402
     handle_git_log,
     handle_git_show_commit,
     handle_git_file_at_revision,
-    handle_git_diff,
     handle_git_blame,
     handle_git_search_commits,
     handle_git_search_diffs,

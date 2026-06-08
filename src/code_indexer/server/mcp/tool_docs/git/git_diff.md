@@ -52,22 +52,10 @@ outputSchema:
   properties:
     success:
       type: boolean
-    from_revision:
+    diff_text:
       type: string
-    to_revision:
-      type:
-      - string
-      - 'null'
-    files:
-      type: array
-    total_insertions:
+    files_changed:
       type: integer
-    total_deletions:
-      type: integer
-    stat_summary:
-      type: string
-    error:
-      type: string
     lines_returned:
       type: integer
     total_lines:
@@ -78,6 +66,14 @@ outputSchema:
       type:
       - integer
       - 'null'
+    offset:
+      type: integer
+    limit:
+      type:
+      - integer
+      - 'null'
+    error:
+      type: string
   required:
   - success
 ---

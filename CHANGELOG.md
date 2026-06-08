@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.111.0] - 2026-06-08
+
+### Removed
+- Bug #1081 (cleanup, no behavior change): Deleted the orphaned `handle_git_diff` MCP handler in `git_read.py`. It was registered-then-overwritten dead code -- the live `git_diff` tool is the separate `git_diff` function (Story #686, diff-line pagination); `handle_git_diff` had zero runtime callers and was only reachable via a registry line immediately overwritten by the live variant. Removed its definition, its dead registration line, its re-exports from `handlers/__init__.py` and `_legacy.py`, and the test that drove it (`test_git_diff_truncation.py`, which exercised the byte-envelope cache_handle path retired in #1080). The dead-handler-based git_diff cases in `test_bug1080_git_coherence.py` (`_call_git_diff` / `TestGitDiffCoherence`) were also removed -- the live `git_diff` pagination coherence is covered by the #1080 manual front-door E2E. `handle_git_log` (the live omni-fan-out worker) and `handle_git_blame` are untouched.
+
+### Fixed
+- Bug #1081 (doc accuracy): `git_diff.md` outputSchema now matches the live `git_diff` handler exactly -- `success`, `diff_text`, `files_changed`, `lines_returned`, `total_lines`, `has_more`, `next_offset`, `offset`, `limit`, `error`. Removed the stale dead-handler fields it previously advertised (`from_revision`, `to_revision`, `files`, `total_insertions`, `total_deletions`, `stat_summary`) that the live tool never returns. MCP clients reading the `git_diff` output schema now see the true response shape.
+
 ## [10.110.0] - 2026-06-08
 
 ### Fixed

@@ -1,14 +1,14 @@
 """Read-only git handler functions for CIDX MCP server.
 
 Covers: git_file_history, git_log, git_show_commit, git_file_at_revision,
-git_diff (both older handle_git_diff and newer git_diff), git_blame,
-git_search_commits, git_search_diffs, git_status, git_fetch,
-git_branch_list, git_conflict_status.
+git_diff, git_blame, git_search_commits, git_search_diffs, git_status,
+git_fetch, git_branch_list, git_conflict_status.
 
-The older handle_git_* variants are still referenced by omni handlers
-(_omni_git_log, _omni_git_search_commits) and must be included here.
-The newer git_diff / git_log variants overwrite the HANDLER_REGISTRY entries
-for those keys (matching the order in the original _legacy.py).
+The older handle_git_log variant is still referenced by the omni handler
+(_omni_git_log) and must be included here.  The newer git_diff / git_log
+variants overwrite the HANDLER_REGISTRY entries for those keys (matching
+the order in the original _legacy.py).  handle_git_diff was removed in
+Bug #1081 — only git_diff (the live paginated variant) remains.
 
 Shared helpers that remain in _legacy.py and are accessed via _get_legacy():
   _resolve_git_repo_path, _resolve_repo_path, _is_git_repo,
@@ -606,119 +606,6 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
         logger.exception(
             f"Error in git_file_at_revision: {e}",
             extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_diff tool - get diff between revisions.
-
-    Story #34: When diff exceeds git_diff_max_tokens, stores full diff in
-    PayloadCache and returns cache_handle for paginated retrieval.
-    """
-    from code_indexer.server.mcp.handlers import _utils as _handler_utils
-
-    leg = _get_legacy()
-    _resolve_git_repo_path = leg._resolve_git_repo_path
-
-    repository_alias = args.get("repository_alias")
-    from_revision = args.get("from_revision")
-
-    # Validate required parameters
-    if not repository_alias:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: repository_alias"}
-        )
-    if not from_revision:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: from_revision"}
-        )
-
-    # Story #1039: bare-to-global alias fallback (read-only handler).
-    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
-        _arm = getattr(_handler_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_handler_utils.app_module, "golden_repo_manager", None)
-        if _arm is not None and _grm is not None:
-            if not _arm.user_has_activated_repo(user.username, repository_alias):
-                from ._global_fallback import try_global_fallback
-
-                _promoted = try_global_fallback(repository_alias, _grm)
-                if _promoted is not None:
-                    logger.info(
-                        "bare-alias fallback: %r -> %r for user %r",
-                        repository_alias,
-                        _promoted,
-                        user.username,
-                    )
-                    args["repository_alias"] = _promoted
-                    repository_alias = _promoted
-
-    try:
-        # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
-        if error_msg is not None:
-            return _mcp_response({"success": False, "error": error_msg})
-        assert repo_path is not None  # narrowed by error_msg check above
-
-        # Create service and execute query
-        from code_indexer.global_repos.git_operations import GitOperationsService
-
-        service = GitOperationsService(Path(repo_path))
-        result = service.get_diff(
-            from_revision=from_revision,
-            to_revision=args.get("to_revision"),
-            path=args.get("path"),
-            context_lines=args.get("context_lines", 3),
-            stat_only=args.get("stat_only", False),
-        )
-
-        # Convert dataclasses to dicts for JSON serialization
-        files = [
-            {
-                "path": f.path,
-                "old_path": f.old_path,
-                "status": f.status,
-                "insertions": f.insertions,
-                "deletions": f.deletions,
-                "hunks": [
-                    {
-                        "old_start": h.old_start,
-                        "old_count": h.old_count,
-                        "new_start": h.new_start,
-                        "new_count": h.new_count,
-                        "content": h.content,
-                    }
-                    for h in f.hunks
-                ],
-            }
-            for f in result.files
-        ]
-
-        # Bug #1080 (Finding #3): byte-envelope (TruncationHelper / cache_handle) is fully
-        # retired for git_diff.  All diff records are always returned in full; the
-        # byte-cut preview/cache_handle pattern has no navigable continuation axis for
-        # clients and so is incoherent.  has_more/total_pages remain False/0.
-        return _mcp_response(
-            {
-                "success": True,
-                "from_revision": result.from_revision,
-                "to_revision": result.to_revision,
-                "files": files,
-                "total_insertions": result.total_insertions,
-                "total_deletions": result.total_deletions,
-                "stat_summary": result.stat_summary,
-                "cache_handle": None,
-                "truncated": False,
-                "total_tokens": 0,
-                "preview_tokens": 0,
-                "total_pages": 0,
-                "has_more": False,
-            }
-        )
-
-    except Exception as e:
-        logger.exception(
-            f"Error in git_diff: {e}", extra={"correlation_id": get_correlation_id()}
         )
         return _mcp_response({"success": False, "error": str(e)})
 
@@ -1511,7 +1398,7 @@ def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Newer git_diff / git_log variants — these overwrite the HANDLER_REGISTRY
 # entries for "git_diff" and "git_log" (same ordering as original _legacy.py).
-# The older handle_git_diff / handle_git_log remain reachable for omni helpers.
+# The older handle_git_log remains reachable for omni helpers.
 # ---------------------------------------------------------------------------
 
 
@@ -1755,7 +1642,6 @@ def _register(registry: dict) -> None:
     registry["git_log"] = handle_git_log
     registry["git_show_commit"] = handle_git_show_commit
     registry["git_file_at_revision"] = handle_git_file_at_revision
-    registry["git_diff"] = handle_git_diff
     registry["git_blame"] = handle_git_blame
     registry["git_file_history"] = handle_git_file_history
     registry["git_search_commits"] = handle_git_search_commits
