@@ -1213,6 +1213,12 @@ class ServerConfig:
     # Values: "disabled" (no-op), "on" (enforce pacing-only), "off" (actively disable)
     pace_maker_mode: str = "disabled"
 
+    # Bug #1078 Phase 1 - Per-budget concurrency cap for serving-path embedding/rerank calls.
+    # Controls the BoundedSemaphore K in ProviderConcurrencyGovernor. Default 8 allows up to
+    # 8 concurrent voyage (or cohere) HTTP calls per process; excess callers queue up to
+    # acquire_timeout seconds then receive GovernorBusyError. Runtime (DB-backed), not bootstrap.
+    query_provider_max_concurrency: int = 8
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

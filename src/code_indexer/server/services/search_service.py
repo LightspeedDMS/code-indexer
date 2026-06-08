@@ -425,8 +425,18 @@ class SemanticSearchService:
                     search_kwargs["filter_conditions"] = filter_conditions
                 search_results, _ = vector_store_client.search(**search_kwargs)
             else:
-                # Backend: sequential execution with pre-computed embedding
-                query_embedding = embedding_service.get_embedding(query)
+                # Backend: sequential execution with pre-computed embedding.
+                # Bug #1078: gate through concurrency governor to cap concurrent
+                # provider HTTP calls per account-level rate budget.
+                from code_indexer.server.services.governed_call import (
+                    governed_query_embedding,
+                )
+
+                query_embedding = governed_query_embedding(
+                    embedding_service,
+                    query,
+                    embedding_purpose=None,
+                )
                 search_results = vector_store_client.search(
                     query_vector=query_embedding,
                     limit=limit,

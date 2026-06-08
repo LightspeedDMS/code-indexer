@@ -932,13 +932,23 @@ class TestCohereRetryDelayCapBug602:
 
     def test_5xx_backoff_capped_at_300s(self, cohere_provider):
         """A 500 response must sleep at most 300s regardless of computed backoff."""
+        import httpx
         from unittest.mock import MagicMock, patch
 
         mock_response_500 = MagicMock()
         mock_response_500.status_code = 500
+        # Bug #1078 refactor: _make_sync_request now calls response.raise_for_status()
+        # (real httpx raises on non-2xx).  Plain MagicMock raise_for_status() is a
+        # no-op, so we must configure it to raise so the retry loop is exercised.
+        mock_response_500.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500 Internal Server Error",
+            request=MagicMock(),
+            response=mock_response_500,
+        )
 
         mock_response_ok = MagicMock()
         mock_response_ok.status_code = 200
+        mock_response_ok.raise_for_status.return_value = None
         mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()
@@ -987,6 +997,7 @@ class TestCohereExponentialBackoffFlagBug603:
 
     def test_exponential_backoff_false_uses_flat_delay_on_5xx(self, cohere_provider):
         """When exponential_backoff=False, all 5xx retry sleeps must use the same fixed delay."""
+        import httpx
         import threading
         from unittest.mock import MagicMock, patch
 
@@ -995,9 +1006,18 @@ class TestCohereExponentialBackoffFlagBug603:
 
         mock_response_500 = MagicMock()
         mock_response_500.status_code = 500
+        # Bug #1078 refactor: _make_sync_request now calls response.raise_for_status()
+        # (real httpx raises on non-2xx).  Plain MagicMock raise_for_status() is a
+        # no-op, so we must configure it to raise so the retry loop is exercised.
+        mock_response_500.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500 Internal Server Error",
+            request=MagicMock(),
+            response=mock_response_500,
+        )
 
         mock_response_ok = MagicMock()
         mock_response_ok.status_code = 200
+        mock_response_ok.raise_for_status.return_value = None
         mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         # Three 500 responses then success to capture multiple sleep calls
@@ -1035,6 +1055,7 @@ class TestCohereExponentialBackoffFlagBug603:
         self, cohere_provider
     ):
         """When exponential_backoff=True, successive 5xx retry sleeps must increase."""
+        import httpx
         import threading
         from unittest.mock import MagicMock, patch
 
@@ -1044,9 +1065,18 @@ class TestCohereExponentialBackoffFlagBug603:
 
         mock_response_500 = MagicMock()
         mock_response_500.status_code = 500
+        # Bug #1078 refactor: _make_sync_request now calls response.raise_for_status()
+        # (real httpx raises on non-2xx).  Plain MagicMock raise_for_status() is a
+        # no-op, so we must configure it to raise so the retry loop is exercised.
+        mock_response_500.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500 Internal Server Error",
+            request=MagicMock(),
+            response=mock_response_500,
+        )
 
         mock_response_ok = MagicMock()
         mock_response_ok.status_code = 200
+        mock_response_ok.raise_for_status.return_value = None
         mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()

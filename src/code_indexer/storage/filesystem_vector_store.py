@@ -2467,11 +2467,18 @@ class FilesystemVectorStore:
             return hnsw_index, id_index, hnsw_load_ms, id_load_ms
 
         def generate_embedding():
-            """Generate query embedding in parallel thread."""
-            t0 = time.time()
-            embedding = embedding_provider.get_embedding(
-                query, embedding_purpose="query"
+            """Generate query embedding in parallel thread.
+
+            Bug #1078: the HTTP call is gated through the concurrency governor so
+            at most K concurrent serving-path embedding requests reach VoyageAI/Cohere.
+            The HNSW-load worker (load_index) runs freely — it makes no provider calls.
+            """
+            from code_indexer.server.services.governed_call import (
+                governed_query_embedding,
             )
+
+            t0 = time.time()
+            embedding = governed_query_embedding(embedding_provider, query)
             embedding_time_ms = (time.time() - t0) * 1000
             return embedding, embedding_time_ms
 

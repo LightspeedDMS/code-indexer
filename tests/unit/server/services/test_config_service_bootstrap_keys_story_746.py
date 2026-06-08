@@ -78,6 +78,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "activated_reaper_config",  # Story #967 — runtime, not bootstrap
             "xray_config",  # Story #977 — runtime, not bootstrap
             "pace_maker_mode",  # Story #997 — runtime Web UI setting (three-way: disabled/on/off)
+            "query_provider_max_concurrency",  # Bug #1078 Phase 1 — runtime, Web UI configurable
         }
     )
 

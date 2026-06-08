@@ -231,9 +231,23 @@ class VoyageAIClient(EmbeddingProvider):
             return False
 
     def _make_sync_request(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        retry: bool = True,
     ) -> Dict[str, Any]:
-        """Make synchronous request to VoyageAI API."""
+        """Make synchronous request to VoyageAI API.
+
+        Args:
+            texts: Text strings to embed.
+            model: Override model name; defaults to self.config.model.
+            retry: When True (default, INDEXING path), retries on 500/network errors
+                with exponential back-off and time.sleep inside this method.
+                When False (QUERY path), makes exactly ONE HTTP attempt and raises
+                immediately on any error — sleep and retry are handled OUTSIDE the
+                governor slot by execute_with_backoff in the caller.
+        """
         from .provider_health_monitor import ProviderHealthMonitor
 
         model_name = model or self.config.model
@@ -241,72 +255,89 @@ class VoyageAIClient(EmbeddingProvider):
         # Prepare request payload
         payload = {"input": texts, "model": model_name}
 
-        # Retry logic
+        def _single_attempt() -> Dict[str, Any]:
+            """Execute ONE HTTP call and return the parsed JSON dict."""
+            _start = time.time()
+            try:
+                from code_indexer.server.services.latency_tracking_httpx_transport import (
+                    build_latency_transport,
+                )
+
+                _latency_transport = build_latency_transport()
+            except ImportError:
+                # Server module not available in CLI-only deployments.
+                _latency_transport = None
+            _timeout = httpx.Timeout(
+                connect=self.config.connect_timeout,
+                read=self.config.timeout,
+                write=self.config.timeout,
+                pool=self.config.timeout,
+            )
+            _headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            _client_ctx = self._http_client_factory.create_sync_client(
+                transport=_latency_transport,
+                headers=_headers,
+                timeout=_timeout,
+            )
+            with _client_ctx as client:
+                response = client.post(self.config.api_endpoint, json=payload)
+            response.raise_for_status()
+
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError(f"Unexpected response format: {type(result)}")
+
+            latency_ms = (time.time() - _start) * 1000
+            ProviderHealthMonitor.get_instance().record_call(
+                "voyage-ai", latency_ms, success=True
+            )
+            return result
+
+        # --- Single-attempt path (QUERY, retry=False) ---
+        # One call, no sleep. All errors propagate immediately to the caller
+        # (execute_with_backoff handles 429 retries OUTSIDE the governor slot).
+        if not retry:
+            _start_single = time.time()
+            try:
+                return _single_attempt()
+            except Exception:
+                latency_ms = (time.time() - _start_single) * 1000
+                ProviderHealthMonitor.get_instance().record_call(
+                    "voyage-ai", latency_ms, success=False
+                )
+                raise
+
+        # --- Retry loop (INDEXING path, retry=True) ---
+        # Keeps original behaviour: retries on 500/network errors with back-off sleep.
+        # 429 still propagates immediately (handled by execute_with_backoff in query path).
         last_exception: Optional[Exception] = None
         _start = time.time()
         for attempt in range(self.config.max_retries + 1):
             try:
                 _start = time.time()
-                try:
-                    from code_indexer.server.services.latency_tracking_httpx_transport import (
-                        build_latency_transport,
-                    )
-
-                    _latency_transport = build_latency_transport()
-                except ImportError:
-                    # Server module not available in CLI-only deployments.
-                    _latency_transport = None
-                _timeout = httpx.Timeout(
-                    connect=self.config.connect_timeout,
-                    read=self.config.timeout,
-                    write=self.config.timeout,
-                    pool=self.config.timeout,
-                )
-                _headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                }
-                _client_ctx = self._http_client_factory.create_sync_client(
-                    transport=_latency_transport,
-                    headers=_headers,
-                    timeout=_timeout,
-                )
-                with _client_ctx as client:
-                    response = client.post(self.config.api_endpoint, json=payload)
-                response.raise_for_status()
-
-                result = response.json()
-
-                if isinstance(result, dict):
-                    latency_ms = (time.time() - _start) * 1000
-                    ProviderHealthMonitor.get_instance().record_call(
-                        "voyage-ai", latency_ms, success=True
-                    )
-                    return result
-                else:
-                    raise ValueError(f"Unexpected response format: {type(result)}")
-
+                return _single_attempt()
             except httpx.HTTPStatusError as e:
                 last_exception = e
-                if (
-                    e.response.status_code == 429
-                ):  # Rate limit - use server-driven backoff
-                    # Check for Retry-After header from server
+                if e.response.status_code == 429:
+                    if not retry:
+                        # Query path: propagate immediately so execute_with_backoff
+                        # can sleep OUTSIDE the governor slot.
+                        raise
+                    # Indexing path (retry=True): back off and retry as before.
                     retry_after = e.response.headers.get("retry-after")
                     if retry_after:
-                        wait_time = float(retry_after)
+                        wait_time = min(float(retry_after), 300.0)
                     else:
-                        # Fall back to exponential backoff
                         wait_time = self.config.retry_delay * (
                             2**attempt if self.config.exponential_backoff else 1
                         )
-
-                    # Cap maximum wait time to 5 minutes to prevent excessive delays
-                    wait_time = min(wait_time, 300.0)
-
                     if attempt < self.config.max_retries:
                         time.sleep(wait_time)
                         continue
+                    raise
                 elif e.response.status_code >= 500:  # Server error
                     wait_time = self.config.retry_delay * (
                         2**attempt if self.config.exponential_backoff else 1
@@ -358,9 +389,15 @@ class VoyageAIClient(EmbeddingProvider):
         model: Optional[str] = None,
         embedding_purpose: Optional[str] = None,
     ) -> List[float]:
-        """Generate embedding for given text."""
-        # Use get_embeddings_batch internally with single-item array
-        batch_result = self.get_embeddings_batch([text], model)
+        """Generate embedding for given text (QUERY path).
+
+        Uses retry=False so that exactly one HTTP attempt is made per
+        governor slot acquisition. The execute_with_backoff wrapper in the
+        caller handles 429 retries OUTSIDE the governor slot.
+        """
+        # Use get_embeddings_batch internally with single-item array and retry=False
+        # so no time.sleep() runs while the governor slot is held (Bug #1078 C2).
+        batch_result = self.get_embeddings_batch([text], model, retry=False)
 
         # Extract first result from batch response
         return batch_result[0]
@@ -371,8 +408,20 @@ class VoyageAIClient(EmbeddingProvider):
         model: Optional[str] = None,
         *,
         embedding_purpose: str = "document",
+        retry: bool = True,
     ) -> List[List[float]]:
-        """Generate embeddings with dynamic token-aware batching (90% safety margin)."""
+        """Generate embeddings with dynamic token-aware batching (90% safety margin).
+
+        Args:
+            texts: Texts to embed.
+            model: Override model name.
+            embedding_purpose: "document" (indexing) or "query".
+            retry: When True (default, INDEXING path), each _make_sync_request call
+                retries on 500/network errors with back-off sleep.
+                When False (QUERY path, set by get_embedding), exactly one HTTP
+                attempt is made — sleep is handled OUTSIDE the governor slot by
+                execute_with_backoff (Bug #1078 C2).
+        """
         if not texts:
             return []
 
@@ -393,7 +442,7 @@ class VoyageAIClient(EmbeddingProvider):
             if current_tokens + chunk_tokens > safety_limit and current_batch:
                 # Submit current batch before it gets too large
                 try:
-                    result = self._make_sync_request(current_batch, model)
+                    result = self._make_sync_request(current_batch, model, retry=retry)
 
                     # LAYER 3 VALIDATION: Validate all embeddings from API before processing
                     for idx, item in enumerate(result["data"]):
@@ -441,7 +490,7 @@ class VoyageAIClient(EmbeddingProvider):
         # Process final batch if not empty
         if current_batch:
             try:
-                result = self._make_sync_request(current_batch, model)
+                result = self._make_sync_request(current_batch, model, retry=retry)
 
                 # LAYER 3 VALIDATION: Validate all embeddings from API before processing
                 for idx, item in enumerate(result["data"]):
