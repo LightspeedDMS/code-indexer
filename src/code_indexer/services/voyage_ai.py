@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ..config import VoyageAIConfig
 from .embedding_provider import EmbeddingProvider, EmbeddingResult, BatchEmbeddingResult
+from .provider_backoff import is_rate_limited
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +478,12 @@ class VoyageAIClient(EmbeddingProvider):
                     self._validate_embeddings(batch_embeddings, model_to_use)
                     all_embeddings.extend(batch_embeddings)
                 except Exception as e:
+                    # Re-raise rate-limit (429) signals intact so the
+                    # execute_with_backoff wrapper (and future AIMD signal) can
+                    # classify and retry them; only non-429 errors are wrapped
+                    # in a generic RuntimeError (Story #1079 Phase A).
+                    if is_rate_limited(e):
+                        raise
                     raise RuntimeError(f"Batch embedding request failed: {e}")
 
                 # Reset for next batch
@@ -523,6 +530,12 @@ class VoyageAIClient(EmbeddingProvider):
                 self._validate_embeddings(batch_embeddings, model_to_use)
                 all_embeddings.extend(batch_embeddings)
             except Exception as e:
+                # Re-raise rate-limit (429) signals intact so the
+                # execute_with_backoff wrapper (and future AIMD signal) can
+                # classify and retry them; only non-429 errors are wrapped
+                # in a generic RuntimeError (Story #1079 Phase A).
+                if is_rate_limited(e):
+                    raise
                 raise RuntimeError(f"Batch embedding request failed: {e}")
 
         return all_embeddings
