@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.109.0] - 2026-06-08
+
+### Changed
+- Bug #1078 (tuning): default `query_provider_max_concurrency` (the per-provider serving-path embedding/rerank concurrency cap K) raised from 8 to 16. A 3-runs-per-K benchmark sweep (K=8/16/32 at concurrency 8/20/50, single worker, real VoyageAI) found K=16 is the diminishing-returns knee: vs K=8 it cut conc-50 p50 latency ~20% (2221->1780ms) and raised throughput ~9% (14.3->15.6 rps), while K=32 showed no benefit and slight regression. High-concurrency throughput is ultimately capped by the provider round-trip + single-worker GIL (~13-16 rps regardless of K), so K governs how efficiently the queue drains. NOTE: K is PER PROCESS — a 3-node cluster now runs up to 3x16=48 concurrent provider calls (was 3x8=24); ensure this stays within the provider account's concurrent-request budget (still operator-tunable via the runtime config field). Real-provider regression test updated (EXPECTED_K=16, C=24) and re-confirmed: in_flight_high_water_mark==16, 0 errors, no hang.
+
 ## [10.108.0] - 2026-06-08
 
 ### Performance

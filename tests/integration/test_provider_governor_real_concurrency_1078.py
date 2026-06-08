@@ -1,7 +1,7 @@
 """C4 — Real-provider concurrency regression test for Bug #1078.
 
 Proves that ProviderConcurrencyGovernor correctly bounds concurrent REAL
-VoyageAI HTTP calls to K=8 (default query_provider_max_concurrency) and
+VoyageAI HTTP calls to K=16 (default query_provider_max_concurrency) and
 that the system does not hang under a 20-thread simultaneous burst.
 
 The test exercises the EXACT production code path used by all 5 serving
@@ -46,9 +46,9 @@ pytestmark = pytest.mark.skipif(
 # Constants
 # ---------------------------------------------------------------------------
 
-CONCURRENCY = 20  # threads launched simultaneously
-EXPECTED_K = 8  # default query_provider_max_concurrency
-EXPECTED_MIN_WAITS = CONCURRENCY - EXPECTED_K  # at least 12 acquisitions had to wait
+CONCURRENCY = 24  # threads launched simultaneously (must be > K=16 to exercise the cap)
+EXPECTED_K = 16  # default query_provider_max_concurrency (Bug #1078 K-sweep knee)
+EXPECTED_MIN_WAITS = CONCURRENCY - EXPECTED_K  # at least 8 acquisitions had to wait
 BURST_DEADLINE_SECS = 120.0  # wall-clock budget for all 20 calls to finish
 SENTINEL_CALL_DEADLINE_SECS = 2.0  # governor must self-recover after burst
 
@@ -81,7 +81,7 @@ def voyage_provider():
 
 
 # ---------------------------------------------------------------------------
-# Test C4-A — Embedding burst: K=8 cap held, ≥12 waited, no hang
+# Test C4-A — Embedding burst: K=16 cap held, ≥8 waited, no hang
 # ---------------------------------------------------------------------------
 
 
@@ -111,7 +111,7 @@ class TestProviderGovernorRealConcurrency:
     def test_embedding_burst_bounds_concurrency(
         self, voyage_provider: "VoyageAIClient"
     ) -> None:
-        """20 simultaneous governed embedding calls — K=8 cap held, ≥12 waited."""
+        """24 simultaneous governed embedding calls — K=16 cap held, ≥8 waited."""
         from code_indexer.server.services.provider_concurrency_governor import (
             ProviderConcurrencyGovernor,
         )

@@ -10,7 +10,7 @@ Design principles:
 - Sinbin pre-check: if ANY mapped ProviderHealthMonitor health key is
   sinbinned, raise ProviderSinbinnedError FAST without consuming a slot.
 - K (max concurrency per budget) comes from server runtime config field
-  ``query_provider_max_concurrency`` (default 8), read once at construction.
+  ``query_provider_max_concurrency`` (default 16), read once at construction.
 - Expose ``in_flight_high_water_mark`` and ``acquire_wait_count`` per budget
   for test assertions and observability.
 
@@ -25,7 +25,7 @@ from typing import Callable, Dict, List, Optional, TypeVar
 logger = logging.getLogger(__name__)
 
 # Default max-concurrency per budget (overridden via server runtime config).
-_DEFAULT_MAX_CONCURRENCY: int = 8
+_DEFAULT_MAX_CONCURRENCY: int = 16
 
 # Budget -> list of ProviderHealthMonitor health keys to check before acquiring.
 _BUDGET_HEALTH_KEYS: Dict[str, List[str]] = {
