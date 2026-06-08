@@ -55,7 +55,7 @@ class TestSingleEmbeddingWrapper:
         result = voyage_client.get_embedding(test_text)
 
         # Assert
-        mock_batch.assert_called_once_with([test_text], None)
+        mock_batch.assert_called_once_with([test_text], None, retry=False)
         assert result == expected_embedding
         assert isinstance(result, list)
         assert all(isinstance(x, float) for x in result)
@@ -73,7 +73,7 @@ class TestSingleEmbeddingWrapper:
         result = voyage_client.get_embedding(test_text, model=test_model)
 
         # Assert
-        mock_batch.assert_called_once_with([test_text], test_model)
+        mock_batch.assert_called_once_with([test_text], test_model, retry=False)
         assert result == expected_embedding
 
     @patch("code_indexer.services.voyage_ai.VoyageAIClient.get_embeddings_batch")
@@ -92,7 +92,7 @@ class TestSingleEmbeddingWrapper:
 
         # Assert
         assert result == batch_results[0]  # Only first result
-        mock_batch.assert_called_once_with([test_text], None)
+        mock_batch.assert_called_once_with([test_text], None, retry=False)
 
     @patch("code_indexer.services.voyage_ai.VoyageAIClient.get_embeddings_batch")
     def test_get_embedding_error_passthrough(self, mock_batch, voyage_client):
@@ -106,7 +106,7 @@ class TestSingleEmbeddingWrapper:
         with pytest.raises(RuntimeError, match="VoyageAI API error.*Server error"):
             voyage_client.get_embedding(test_text)
 
-        mock_batch.assert_called_once_with([test_text], None)
+        mock_batch.assert_called_once_with([test_text], None, retry=False)
 
     @patch("code_indexer.services.voyage_ai.VoyageAIClient.get_embeddings_batch")
     def test_get_embedding_api_key_error_passthrough(self, mock_batch, voyage_client):
@@ -173,8 +173,8 @@ class TestSingleEmbeddingWrapper:
         sig = inspect.signature(voyage_client.get_embedding)
         params = list(sig.parameters.keys())
 
-        # Verify signature: get_embedding(self, text: str, model: Optional[str] = None) -> List[float]
-        assert params == ["text", "model"]
+        # Verify signature: get_embedding(self, text: str, model: Optional[str] = None, *, embedding_purpose: Optional[str] = None) -> List[float]
+        assert params == ["text", "model", "embedding_purpose"]
 
         # Verify parameter types and defaults
         text_param = sig.parameters["text"]
@@ -218,8 +218,10 @@ class TestSingleEmbeddingWrapperIntegration:
         """Test complete integration of single embedding via batch processing."""
         # Arrange
         test_text = "integration test text"
+        # voyage-code-3 requires 1024-dim vectors; _validate_embeddings rejects wrong dims
+        expected_embedding = [0.1] * 1024
         mock_api_response = {
-            "data": [{"embedding": [0.1, 0.2, 0.3, 0.4]}],
+            "data": [{"embedding": expected_embedding}],
             "usage": {"total_tokens": 10},
         }
         mock_request.return_value = mock_api_response
@@ -228,10 +230,11 @@ class TestSingleEmbeddingWrapperIntegration:
         result = voyage_client.get_embedding(test_text)
 
         # Assert
-        assert result == [0.1, 0.2, 0.3, 0.4]
+        assert result == expected_embedding
 
-        # Verify that _make_sync_request was called with single-item array
-        mock_request.assert_called_once_with([test_text], None)
+        # Verify that _make_sync_request was called with single-item array and retry=False
+        # (get_embedding is the QUERY path — no sleep while governor slot is held)
+        mock_request.assert_called_once_with([test_text], None, retry=False)
 
     @patch("code_indexer.services.voyage_ai.VoyageAIClient._make_sync_request")
     def test_integration_error_handling_preservation(self, mock_request, voyage_client):
@@ -255,8 +258,10 @@ class TestSingleEmbeddingWrapperIntegration:
         """Test that CLI query functionality compatibility is preserved."""
         # Arrange - Simulate typical CLI query usage
         query_text = "function authentication"
+        # voyage-code-3 requires 1024-dim vectors; _validate_embeddings rejects wrong dims
+        expected_embedding = [0.15] * 1024
         mock_api_response = {
-            "data": [{"embedding": [0.15, 0.25, 0.35, 0.45, 0.55]}],
+            "data": [{"embedding": expected_embedding}],
             "usage": {"total_tokens": 15},
         }
         mock_request.return_value = mock_api_response
@@ -266,12 +271,12 @@ class TestSingleEmbeddingWrapperIntegration:
 
         # Assert - Result should be suitable for vector search
         assert isinstance(query_embedding, list)
-        assert len(query_embedding) == 5
+        assert len(query_embedding) == 1024
         assert all(isinstance(x, float) for x in query_embedding)
-        assert query_embedding == [0.15, 0.25, 0.35, 0.45, 0.55]
+        assert query_embedding == expected_embedding
 
-        # Verify proper API call was made
-        mock_request.assert_called_once_with([query_text], None)
+        # Verify proper API call was made (retry=False — QUERY path, no sleep in governor slot)
+        mock_request.assert_called_once_with([query_text], None, retry=False)
 
 
 if __name__ == "__main__":
