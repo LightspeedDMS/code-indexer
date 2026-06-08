@@ -53,32 +53,30 @@ def test_emit_direct_path_persists_alias_to_own_column(tmp_path: Path) -> None:
 
     db_path = tmp_path / "handler_direct.db"
     handler = SQLiteLogHandler(db_path=db_path)
+    record = logging.LogRecord(
+        name="lifecycle-runner",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="write_meta_md failed",
+        args=(),
+        exc_info=None,
+    )
+    setattr(record, "alias", "my-repo-direct")
+
+    handler.emit(record)
+    handler.close()  # flush async writer thread before reading the DB
+
+    conn = sqlite3.connect(str(db_path))
     try:
-        record = logging.LogRecord(
-            name="lifecycle-runner",
-            level=logging.ERROR,
-            pathname=__file__,
-            lineno=1,
-            msg="write_meta_md failed",
-            args=(),
-            exc_info=None,
+        row = conn.execute(
+            "SELECT message, alias FROM logs WHERE source = ?",
+            ("lifecycle-runner",),
+        ).fetchone()
+        assert row is not None, "emit() must have written a row"
+        assert row[0] == "write_meta_md failed"
+        assert row[1] == "my-repo-direct", (
+            f"alias must land in its own column on the direct path; got row={row}"
         )
-        setattr(record, "alias", "my-repo-direct")
-
-        handler.emit(record)
-
-        conn = sqlite3.connect(str(db_path))
-        try:
-            row = conn.execute(
-                "SELECT message, alias FROM logs WHERE source = ?",
-                ("lifecycle-runner",),
-            ).fetchone()
-            assert row is not None, "emit() must have written a row"
-            assert row[0] == "write_meta_md failed"
-            assert row[1] == "my-repo-direct", (
-                f"alias must land in its own column on the direct path; got row={row}"
-            )
-        finally:
-            conn.close()
     finally:
-        handler.close()
+        conn.close()

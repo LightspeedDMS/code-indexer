@@ -105,12 +105,14 @@ Fields per node:
 | invalid_file_path | file_path is empty or otherwise malformed. |
 | path_traversal_rejected | file_path contains ../ sequences that would escape the repository root. |
 | file_not_found | The file does not exist inside the repository. |
-| unsupported_language | The file extension has no registered tree-sitter grammar. Supported extensions correspond to: java, kotlin, go, python, typescript, javascript (including .mjs/.cjs), bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy/gradle. |
+| unsupported_language | The file extension has no registered tree-sitter grammar. Supported extensions correspond to: java, kotlin, go, python, typescript, javascript (including .mjs/.cjs), bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy/gradle, c (.c/.h), cpp (.cc/.cpp/.cxx/.c++/.hpp/.hh/.hxx/.h++). |
 | xray_extras_not_installed | The xray extras package (tree-sitter-languages) is not installed on this server. Install via: pip install code-indexer[xray]. |
 
 ## Supported Languages
 
-The 15 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript (including .mjs/.cjs extensions), bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy (including .gradle extension).
+The 17 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript (including .mjs/.cjs extensions), bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy (including .gradle extension), c (.c, .h), cpp (.cc, .cpp, .cxx, .c++, .hpp, .hh, .hxx, .h++).
+
+Note on `.h` headers: `.h` maps to the C grammar (GitHub-Linguist default). A C++ header named `.h` parses under the C grammar and may produce ERROR nodes on C++-only syntax (templates, namespaces, classes). Name C++ headers `.hpp`/`.hh`/`.hxx`/`.h++` to parse them under the C++ grammar.
 
 ## Examples
 

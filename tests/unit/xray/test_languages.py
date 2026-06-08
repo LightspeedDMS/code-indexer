@@ -7,7 +7,7 @@ class TestSupportedLanguages:
     """Tests for SUPPORTED_LANGUAGES constant."""
 
     def test_mandatory_languages_present(self) -> None:
-        """All 10 mandatory languages must be in SUPPORTED_LANGUAGES."""
+        """All 12 mandatory languages must be in SUPPORTED_LANGUAGES."""
         from code_indexer.xray.languages import SUPPORTED_LANGUAGES
 
         mandatory = {
@@ -21,6 +21,8 @@ class TestSupportedLanguages:
             "csharp",
             "html",
             "css",
+            "c",
+            "cpp",
         }
         for lang in mandatory:
             assert lang in SUPPORTED_LANGUAGES, f"Mandatory language '{lang}' missing"
@@ -116,6 +118,24 @@ class TestExtensionMap:
         from code_indexer.xray.languages import EXTENSION_MAP
 
         assert EXTENSION_MAP[".css"] == "css"
+
+    def test_c_extensions(self) -> None:
+        from code_indexer.xray.languages import EXTENSION_MAP
+
+        assert EXTENSION_MAP[".c"] == "c"
+        assert EXTENSION_MAP[".h"] == "c"
+
+    def test_cpp_extensions(self) -> None:
+        from code_indexer.xray.languages import EXTENSION_MAP
+
+        assert EXTENSION_MAP[".cc"] == "cpp"
+        assert EXTENSION_MAP[".cpp"] == "cpp"
+        assert EXTENSION_MAP[".cxx"] == "cpp"
+        assert EXTENSION_MAP[".c++"] == "cpp"
+        assert EXTENSION_MAP[".hpp"] == "cpp"
+        assert EXTENSION_MAP[".hh"] == "cpp"
+        assert EXTENSION_MAP[".hxx"] == "cpp"
+        assert EXTENSION_MAP[".h++"] == "cpp"
 
     def test_all_extensions_lowercase(self) -> None:
         """All extension keys must be lowercase (matching Path.suffix.lower())."""

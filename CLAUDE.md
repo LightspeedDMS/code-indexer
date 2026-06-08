@@ -194,7 +194,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 **Key invariants**:
 - Raw `tree_sitter.Node` NEVER exposed to evaluator code -- always wrapped in `XRayNode` (`__slots__ = ("_node",)`, normal assignment, NO `object.__setattr__`).
 - `supported_languages`/`extension_map` are INSTANCE-level (conditional `terraform`/`.tf` when HCL grammar present in Python; mandatory in Rust).
-- 15 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy. Python xray supports 10 (hcl conditional via `_hcl_available()`). Extensions mjs/cjs map to the javascript grammar.
+- 17 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp. Python xray supports 12 (hcl conditional via `_hcl_available()`; c, cpp added in Story #1077). Extensions mjs/cjs map to the javascript grammar; c uses `.c`/`.h`, cpp uses `.cc`/`.cpp`/`.cxx`/`.c++`/`.hpp`/`.hh`/`.hxx`/`.h++` (a `.h` C++ header parses under the C grammar and may emit ERROR nodes on C++-only syntax).
 - **Dependency**: `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` -- CORE deps since v10.2.1.
 
 ### X-Ray Sandbox Security Boundary (Epic #968 / Story #970)

@@ -2,6 +2,17 @@
 
 This document captures the X-Ray search engine architecture and MCP handler shim invariants extracted from project CLAUDE.md. It defines the two-phase orchestration (regex driver → sandboxed evaluator) and the async job submission pattern.
 
+## Supported Languages
+
+The Rust xray-core engine supports 17 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp. The Python xray engine supports 12 (hcl conditional via `_hcl_available()`; c and cpp added in Story #1077).
+
+C and C++ extensions and verified node kinds (confirmed against tree-sitter-c 0.24.2 and tree-sitter-cpp 0.23.4):
+
+- **C** — extensions `.c`, `.h`. Root `translation_unit`. Function definition `function_definition`. Function call `call_expression`. Struct `struct_specifier`. `if_statement` / `for_statement` / `while_statement`. String literal `string_literal`. Comment `comment`. C has no exception constructs.
+- **C++** — extensions `.cc`, `.cpp`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.hxx`, `.h++`. Root `translation_unit`. Function definition `function_definition`. Function call `call_expression`. Class `class_specifier` (also `struct_specifier`). Namespace `namespace_definition`. Template `template_declaration`. `if_statement` / `for_statement` / `while_statement`. Try/catch `try_statement` / `catch_clause`. String literal `string_literal`. Comment `comment`.
+
+`.h` maps to the C grammar (GitHub-Linguist default). A C++ header named `.h` parses under the C grammar and may produce ERROR nodes on C++-only syntax; name C++ headers `.hpp`/`.hh`/`.hxx`/`.h++` to parse them under the C++ grammar.
+
 `src/code_indexer/xray/search_engine.py` — `XRaySearchEngine` is the two-phase orchestrator:
 
 - **Phase 1 (driver, regex)**: regex walk over `repo_path` via `_run_phase1_driver`. Applies the `pattern` regex to file content (`search_target='content'`) or relative path (`search_target='filename'`). Honors `path`, `include_patterns` / `exclude_patterns` (fnmatch / ripgrep glob), `case_sensitive`, `multiline`, `pcre2`, and `context_lines`. Content searches delegate to `RegexSearchService` (ripgrep-backed). Returns a sorted, deduplicated list of candidate `Path` objects together with their per-file Phase 1 hit list, stored in `self._last_phase1_positions[path]` as a list of dicts: `{line_number, line_content, column, byte_offset, context_before, context_after}`.

@@ -270,7 +270,7 @@ class SemanticQueryManager:
         """
         try:
             if self._is_composite_repository(repo_path):
-                self.logger.info(
+                self.logger.debug(
                     f"Routing query to composite handler for repository: {repo_path}",
                     extra={"correlation_id": get_correlation_id()},
                 )
@@ -283,7 +283,7 @@ class SemanticQueryManager:
                     **kwargs,
                 )
 
-            self.logger.info(
+            self.logger.debug(
                 f"Routing query to single repository handler for: {repo_path}",
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -371,7 +371,7 @@ class SemanticQueryManager:
         Raises:
             Exception: If CLI execution or parsing fails
         """
-        self.logger.info(
+        self.logger.debug(
             f"Composite repository search for {repo_path} using CLI integration",
             extra={"correlation_id": get_correlation_id()},
         )
@@ -1103,7 +1103,7 @@ class SemanticQueryManager:
 
         # Log query strategy if non-default (Story #488 Phase 4)
         if query_strategy is not None and query_strategy != "primary_only":
-            logger.info(
+            logger.debug(
                 "Query strategy '%s' requested",
                 query_strategy,
                 extra=get_log_extra("QUERY-STRATEGY-001"),

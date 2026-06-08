@@ -174,20 +174,30 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         return "search_document"
 
     def _make_sync_request(
-        self, texts: List[str], input_type: str = "search_document"
+        self,
+        texts: List[str],
+        input_type: str = "search_document",
+        *,
+        retry: bool = True,
     ) -> Dict[str, Any]:
         """Make synchronous HTTP request to Cohere Embed API.
 
         Args:
             texts: List of text strings to embed.
             input_type: Cohere input_type parameter.
+            retry: When True (default, INDEXING path), retries on 500/network errors
+                with exponential back-off and time.sleep inside this method.
+                When False (QUERY path), makes exactly ONE HTTP attempt and raises
+                immediately on any error — sleep and retry are handled OUTSIDE the
+                governor slot by execute_with_backoff in the caller (Bug #1078 C2).
 
         Returns:
             Parsed JSON response from the API.
 
         Raises:
             ValueError: If the API key is invalid (401 Unauthorized).
-            RuntimeError: If all retry attempts are exhausted.
+            RuntimeError: If all retry attempts are exhausted (retry=True) or
+                the single attempt fails (retry=False).
         """
         import httpx
 
@@ -204,6 +214,58 @@ class CohereEmbeddingProvider(EmbeddingProvider):
 
         from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
+        def _single_attempt() -> Dict[str, Any]:
+            """Execute ONE HTTP call and return the parsed JSON dict."""
+            _start = time.time()
+            try:
+                from code_indexer.server.services.latency_tracking_httpx_transport import (
+                    build_latency_transport,
+                )
+
+                _latency_transport = build_latency_transport()
+            except ImportError:
+                # Server module not available in CLI-only deployments.
+                _latency_transport = None
+            _timeout = httpx.Timeout(
+                connect=self.config.connect_timeout,
+                read=self.config.timeout,
+                write=self.config.timeout,
+                pool=self.config.timeout,
+            )
+            _client_ctx = self._http_client_factory.create_sync_client(
+                transport=_latency_transport,
+                timeout=_timeout,
+            )
+            with _client_ctx as client:
+                response = client.post(
+                    self.config.api_endpoint,
+                    headers=headers,
+                    json=payload,
+                )
+            response.raise_for_status()
+            latency_ms = (time.time() - _start) * 1000
+            ProviderHealthMonitor.get_instance().record_call(
+                "cohere", latency_ms, success=True
+            )
+            return dict(response.json())
+
+        # --- Single-attempt path (QUERY, retry=False) ---
+        # One call, no sleep. All errors propagate immediately to the caller
+        # (execute_with_backoff handles 429 retries OUTSIDE the governor slot).
+        if not retry:
+            _start_single = time.time()
+            try:
+                return _single_attempt()
+            except Exception:
+                latency_ms = (time.time() - _start_single) * 1000
+                ProviderHealthMonitor.get_instance().record_call(
+                    "cohere", latency_ms, success=False
+                )
+                raise
+
+        # --- Retry loop (INDEXING path, retry=True) ---
+        # Keeps original behaviour: retries on 500/network errors with back-off sleep.
+        # 429 still propagates immediately (handled by execute_with_backoff in query path).
         last_error: Optional[Exception] = None
         max_attempts = self.config.max_retries + 1
         _start = time.time()
@@ -211,71 +273,34 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         for attempt in range(max_attempts):
             try:
                 _start = time.time()
-                try:
-                    from code_indexer.server.services.latency_tracking_httpx_transport import (
-                        build_latency_transport,
-                    )
-
-                    _latency_transport = build_latency_transport()
-                except ImportError:
-                    # Server module not available in CLI-only deployments.
-                    _latency_transport = None
-                _timeout = httpx.Timeout(
-                    connect=self.config.connect_timeout,
-                    read=self.config.timeout,
-                    write=self.config.timeout,
-                    pool=self.config.timeout,
-                )
-                _client_ctx = self._http_client_factory.create_sync_client(
-                    transport=_latency_transport,
-                    timeout=_timeout,
-                )
-                with _client_ctx as client:
-                    response = client.post(
-                        self.config.api_endpoint,
-                        headers=headers,
-                        json=payload,
-                    )
-
-                if response.status_code == 429:
-                    # Rate limited - wait and retry
-                    retry_after = float(
-                        response.headers.get("retry-after", self.config.retry_delay)
-                    )
-                    capped_delay = min(retry_after, _MAX_RETRY_SLEEP_SECONDS)
-                    logger.warning(
-                        "Cohere API rate limited (attempt %d/%d), retrying after %.1fs",
-                        attempt + 1,
-                        max_attempts,
-                        capped_delay,
-                    )
-                    time.sleep(capped_delay)
-                    continue
-
-                if response.status_code >= 500:
-                    delay = self.config.retry_delay * (
-                        2**attempt if self.config.exponential_backoff else 1
-                    )
-                    capped_delay = min(delay, _MAX_RETRY_SLEEP_SECONDS)
-                    logger.warning(
-                        "Cohere API server error %d (attempt %d/%d), retrying after %.1fs",
-                        response.status_code,
-                        attempt + 1,
-                        max_attempts,
-                        capped_delay,
-                    )
-                    time.sleep(capped_delay)
-                    continue
-
-                response.raise_for_status()
-                latency_ms = (time.time() - _start) * 1000
-                ProviderHealthMonitor.get_instance().record_call(
-                    "cohere", latency_ms, success=True
-                )
-                return dict(response.json())
-
+                return _single_attempt()
             except Exception as exc:
                 last_error = exc
+                response_obj = getattr(exc, "response", None)
+                status = getattr(response_obj, "status_code", None)
+                if status == 429:
+                    if not retry:
+                        # Query path: propagate immediately so execute_with_backoff
+                        # can sleep OUTSIDE the governor slot.
+                        raise
+                    # Indexing path (retry=True): back off and retry.
+                    retry_after = getattr(response_obj, "headers", {}).get(
+                        "retry-after"
+                    )
+                    if retry_after:
+                        wait_time = min(float(retry_after), _MAX_RETRY_SLEEP_SECONDS)
+                    else:
+                        wait_time = self.config.retry_delay * (
+                            2**attempt if self.config.exponential_backoff else 1
+                        )
+                    if attempt < self.config.max_retries:
+                        time.sleep(wait_time)
+                        continue
+                    latency_ms = (time.time() - _start) * 1000
+                    ProviderHealthMonitor.get_instance().record_call(
+                        "cohere", latency_ms, success=False
+                    )
+                    raise
                 if attempt < self.config.max_retries:
                     delay = self.config.retry_delay * (
                         2**attempt if self.config.exponential_backoff else 1
@@ -374,9 +399,14 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         *,
         embedding_purpose: str = "document",
     ) -> List[float]:
-        """Get single text embedding."""
+        """Get single text embedding (QUERY path).
+
+        Uses retry=False so that exactly one HTTP attempt is made per
+        governor slot acquisition. The execute_with_backoff wrapper in the
+        caller handles 429 retries OUTSIDE the governor slot (Bug #1078 C2).
+        """
         result = self.get_embeddings_batch(
-            [text], model, embedding_purpose=embedding_purpose
+            [text], model, embedding_purpose=embedding_purpose, retry=False
         )
         return result[0]
 
@@ -386,6 +416,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         model: Optional[str] = None,
         *,
         embedding_purpose: str = "document",
+        retry: bool = True,
     ) -> List[List[float]]:
         """Get batch embeddings with dual-constraint splitting (tokens + texts/request)."""
         if not texts:
@@ -412,7 +443,9 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 or len(current_batch) >= max_texts
             ):
                 # Submit current batch
-                response = self._make_sync_request(current_batch, input_type)
+                response = self._make_sync_request(
+                    current_batch, input_type, retry=retry
+                )
                 embeddings = response.get("embeddings", {}).get("float", [])
                 # Validate response
                 if len(embeddings) != len(current_batch):
@@ -440,7 +473,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
 
         # Submit final batch
         if current_batch:
-            response = self._make_sync_request(current_batch, input_type)
+            response = self._make_sync_request(current_batch, input_type, retry=retry)
             embeddings = response.get("embeddings", {}).get("float", [])
             # Validate response
             if len(embeddings) != len(current_batch):

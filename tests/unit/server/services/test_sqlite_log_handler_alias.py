@@ -99,6 +99,7 @@ def test_emit_forwards_alias_from_extra_to_backend(tmp_path: Path) -> None:
     setattr(record, "alias", "my-repo")
 
     handler.emit(record)
+    handler.close()  # flush async writer thread before asserting
 
     assert len(backend.calls) == 1
     assert backend.calls[0]["alias"] == "my-repo", (
@@ -123,6 +124,7 @@ def test_emit_without_alias_forwards_none(tmp_path: Path) -> None:
     )
 
     handler.emit(record)
+    handler.close()  # flush async writer thread before asserting
 
     assert len(backend.calls) == 1
     assert backend.calls[0]["alias"] is None, (
@@ -152,6 +154,7 @@ def test_emit_does_not_include_alias_in_extra_data_json(tmp_path: Path) -> None:
     setattr(record, "attempt", 3)
 
     handler.emit(record)
+    handler.close()  # flush async writer thread before asserting
 
     assert len(backend.calls) == 1
     call = backend.calls[0]

@@ -474,6 +474,13 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
     This is called once per request and the vector is shared with memory
     retrieval (GAP 1: zero duplicate Voyage API calls).
 
+    Bug #1078: the HTTP call is gated through ProviderConcurrencyGovernor so
+    memory-retrieval embeddings do not bypass the per-budget concurrency cap.
+
+    Bug #899 (fault-injection factory wired here): previously VoyageAIClient was
+    constructed without an http_client_factory, bypassing fault injection in Phase 5
+    E2E tests. Now passes _get_http_client_factory() from search_service.
+
     Returns:
         A non-empty list of floats on success.
         An empty list on any error (logged at WARNING); the caller must check
@@ -482,12 +489,28 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
     try:
         from code_indexer.config import VoyageAIConfig
         from code_indexer.services.voyage_ai import VoyageAIClient
+        from code_indexer.server.services.search_service import _get_http_client_factory
+        from code_indexer.server.services.governed_call import governed_query_embedding
 
-        provider = VoyageAIClient(VoyageAIConfig())
+        # Bug #899 fix: pass factory so fault injection intercepts this client.
+        # AttributeError guard: app.state not set in unit-test environments without
+        # full lifespan; None is equivalent to the pre-#899 default (no fault injection).
+        try:
+            _factory = _get_http_client_factory()
+        except AttributeError:
+            logger.warning(
+                "http_client_factory not available on app.state; "
+                "VoyageAIClient using default transport (fault injection inactive). "
+                "This is expected only in unit-test environments, not in production."
+            )
+            _factory = None
+
+        provider = VoyageAIClient(VoyageAIConfig(), http_client_factory=_factory)
         # cast: EmbeddingProvider.get_embedding is typed as returning Any upstream
         # (broad protocol), but for VoyageAIClient it always yields a List[float].
         return cast(
-            List[float], provider.get_embedding(query_text, embedding_purpose="query")
+            List[float],
+            governed_query_embedding(provider, query_text),
         )
     except Exception as exc:
         logger.warning(

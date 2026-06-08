@@ -20,6 +20,8 @@ pub fn language_for_extension(ext: &str) -> Option<Language> {
         "sql" => Some(tree_sitter_sequel_tsql::LANGUAGE.into()),
         "xml" => Some(tree_sitter_xml::LANGUAGE_XML.into()),
         "groovy" | "gradle" => Some(tree_sitter_groovy::LANGUAGE.into()),
+        "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
+        "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => Some(tree_sitter_cpp::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -29,6 +31,7 @@ pub fn supported_extensions() -> &'static [&'static str] {
     &[
         "java", "kt", "kts", "py", "ts", "tsx", "js", "jsx", "go", "cs", "sh", "bash", "html",
         "htm", "css", "tf", "hcl", "yml", "yaml", "sql", "xml", "groovy", "gradle", "mjs", "cjs",
+        "c", "h", "cc", "cpp", "cxx", "c++", "hpp", "hh", "hxx", "h++",
     ]
 }
 
@@ -108,6 +111,68 @@ mod tests {
         let exts = supported_extensions();
         for ext in &["tf", "hcl", "yml", "yaml", "sql", "xml", "groovy", "gradle", "mjs", "cjs"] {
             assert!(exts.contains(ext), "Extension not in supported list: {}", ext);
+        }
+    }
+
+    // --- C language support ---
+
+    #[test]
+    fn test_c_extension_present() {
+        assert!(language_for_extension("c").is_some(), "No language for .c");
+    }
+
+    #[test]
+    fn test_c_header_extension_present() {
+        assert!(language_for_extension("h").is_some(), "No language for .h");
+    }
+
+    // --- C++ language support ---
+
+    #[test]
+    fn test_cpp_extension_present() {
+        assert!(language_for_extension("cpp").is_some(), "No language for .cpp");
+    }
+
+    #[test]
+    fn test_cc_extension_present() {
+        assert!(language_for_extension("cc").is_some(), "No language for .cc");
+    }
+
+    #[test]
+    fn test_cxx_extension_present() {
+        assert!(language_for_extension("cxx").is_some(), "No language for .cxx");
+    }
+
+    #[test]
+    fn test_cpp_plus_plus_extension_present() {
+        assert!(language_for_extension("c++").is_some(), "No language for .c++");
+    }
+
+    #[test]
+    fn test_hpp_extension_present() {
+        assert!(language_for_extension("hpp").is_some(), "No language for .hpp");
+    }
+
+    #[test]
+    fn test_hh_extension_present() {
+        assert!(language_for_extension("hh").is_some(), "No language for .hh");
+    }
+
+    #[test]
+    fn test_hxx_extension_present() {
+        assert!(language_for_extension("hxx").is_some(), "No language for .hxx");
+    }
+
+    #[test]
+    fn test_hxx_plus_plus_extension_present() {
+        assert!(language_for_extension("h++").is_some(), "No language for .h++");
+    }
+
+    #[test]
+    fn test_c_and_cpp_extensions_in_supported_list() {
+        let exts = supported_extensions();
+        for ext in &["c", "h", "cc", "cpp", "cxx", "c++", "hpp", "hh", "hxx", "h++"] {
+            assert!(exts.contains(ext), "C/C++ extension not in supported list: {}", ext);
         }
     }
 }

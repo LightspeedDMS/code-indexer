@@ -35,7 +35,7 @@ class BackendFactory:
         """
         # ServerConfig has no vector_store attribute; default to filesystem (only supported backend)
         if not hasattr(config, "vector_store") or config.vector_store is None:
-            logger.info("Creating FilesystemBackend (no vector_store config)")
+            logger.debug("Creating FilesystemBackend (no vector_store config)")
             return FilesystemBackend(
                 project_root=project_root, hnsw_index_cache=hnsw_cache
             )
@@ -43,7 +43,7 @@ class BackendFactory:
         provider = config.vector_store.provider
 
         if provider == "filesystem":
-            logger.info("Creating FilesystemBackend")
+            logger.debug("Creating FilesystemBackend")
             return FilesystemBackend(
                 project_root=project_root, hnsw_index_cache=hnsw_cache
             )

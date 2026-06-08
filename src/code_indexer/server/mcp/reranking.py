@@ -24,7 +24,7 @@ Bug #679 Part 2 (AC4): rerank_metadata also contains 'reranker_status' nested di
 
 import logging
 import time
-from typing import Any, Callable, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 from code_indexer.server.clients.reranker_clients import (
     CohereRerankerClient,
@@ -37,6 +37,16 @@ from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 logger = logging.getLogger(__name__)
 
 MAX_CANDIDATE_LIMIT = 200  # Hard cap on candidates fetched for reranking
+
+# Bug #1078 Phase 1: seconds to wait for a governor slot before raising GovernorBusyError.
+_GOVERNOR_ACQUIRE_TIMEOUT_SECS: float = 30.0
+
+# Map reranker client class -> governor budget key.
+# VoyageRerankerClient uses the shared Voyage account budget; CohereRerankerClient uses cohere.
+_RERANKER_BUDGET: Dict[Type, str] = {
+    VoyageRerankerClient: "voyage",
+    CohereRerankerClient: "cohere",
+}
 
 _DISABLED_HINT = (
     "Reranking requested but no reranker providers are configured. "
@@ -116,9 +126,41 @@ def _attempt_provider_rerank(
     if monitor.is_sinbinned(health_key):
         return None, "skipped"
     try:
-        client = client_cls()
-        rerank_results = client.rerank(
-            query=query, documents=documents, instruction=instruction, top_k=top_k
+        from code_indexer.server.services.search_service import _get_http_client_factory
+        from code_indexer.server.services.provider_concurrency_governor import (
+            ProviderConcurrencyGovernor,
+        )
+
+        # Bug #899 fix: pass factory so fault injection intercepts this client.
+        # AttributeError guard: app.state not set in unit-test environments without
+        # full lifespan; None is equivalent to the pre-#899 default (no fault injection).
+        try:
+            _factory = _get_http_client_factory()
+        except AttributeError:
+            logger.warning(
+                "http_client_factory not available on app.state; "
+                "reranker client using default transport (fault injection inactive). "
+                "This is expected only in unit-test environments, not in production."
+            )
+            _factory = None
+        from code_indexer.services.provider_backoff import execute_with_backoff
+
+        client = client_cls(http_client_factory=_factory)
+        # Bug #1078: gate the HTTP call through the concurrency governor AND wrap
+        # with execute_with_backoff so 429 sleeps happen OUTSIDE the held slot.
+        _budget = _RERANKER_BUDGET.get(client_cls, "voyage")
+        _governor = ProviderConcurrencyGovernor.get_instance()
+        rerank_results = execute_with_backoff(
+            lambda: _governor.execute(
+                _budget,
+                lambda: client.rerank(
+                    query=query,
+                    documents=documents,
+                    instruction=instruction,
+                    top_k=top_k,
+                ),
+                acquire_timeout=_GOVERNOR_ACQUIRE_TIMEOUT_SECS,
+            )
         )
         return [(r.index, r.relevance_score) for r in rerank_results], None
     except RerankerSinbinnedException:

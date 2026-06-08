@@ -21,6 +21,8 @@ SUPPORTED_LANGUAGES: dict[str, str] = {
     "csharp": "c_sharp",
     "html": "html",
     "css": "css",
+    "c": "c",
+    "cpp": "cpp",
 }
 
 # File extension -> canonical language name mapping
@@ -42,6 +44,16 @@ EXTENSION_MAP: dict[str, str] = {
     ".html": "html",
     ".htm": "html",
     ".css": "css",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".c++": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".hxx": "cpp",
+    ".h++": "cpp",
 }
 
 
