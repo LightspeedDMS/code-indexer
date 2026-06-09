@@ -23,7 +23,15 @@ Design principles:
   ProviderSinbinnedError FAST without consuming a slot.
 - Initial K is seeded from server runtime config field
   ``query_provider_max_concurrency`` (default 8 when unset/unreadable), then
-  CLAMPED into ``[K_MIN, K_MAX]`` = [8, 32].
+  CLAMPED into ``[k_min, k_max]``.
+- The K bounds ``[k_min, k_max]`` (the AIMD floor/ceiling AND the per-lane
+  limiter clamp) are themselves seeded from config ``coalesce_k_min`` /
+  ``coalesce_k_max`` (defaults ``[K_MIN, K_MAX] = [8, 32]``; valid range
+  ``8 <= k_min <= k_max <= 256``). This is a CONSTRUCTION-SCOPED seed, NOT a
+  live hot-reload knob — like ``query_provider_max_concurrency``, the bounds are
+  baked in at construction and only change on the next governor construction /
+  server restart. Invalid config falls back to the 8/32 defaults with a logged
+  WARNING (see ``_read_config_k_bounds``).
 - Telemetry: ``in_flight_high_water_mark`` reads each lane's ResizableLimiter
   ``high_water`` (single source of truth). ``acquire_wait_count`` is a
   governor-maintained contention counter (the limiter does not track waits).
@@ -34,10 +42,11 @@ Call-site pattern (sleep is OUTSIDE the slot — see provider_backoff.py):
 
 import logging
 import threading
-from typing import Callable, Dict, Optional, TypeVar
+from typing import Callable, Dict, Optional, Tuple, TypeVar
 
 from code_indexer.server.services.aimd_controller import AimdController
 from code_indexer.server.services.resizable_limiter import (
+    K_MAX,
     K_MIN,
     ResizableLimiter,
 )
@@ -47,8 +56,13 @@ logger = logging.getLogger(__name__)
 
 # Default seed for the initial per-lane K when server runtime config is
 # unavailable/unreadable. Per Story #1079 this defaults to the AIMD floor
-# (K_MIN = 8); the constructor additionally clamps any seed into [K_MIN, K_MAX].
+# (K_MIN = 8); the constructor additionally clamps any seed into [k_min, k_max].
 _DEFAULT_MAX_CONCURRENCY: int = K_MIN
+
+# Absolute ceiling for the configurable AIMD K_MAX (coalesce_k_max). A sane upper
+# bound so an operator typo (e.g. 100000) cannot create a runaway concurrency
+# ceiling. Config values above this are rejected and fall back to the defaults.
+_K_MAX_HARD_CEILING: int = 256
 
 # Lane -> the single ProviderHealthMonitor health key to check before acquiring.
 _LANE_HEALTH_KEY: Dict[str, str] = {
@@ -95,16 +109,32 @@ class ProviderConcurrencyGovernor:
     _lock: threading.Lock = threading.Lock()
 
     def __init__(self, max_concurrency: Optional[int] = None) -> None:
+        # K bounds (the AIMD floor/ceiling + limiter clamp) are a CONSTRUCTION-
+        # SCOPED seed read from config.coalesce_k_min / config.coalesce_k_max,
+        # NOT a live hot-reload knob (mirrors how query_provider_max_concurrency
+        # seeds the initial K at construction). A change to these config fields
+        # takes effect on the next governor construction / server restart.
+        #
+        # Explicit max_concurrency (direct construction in tests) keeps the
+        # default [K_MIN, K_MAX] = [8, 32] bounds so existing tests are
+        # unaffected; only the auto-seed path consults config for the bounds.
         if max_concurrency is None:
+            k_min, k_max = self._read_config_k_bounds()
             max_concurrency = self._read_config_concurrency()
-        # One ResizableLimiter + AimdController per lane. ResizableLimiter clamps
-        # the seed into [K_MIN, K_MAX] internally; AimdController seeds its K from
-        # the limiter's (clamped) limit, so the two always agree at construction.
+        else:
+            k_min, k_max = K_MIN, K_MAX
+        # Clamp the initial K seed into the (possibly config-widened) bounds.
+        seed = min(max(max_concurrency, k_min), k_max)
+        # One ResizableLimiter + AimdController per lane. The limiter clamps into
+        # [k_min, k_max]; AimdController seeds its K from the limiter's (clamped)
+        # limit and uses the same [k_min, k_max] floor/ceiling, so the two always
+        # agree at construction.
         self._limiters: Dict[str, ResizableLimiter] = {
-            lane: ResizableLimiter(initial=max_concurrency) for lane in _LANE_HEALTH_KEY
+            lane: ResizableLimiter(initial=seed, k_min=k_min, k_max=k_max)
+            for lane in _LANE_HEALTH_KEY
         }
         self._aimd: Dict[str, AimdController] = {
-            lane: AimdController(limiter=self._limiters[lane])
+            lane: AimdController(limiter=self._limiters[lane], k_min=k_min, k_max=k_max)
             for lane in _LANE_HEALTH_KEY
         }
         # acquire_wait_count stays governor-maintained (the limiter does not
@@ -278,3 +308,65 @@ class ProviderConcurrencyGovernor:
                 _DEFAULT_MAX_CONCURRENCY,
             )
         return _DEFAULT_MAX_CONCURRENCY
+
+    @staticmethod
+    def _read_config_k_bounds() -> Tuple[int, int]:
+        """Read coalesce_k_min/coalesce_k_max (the AIMD floor/ceiling seeds).
+
+        CONSTRUCTION-SCOPED seed, NOT a live hot-reload knob — the returned
+        bounds are baked into the per-lane limiter clamp + AIMD floor/ceiling at
+        construction and only change on the next governor construction / restart.
+
+        Validation: requires ``K_MIN <= k_min <= k_max <= _K_MAX_HARD_CEILING``.
+        On ANY failure (config not yet initialized, missing field, non-int,
+        out-of-range, k_min > k_max, test context) falls back to the documented
+        module defaults ``(K_MIN, K_MAX) = (8, 32)``. Present-but-invalid values
+        emit a structured WARNING; missing fields and unreadable config log at
+        DEBUG. Mirrors the ``_read_config_concurrency`` fallback discipline.
+        """
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            cfg = get_config_service().get_config()
+            k_min = getattr(cfg, "coalesce_k_min", None)
+            k_max = getattr(cfg, "coalesce_k_max", None)
+            if k_min is None or k_max is None:
+                # Missing field(s): use defaults (matches an un-migrated config
+                # that predates the coalesce_k_* fields). DEBUG, not WARNING —
+                # absence is expected/benign, unlike present-but-invalid values.
+                logger.debug(
+                    "ProviderConcurrencyGovernor: coalesce K bounds absent "
+                    "(k_min=%r, k_max=%r); using defaults (%d, %d)",
+                    k_min,
+                    k_max,
+                    K_MIN,
+                    K_MAX,
+                )
+                return K_MIN, K_MAX
+            if (
+                isinstance(k_min, int)
+                and isinstance(k_max, int)
+                and K_MIN <= k_min <= k_max <= _K_MAX_HARD_CEILING
+            ):
+                return k_min, k_max
+            # Present but invalid -> WARNING + documented defaults.
+            logger.warning(
+                "ProviderConcurrencyGovernor: invalid coalesce K bounds "
+                "(k_min=%r, k_max=%r); require %d <= k_min <= k_max <= %d. "
+                "Falling back to defaults (%d, %d).",
+                k_min,
+                k_max,
+                K_MIN,
+                _K_MAX_HARD_CEILING,
+                K_MIN,
+                K_MAX,
+            )
+        except Exception as exc:
+            logger.debug(
+                "ProviderConcurrencyGovernor: could not read coalesce K bounds "
+                "(%s); using defaults (%d, %d)",
+                exc,
+                K_MIN,
+                K_MAX,
+            )
+        return K_MIN, K_MAX

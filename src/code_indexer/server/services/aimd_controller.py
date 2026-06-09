@@ -57,9 +57,18 @@ class AimdController:
         limiter: ResizableLimiter,
         *,
         time_fn: Callable[[], float] = time.monotonic,
+        k_min: int = K_MIN,
+        k_max: int = K_MAX,
     ) -> None:
         self._limiter = limiter
         self._time_fn = time_fn
+        # Per-instance AIMD floor/ceiling. Default to the module constants
+        # [K_MIN, K_MAX] = [8, 32] so existing direct-construction callers/tests
+        # are unaffected; the governor seeds these from config.coalesce_k_min /
+        # config.coalesce_k_max (Story #1079 anti-orphan fix). The bound clamps
+        # are read at the decrease floor / increase ceiling below.
+        self._k_min: int = k_min
+        self._k_max: int = k_max
         # AIMD state — all reads/writes happen under the limiter's condition lock.
         # Seed K from the limiter's current (already-clamped) limit so the AIMD
         # target and the limiter's enforced limit agree at construction. The
@@ -89,7 +98,7 @@ class AimdController:
             if not success:
                 # Multiplicative decrease — never below the floor.
                 old_k = self._k
-                new_k = max(K_MIN, self._k // 2)
+                new_k = max(self._k_min, self._k // 2)
                 # Observability (Phase E): structured WARNING ONLY when K actually
                 # drops. At the floor (new_k == old_k) there is nothing to report.
                 if new_k != old_k:
@@ -112,7 +121,7 @@ class AimdController:
                 return
 
             self._success_run += 1
-            if self._success_run >= SUCCESS_THRESHOLD and self._k < K_MAX:
+            if self._success_run >= SUCCESS_THRESHOLD and self._k < self._k_max:
                 self._k += 1
                 self._success_run = 0
                 self._limiter.set_limit(self._k)

@@ -426,3 +426,118 @@ class TestConfigSeedClamp:
             assert g.aimd(lane).k == 8, (
                 f"lane {lane} should seed to K_MIN=8 when config is unreadable"
             )
+
+
+# ---------------------------------------------------------------------------
+# coalesce_k_min / coalesce_k_max config seeds (Story #1079 anti-orphan fix)
+# ---------------------------------------------------------------------------
+
+
+class _FakeConfig:
+    """Minimal stand-in for ServerConfig exposing the fields the governor reads."""
+
+    def __init__(self, *, k_min=8, k_max=32, max_concurrency=8):
+        self.coalesce_k_min = k_min
+        self.coalesce_k_max = k_max
+        self.query_provider_max_concurrency = max_concurrency
+
+
+class _FakeConfigService:
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    def get_config(self):
+        return self._cfg
+
+
+def _patch_config(cfg):
+    """Patch get_config_service to return a service yielding ``cfg``."""
+    return patch(
+        "code_indexer.server.services.config_service.get_config_service",
+        return_value=_FakeConfigService(cfg),
+    )
+
+
+class TestCoalesceKBoundsSeed:
+    def test_governor_seeds_aimd_ceiling_from_config(self):
+        """coalesce_k_max=64 lets a lane's AIMD grow above the default 32 up to 64."""
+        from code_indexer.server.services.aimd_controller import SUCCESS_THRESHOLD
+
+        cfg = _FakeConfig(k_min=8, k_max=64, max_concurrency=8)
+        with _patch_config(cfg):
+            g = ProviderConcurrencyGovernor()  # seed from config
+        aimd = g.aimd("voyage:embed")
+        # Drive far more successes than needed to reach the configured ceiling.
+        for _ in range(SUCCESS_THRESHOLD * (64 - 8) + SUCCESS_THRESHOLD * 5):
+            aimd.record(success=True)
+        assert aimd.k == 64, "AIMD must grow up to the config-seeded k_max=64"
+
+    def test_governor_seeds_limiter_clamp_from_config(self):
+        """The per-lane limiter clamp bound becomes [k_min, k_max] from config."""
+        cfg = _FakeConfig(k_min=8, k_max=64, max_concurrency=8)
+        with _patch_config(cfg):
+            g = ProviderConcurrencyGovernor()
+        limiter = g._limiters["voyage:embed"]
+        limiter.set_limit(64)
+        assert limiter.limit == 64, "limiter clamp ceiling must be the config k_max=64"
+        limiter.set_limit(999)
+        assert limiter.limit == 64
+
+    def test_initial_seed_clamps_into_config_bounds(self):
+        """The initial K seed clamps into [k_min, k_max], not [8, 32]."""
+        # max_concurrency=50 is above default K_MAX (32) but within [8, 64].
+        cfg = _FakeConfig(k_min=8, k_max=64, max_concurrency=50)
+        with _patch_config(cfg):
+            g = ProviderConcurrencyGovernor()
+        for lane in LANES:
+            assert g.aimd(lane).k == 50, (
+                f"lane {lane} initial K must clamp into the configured [8, 64]"
+            )
+
+    def test_invalid_k_min_greater_than_k_max_falls_back_to_defaults(self, caplog):
+        """k_min > k_max is invalid -> fall back to 8/32 with a logged WARNING."""
+        import logging
+
+        cfg = _FakeConfig(k_min=40, k_max=10, max_concurrency=8)
+        logger_name = "code_indexer.server.services.provider_concurrency_governor"
+        with _patch_config(cfg):
+            with caplog.at_level(logging.WARNING, logger=logger_name):
+                g = ProviderConcurrencyGovernor()
+        # Defaults applied: floor 8, ceiling 32.
+        limiter = g._limiters["voyage:embed"]
+        limiter.set_limit(999)
+        assert limiter.limit == 32, "invalid config must fall back to default K_MAX=32"
+        assert any(
+            r.name == logger_name and r.levelno == logging.WARNING
+            for r in caplog.records
+        ), "invalid K bounds must emit a WARNING"
+
+    def test_invalid_k_min_below_floor_falls_back(self):
+        """k_min < 8 is invalid -> fall back to default 8/32."""
+        cfg = _FakeConfig(k_min=2, k_max=64, max_concurrency=8)
+        with _patch_config(cfg):
+            g = ProviderConcurrencyGovernor()
+        limiter = g._limiters["voyage:embed"]
+        limiter.set_limit(999)
+        assert limiter.limit == 32, "k_min<8 invalid -> default ceiling 32"
+        limiter.set_limit(0)
+        assert limiter.limit == 8, "k_min<8 invalid -> default floor 8"
+
+    def test_missing_fields_fall_back_to_defaults(self):
+        """Config without the coalesce_k_* fields -> default 8/32, no crash."""
+
+        class _BareConfig:
+            query_provider_max_concurrency = 8
+
+        with _patch_config(_BareConfig()):
+            g = ProviderConcurrencyGovernor()
+        limiter = g._limiters["voyage:embed"]
+        limiter.set_limit(999)
+        assert limiter.limit == 32
+
+    def test_explicit_max_concurrency_preserves_default_bounds(self):
+        """Direct construction (tests) with max_concurrency keeps default [8, 32]."""
+        g = ProviderConcurrencyGovernor(max_concurrency=20)
+        limiter = g._limiters["voyage:embed"]
+        limiter.set_limit(999)
+        assert limiter.limit == 32, "explicit construction must keep default K_MAX=32"

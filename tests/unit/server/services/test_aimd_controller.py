@@ -182,6 +182,42 @@ class TestAimdCooldown:
 
 
 # ---------------------------------------------------------------------------
+# Configurable floor/ceiling (Story #1079 anti-orphan: coalesce_k_min/k_max)
+# ---------------------------------------------------------------------------
+
+
+class TestAimdConfigurableBounds:
+    def test_default_ceiling_is_k_max(self):
+        """No k_max arg -> additive increase caps at the module default K_MAX (32)."""
+        aimd, limiter, _ = _make()
+        for _ in range(SUCCESS_THRESHOLD * (K_MAX - K_MIN) + SUCCESS_THRESHOLD * 5):
+            aimd.record(success=True)
+        assert aimd.k == K_MAX
+        assert limiter.limit == K_MAX
+
+    def test_custom_ceiling_grows_above_k_max(self):
+        """k_max=64 (with a matching limiter) lets K grow past 32 up to 64."""
+        clock = _FakeClock()
+        limiter = ResizableLimiter(initial=8, k_min=8, k_max=64)
+        aimd = AimdController(limiter=limiter, time_fn=clock, k_min=8, k_max=64)
+        # Drive well past the would-be K_MAX (32) ceiling toward 64.
+        for _ in range(SUCCESS_THRESHOLD * (64 - 8) + SUCCESS_THRESHOLD * 5):
+            aimd.record(success=True)
+        assert aimd.k == 64, "custom ceiling must let K grow above the default K_MAX"
+        assert limiter.limit == 64
+
+    def test_custom_floor_caps_multiplicative_decrease(self):
+        """A custom k_min raises the decrease floor above K_MIN."""
+        clock = _FakeClock()
+        limiter = ResizableLimiter(initial=40, k_min=10, k_max=64)
+        aimd = AimdController(limiter=limiter, time_fn=clock, k_min=10, k_max=64)
+        aimd._k = 12
+        aimd.record(success=False)  # 12 // 2 = 6, but floor is 10
+        assert aimd.k == 10, "decrease must not drop below the configured floor"
+        assert limiter.limit == 10
+
+
+# ---------------------------------------------------------------------------
 # Observability: structured WARNING on multiplicative decrease (Phase E)
 # ---------------------------------------------------------------------------
 

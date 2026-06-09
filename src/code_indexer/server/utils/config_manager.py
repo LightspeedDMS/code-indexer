@@ -1224,8 +1224,14 @@ class ServerConfig:
 
     # Story #1079 Phase E - Server-side embedding request coalescer.
     # All four are RUNTIME (DB-backed, Web-UI tunable), NOT bootstrap config.json.
-    # They are read live via getattr in coalesced_query_embedding / the coalescer
-    # registry, so changes take effect WITHOUT a restart.
+    # coalesce_enabled / coalesce_max_batch_size are read live via getattr in
+    # coalesced_query_embedding / the coalescer registry, so changes take effect
+    # WITHOUT a restart (true hot-reload). coalesce_k_min / coalesce_k_max are
+    # DIFFERENT: they are CONSTRUCTION-SCOPED governor seeds (read once at
+    # ProviderConcurrencyGovernor construction via _read_config_k_bounds and baked
+    # into each lane's limiter clamp + AIMD floor/ceiling) — a change takes effect
+    # on the next governor construction / server restart, exactly like
+    # query_provider_max_concurrency seeds the initial K. They do NOT live-reload.
     #
     # coalesce_enabled: kill switch. When False, coalesced_query_embedding
     #   delegates to governed_query_embedding (governor + AIMD still apply, no
@@ -1235,8 +1241,11 @@ class ServerConfig:
     #   _get_texts_per_request() (the smallest provider texts cap), so a sealed
     #   batch never sub-splits in the provider. Read live at registry build / seal.
     coalesce_max_batch_size: int = 96
-    # coalesce_k_min / coalesce_k_max: per-lane AIMD K floor/ceiling seeds,
-    #   matching the locked design (K_MIN=8, K_MAX=32).
+    # coalesce_k_min / coalesce_k_max: per-lane AIMD K floor/ceiling seeds AND the
+    #   per-lane ResizableLimiter clamp bounds, matching the locked design
+    #   (K_MIN=8, K_MAX=32). Valid range 8 <= k_min <= k_max <= 256; present-but-
+    #   invalid config falls back to the 8/32 defaults with a logged WARNING.
+    #   Construction-scoped seed (see preamble) — NOT live hot-reload.
     coalesce_k_min: int = 8
     coalesce_k_max: int = 32
 

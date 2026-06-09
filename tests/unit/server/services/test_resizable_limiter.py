@@ -154,6 +154,42 @@ class TestResizableLimiterSetLimit:
 
 
 # ---------------------------------------------------------------------------
+# Configurable clamp bounds (Story #1079 anti-orphan fix: coalesce_k_min/k_max)
+# ---------------------------------------------------------------------------
+
+
+class TestResizableLimiterConfigurableBounds:
+    def test_default_bounds_preserve_existing_behavior(self):
+        """No k_min/k_max args -> clamp into the module defaults [K_MIN, K_MAX]."""
+        assert ResizableLimiter(initial=1).limit == K_MIN
+        assert ResizableLimiter(initial=999).limit == K_MAX
+
+    def test_custom_bounds_widen_clamp_range(self):
+        """k_max=64 lets the limit clamp up to 64 instead of K_MAX (32)."""
+        lim = ResizableLimiter(initial=999, k_min=8, k_max=64)
+        assert lim.limit == 64
+        lim2 = ResizableLimiter(initial=50, k_min=8, k_max=64)
+        assert lim2.limit == 50
+
+    def test_custom_bounds_apply_to_set_limit(self):
+        """set_limit clamps into the CONFIGURED [k_min, k_max], not the module defaults."""
+        lim = ResizableLimiter(initial=8, k_min=8, k_max=64)
+        lim.set_limit(64)
+        assert lim.limit == 64
+        lim.set_limit(999)
+        assert lim.limit == 64
+        lim.set_limit(0)
+        assert lim.limit == 8
+
+    def test_custom_floor_clamps_below(self):
+        """A custom k_min raises the floor for both initial and set_limit."""
+        lim = ResizableLimiter(initial=4, k_min=10, k_max=64)
+        assert lim.limit == 10
+        lim.set_limit(5)
+        assert lim.limit == 10
+
+
+# ---------------------------------------------------------------------------
 # Thread-safety under saturation
 # ---------------------------------------------------------------------------
 
