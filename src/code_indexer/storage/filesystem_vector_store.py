@@ -2490,11 +2490,11 @@ class FilesystemVectorStore:
             The HNSW-load worker (load_index) runs freely — it makes no provider calls.
             """
             from code_indexer.server.services.governed_call import (
-                governed_query_embedding,
+                coalesced_query_embedding,
             )
 
             t0 = time.time()
-            embedding = governed_query_embedding(embedding_provider, query)
+            embedding = coalesced_query_embedding(embedding_provider, query)
             embedding_time_ms = (time.time() - t0) * 1000
             return embedding, embedding_time_ms
 

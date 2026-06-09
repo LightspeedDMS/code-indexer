@@ -79,6 +79,10 @@ def test_all_server_config_fields_are_classified() -> None:
             "xray_config",  # Story #977 — runtime, not bootstrap
             "pace_maker_mode",  # Story #997 — runtime Web UI setting (three-way: disabled/on/off)
             "query_provider_max_concurrency",  # Bug #1078 Phase 1 — runtime, Web UI configurable
+            "coalesce_enabled",  # Story #1079 Phase E — runtime kill switch
+            "coalesce_max_batch_size",  # Story #1079 Phase E — runtime cap
+            "coalesce_k_min",  # Story #1079 Phase E — runtime AIMD floor seed
+            "coalesce_k_max",  # Story #1079 Phase E — runtime AIMD ceiling seed
         }
     )
 

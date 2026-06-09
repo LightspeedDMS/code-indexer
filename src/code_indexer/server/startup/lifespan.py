@@ -2822,6 +2822,42 @@ def make_lifespan(
                 )
             )
 
+        # Story #1079 Phase E: build the embedding coalescer registry ONCE, after
+        # providers + runtime config are available and fault injection has wired
+        # app.state.http_client_factory. The registry holds one EmbeddingCoalescer
+        # per configured :embed lane; coalesced_query_embedding reads it live and
+        # falls back to the direct governed call when it is absent (CLI/solo never
+        # build one). Non-fatal: a failure leaves no registry, so queries simply
+        # use the direct governed single call.
+        try:
+            from code_indexer.server.services.coalescer_registry import (
+                build_coalescer_registry,
+                set_coalescer_registry,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_cfg_svc,
+            )
+
+            _coalescer_registry = build_coalescer_registry(
+                _get_cfg_svc().get_config(),
+                http_client_factory=getattr(app.state, "http_client_factory", None),
+            )
+            set_coalescer_registry(_coalescer_registry)
+            logger.info(
+                "Embedding coalescer registry built (Story #1079 Phase E)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1079",
+                    f"Failed to build embedding coalescer registry "
+                    f"(queries will use the direct governed call): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         yield  # Server is now running
 
         # Shutdown: Remove SQLiteLogHandler from root logger FIRST (Bug #1060).
@@ -2843,6 +2879,21 @@ def make_lifespan(
         _mcp_executor.shutdown(wait=False)
         # Bug #1070: Shut down the dedicated xray executor.
         _xray_executor.shutdown(wait=False)
+
+        # Story #1079 Phase E: clear the process-level coalescer registry so a
+        # subsequent lifespan cycle in the same process does not inherit a stale
+        # registry. Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.coalescer_registry import (
+                clear_coalescer_registry,
+            )
+
+            clear_coalescer_registry()
+        except Exception:
+            logger.debug(
+                "Coalescer registry clear failed (expected during shutdown)",
+                exc_info=True,
+            )
 
         # Prevent test pollution across repeated TestClient/lifespan cycles:
         # the FastAPI lifespan instantiates a real TOTPService and stores it in

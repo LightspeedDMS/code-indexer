@@ -16,7 +16,13 @@ uses this function directly to exercise the real Voyage HTTP path under a 20-
 thread simultaneous burst and assert the governor caps in-flight to K=8.
 """
 
-from typing import Any, List, Optional
+import logging
+from typing import Any, List, Optional, cast
+
+from code_indexer.server.services.coalescer_registry import get_coalescer_registry
+from code_indexer.server.services.config_service import get_config_service
+
+logger = logging.getLogger(__name__)
 
 # Seconds to wait for a governor slot — shared across all 4 embedding sites.
 # 30 s is well within the 60 s caller timeout and absorbs momentary bursts.
@@ -95,3 +101,66 @@ def governed_query_embedding(
             acquire_timeout=acquire_timeout,
         )
     )
+
+
+def coalesced_query_embedding(
+    provider: Any,
+    text: str,
+    *,
+    embedding_purpose: Optional[str] = "query",
+    acquire_timeout: float = _GOVERNOR_ACQUIRE_TIMEOUT_SECS,
+) -> List[float]:
+    """Server-gated entry point for a single query embedding (Story #1079 Phase E).
+
+    The 4 query sites call this (swapping only the function name). ALL gating
+    lives here, so call sites are identical on CLI and server. Args mirror
+    ``governed_query_embedding``. The chosen path is debug-logged; each branch is
+    explicit (Messi #2 anti-fallback). See the inline path comments below.
+    """
+
+    def _direct() -> List[float]:
+        return governed_query_embedding(
+            provider,
+            text,
+            embedding_purpose=embedding_purpose,
+            acquire_timeout=acquire_timeout,
+        )
+
+    registry = get_coalescer_registry()
+    if registry is None:
+        # Path 1: CLI/solo — no registry was ever built. Direct governed call.
+        # No coalescer constructed, no accumulation window — CLI path untouched.
+        logger.debug("coalesced_query_embedding: no registry -> direct governed call")
+        return _direct()
+
+    # Read the kill switch LIVE so Web UI toggles hot-reload without a restart
+    # (mirrors the memory_retrieval_enabled pattern). Defensive: if config is
+    # unreadable, fail toward the simpler always-correct direct governed call.
+    try:
+        coalesce_enabled = bool(get_config_service().get_config().coalesce_enabled)
+    except Exception as exc:  # noqa: BLE001 — config read is best-effort here
+        logger.warning(
+            "coalesced_query_embedding: could not read coalesce_enabled (%s); "
+            "delegating to direct governed call",
+            exc,
+        )
+        coalesce_enabled = False
+
+    if not coalesce_enabled:
+        # Path 2: kill switch — governor + AIMD still apply, no batching.
+        logger.debug("coalesced_query_embedding: coalesce disabled -> direct call")
+        return _direct()
+
+    lane = _get_embedding_budget(provider)  # "cohere:embed" or "voyage:embed"
+    coalescer = registry.get(lane)
+    if coalescer is None:
+        # Path 4: lane not configured (provider key absent) — direct governed call.
+        logger.debug(
+            "coalesced_query_embedding: no coalescer for lane=%s -> direct call",
+            lane,
+        )
+        return _direct()
+
+    # Path 3: coalesce. submit() blocks until this text's vector is ready.
+    logger.debug("coalesced_query_embedding: coalescing on lane=%s", lane)
+    return cast(List[float], coalescer.submit(text))

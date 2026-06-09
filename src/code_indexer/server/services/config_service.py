@@ -854,6 +854,19 @@ class ConfigService:
         # Story #22 - Configurable service display name
         elif key == "service_display_name":
             config.service_display_name = str(value)
+        # Story #1079 Phase E - embedding coalescer runtime settings. Tunable via
+        # the existing config-update path (no separate HTML widget — mirrors how
+        # query_provider_max_concurrency is a top-level runtime field). The kill
+        # switch (coalesce_enabled=False) and caps hot-reload because the helper /
+        # registry read them live.
+        elif key == "coalesce_enabled":
+            config.coalesce_enabled = _parse_bool(value)
+        elif key == "coalesce_max_batch_size":
+            config.coalesce_max_batch_size = int(value)
+        elif key == "coalesce_k_min":
+            config.coalesce_k_min = int(value)
+        elif key == "coalesce_k_max":
+            config.coalesce_k_max = int(value)
         else:
             raise ValueError(f"Unknown server setting: {key}")
 

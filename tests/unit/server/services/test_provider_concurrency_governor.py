@@ -387,6 +387,24 @@ class TestSingleton:
 # ---------------------------------------------------------------------------
 
 
+class TestCurrentK:
+    def test_current_k_returns_per_lane_aimd_k(self):
+        """current_k exposes each lane's live AIMD K for observability."""
+        g = _make_governor(k=12)
+        ck = g.current_k
+        assert set(ck.keys()) == set(LANES)
+        for lane in LANES:
+            assert ck[lane] == g.aimd(lane).k == 12
+
+    def test_current_k_reflects_aimd_decrease(self):
+        """A 429-driven multiplicative decrease is visible via current_k."""
+        g = _make_governor(k=16)
+        g.aimd("voyage:embed").record(success=False)  # K -> 8 (floor)
+        assert g.current_k["voyage:embed"] == 8
+        # Other lanes unaffected (lane independence).
+        assert g.current_k["cohere:embed"] == 16
+
+
 class TestConfigSeedClamp:
     def test_initial_k_clamped_into_range(self):
         # Default config value (16) must clamp into [8, 32].

@@ -179,3 +179,44 @@ class TestAimdCooldown:
         for _ in range(SUCCESS_THRESHOLD - 1):
             aimd.record(success=True)
         assert aimd.k == 11
+
+
+# ---------------------------------------------------------------------------
+# Observability: structured WARNING on multiplicative decrease (Phase E)
+# ---------------------------------------------------------------------------
+
+_AIMD_LOGGER = "code_indexer.server.services.aimd_controller"
+
+
+class TestDecreaseLogging:
+    def test_decrease_emits_structured_warning(self, caplog):
+        """A 429-driven decrease logs a WARNING with structured old_k/new_k."""
+        import logging
+
+        aimd, _limiter, _clock = _make(limiter_initial=16)
+        with caplog.at_level(logging.WARNING, logger=_AIMD_LOGGER):
+            aimd.record(success=False)  # 16 -> 8
+        assert aimd.k == 8
+        decrease_records = [
+            r
+            for r in caplog.records
+            if r.name == _AIMD_LOGGER and r.levelno == logging.WARNING
+        ]
+        assert decrease_records, "decrease must emit a WARNING on the aimd logger"
+        record = decrease_records[0]
+        assert record.old_k == 16
+        assert record.new_k == 8
+
+    def test_no_log_when_already_at_floor(self, caplog):
+        """At the K_MIN floor a 429 leaves K unchanged and emits no decrease log."""
+        import logging
+
+        aimd, _limiter, _clock = _make(limiter_initial=K_MIN)
+        with caplog.at_level(logging.WARNING, logger=_AIMD_LOGGER):
+            aimd.record(success=False)  # already at floor, K stays K_MIN
+        assert aimd.k == K_MIN
+        assert not [
+            r
+            for r in caplog.records
+            if r.name == _AIMD_LOGGER and r.levelno == logging.WARNING
+        ], "no decrease log when K is unchanged at the floor"

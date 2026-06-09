@@ -1222,6 +1222,24 @@ class ServerConfig:
     # Runtime (DB-backed), not bootstrap.
     query_provider_max_concurrency: int = 16
 
+    # Story #1079 Phase E - Server-side embedding request coalescer.
+    # All four are RUNTIME (DB-backed, Web-UI tunable), NOT bootstrap config.json.
+    # They are read live via getattr in coalesced_query_embedding / the coalescer
+    # registry, so changes take effect WITHOUT a restart.
+    #
+    # coalesce_enabled: kill switch. When False, coalesced_query_embedding
+    #   delegates to governed_query_embedding (governor + AIMD still apply, no
+    #   batch accumulation). Read live each call (hot-reload).
+    coalesce_enabled: bool = True
+    # coalesce_max_batch_size: hard texts-per-batch ceiling. 96 == Cohere's
+    #   _get_texts_per_request() (the smallest provider texts cap), so a sealed
+    #   batch never sub-splits in the provider. Read live at registry build / seal.
+    coalesce_max_batch_size: int = 96
+    # coalesce_k_min / coalesce_k_max: per-lane AIMD K floor/ceiling seeds,
+    #   matching the locked design (K_MIN=8, K_MAX=32).
+    coalesce_k_min: int = 8
+    coalesce_k_max: int = 32
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

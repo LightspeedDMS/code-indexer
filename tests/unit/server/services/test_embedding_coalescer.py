@@ -554,3 +554,120 @@ class TestBackoffReleasesSlot:
         assert prov.call_count == 2  # 429 then success
         assert 1 in samples, "slot was never observed held"
         assert 0 in samples, "slot was never observed released during backoff"
+
+
+# ---------------------------------------------------------------------------
+# Phase D robustness follow-up: token safety margin derived from provider spec
+# ---------------------------------------------------------------------------
+
+
+class _SpecMarginCohereProvider(FakeCohereProvider):
+    """Cohere-shaped fake exposing model_specs with a non-90 safety margin."""
+
+    def __init__(self, safety_margin_percentage: int, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.model_specs = {
+            "api_constraints": {"safety_margin_percentage": safety_margin_percentage}
+        }
+
+
+class TestTokenSafetyMarginFromSpec:
+    def test_token_safety_margin_derived_from_provider_spec(self):
+        """A non-90 Cohere-style margin is honored (not the hardcoded 0.9)."""
+        governor = ProviderConcurrencyGovernor(GOV_K)
+        # 80% margin instead of the default 90% -> int(120000 * 80 / 100).
+        prov = _SpecMarginCohereProvider(
+            safety_margin_percentage=80, token_limit=120000
+        )
+        c = EmbeddingCoalescer(
+            LANE,
+            prov,
+            governor=governor,
+            coalesce_max_batch_size=96,
+        )
+        assert c.token_limit == int(120000 * 80 / 100)
+
+    def test_token_safety_margin_falls_back_to_90_when_no_spec(self):
+        """Voyage exposes no spec margin -> coalescer uses the 0.9 fallback."""
+        governor = ProviderConcurrencyGovernor(GOV_K)
+        prov = FakeVoyageProvider(token_limit=120000)  # no model_specs attr
+        c = EmbeddingCoalescer(
+            LANE,
+            prov,
+            governor=governor,
+            coalesce_max_batch_size=96,
+        )
+        assert c.token_limit == int(120000 * 90 / 100)
+
+
+# ---------------------------------------------------------------------------
+# Phase D observability: per-coalescer dispatch counters
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchCounters:
+    def test_coalescer_exposes_dispatch_counters(self):
+        """submit() increments batches_dispatched and texts_coalesced."""
+        governor = ProviderConcurrencyGovernor(GOV_K)
+        prov = FakeVoyageProvider()
+        c = EmbeddingCoalescer(LANE, prov, governor=governor)
+
+        assert c.batches_dispatched == 0
+        assert c.texts_coalesced == 0
+
+        vec = c.submit("text-3")
+        assert vec == [3.0, 0.0]
+        assert c.batches_dispatched == 1
+        assert c.texts_coalesced == 1
+
+        c.submit("text-4")
+        assert c.batches_dispatched == 2
+        assert c.texts_coalesced == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase E: live (hot-reload) texts ceiling via ceiling_provider
+# ---------------------------------------------------------------------------
+
+
+class TestLiveCeiling:
+    def test_live_ceiling_recomputed_at_seal(self):
+        """effective_texts_cap follows a mutable ceiling_provider (Voyage: no cap)."""
+        governor = ProviderConcurrencyGovernor(GOV_K)
+        box = {"ceiling": 4}
+        c = EmbeddingCoalescer(
+            LANE,
+            FakeVoyageProvider(),
+            governor=governor,
+            coalesce_max_batch_size=96,
+            ceiling_provider=lambda: box["ceiling"],
+        )
+        assert c.effective_texts_cap() == 4
+        # Hot-reload: change the config-backed ceiling; no rebuild.
+        box["ceiling"] = 16
+        assert c.effective_texts_cap() == 16
+
+    def test_live_ceiling_capped_by_provider_limit(self):
+        """The live ceiling is still capped by the provider's texts-per-request."""
+        governor = ProviderConcurrencyGovernor(GOV_K)
+        box = {"ceiling": 1000}
+        c = EmbeddingCoalescer(
+            "cohere:embed",
+            FakeCohereProvider(texts_per_request=96),
+            governor=governor,
+            coalesce_max_batch_size=96,
+            ceiling_provider=lambda: box["ceiling"],
+        )
+        # 1000 requested but Cohere caps at 96 -> min wins.
+        assert c.effective_texts_cap() == 96
+
+    def test_no_ceiling_provider_uses_static_cap(self):
+        """Without ceiling_provider, effective_texts_cap is the static texts_cap."""
+        governor = ProviderConcurrencyGovernor(GOV_K)
+        c = EmbeddingCoalescer(
+            LANE,
+            FakeVoyageProvider(),
+            governor=governor,
+            coalesce_max_batch_size=48,
+        )
+        assert c.effective_texts_cap() == 48

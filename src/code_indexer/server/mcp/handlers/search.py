@@ -490,7 +490,9 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
         from code_indexer.config import VoyageAIConfig
         from code_indexer.services.voyage_ai import VoyageAIClient
         from code_indexer.server.services.search_service import _get_http_client_factory
-        from code_indexer.server.services.governed_call import governed_query_embedding
+        from code_indexer.server.services.governed_call import (
+            coalesced_query_embedding,
+        )
 
         # Bug #899 fix: pass factory so fault injection intercepts this client.
         # AttributeError guard: app.state not set in unit-test environments without
@@ -510,7 +512,7 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
         # (broad protocol), but for VoyageAIClient it always yields a List[float].
         return cast(
             List[float],
-            governed_query_embedding(provider, query_text),
+            coalesced_query_embedding(provider, query_text),
         )
     except Exception as exc:
         logger.warning(

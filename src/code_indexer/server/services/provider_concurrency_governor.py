@@ -227,6 +227,16 @@ class ProviderConcurrencyGovernor:
         with self._stats_lock:
             return dict(self._wait_count)
 
+    @property
+    def current_k(self) -> Dict[str, int]:
+        """Per-lane current adaptive concurrency K (observability).
+
+        Reads each lane's AimdController ``k`` (lock-protected). The coalescer
+        coalescing ratio and these K values are the primary Phase E observability
+        surface for the per-lane adaptive limiter.
+        """
+        return {lane: aimd.k for lane, aimd in self._aimd.items()}
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

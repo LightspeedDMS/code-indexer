@@ -25,6 +25,7 @@ Determinism: ``time_fn`` defaults to ``time.monotonic`` but is injectable so the
 cooldown logic is unit-testable without sleeping. NEVER use ``time.sleep`` here.
 """
 
+import logging
 import threading
 import time
 from typing import Callable
@@ -34,6 +35,8 @@ from code_indexer.server.services.resizable_limiter import (
     K_MIN,
     ResizableLimiter,
 )
+
+logger = logging.getLogger(__name__)
 
 # Consecutive successes (outside cooldown) required before one additive +1 step.
 # Small enough to recover throughput within a few hundred ms of healthy calls,
@@ -85,7 +88,18 @@ class AimdController:
         with self._lock:
             if not success:
                 # Multiplicative decrease — never below the floor.
-                self._k = max(K_MIN, self._k // 2)
+                old_k = self._k
+                new_k = max(K_MIN, self._k // 2)
+                # Observability (Phase E): structured WARNING ONLY when K actually
+                # drops. At the floor (new_k == old_k) there is nothing to report.
+                if new_k != old_k:
+                    logger.warning(
+                        "AIMD multiplicative decrease: K %d -> %d (429)",
+                        old_k,
+                        new_k,
+                        extra={"old_k": old_k, "new_k": new_k},
+                    )
+                self._k = new_k
                 self._success_run = 0
                 self._cooldown_until = self._time_fn() + COOLDOWN_SECONDS
                 self._limiter.set_limit(self._k)

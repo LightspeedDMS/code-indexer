@@ -429,10 +429,10 @@ class SemanticSearchService:
                 # Bug #1078: gate through concurrency governor to cap concurrent
                 # provider HTTP calls per account-level rate budget.
                 from code_indexer.server.services.governed_call import (
-                    governed_query_embedding,
+                    coalesced_query_embedding,
                 )
 
-                query_embedding = governed_query_embedding(
+                query_embedding = coalesced_query_embedding(
                     embedding_service,
                     query,
                     embedding_purpose=None,
