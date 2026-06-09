@@ -316,7 +316,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if _elided > 0
         else repr(_aliases_preview)
     )
-    logger.info(
+    # py-spy logging-lock fix (follow-up to Bug #1078): demoted from INFO to
+    # DEBUG so this per-query audit line no longer acquires the logging handler
+    # lock on the hot path at default log levels (operators can re-enable via
+    # DEBUG when diagnosing fan-out expansion).
+    logger.debug(
         f"_omni_search_code post-expansion: user={user.username!r} "
         f"correlation_id={get_correlation_id()!r} "
         f"expanded_count={len(repo_aliases)} "
@@ -933,9 +937,12 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repository_alias = _parse_json_string_array(repository_alias)
         params["repository_alias"] = repository_alias
 
-        # Bug #881 Phase 1 entry log: operators can audit every search_code call
+        # Bug #881 Phase 1 entry log: operators can audit every search_code call.
+        # py-spy logging-lock fix (follow-up to Bug #1078): demoted INFO -> DEBUG
+        # so this per-query audit line does not acquire the logging handler lock
+        # on the hot path at default levels. Re-enable via DEBUG to audit calls.
         _query_log = str(params.get("query_text", ""))[:_QUERY_LOG_TRUNCATION_LIMIT]
-        logger.info(
+        logger.debug(
             f"search_code entry: user={user.username!r} "
             f"correlation_id={get_correlation_id()!r} "
             f"repository_alias={repository_alias!r} "
@@ -988,9 +995,12 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         else:
             _result = _search_activated_repo(params, user)
 
-        # Bug #881 Phase 1 exit log: elapsed_ms and result_count for every call
+        # Bug #881 Phase 1 exit log: elapsed_ms and result_count for every call.
+        # py-spy logging-lock fix (follow-up to Bug #1078): demoted INFO -> DEBUG
+        # so this per-query audit line does not acquire the logging handler lock
+        # on the hot path at default levels.
         _elapsed_ms = int((time.monotonic() - _search_start) * 1000)
-        logger.info(
+        logger.debug(
             f"search_code complete: correlation_id={get_correlation_id()!r} "
             f"result_count=0 elapsed_ms={_elapsed_ms}ms",
             extra={"correlation_id": get_correlation_id()},

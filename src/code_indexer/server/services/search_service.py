@@ -329,10 +329,8 @@ class SemanticSearchService:
             config_manager = ConfigManager.create_with_backtrack(Path(repo_path))
             config = config_manager.get_config()
 
-            logger.info(
-                f"Loaded repository config from {repo_path}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix (follow-up to Bug #1078): the per-query
+            # "Loaded repository config" INFO log was removed from this hot path.
 
             # Create backend using BackendFactory (Story #526: pass server cache).
             # Bug #881 Phase 3: fan-out callers pass hnsw_cache=None to prevent
@@ -355,10 +353,7 @@ class SemanticSearchService:
             )
             vector_store_client = backend.get_vector_store_client()
 
-            logger.info(
-                f"Using backend: {type(backend).__name__}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Using backend" INFO removed.
 
             # Create embedding service — use provider_name_override when set (Story #593).
             # Bug #899: pass http_client_factory so FaultInjectingSyncTransport intercepts
@@ -374,10 +369,7 @@ class SemanticSearchService:
                 config, embedding_service
             )
 
-            logger.info(
-                f"Using collection: {collection_name}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Using collection" INFO removed.
 
             # Build filter_conditions from request parameters (Story #375)
             filter_conditions = self._build_filter_conditions(
@@ -443,10 +435,7 @@ class SemanticSearchService:
                     collection_name=collection_name,
                 )
 
-            logger.info(
-                f"Found {len(search_results)} results",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Found N results" INFO removed.
 
             # Format results for response
             formatted_results = []

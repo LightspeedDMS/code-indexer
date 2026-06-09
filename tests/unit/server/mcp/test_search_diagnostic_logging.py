@@ -1,15 +1,23 @@
 """
 Tests for Phase 1 Diagnostic Logging on MCP search_code hot path.
 
-Bug #881: HNSW cache memory leak — Phase 1 adds 4 INFO log lines so operators
+Bug #881: HNSW cache memory leak — Phase 1 added diagnostic log lines so operators
 can observe wildcard expansion blowup live and diagnose Mechanism B.
 
-The 4 expected INFO lines (one test per line):
-1. search_code() entry: correlation_id, user_id, query_text (truncated to 100 chars),
-   repository_alias, limit, accuracy
-2. _expand_wildcard_patterns(): correlation_id, pattern, matched_count (promoted from DEBUG to INFO)
-3. _omni_search_code() post-expansion: correlation_id, user_id, expanded_count, expanded_aliases
-4. search_code() exit: correlation_id, result_count, elapsed_ms
+py-spy hot-path fix (follow-up to Bug #1078): the three PER-CALL search_code audit
+lines (entry, omni post-expansion, exit) were demoted from INFO to DEBUG so they no
+longer acquire the logging handler lock on the query hot path at default levels.
+Their field content is unchanged; operators re-enable them via DEBUG. The
+wildcard-expansion line in _expand_wildcard_patterns() stays INFO (it is NOT on the
+per-query serving path — it only fires when a wildcard alias is expanded).
+
+The expected lines (one test per line):
+1. search_code() entry [DEBUG]: correlation_id, user_id, query_text (truncated to
+   100 chars), repository_alias, limit, accuracy
+2. _expand_wildcard_patterns() [INFO]: correlation_id, pattern, matched_count
+3. _omni_search_code() post-expansion [DEBUG]: correlation_id, user_id,
+   expanded_count, expanded_aliases
+4. search_code() exit [DEBUG]: correlation_id, result_count, elapsed_ms
 """
 
 import logging
@@ -114,9 +122,13 @@ def _make_omni_patches():
 
 
 def test_entry_log_fires_with_all_required_fields(caplog):
-    """INFO log at search_code() entry must include: correlation_id, user_id,
+    """DEBUG log at search_code() entry must include: correlation_id, user_id,
     query_text truncated to QUERY_LOG_TRUNCATION_LIMIT chars, repository_alias,
     limit, accuracy.  Full QUERY_LONG string must NOT appear.
+
+    py-spy hot-path fix (follow-up to Bug #1078): this Bug #881 per-call audit
+    log was demoted INFO -> DEBUG so it does not acquire the logging lock on the
+    hot path at default levels. The audit fields it carries are unchanged.
     """
     from code_indexer.server.mcp.handlers.search import search_code
 
@@ -132,20 +144,22 @@ def test_entry_log_fires_with_all_required_fields(caplog):
             "code_indexer.server.mcp.handlers.search.get_correlation_id",
             return_value=CORRELATION_ID_ENTRY,
         ),
-        caplog.at_level(logging.INFO, logger="code_indexer.server.mcp.handlers.search"),
+        caplog.at_level(
+            logging.DEBUG, logger="code_indexer.server.mcp.handlers.search"
+        ),
     ):
         search_code(params, user)
 
     entry_records = [
         r
         for r in caplog.records
-        if r.levelno == logging.INFO
+        if r.levelno == logging.DEBUG
         and "alice" in r.getMessage()
         and CORRELATION_ID_ENTRY in r.getMessage()
     ]
     assert entry_records, (
-        f"Expected entry INFO log with user='alice' and correlation_id={CORRELATION_ID_ENTRY!r}. "
-        f"INFO records: {[r.getMessage() for r in caplog.records if r.levelno == logging.INFO]}"
+        f"Expected entry DEBUG log with user='alice' and correlation_id={CORRELATION_ID_ENTRY!r}. "
+        f"DEBUG records: {[r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]}"
     )
     msg = entry_records[0].getMessage()
 
@@ -232,8 +246,11 @@ def test_wildcard_expansion_info_log_fires_with_pattern_count_and_correlation_id
 
 
 def test_omni_post_expansion_info_log_fires_with_all_fields(caplog):
-    """_omni_search_code() must emit INFO after expansion with: correlation_id,
-    user_id, expanded_count, and ALL expanded_aliases shown (first 10, elided if more).
+    """_omni_search_code() must emit a DEBUG audit log after expansion with:
+    correlation_id, user_id, expanded_count, and ALL expanded_aliases shown
+    (first 10, elided if more).
+
+    py-spy hot-path fix: demoted INFO -> DEBUG (fields unchanged).
     """
     from code_indexer.server.mcp.handlers.search import search_code
 
@@ -261,7 +278,9 @@ def test_omni_post_expansion_info_log_fires_with_all_fields(caplog):
             "code_indexer.server.multi.multi_search_service.MultiSearchService",
             autospec=True,
         ) as mock_cls,
-        caplog.at_level(logging.INFO, logger="code_indexer.server.mcp.handlers.search"),
+        caplog.at_level(
+            logging.DEBUG, logger="code_indexer.server.mcp.handlers.search"
+        ),
     ):
         mock_svc = MagicMock()
         mock_svc.search.return_value = fake_multi_response
@@ -271,14 +290,14 @@ def test_omni_post_expansion_info_log_fires_with_all_fields(caplog):
     omni_records = [
         r
         for r in caplog.records
-        if r.levelno == logging.INFO
+        if r.levelno == logging.DEBUG
         and CORRELATION_ID_OMNI in r.getMessage()
         and str(EXPANDED_REPO_COUNT) in r.getMessage()
     ]
     assert omni_records, (
-        f"Expected omni post-expansion INFO log with correlation_id={CORRELATION_ID_OMNI!r} "
+        f"Expected omni post-expansion DEBUG log with correlation_id={CORRELATION_ID_OMNI!r} "
         f"and expanded_count={EXPANDED_REPO_COUNT}. "
-        f"INFO records: {[r.getMessage() for r in caplog.records if r.levelno == logging.INFO]}"
+        f"DEBUG records: {[r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]}"
     )
     msg = omni_records[0].getMessage()
 
@@ -296,8 +315,10 @@ def test_omni_post_expansion_info_log_fires_with_all_fields(caplog):
 
 
 def test_exit_log_fires_with_correlation_id_result_count_and_elapsed_ms(caplog):
-    """INFO log at search_code() exit must include: correlation_id,
+    """DEBUG log at search_code() exit must include: correlation_id,
     result_count=<N> field pattern, and elapsed_ms as '<digits>ms'.
+
+    py-spy hot-path fix: demoted INFO -> DEBUG (fields unchanged).
     """
     from code_indexer.server.mcp.handlers.search import search_code
 
@@ -313,20 +334,22 @@ def test_exit_log_fires_with_correlation_id_result_count_and_elapsed_ms(caplog):
             "code_indexer.server.mcp.handlers.search.get_correlation_id",
             return_value=CORRELATION_ID_EXIT,
         ),
-        caplog.at_level(logging.INFO, logger="code_indexer.server.mcp.handlers.search"),
+        caplog.at_level(
+            logging.DEBUG, logger="code_indexer.server.mcp.handlers.search"
+        ),
     ):
         search_code(params, user)
 
     exit_records = [
         r
         for r in caplog.records
-        if r.levelno == logging.INFO
+        if r.levelno == logging.DEBUG
         and CORRELATION_ID_EXIT in r.getMessage()
         and re.search(r"\d+\s*ms", r.getMessage())
     ]
     assert exit_records, (
-        f"Expected exit INFO log with correlation_id={CORRELATION_ID_EXIT!r} and elapsed_ms pattern. "
-        f"INFO records: {[r.getMessage() for r in caplog.records if r.levelno == logging.INFO]}"
+        f"Expected exit DEBUG log with correlation_id={CORRELATION_ID_EXIT!r} and elapsed_ms pattern. "
+        f"DEBUG records: {[r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]}"
     )
     msg = exit_records[0].getMessage()
 
