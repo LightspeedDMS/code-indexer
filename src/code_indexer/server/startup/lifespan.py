@@ -175,12 +175,29 @@ def make_lifespan(
             log_db_path = Path(server_data_dir) / "logs.db"
             sqlite_handler = SQLiteLogHandler(log_db_path)
             sqlite_handler.setLevel(configured_level)
-            logging.getLogger().addHandler(sqlite_handler)
+            _root_logger = logging.getLogger()
+            _root_logger.addHandler(sqlite_handler)
 
             # Set app state for web routes to access
             app.state.log_db_path = log_db_path
             # Store handler reference so LogsBackend can be injected later (Story #500 AC4)
             app.state.sqlite_log_handler = sqlite_handler
+
+            # py-spy logging-lock fix (follow-up to Bug #1078): route the root
+            # logger through a single QueueHandler whose QueueListener owns the
+            # REAL handlers (the SQLiteLogHandler installed above plus any console
+            # StreamHandler attached by uvicorn / basicConfig). On a request
+            # thread, a logger.info() call now does only a fast enqueue; all
+            # formatting and handler I/O happen on the single listener thread,
+            # off the /api/query hot path. The listener is stopped (drained +
+            # flushed) on shutdown — see the shutdown section below.
+            from code_indexer.server.services.async_logging import (
+                install_queue_logging,
+            )
+
+            _real_handlers = list(_root_logger.handlers)
+            log_queue_listener = install_queue_logging(_real_handlers)
+            app.state.log_queue_listener = log_queue_listener
 
             logger.info(
                 f"SQLite log handler initialized: {log_db_path} (level: {startup_config.log_level})",
@@ -2860,11 +2877,40 @@ def make_lifespan(
 
         yield  # Server is now running
 
-        # Shutdown: Remove SQLiteLogHandler from root logger FIRST (Bug #1060).
-        # Must run before any other shutdown step that could raise and skip it.
+        # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
+        # follow-up to Bug #1078). The listener owns the real handlers behind the
+        # root QueueHandler; stop() drains every queued record and then closes the
+        # real handlers, so no logs are lost on a clean shutdown. Must run before
+        # any other shutdown step that could raise and skip it. Idempotent and
+        # non-fatal — never abort the remaining shutdown chain.
+        _log_queue_listener = getattr(app.state, "log_queue_listener", None)
+        if _log_queue_listener is not None:
+            try:
+                # Drain in-flight records before stopping the listener.
+                _log_queue_listener.flush()
+                _log_queue_listener.stop()
+            except Exception:
+                pass
+            # Detach the IdentityQueueHandler we installed on the root logger so
+            # it is not leaked across lifespan cycles (mirrors the Bug #1060
+            # symmetry below). removeHandler is a no-op if already detached.
+            try:
+                from code_indexer.server.services.async_logging import (
+                    IdentityQueueHandler,
+                )
+
+                _root = logging.getLogger()
+                for _h in list(_root.handlers):
+                    if isinstance(_h, IdentityQueueHandler):
+                        _root.removeHandler(_h)
+            except Exception:
+                pass
+
+        # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
         # Symmetric with the install in startup: without this, the handler remains
-        # on the root logger after lifespan exits, tries to write to the now-deleted
-        # tmp DB, and silently drops subsequent log records from other tests.
+        # registered (now behind the listener) after lifespan exits, tries to write
+        # to the now-deleted tmp DB, and silently drops subsequent log records from
+        # other tests. close() flushes the handler's own writer queue (Bug #1078).
         # Idempotent: removeHandler is a no-op if the handler was never added.
         _sqlite_handler = getattr(app.state, "sqlite_log_handler", None)
         if _sqlite_handler is not None:
