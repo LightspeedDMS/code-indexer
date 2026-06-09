@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.112.0] - 2026-06-08
+
+### Added
+- Story #1079: Server-side embedding request coalescer with adaptive per-lane concurrency governance (refines Bug #1078). Concurrent server query-embeds now coalesce into batched provider calls, gated by a self-tuning per-lane governor, so searches succeed under burst load without provider 429 failures at near-zero added latency at low load.
+  - **4 independent governed lanes** (`voyage:embed`, `voyage:rerank`, `cohere:embed`, `cohere:rerank`) replace Bug #1078's 2 shared per-provider budgets, each with its own `ResizableLimiter` (lock+condition, runtime-resizable K, replaces `BoundedSemaphore`), `AimdController` (additive-increase/multiplicative-decrease adaptive concurrency, K_MIN=8/K_MAX=32), and sinbin health key. Lanes adapt fully independently.
+  - **`EmbeddingCoalescer`** (one per `:embed` lane) coalesces concurrent submissions into a single batched `get_embeddings_batch(retry=False)` call through the governor as the SOLE limiter (no second semaphore; backoff sleeps outside the slot). Dual-constraint sealing (provider texts cap AND `_get_model_token_limit()*margin`, using the provider's own token counter) guarantees exactly one provider HTTP call per sealed batch. Shared-fate fan-out completes every coalesced caller's future on success or any exception (no hang).
+  - **Canonical 429 normalization** (`provider_backoff.is_rate_limited`): providers re-raise 429s intact (fixes a latent Bug #1078 gap where VoyageAI masked 429s as generic `RuntimeError`, invisible to backoff retry and AIMD).
+  - **Server-gated**: a coalescer registry is built only in server lifespan; the CLI/solo path keeps the direct governed single call (no batching, no accumulation window). Runtime kill switch (`coalesce_enabled`) and hot-reloadable caps (`coalesce_max_batch_size`), plus `coalesce_k_min`/`coalesce_k_max` AIMD bounds. Per-lane observability (`current_k`, AIMD-decrease logs, coalescing-ratio counters).
+- Validated end-to-end against a live server via the REST front door: a 40-concurrent `/api/query` burst across both providers (Voyage + Cohere) completed with zero 429s and proven coalescing (40 embeds -> 17 Voyage / 27 Cohere batches).
+
 ## [10.111.0] - 2026-06-08
 
 ### Removed
