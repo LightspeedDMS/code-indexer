@@ -11,8 +11,13 @@ import os
 import random
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Union, Set
+from typing import List, Dict, Any, Optional, Tuple, Union, Set, TYPE_CHECKING
 from datetime import datetime
+
+if TYPE_CHECKING:
+    # Imported only for type-checking so the runtime CLI startup import budget
+    # is unaffected (concurrent.futures stays a lazy import inside search()).
+    from concurrent.futures import Executor
 import threading
 import numpy as np
 import logging
@@ -2356,6 +2361,7 @@ class FilesystemVectorStore:
         prefetch_limit: Optional[int] = None,
         ef: int = 50,
         subdirectory: Optional[str] = None,
+        parallel_executor: Optional["Executor"] = None,
     ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         """Search for similar vectors using parallel execution of index loading and embedding generation.
 
@@ -2378,6 +2384,13 @@ class FilesystemVectorStore:
             lazy_load: If True, load payloads on-demand with early exit (optimization for restrictive filters)
             prefetch_limit: How many candidate IDs to fetch from HNSW (default: limit * 2 or limit * 15 for lazy_load)
             subdirectory: Optional subdirectory path (e.g., "multimodal_index")
+            parallel_executor: Optional SHARED, long-lived ThreadPoolExecutor for the
+                index-load || embedding fan-out. SERVER PATH: the server injects its
+                app-level query executor here so concurrent requests reuse threads
+                instead of each creating/destroying a per-request pool (which serialized
+                on CPython's process-wide _global_shutdown_lock). CLI/SOLO/DAEMON PATH:
+                leave None — a per-call ThreadPoolExecutor(max_workers=2) is created and
+                cleaned up exactly as before (single-user, no concurrency/churn problem).
 
         Returns:
             List of results with id, score, payload (including content), and staleness
@@ -2498,16 +2511,37 @@ class FilesystemVectorStore:
             embedding_time_ms = (time.time() - t0) * 1000
             return embedding, embedding_time_ms
 
-        # Execute both operations in parallel using ThreadPoolExecutor
+        # Execute both operations in parallel.
+        #
+        # Anti-fallback explicit branch (Messi #2): the SERVER passes a shared,
+        # long-lived executor; the CLI/solo/daemon does NOT. This is intentionally
+        # two readable paths, never a silent global.
+        #
+        # SERVER PATH (parallel_executor injected): submit to the shared pool and
+        # gather — DO NOT shut it down (it is owned by the app lifespan). This
+        # eliminates the per-request ThreadPoolExecutor create/destroy churn that
+        # serialized concurrent queries on CPython's _global_shutdown_lock.
+        #
+        # CLI PATH (parallel_executor is None): single-user, not concurrent — keep
+        # the original per-call ThreadPoolExecutor(max_workers=2) context manager,
+        # so CLI behaviour and the CLI startup import budget are unchanged.
         parallel_start = time.time()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Submit both tasks
-            index_future = executor.submit(load_index)
-            embedding_future = executor.submit(generate_embedding)
-
-            # Wait for both to complete and gather results
+        if parallel_executor is not None:
+            index_future = parallel_executor.submit(load_index)
+            embedding_future = parallel_executor.submit(generate_embedding)
+            # .result() re-raises any sub-task exception in the caller's thread —
+            # identical exception propagation to the `with` form below.
             hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
             query_vector, embedding_ms = embedding_future.result()
+        else:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit both tasks
+                index_future = executor.submit(load_index)
+                embedding_future = executor.submit(generate_embedding)
+
+                # Wait for both to complete and gather results
+                hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
+                query_vector, embedding_ms = embedding_future.result()
 
         # Calculate actual parallel execution time (wall clock)
         parallel_load_ms = (time.time() - parallel_start) * 1000

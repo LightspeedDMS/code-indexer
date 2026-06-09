@@ -30,6 +30,10 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
 _MCP_DISPATCH_POOL_MIN: int = 1
 _MCP_DISPATCH_POOL_MAX: int = 1024
 
+# perf - bounds for query_executor_pool_size bootstrap config key (range 1-2048)
+_QUERY_EXECUTOR_POOL_MIN: int = 1
+_QUERY_EXECUTOR_POOL_MAX: int = 2048
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -1193,6 +1197,23 @@ class ServerConfig:
     # Range: 1-1024. Default 128.
     mcp_dispatch_pool_size: int = 128
 
+    # perf - Shared, long-lived query executor pool (bootstrap-only).
+    # FilesystemVectorStore.search() runs the index-load task in parallel with the
+    # embedding task (2 sub-tasks per query). Previously each request created its
+    # own ThreadPoolExecutor, so the create/destroy churn serialized concurrent
+    # queries on CPython's process-wide _global_shutdown_lock (71% of worker-thread
+    # py-spy samples in `submit`). This pool is created ONCE at startup and reused.
+    #
+    # Sizing rationale: it must hold ~2 threads per concurrently-served query so
+    # requests' sub-tasks don't starve each other (a tiny shared pool would be
+    # WORSE — it would serialize all requests). Default 256 mirrors
+    # server_threadpool_size (the anyio/Starlette sync-handler capacity): with up
+    # to ~256 concurrent sync query handlers, 256 query-executor workers cover the
+    # worst case without queueing. The fan-out is non-nested (load_index /
+    # generate_embedding never submit back to this pool), so no deadlock risk.
+    # Range: 1-2048.
+    query_executor_pool_size: int = 256
+
     # Story #908 / Epic #907 - Graph-channel anomaly repair (bootstrap-only, never DB).
     # Default True so fresh installs automatically run Phase 3.7 SELF_LOOP repair.
     # Set enable_graph_channel_repair=false in config.json to disable.
@@ -2081,6 +2102,17 @@ class ServerConfigManager:
             raise ValueError(
                 f"mcp_dispatch_pool_size must be between {_MCP_DISPATCH_POOL_MIN} "
                 f"and {_MCP_DISPATCH_POOL_MAX}, got {config.mcp_dispatch_pool_size}"
+            )
+
+        # Validate query_executor_pool_size (perf - shared query executor)
+        if not (
+            _QUERY_EXECUTOR_POOL_MIN
+            <= config.query_executor_pool_size
+            <= _QUERY_EXECUTOR_POOL_MAX
+        ):
+            raise ValueError(
+                f"query_executor_pool_size must be between {_QUERY_EXECUTOR_POOL_MIN} "
+                f"and {_QUERY_EXECUTOR_POOL_MAX}, got {config.query_executor_pool_size}"
             )
 
         # Validate port range

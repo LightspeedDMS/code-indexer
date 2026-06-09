@@ -46,6 +46,28 @@ def _get_http_client_factory() -> Any:
     return _app.state.http_client_factory
 
 
+def _get_query_executor() -> Any:
+    """Get the shared, long-lived query ThreadPoolExecutor from app.state.
+
+    perf: the server lifespan creates ONE app-level ThreadPoolExecutor
+    (app.state.query_executor) so the FilesystemVectorStore embed||index-load
+    fan-out reuses threads across concurrent requests instead of each request
+    creating/destroying its own pool (which serialized on CPython's
+    process-wide _global_shutdown_lock).
+
+    Returns the executor when running under the server lifespan, or None when
+    app.state has no query_executor (e.g. CLI in-process / unit tests). The
+    None case is an explicit, readable signal that the per-call leaf pool
+    should be used — NOT a silent global (Messi anti-fallback #2).
+
+    Extracted as a module-level function so unit tests can patch it without
+    setting up the full app.state (mirrors _get_http_client_factory()).
+    """
+    from ..app import app as _app
+
+    return getattr(_app.state, "query_executor", None)
+
+
 def _get_golden_repos_dir() -> str:
     """Get golden repos directory from app.state configuration."""
     from typing import Optional, cast
@@ -412,6 +434,10 @@ class SemanticSearchService:
                     limit=limit,
                     return_timing=True,
                     ef=ef_value,
+                    # perf: reuse the server's shared long-lived executor for the
+                    # embed||index-load fan-out (None under CLI in-process -> leaf
+                    # falls back to a per-call pool).
+                    parallel_executor=_get_query_executor(),
                 )
                 if filter_conditions:
                     search_kwargs["filter_conditions"] = filter_conditions

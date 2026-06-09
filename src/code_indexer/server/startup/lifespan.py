@@ -253,6 +253,32 @@ def make_lifespan(
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # perf: ONE shared, long-lived ThreadPoolExecutor for the query-path
+        # embed||index-load fan-out (FilesystemVectorStore.search). Reusing this
+        # pool across requests eliminates the per-request executor create/destroy
+        # churn that serialized concurrent queries on CPython's process-wide
+        # _global_shutdown_lock. SemanticSearchService injects it via
+        # app.state.query_executor (see search_service._get_query_executor()).
+        # Mirrors the _mcp_executor / _xray_executor bootstrap-fallback pattern.
+        _DEFAULT_QUERY_POOL_SIZE: int = 256
+        _query_pool_size = (
+            getattr(
+                startup_config, "query_executor_pool_size", _DEFAULT_QUERY_POOL_SIZE
+            )
+            if startup_config is not None
+            else _DEFAULT_QUERY_POOL_SIZE
+        )
+        if _query_pool_size <= 0:
+            raise ValueError(
+                f"query_executor_pool_size must be > 0, got {_query_pool_size}"
+            )
+        _query_executor = ThreadPoolExecutor(max_workers=_query_pool_size)
+        app.state.query_executor = _query_executor
+        logger.info(
+            f"Query executor pool sized to {_query_pool_size} threads (perf)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
         # Bug #1070: Dedicated xray executor isolated from BJM's 5-worker pool.
         from code_indexer.server.utils.config_manager import (
             BackgroundJobsConfig as _BackgroundJobsConfig,
@@ -2925,6 +2951,8 @@ def make_lifespan(
         _mcp_executor.shutdown(wait=False)
         # Bug #1070: Shut down the dedicated xray executor.
         _xray_executor.shutdown(wait=False)
+        # perf: Shut down the shared query executor (mirror of the two above).
+        _query_executor.shutdown(wait=False)
 
         # Story #1079 Phase E: clear the process-level coalescer registry so a
         # subsequent lifespan cycle in the same process does not inherit a stale

@@ -88,6 +88,7 @@ BOOTSTRAP_KEYS = frozenset(
         "server_threadpool_size",  # startup threadpool config
         "pace_maker_clone_path",  # Story #997 - bootstrap-only (written by auto-updater pre-DB)
         "mcp_dispatch_pool_size",  # Story #1009 - asyncio default executor size
+        "query_executor_pool_size",  # perf - shared query executor size (created at startup, pre-DB)
         "enable_predeactivation_leak_scan",  # Story #1032 - bootstrap flag to restore pre-flight leak scan
         "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
