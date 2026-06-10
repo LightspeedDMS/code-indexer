@@ -9,6 +9,15 @@ Tracks API call timestamps using rolling window approach:
 
 SQLite database storage allows multiple uvicorn workers to share metrics.
 Timestamps older than 24 hours are automatically cleaned up.
+
+Story #1083 — batched background writer:
+    The hot path enqueues metric events; the background ``_writer_loop`` drains the
+    currently-queued backlog (bounded by ``min(qsize(), _MAX_DRAIN_BATCH)``) and
+    writes ALL of them via a SINGLE ``backend.upsert_buckets_batch()`` transaction
+    per drain — collapsing the previous one-``BEGIN EXCLUSIVE``-per-event churn
+    (~4N transactions) into ~1.  Counts are coalesced per bucket key and preserved
+    exactly.  ``stop_writer()`` signals + joins the thread + final-drains so no
+    queued counts are lost on shutdown (wired into lifespan).
 """
 
 import logging
@@ -44,6 +53,11 @@ _BUCKET_CLEANUP_INTERVAL = 100
 
 # Background writer queue poll timeout (seconds)
 _QUEUE_POLL_TIMEOUT_S = 1.0
+
+# Story #1083: max metric events coalesced into a single batched write/transaction.
+# Caps per-drain loop iterations + in-memory event list + transaction size so the
+# batched writer stays bounded under sustained producer pressure (MESSI #14).
+_MAX_DRAIN_BATCH = 1_000
 
 
 def _truncate_min1(dt: datetime) -> str:
@@ -121,10 +135,20 @@ class ApiMetricsService:
                 f"ApiMetricsService using injected storage backend "
                 f"(node_id={self._node_id!r})"
             )
-            self._writer_thread = threading.Thread(
-                target=self._writer_loop, daemon=True, name="api-metrics-writer"
-            )
-            self._writer_thread.start()
+            # Clear any stop flag left over from a previous stop_writer() so a
+            # SECOND lifespan startup in the same process (e.g. in-process
+            # FastAPI TestClient E2E) starts a writer that actually runs. Without
+            # this, the re-init thread sees the stale stop flag and exits
+            # immediately, silently dropping every enqueued metric (MESSI #13).
+            self._stop_event.clear()
+            # Only (re)start when no writer is already running, so an idempotent
+            # re-init while the existing writer is still alive does not spawn a
+            # duplicate thread.
+            if self._writer_thread is None or not self._writer_thread.is_alive():
+                self._writer_thread = threading.Thread(
+                    target=self._writer_loop, daemon=True, name="api-metrics-writer"
+                )
+                self._writer_thread.start()
             return
 
         if not db_path:
@@ -173,71 +197,126 @@ class ApiMetricsService:
 
         logger.debug(f"ApiMetricsService initialized with database: {db_path}")
 
-    def _writer_loop(self) -> None:
-        """Background thread: drain queue and write bucket UPSERTs for all 4 tiers.
+    @staticmethod
+    def _bucket_map_for(timestamp: datetime) -> Dict[str, str]:
+        """Precompute the 4-tier (granularity -> bucket_start) map for one event."""
+        return {
+            "min1": _truncate_min1(timestamp),
+            "min5": _truncate_min5(timestamp),
+            "hour1": _truncate_hour1(timestamp),
+            "day1": _truncate_day1(timestamp),
+        }
 
-        Runs until _stop_event is set. Polls the queue with a bounded timeout so
-        the loop terminates cleanly when the service shuts down.
+    def _drain_and_write(self, first_item: Tuple[str, str, datetime]) -> int:
+        """Drain the currently-queued backlog (starting with first_item) and write
+        it to the backend in ONE batched transaction (Story #1083).
+
+        Returns the number of events written so the caller can drive periodic
+        cleanup.
+
+        PROVABLE BOUND (MESSI #14): the additional drain count is fixed up-front to
+        ``min(qsize() snapshot, _MAX_DRAIN_BATCH)``.  Items producers enqueue AFTER
+        the snapshot are NOT chased — they roll to the next drain cycle.  This caps
+        both the loop iterations and the in-memory ``events`` list / transaction
+        size regardless of sustained producer pressure.
+        """
+        events: List[Dict[str, Any]] = []
+        metric_type, username, timestamp = first_item
+        events.append(
+            {
+                "username": username,
+                "metric_type": metric_type,
+                "buckets": self._bucket_map_for(timestamp),
+            }
+        )
+        # Snapshot the backlog ONCE; drain at most that many (capped) more items.
+        backlog = min(self._queue.qsize(), _MAX_DRAIN_BATCH)
+        for _ in range(backlog):
+            try:
+                metric_type, username, timestamp = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            events.append(
+                {
+                    "username": username,
+                    "metric_type": metric_type,
+                    "buckets": self._bucket_map_for(timestamp),
+                }
+            )
+
+        if self._backend is None:
+            return 0
+
+        try:
+            self._backend.upsert_buckets_batch(events, node_id=self._node_id)
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-050",
+                    f"Failed to batch-upsert {len(events)} metric event(s): {e}",
+                )
+            )
+        return len(events)
+
+    def _writer_loop(self) -> None:
+        """Background thread: drain the queue and write buckets in BATCHED writes.
+
+        Story #1083: instead of one BEGIN EXCLUSIVE transaction per metric event,
+        the loop blocks for the next event then drains the currently-queued backlog
+        (bounded) and writes it in ONE upsert_buckets_batch transaction.  This
+        collapses ~4N per-event transactions into ~1 per drain under load.
+
+        Runs until _stop_event is set; on shutdown the trailing queue is drained by
+        stop_writer().  Polls with a bounded timeout so the loop terminates cleanly.
         """
         write_count = 0
         while not self._stop_event.is_set():
             try:
-                metric_type, username, timestamp = self._queue.get(
-                    timeout=_QUEUE_POLL_TIMEOUT_S
-                )
+                first_item = self._queue.get(timeout=_QUEUE_POLL_TIMEOUT_S)
             except queue.Empty:
                 continue
 
-            if self._backend is not None:
+            write_count += self._drain_and_write(first_item)
+            if write_count >= _BUCKET_CLEANUP_INTERVAL and self._backend is not None:
                 try:
-                    self._backend.upsert_bucket(
-                        username,
-                        "min1",
-                        _truncate_min1(timestamp),
-                        metric_type,
-                        node_id=self._node_id,
-                    )
-                    self._backend.upsert_bucket(
-                        username,
-                        "min5",
-                        _truncate_min5(timestamp),
-                        metric_type,
-                        node_id=self._node_id,
-                    )
-                    self._backend.upsert_bucket(
-                        username,
-                        "hour1",
-                        _truncate_hour1(timestamp),
-                        metric_type,
-                        node_id=self._node_id,
-                    )
-                    self._backend.upsert_bucket(
-                        username,
-                        "day1",
-                        _truncate_day1(timestamp),
-                        metric_type,
-                        node_id=self._node_id,
-                    )
+                    self._backend.cleanup_expired_buckets()
                 except Exception as e:
                     logger.warning(
                         format_error_log(
-                            "APP-GENERAL-050",
-                            f"Failed to upsert bucket for {metric_type}/{username}: {e}",
+                            "APP-GENERAL-051",
+                            f"Failed to cleanup expired buckets: {e}",
                         )
                     )
+                write_count = 0
 
-                write_count += 1
-                if write_count >= _BUCKET_CLEANUP_INTERVAL:
-                    try:
-                        self._backend.cleanup_expired_buckets()
-                    except Exception as e:
-                        logger.warning(
-                            format_error_log(
-                                "APP-GENERAL-051",
-                                f"Failed to cleanup expired buckets: {e}",
-                            )
-                        )
-                    write_count = 0
+    def stop_writer(self, join_timeout: float = 5.0) -> None:
+        """Stop the background writer and drain any remaining queued events.
+
+        Story #1083: signals the stop event, joins the writer thread, then performs
+        a FINAL bounded drain so no queued metric counts are lost on shutdown.
+        Idempotent and safe to call when no writer thread was ever started.
+
+        Args:
+            join_timeout: Max seconds to wait for the writer thread to exit.
+        """
+        self._stop_event.set()
+        thread = self._writer_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=join_timeout)
+
+        if self._backend is None:
+            return
+
+        # Final drain: flush whatever remained queued at shutdown. Bounded by the
+        # queue's finite maxsize — after the writer thread has stopped there are no
+        # more producers in the shutdown path, so each pass strictly shrinks the
+        # queue and the loop terminates (MESSI #14).
+        while True:
+            try:
+                first_item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            self._drain_and_write(first_item)
 
     def _cleanup_old(self) -> None:
         """Remove timestamps older than 24 hours from the database.

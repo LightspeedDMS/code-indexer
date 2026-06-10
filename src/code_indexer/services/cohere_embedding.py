@@ -92,8 +92,9 @@ class SyncClientFactory(Protocol):
         self,
         *,
         transport: Optional[httpx.BaseTransport] = None,
+        pooled: bool = False,
         **kwargs: Any,
-    ) -> httpx.Client: ...
+    ) -> Any: ...
 
 
 # Number of embedding values shown in error messages when validating None values
@@ -254,24 +255,25 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         def _single_attempt() -> Dict[str, Any]:
             """Execute ONE HTTP call and return the parsed JSON dict."""
             _start = time.time()
-            try:
-                from code_indexer.server.services.latency_tracking_httpx_transport import (
-                    build_latency_transport,
-                )
-
-                _latency_transport = build_latency_transport()
-            except ImportError:
-                # Server module not available in CLI-only deployments.
-                _latency_transport = None
             _timeout = httpx.Timeout(
                 connect=self.config.connect_timeout,
                 read=self.config.timeout,
                 write=self.config.timeout,
                 pool=self.config.timeout,
             )
+            # Story #1083 (+ residual): pooled=True borrows the factory's ONE
+            # long-lived keep-alive client (reused SSLContext + connection pool)
+            # instead of building+closing a fresh client (TLS handshake) per query.
+            # The latency transport is OWNED by the factory and baked into the
+            # pooled client ONCE — the provider no longer constructs
+            # build_latency_transport() (and its SSLContext) per call, which was
+            # the residual per-query churn.  Auth travels on the per-request
+            # .post() call below, so the pooled client is auth-agnostic.  Under
+            # fault injection the factory ignores pooled and still returns a fresh
+            # per-call fault-intercepted client (building the latency transport then).
             _client_ctx = self._http_client_factory.create_sync_client(
-                transport=_latency_transport,
                 timeout=_timeout,
+                pooled=True,
             )
             with _client_ctx as client:
                 response = client.post(

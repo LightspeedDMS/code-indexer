@@ -233,6 +233,145 @@ class TestNullFaultFactory:
         async with factory.create_client() as client:
             assert isinstance(client, httpx.AsyncClient)
 
+    def test_pooled_reuses_one_borrowed_client(self) -> None:
+        """NullFaultFactory honours pooled=True with the same borrow contract."""
+        from code_indexer.server.fault_injection.null_factory import NullFaultFactory
+
+        factory = NullFaultFactory()
+        try:
+            with factory.create_sync_client(pooled=True) as c1:
+                pass
+            with factory.create_sync_client(pooled=True) as c2:
+                pass
+            assert c1 is c2
+            assert c1.is_closed is False
+        finally:
+            factory.close_pooled_clients()
+        assert c1.is_closed is True
+
+
+# ===========================================================================
+# Story #1083: production-path pooled keep-alive sync client
+# ===========================================================================
+
+
+class TestPooledProductionSyncClient:
+    """HttpClientFactory owns ONE long-lived pooled client on the production path.
+
+    When fault injection is OFF, callers opt into pooling via ``pooled=True``.
+    The factory builds the keep-alive client once (lazily) and returns a borrow
+    wrapper whose ``__exit__`` is a NO-OP, so the provider's
+    ``with ctx as client:`` does NOT close the shared client.
+    """
+
+    def test_pooled_client_is_reused_across_calls(self) -> None:
+        """Two pooled create_sync_client(pooled=True) calls share ONE client."""
+        factory = HttpClientFactory(fault_injection_service=None)
+        try:
+            with factory.create_sync_client(pooled=True) as c1:
+                pass
+            with factory.create_sync_client(pooled=True) as c2:
+                pass
+            assert c1 is c2, "Pooled production client must be the same object"
+        finally:
+            factory.close_pooled_clients()
+
+    def test_pooled_client_borrow_exit_does_not_close(self) -> None:
+        """Exiting the borrow context must NOT close the shared pooled client."""
+        factory = HttpClientFactory(fault_injection_service=None)
+        try:
+            with factory.create_sync_client(pooled=True) as client:
+                pass
+            assert client.is_closed is False, (
+                "Borrow __exit__ must be a no-op — pooled client stays open"
+            )
+        finally:
+            factory.close_pooled_clients()
+
+    def test_pooled_client_carries_latency_transport(self) -> None:
+        """A transport passed on the FIRST pooled build is baked into the client."""
+        factory = HttpClientFactory(fault_injection_service=None)
+        latency_transport = httpx.HTTPTransport()
+        try:
+            with factory.create_sync_client(
+                pooled=True, transport=latency_transport
+            ) as client:
+                assert client._transport is latency_transport
+        finally:
+            factory.close_pooled_clients()
+
+    def test_pooled_client_applies_connection_limits(self) -> None:
+        """The pooled client must be built with bounded keep-alive limits.
+
+        httpx propagates Limits onto the transport's connection pool, so assert
+        the bound on the actual pool (the observable enforcement point).
+        """
+        factory = HttpClientFactory(fault_injection_service=None)
+        try:
+            with factory.create_sync_client(pooled=True) as client:
+                pool = client._transport._pool
+                assert pool._max_keepalive_connections is not None
+                assert pool._max_connections is not None
+                assert pool._max_keepalive_connections >= 1
+                assert pool._max_connections >= pool._max_keepalive_connections
+        finally:
+            factory.close_pooled_clients()
+
+    def test_close_pooled_clients_closes_the_client(self) -> None:
+        """close_pooled_clients() must close the pooled client and drop the ref."""
+        factory = HttpClientFactory(fault_injection_service=None)
+        with factory.create_sync_client(pooled=True) as client:
+            pass
+        factory.close_pooled_clients()
+        assert client.is_closed is True
+        # A fresh pooled client is built after close (new object).
+        try:
+            with factory.create_sync_client(pooled=True) as client2:
+                pass
+            assert client2 is not client
+        finally:
+            factory.close_pooled_clients()
+
+    def test_fault_injection_path_ignores_pooled_flag(self) -> None:
+        """With fault injection ON, pooled=True still yields a FRESH per-call client."""
+        svc = _make_service(enabled=True)
+        factory = HttpClientFactory(fault_injection_service=svc)
+        with factory.create_sync_client(pooled=True) as c1:
+            assert isinstance(c1._transport, FaultInjectingSyncTransport)
+        # Fresh per-call client → closed on exit, and a second call is a new object.
+        assert c1.is_closed is True
+        with factory.create_sync_client(pooled=True) as c2:
+            assert c2 is not c1
+        assert c2.is_closed is True
+
+    def test_pooled_client_thread_safe_single_instance(self) -> None:
+        """Concurrent pooled requests all observe the SAME single client object."""
+        import threading
+
+        factory = HttpClientFactory(fault_injection_service=None)
+        seen: list = []
+        seen_lock = threading.Lock()
+        barrier = threading.Barrier(8)
+
+        def worker() -> None:
+            barrier.wait()
+            with factory.create_sync_client(pooled=True) as c:
+                with seen_lock:
+                    seen.append(c)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        try:
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert len(seen) == 8
+            assert len({id(c) for c in seen}) == 1, (
+                "All concurrent pooled requests must share ONE client instance"
+            )
+        finally:
+            factory.close_pooled_clients()
+
 
 # ===========================================================================
 # Scenario 18: anti-regression — no direct httpx.AsyncClient() in server/

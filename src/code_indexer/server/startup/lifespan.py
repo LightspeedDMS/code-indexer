@@ -2959,6 +2959,41 @@ def make_lifespan(
 
         yield  # Server is now running
 
+        # Story #1083: close the pooled production httpx client owned by the
+        # HttpClientFactory. On the production path (fault injection OFF) the
+        # factory builds ONE long-lived keep-alive client (reused SSLContext +
+        # connection pool) lazily on the first query and reuses it across all
+        # queries. Closing it here releases the connections and prevents leaking
+        # the pool across lifespan cycles.
+        _http_client_factory = getattr(app.state, "http_client_factory", None)
+        if _http_client_factory is not None:
+            try:
+                _http_client_factory.close_pooled_clients()
+            except Exception as _pool_close_exc:
+                # Non-fatal LOG+RECOVER (Messi #13): never abort the remaining
+                # shutdown chain, but keep the failure observable for operators.
+                logger.warning(
+                    "Story #1083: failed to close pooled httpx client during "
+                    "shutdown: %s",
+                    _pool_close_exc,
+                )
+
+        # Story #1083: drain the batched API-metrics writer. The writer coalesces
+        # queued metric events into one transaction per drain; stop_writer() signals
+        # the thread, joins it, and performs a final drain so no queued counts are
+        # lost. Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.api_metrics_service import (
+                api_metrics_service as _ams_shutdown,
+            )
+
+            _ams_shutdown.stop_writer()
+        except Exception as _metrics_stop_exc:
+            logger.warning(
+                "Story #1083: failed to drain api-metrics writer during shutdown: %s",
+                _metrics_stop_exc,
+            )
+
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
         # follow-up to Bug #1078). The listener owns the real handlers behind the
         # root QueueHandler; stop() drains every queued record and then closes the
