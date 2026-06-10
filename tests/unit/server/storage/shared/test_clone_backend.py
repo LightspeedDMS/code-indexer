@@ -280,7 +280,11 @@ class TestOntapCloneBackendCreateClone:
         from code_indexer.server.storage.shared.clone_backend import OntapCloneBackend
 
         client = self._make_mock_client()
-        backend = OntapCloneBackend(flexclone_client=client, mount_point="/mnt/fsx")
+        backend = OntapCloneBackend(
+            flexclone_client=client,
+            mount_point="/mnt/fsx",
+            visibility_waiter=_noop_visibility_waiter,
+        )
 
         backend.create_clone("/ignored/source", "cidx", "cidx_clone_myrepo_1700000000")
 
@@ -291,7 +295,11 @@ class TestOntapCloneBackendCreateClone:
         from code_indexer.server.storage.shared.clone_backend import OntapCloneBackend
 
         client = self._make_mock_client()
-        backend = OntapCloneBackend(flexclone_client=client, mount_point="/mnt/fsx")
+        backend = OntapCloneBackend(
+            flexclone_client=client,
+            mount_point="/mnt/fsx",
+            visibility_waiter=_noop_visibility_waiter,
+        )
 
         backend.create_clone("/src", "cidx", "my-clone")
 
@@ -303,7 +311,11 @@ class TestOntapCloneBackendCreateClone:
         from code_indexer.server.storage.shared.clone_backend import OntapCloneBackend
 
         client = self._make_mock_client()
-        backend = OntapCloneBackend(flexclone_client=client, mount_point="/mnt/fsx")
+        backend = OntapCloneBackend(
+            flexclone_client=client,
+            mount_point="/mnt/fsx",
+            visibility_waiter=_noop_visibility_waiter,
+        )
 
         result = backend.create_clone("/src", "cidx", "my-clone")
 
@@ -527,10 +539,24 @@ def _make_cow_config(timeout_seconds: int = 30):
     )
 
 
+def _noop_visibility_waiter(_path: str) -> None:
+    """No-op NFS visibility waiter for tests that assert HTTP/path behaviour.
+
+    The real read-after-create barrier (Bug #1084) polls os.path.isdir on the
+    returned dest; these tests use synthetic dest paths that never exist on
+    disk, so a no-op waiter avoids the bounded real poll. The barrier itself is
+    covered by tests/unit/server/storage/shared/test_nfs_visibility_bug1084.py.
+    """
+    return None
+
+
 def _make_cow_backend(timeout_seconds: int = 30):
     from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
 
-    return CowDaemonBackend(config=_make_cow_config(timeout_seconds=timeout_seconds))
+    return CowDaemonBackend(
+        config=_make_cow_config(timeout_seconds=timeout_seconds),
+        visibility_waiter=_noop_visibility_waiter,
+    )
 
 
 def _mock_requests_module(post_resp=None, get_resp=None, delete_resp=None):
@@ -694,7 +720,9 @@ class TestCowDaemonBackendCreateClone:
             timeout_seconds=30,
             daemon_storage_path="/home/jsbattig/cow-storage",
         )
-        backend = CowDaemonBackend(config=config)
+        backend = CowDaemonBackend(
+            config=config, visibility_waiter=_noop_visibility_waiter
+        )
 
         post_resp = _make_response(202, {"job_id": "job-tr"})
         poll_resp = _make_response(
@@ -1355,7 +1383,9 @@ class TestCowDaemonBackendPathTranslation:
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
 
         config = self._make_cow_config_with_translation()
-        backend = CowDaemonBackend(config=config)
+        backend = CowDaemonBackend(
+            config=config, visibility_waiter=_noop_visibility_waiter
+        )
 
         post_resp = _make_response(202, {"job_id": "job-translate"})
         poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})

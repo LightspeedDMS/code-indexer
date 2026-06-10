@@ -34,6 +34,10 @@ from code_indexer.server.services.cidx_meta_backup import (
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
+from code_indexer.server.storage.shared.nfs_visibility import (
+    NFS_VISIBILITY_TIMEOUT_SECONDS,
+    wait_for_nfs_visibility,
+)
 from code_indexer.server.utils.config_manager import ScipConfig, ServerResourceConfig
 
 if TYPE_CHECKING:
@@ -2170,6 +2174,17 @@ class RefreshScheduler:
                 raise RuntimeError(
                     f"CoW clone failed for {alias_name} via snapshot_manager: {type(e).__name__}: {e}"
                 )
+
+            # Bug #1084 defense-in-depth: confirm the freshly created snapshot is
+            # visible on THIS node before any subprocess.run(cwd=versioned_path).
+            # The clone backend already waits at its create boundary, but a future
+            # non-cow backend or a very slow NFS could still expose the
+            # read-after-create dcache race that ENOENTs the git restore /
+            # cidx fix-config steps below. Idempotent and fast when already
+            # visible; raises (anti-fallback) if it never appears.
+            wait_for_nfs_visibility(
+                str(versioned_path), timeout=NFS_VISIBILITY_TIMEOUT_SECONDS
+            )
 
             # Step 3: Fix git status on clone (only if .git exists) — non-fatal
             git_dir = versioned_path / ".git"
