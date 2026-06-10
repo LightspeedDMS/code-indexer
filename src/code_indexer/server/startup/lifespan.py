@@ -279,6 +279,62 @@ def make_lifespan(
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Story #1082: drift-safe per-query repo-config cache. Removes the
+        # per-query config.json json.load + path resolve() from the GIL-bound
+        # hot path. Routes proven-immutable .versioned/{alias}/v_* snapshot
+        # paths to a NO-TTL bounded-LRU sub-cache and everything else (incl. the
+        # MUTABLE base clone returned by get_actual_repo_path Priority-1) to a
+        # SHORT-TTL bounded sub-cache (self-healing safety net). Sized/TTL'd from
+        # named CacheConfig knobs (no hardcoded literals); kill-switch honored.
+        from code_indexer.config import ConfigManager as _ConfigManager
+        from code_indexer.server.services.config_service import (
+            get_config_service as _get_config_service,
+        )
+        from code_indexer.server.services.query_path_cache import (
+            RepoConfigCache as _RepoConfigCache,
+        )
+        from code_indexer.server.utils.config_manager import (
+            CacheConfig as _CacheConfig,
+        )
+
+        try:
+            _cache_cfg = _get_config_service().get_config().cache_config
+        except Exception:
+            # Degraded startup: log and fall back to dataclass defaults (named,
+            # not magic literals) rather than disabling the cache silently.
+            logger.warning(
+                "Failed to read CacheConfig from config service; "
+                "using dataclass defaults for repo-config cache",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            _cache_cfg = _CacheConfig()
+
+        if getattr(_cache_cfg, "query_path_cache_enabled", True):
+
+            def _repo_config_loader(repo_path: str) -> Any:
+                return _ConfigManager.create_with_backtrack(
+                    Path(repo_path)
+                ).get_config()
+
+            app.state.repo_config_cache = _RepoConfigCache(
+                config_ttl_seconds=float(_cache_cfg.repo_config_cache_ttl_seconds),
+                config_max_entries=int(_cache_cfg.repo_config_cache_max_entries),
+                loader=_repo_config_loader,
+            )
+            logger.info(
+                "Repo-config cache wired (ttl=%ss, max_entries=%s) (Story #1082)",
+                _cache_cfg.repo_config_cache_ttl_seconds,
+                _cache_cfg.repo_config_cache_max_entries,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            app.state.repo_config_cache = None
+            logger.info(
+                "Repo-config cache DISABLED via query_path_cache_enabled kill-switch",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Bug #1070: Dedicated xray executor isolated from BJM's 5-worker pool.
         from code_indexer.server.utils.config_manager import (
             BackgroundJobsConfig as _BackgroundJobsConfig,

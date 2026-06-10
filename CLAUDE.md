@@ -279,12 +279,33 @@ Persistent storage of reusable Rust evaluator patterns in cidx-meta under `xray-
 
 Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.
 
-### Golden Repo Versioned Path (IMMUTABLE)
+### Golden Repo Versioned Path (mutable-vs-immutable -- resolver-accurate)
 
 - **Base clone** (`golden-repos/{alias}/`): mutable -- where git ops and indexing happen
-- **Versioned snapshot** (`.versioned/{alias}/v_{timestamp}/`): IMMUTABLE -- served to queries
+- **Versioned snapshot** (`.versioned/{alias}/v_{timestamp}/`): IMMUTABLE after creation
 
-Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_repo_path(alias)`. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
+**Resolver reality (Story #1082 audit -- corrects the prior "served to queries = immutable" claim).** `GoldenRepoManager.get_actual_repo_path(alias)` (`server/repositories/golden_repo_manager.py:2150`) is **Priority-1 / Priority-2**: if the **mutable base clone** `golden_repo.clone_path` exists on disk it is returned (line 2206-2216); only when it does NOT exist does it fall through to the latest `.versioned/{alias}/v_*` snapshot (line 2218+). So for GOLDEN/ACTIVATED repos the query path commonly receives the **mutable** path, NOT the immutable snapshot. GLOBAL repos differ: the alias JSON `target_path` is repointed to a `.versioned/{alias}/v_*` snapshot after the first refresh (`global_repos/refresh_scheduler.py:1171/1429/1623`), so `AliasManager.read_alias()` yields the immutable snapshot for global repos.
+
+Consequence for any path-keyed cache: do NOT assume the query-path string is immutable. Use the explicit predicate `is_immutable_versioned_snapshot(path)` (`server/services/query_path_cache.py`) -- it returns True ONLY for a validated `.versioned/{alias}/v_*` shape -- and **default to a SHORT TTL** for anything it does not prove immutable.
+
+Alias JSON `target_path` is authoritative for global repos. Use `GoldenRepoManager.get_actual_repo_path(alias)` for golden/activated. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
+
+### Query-Path Drift-Safe Caching (Story #1082)
+
+Per-query server orchestration glue is cached off the GIL-bound hot path WITHOUT extra RAM or workers, with a precise staleness policy. Single primitive `TTLCache` in `server/services/query_path_cache.py` (thread-safe, per-key **single-flight** -- no thundering herd on cold miss/expiry -- bounded LRU, hit/miss/reload/invalidate/evict counters, optional NO-TTL mode that is STILL bounded).
+
+**Staleness model (do not violate):**
+- **ZERO staleness** for (a) static package model-spec YAML and (b) keys PROVEN immutable by `is_immutable_versioned_snapshot()`. A golden-repo refresh makes a NEW versioned path = new key = cache miss, never an in-place stale read. These use NO TTL but are still bounded (LRU + alias-repoint / old-version invalidation).
+- **BOUNDED staleness <= the configured short TTL `T`** for mutable / not-provably-immutable repo paths (incl. the Priority-1 base clone), provider-config state, and DB metadata. TTL is a self-healing net even where event invalidation exists.
+- **NEVER cached:** auth-bearing rows (api keys / key-hashes, user rows, MCP credentials, permissions, group membership, token validation) -- so revocation / access-gating changes take effect immediately, zero grace, on every node.
+
+**What is implemented:**
+- **Load-once model-spec:** `voyage_ai._get_voyage_model_specs()` / `cohere_embedding._get_cohere_model_specs()` parse the static YAML ONCE per process (was per `VoyageAIClient.__init__`, i.e. per query). HTTP client stays per-request for thread safety -- only the parsed model-spec state is shared.
+- **RepoConfigCache** (`query_path_cache.py`): composes a NO-TTL bounded sub-cache (predicate-proven `.versioned/v_*` paths) + a SHORT-TTL bounded sub-cache (default, everything else). Wired in `startup/lifespan.py` as `app.state.repo_config_cache`; consumed by `search_service._load_repo_config()` (returns None registry -> direct load on CLI/in-process, NOT a fallback). Knobs on `CacheConfig`: `query_path_cache_enabled` (kill-switch), `repo_config_cache_ttl_seconds` (30), `repo_config_cache_max_entries` (2048) -- named, Web-UI-tunable, no hardcoded literals.
+- **`provider_config_digest()`**: normalized digest over ALL behavior-affecting fields (provider, model, key-FINGERPRINT never raw secret, api_endpoint, connect_timeout, timeout, Cohere max_retries/retry_delay/exponential_backoff). Two repos same provider/model/key but different endpoint/timeouts/retries -> distinct digests -> never share state.
+- **`codebase_dir mismatch` de-spam:** `config.py` logs the WARNING at most once per distinct config path (process-local memo); the per-load Bug #1033 NFS multi-mount reconciliation still runs on EVERY load -- no normalized `codebase_dir` persisted to shared state.
+
+**Deliberately deferred (KISS / scope):** explicit refresh-event `invalidate()` wiring through the refresh scheduler (the `invalidate()` API exists + is unit-tested, but Scenario 6 is already satisfied by new-path=new-key + bounded old-version eviction + SHORT TTL); provider-state object cache (the model-spec parse -- the real per-query cost -- is already eliminated by the load-once memo; caching a per-request client is forbidden for thread safety); the confirm-first DB-metadata `list_repos` cache and health-monitor memoization (NOT confirmed non-auth-safe at the call sites in scope, so deferred). NEVER cache auth-bearing data to "improve" any of these.
 
 ### ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)
 

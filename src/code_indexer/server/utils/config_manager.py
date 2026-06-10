@@ -82,6 +82,18 @@ class CacheConfig:
     payload_cache_ttl_seconds: int = 900
     payload_cleanup_interval_seconds: int = 60
 
+    # Query-path repo-config cache settings (Story #1082).
+    # query_path_cache_enabled: optional kill-switch; when False the per-query
+    #   repo-config cache is bypassed and config loads directly (baseline).
+    # repo_config_cache_ttl_seconds: SHORT, conservative TTL for mutable /
+    #   not-provably-immutable repo paths (proven-immutable .versioned/ snapshot
+    #   paths are cached with NO TTL but still bounded). Self-healing safety net.
+    # repo_config_cache_max_entries: hard LRU bound on EACH sub-cache (immutable
+    #   + mutable) to keep cardinality bounded across refresh cycles (Bug #897).
+    query_path_cache_enabled: bool = True
+    repo_config_cache_ttl_seconds: int = 30
+    repo_config_cache_max_entries: int = 2048
+
 
 @dataclass
 class ServerResourceConfig:

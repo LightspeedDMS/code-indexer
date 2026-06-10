@@ -68,6 +68,38 @@ def _get_query_executor() -> Any:
     return getattr(_app.state, "query_executor", None)
 
 
+def _get_repo_config_cache() -> Any:
+    """Get the shared repo-config cache registry from app.state (or None).
+
+    Story #1082: the server lifespan installs ONE RepoConfigCache
+    (app.state.repo_config_cache) so per-query config.json parsing + path
+    resolution is served from a drift-safe cache instead of re-parsing on every
+    request. Returns None when running outside the server lifespan (CLI
+    in-process / unit tests), which is an explicit, readable signal that config
+    should be loaded directly -- NOT a silent fallback (Messi anti-fallback #2).
+
+    Extracted as a module-level function so unit tests can patch it without
+    setting up the full app.state (mirrors _get_query_executor()).
+    """
+    from ..app import app as _app
+
+    return getattr(_app.state, "repo_config_cache", None)
+
+
+def _load_repo_config(repo_path: str) -> Any:
+    """Load the parsed Config for a repo path, via the cache when wired.
+
+    When the app.state RepoConfigCache registry is present, the config is served
+    from it (NO-TTL for predicate-proven immutable .versioned/ snapshot paths;
+    SHORT-TTL for mutable / not-provably-immutable paths). When absent, the
+    config is loaded directly (identical to the pre-#1082 behavior).
+    """
+    registry = _get_repo_config_cache()
+    if registry is not None:
+        return registry.get_config(repo_path)
+    return ConfigManager.create_with_backtrack(Path(repo_path)).get_config()
+
+
 def _get_golden_repos_dir() -> str:
     """Get golden repos directory from app.state configuration."""
     from typing import Optional, cast
@@ -347,9 +379,13 @@ class SemanticSearchService:
             RuntimeError: If embedding generation or vector search fails
         """
         try:
-            # Load repository-specific configuration
-            config_manager = ConfigManager.create_with_backtrack(Path(repo_path))
-            config = config_manager.get_config()
+            # Load repository-specific configuration.
+            # Story #1082: served from the drift-safe RepoConfigCache when the
+            # server lifespan has wired it (NO-TTL for proven-immutable
+            # .versioned/ snapshots, SHORT-TTL otherwise); identical direct load
+            # under CLI in-process. Removes per-query json.load + path resolve()
+            # from the GIL-bound hot path.
+            config = _load_repo_config(repo_path)
 
             # py-spy logging-lock fix (follow-up to Bug #1078): the per-query
             # "Loaded repository config" INFO log was removed from this hot path.
