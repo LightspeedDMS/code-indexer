@@ -135,10 +135,20 @@ class ApiMetricsService:
                 f"ApiMetricsService using injected storage backend "
                 f"(node_id={self._node_id!r})"
             )
-            self._writer_thread = threading.Thread(
-                target=self._writer_loop, daemon=True, name="api-metrics-writer"
-            )
-            self._writer_thread.start()
+            # Clear any stop flag left over from a previous stop_writer() so a
+            # SECOND lifespan startup in the same process (e.g. in-process
+            # FastAPI TestClient E2E) starts a writer that actually runs. Without
+            # this, the re-init thread sees the stale stop flag and exits
+            # immediately, silently dropping every enqueued metric (MESSI #13).
+            self._stop_event.clear()
+            # Only (re)start when no writer is already running, so an idempotent
+            # re-init while the existing writer is still alive does not spawn a
+            # duplicate thread.
+            if self._writer_thread is None or not self._writer_thread.is_alive():
+                self._writer_thread = threading.Thread(
+                    target=self._writer_loop, daemon=True, name="api-metrics-writer"
+                )
+                self._writer_thread.start()
             return
 
         if not db_path:

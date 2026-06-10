@@ -13,7 +13,11 @@ import sqlite3
 import threading
 import time
 
-from code_indexer.server.services.api_metrics_service import ApiMetricsService
+import code_indexer.server.services.api_metrics_service as api_metrics_module
+from code_indexer.server.services.api_metrics_service import (
+    ApiMetricsService,
+    api_metrics_service,
+)
 from code_indexer.server.storage.sqlite_backends import ApiMetricsSqliteBackend
 
 
@@ -109,3 +113,60 @@ def test_stop_writer_drains_remaining_queue(tmp_path):
     assert _min1_count(db_file, "bob", "regex") == 10, (
         "stop_writer() must drain remaining queued events before exiting"
     )
+
+
+def _reset_singleton(service) -> None:
+    """Restore the real api_metrics_service singleton to a pristine, unwired state
+    so a re-init test does not leak a stopped/started writer into other tests."""
+    import queue as _queue
+
+    service.stop_writer()
+    service._backend = None
+    service._writer_thread = None
+    service._stop_event = threading.Event()
+    service._queue = _queue.Queue(maxsize=api_metrics_module._QUEUE_MAXSIZE)
+
+
+def test_singleton_reinit_after_stop_keeps_live_writer(tmp_path):
+    """Regression (story #1083 review): a SECOND lifespan startup in the same
+    process must produce a LIVE writer.
+
+    Reproduces the in-process FastAPI TestClient E2E sequence on the real module
+    singleton: initialize -> enqueue -> stop_writer -> initialize AGAIN -> enqueue N.
+    Before the fix, initialize() never cleared _stop_event, so the re-init writer
+    thread saw the stop flag immediately, exited, and 0 of the N events were
+    written. After the fix, all N are persisted.
+    """
+    service = api_metrics_service  # the REAL module singleton, not a fresh instance
+    try:
+        # --- First lifespan: init, enqueue one, then shut the writer down. ---
+        db_first = str(tmp_path / "first.db")
+        backend_first = ApiMetricsSqliteBackend(db_first)
+        service.initialize(db_first, storage_backend=backend_first)
+        service.increment_semantic_search(username="carol")
+        assert _poll_until(lambda: _min1_count(db_first, "carol", "semantic") == 1), (
+            "first lifespan writer must persist its event"
+        )
+        service.stop_writer()
+
+        # --- Second lifespan in the SAME process: a fresh init must re-arm. ---
+        db_second = str(tmp_path / "second.db")
+        backend_second = ApiMetricsSqliteBackend(db_second)
+        service.initialize(db_second, storage_backend=backend_second)
+
+        assert service._writer_thread is not None
+        assert service._writer_thread.is_alive(), (
+            "re-init must produce a LIVE writer thread (stop_event not cleared = "
+            "thread exits immediately)"
+        )
+
+        n = 15
+        for _ in range(n):
+            service.increment_semantic_search(username="carol")
+
+        assert _poll_until(lambda: _min1_count(db_second, "carol", "semantic") == n), (
+            f"re-init writer must persist all {n} events, got "
+            f"{_min1_count(db_second, 'carol', 'semantic')} (0 == stop_event never cleared)"
+        )
+    finally:
+        _reset_singleton(service)
