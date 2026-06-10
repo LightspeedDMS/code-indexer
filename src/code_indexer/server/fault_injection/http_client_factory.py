@@ -37,6 +37,29 @@ Story #1083 — production connection pooling (sync path):
     When fault injection is ACTIVE, ``pooled`` is IGNORED: the factory returns a
     fresh per-call client wrapped in FaultInjectingSyncTransport (closed per call)
     so every scripted fault still intercepts every call exactly as before.
+
+Story #1083 residual — bake the latency transport in ONCE on the pooled path:
+    The factory OWNS latency-transport construction.  Providers no longer build a
+    fresh ``build_latency_transport()`` (a new ``httpx.HTTPTransport`` + its
+    ``SSLContext``) per embed call.  Instead:
+
+    * Pooled production path (fault OFF): the factory calls
+      ``build_latency_transport()`` exactly ONCE, at pooled-client construction,
+      and bakes the single shared LatencyTrackingHTTPXTransport into the
+      keep-alive client.  Every subsequent pooled request reuses it — killing the
+      per-query SSLContext/transport churn.  ``build_latency_transport()`` is a
+      thin timing wrapper with no per-request mutable state (``_wrapped`` /
+      ``_tracker`` / ``_registry`` are read-only after construction), so one
+      shared instance is safe across concurrent requests and still records a
+      latency sample per request via the DependencyLatencyTracker.
+
+    * Fault-injection path (fault ON): the factory builds the latency transport
+      per call (fresh per-call client) and wraps it in FaultInjectingSyncTransport
+      — UNCHANGED composition ``FaultInjectingSyncTransport →
+      LatencyTrackingHTTPXTransport → HTTPTransport``.
+
+    A caller-supplied ``transport`` always wins over the internal build (used by
+    tests and any caller that composes its own transport).
 """
 
 from __future__ import annotations
@@ -55,6 +78,9 @@ from code_indexer.server.fault_injection.fault_injecting_transport import (
 )
 from code_indexer.server.fault_injection.fault_injecting_sync_transport import (
     FaultInjectingSyncTransport,
+)
+from code_indexer.server.services.latency_tracking_httpx_transport import (
+    build_latency_transport,
 )
 
 # Story #1083: connection-pool limits for the long-lived production sync client.
@@ -187,9 +213,14 @@ class HttpClientFactory:
             # fault transport, closed per call.  The ``pooled`` flag is ignored on
             # this path by design (Story #1083 approved compromise) so every
             # scripted fault still intercepts every call exactly as before.
-            base_transport: httpx.BaseTransport = (
-                transport if transport is not None else httpx.HTTPTransport()
-            )
+            #
+            # Story #1083 residual: the factory now OWNS latency-transport
+            # construction.  On the fault path it builds one PER CALL (fresh
+            # per-call client) so the composition stays
+            # FaultInjectingSyncTransport → LatencyTrackingHTTPXTransport →
+            # HTTPTransport.  A bare HTTPTransport is the floor when no tracker is
+            # registered.
+            base_transport: httpx.BaseTransport = self._resolve_transport(transport)
             fault_transport = FaultInjectingSyncTransport(
                 wrapped=base_transport,
                 service=svc,
@@ -208,6 +239,27 @@ class HttpClientFactory:
             return httpx.Client(transport=transport, **kwargs)
         return httpx.Client(**kwargs)
 
+    @staticmethod
+    def _resolve_transport(
+        transport: Optional[httpx.BaseTransport],
+    ) -> httpx.BaseTransport:
+        """Return a caller-supplied transport, else build the latency transport.
+
+        Story #1083 residual: the factory owns latency-transport construction so
+        providers stop building a fresh ``build_latency_transport()`` (and its
+        SSLContext) per call.  A caller-supplied ``transport`` always wins.  When
+        none is supplied, ``build_latency_transport()`` is consulted; if it returns
+        None (no DependencyLatencyTracker registered — e.g. CLI / tests), a bare
+        ``httpx.HTTPTransport`` is the floor so the returned client is always
+        wired with a concrete transport.
+        """
+        if transport is not None:
+            return transport
+        latency: Optional[httpx.BaseTransport] = build_latency_transport()
+        if latency is not None:
+            return latency
+        return httpx.HTTPTransport()
+
     def _get_or_create_pooled_client(
         self,
         *,
@@ -220,6 +272,13 @@ class HttpClientFactory:
         under ``_pool_lock`` with bounded ``httpx.Limits``; all later callers reuse
         it.  ``httpx.Client`` is safe for concurrent requests across threads, which
         is exactly how the shared client is exercised.
+
+        Story #1083 residual: the single shared latency transport is built HERE,
+        exactly once, under the lock — so ``build_latency_transport()`` (and its
+        ``SSLContext`` / ``httpx.HTTPTransport``) is constructed once per pool, not
+        once per query.  The latency transport is a thin timing wrapper with no
+        per-request mutable state, so the one shared instance safely records a
+        sample for every concurrent request.
         """
         client = self._pooled_sync_client
         if client is not None:
@@ -231,10 +290,9 @@ class HttpClientFactory:
                 max_keepalive_connections=DEFAULT_MAX_KEEPALIVE_CONNECTIONS,
                 max_connections=DEFAULT_MAX_CONNECTIONS,
             )
-            if transport is not None:
-                built = httpx.Client(transport=transport, limits=limits, **kwargs)
-            else:
-                built = httpx.Client(limits=limits, **kwargs)
+            # Build the latency transport ONCE and bake it into the pooled client.
+            baked_transport = self._resolve_transport(transport)
+            built = httpx.Client(transport=baked_transport, limits=limits, **kwargs)
             self._pooled_sync_client = built
             return built
 
