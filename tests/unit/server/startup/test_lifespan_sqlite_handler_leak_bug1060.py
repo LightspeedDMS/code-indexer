@@ -203,13 +203,18 @@ class TestLifespanRealHandlerRemoval:
             async def _run():
                 nonlocal handler_installed
                 async with lifespan_fn(app):
-                    # Inside lifespan: check that the handler was actually installed
-                    sqlite_handlers = [
-                        h
-                        for h in root_logger.handlers
-                        if isinstance(h, SQLiteLogHandler)
-                    ]
-                    handler_installed = len(sqlite_handlers) > 0
+                    # Inside lifespan: the SQLiteLogHandler is no longer attached
+                    # directly to the root logger — the async-logging change
+                    # (py-spy follow-up to Bug #1078) moves it BEHIND the
+                    # QueueListener. Confirm it was installed by checking the
+                    # listener's handler list (the architecture genuinely changed).
+                    listener = getattr(app.state, "log_queue_listener", None)
+                    listener_handlers = (
+                        list(listener.handlers) if listener is not None else []
+                    )
+                    handler_installed = any(
+                        isinstance(h, SQLiteLogHandler) for h in listener_handlers
+                    )
                 # After exit: collect any remaining SQLiteLogHandlers
 
             try:
@@ -224,8 +229,15 @@ class TestLifespanRealHandlerRemoval:
                 os.environ.pop("CIDX_SERVER_DATA_DIR", None)
 
             # After the lifespan exits, the root logger must be clean
+            from code_indexer.server.services.async_logging import (
+                IdentityQueueHandler,
+            )
+
             remaining_sqlite_handlers = [
                 h for h in root_logger.handlers if isinstance(h, SQLiteLogHandler)
+            ]
+            remaining_queue_handlers = [
+                h for h in root_logger.handlers if isinstance(h, IdentityQueueHandler)
             ]
 
             # Guarantee we clean up even on test failure (never leak a handler)
@@ -235,15 +247,23 @@ class TestLifespanRealHandlerRemoval:
                     h.close()
                 except Exception:
                     pass
+            for h in remaining_queue_handlers:
+                root_logger.removeHandler(h)
 
         assert handler_installed, (
-            "SQLiteLogHandler was never installed during lifespan startup. "
+            "SQLiteLogHandler was never installed during lifespan startup "
+            "(expected behind the async QueueListener). "
             "Check that startup config is readable in the tmp server_data_dir."
         )
         assert len(remaining_sqlite_handlers) == 0, (
             f"Bug #1060: {len(remaining_sqlite_handlers)} SQLiteLogHandler(s) remained on "
             f"root logger after lifespan exit. The lifespan shutdown must call "
             f"logging.getLogger().removeHandler(sqlite_handler) immediately after yield."
+        )
+        assert len(remaining_queue_handlers) == 0, (
+            f"async-logging leak: {len(remaining_queue_handlers)} IdentityQueueHandler(s) "
+            f"remained on the root logger after lifespan exit. The shutdown must remove "
+            f"the QueueHandler after stopping the listener."
         )
 
     def test_three_lifespan_cycles_do_not_accumulate_handlers(self):

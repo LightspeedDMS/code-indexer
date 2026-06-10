@@ -336,6 +336,46 @@ def test_close_flushes_remaining_records_and_stops_writer(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Test 3b: flush() drains the writer queue synchronously (without closing)
+# ---------------------------------------------------------------------------
+
+
+def test_flush_drains_writer_queue_synchronously(tmp_path: Path) -> None:
+    """flush() must block until the writer thread has drained the queue.
+
+    Unlike close(), flush() leaves the handler usable afterwards. This is the
+    deterministic-drain hook timing-sensitive tests need instead of sleeping or
+    weakening assertions. The writer backend blocks briefly per insert so that,
+    without a real synchronous drain, the rows would not yet be present.
+    """
+    backend = _TrackingLogsBackend(block_seconds=0.02)
+    handler = _build_handler(tmp_path, backend)
+    try:
+        for i in range(5):
+            handler.emit(_make_record(f"flush-hook record {i}"))
+
+        handler.flush()  # must block until all 5 are written
+
+        with backend._lock:
+            messages = {c["message"] for c in backend.calls}
+        for i in range(5):
+            assert f"flush-hook record {i}" in messages, (
+                f"flush() returned before record {i} was written; "
+                f"got {len(messages)} records"
+            )
+
+        # Handler must still be usable after flush() (unlike close()).
+        handler.emit(_make_record("after flush still works"))
+        handler.flush()
+        with backend._lock:
+            assert any(
+                c["message"] == "after flush still works" for c in backend.calls
+            ), "handler must remain usable after flush()"
+    finally:
+        handler.close()
+
+
+# ---------------------------------------------------------------------------
 # Test 4: writer-thread guard prevents re-enqueueing recursion
 # ---------------------------------------------------------------------------
 

@@ -103,32 +103,34 @@ class TestGatingSitePresence:
     """Governor gating MUST appear in each of the 5 serving call sites."""
 
     def test_site1_search_service_pg_backend_gated(self):
-        """search_service.py PG-backend embedding call must be gated via governed_query_embedding.
+        """search_service.py PG-backend embedding call must be gated via coalesced_query_embedding.
 
-        After the Bug #1078 refactor, gating is centralised in governed_call.py.
-        Each site delegates to governed_query_embedding() rather than inlining the
-        ProviderConcurrencyGovernor/execute_with_backoff boilerplate directly.
+        Story #1079 Phase E: the 4 query sites now call coalesced_query_embedding,
+        the server-gated entry point that delegates to governed_query_embedding on
+        CLI/solo (no registry) or when the kill switch is off, and coalesces on the
+        server. Gating lives entirely inside coalesced_query_embedding.
         """
         src = _read("code_indexer/server/services/search_service.py")
-        assert "governed_query_embedding" in src, (
-            "search_service.py must gate embedding via governed_query_embedding "
-            "(from server/services/governed_call.py) — direct ProviderConcurrencyGovernor "
-            "usage was consolidated into the shared helper"
+        assert "coalesced_query_embedding" in src, (
+            "search_service.py must gate embedding via coalesced_query_embedding "
+            "(from server/services/governed_call.py) — the Phase E server-gated "
+            "entry point"
         )
 
     def test_site2_filesystem_vector_store_gated(self):
-        """filesystem_vector_store.py generate_embedding closure must be gated via governed_query_embedding."""
+        """filesystem_vector_store.py generate_embedding closure must be gated via coalesced_query_embedding."""
         src = _read("code_indexer/storage/filesystem_vector_store.py")
-        assert "governed_query_embedding" in src, (
-            "filesystem_vector_store.py must gate embedding via governed_query_embedding "
-            "(from server/services/governed_call.py)"
+        assert "coalesced_query_embedding" in src, (
+            "filesystem_vector_store.py must gate embedding via coalesced_query_embedding "
+            "(from server/services/governed_call.py) — gating is registry-aware so "
+            "CLI stays on the direct governed single call"
         )
 
     def test_site3_memory_handler_gated(self):
-        """handlers/search.py _compute_memory_query_vector must be gated via governed_query_embedding."""
+        """handlers/search.py _compute_memory_query_vector must be gated via coalesced_query_embedding."""
         src = _read("code_indexer/server/mcp/handlers/search.py")
-        assert "governed_query_embedding" in src, (
-            "handlers/search.py must gate memory embedding via governed_query_embedding "
+        assert "coalesced_query_embedding" in src, (
+            "handlers/search.py must gate memory embedding via coalesced_query_embedding "
             "(from server/services/governed_call.py)"
         )
 
@@ -143,10 +145,10 @@ class TestGatingSitePresence:
         assert "_RERANKER_BUDGET" in src
 
     def test_site5_temporal_search_service_gated(self):
-        """temporal_search_service.py embedding call must be gated via governed_query_embedding."""
+        """temporal_search_service.py embedding call must be gated via coalesced_query_embedding."""
         src = _read("code_indexer/services/temporal/temporal_search_service.py")
-        assert "governed_query_embedding" in src, (
-            "temporal_search_service.py must gate embedding via governed_query_embedding "
+        assert "coalesced_query_embedding" in src, (
+            "temporal_search_service.py must gate embedding via coalesced_query_embedding "
             "(from server/services/governed_call.py)"
         )
 
@@ -247,25 +249,26 @@ class TestExecuteWithBackoffWiring:
         )
 
     def test_site1_search_service_uses_governed_query_embedding(self):
-        """search_service.py PG-backend path must delegate to governed_query_embedding."""
+        """search_service.py PG-backend path must delegate to coalesced_query_embedding."""
         src = _read("code_indexer/server/services/search_service.py")
-        assert "governed_query_embedding" in src, (
-            "search_service.py must call governed_query_embedding() from governed_call.py — "
-            "execute_with_backoff+governor.execute wiring now lives in the shared helper"
+        assert "coalesced_query_embedding" in src, (
+            "search_service.py must call coalesced_query_embedding() from governed_call.py — "
+            "the Phase E server-gated entry point routes to the execute_with_backoff+"
+            "governor.execute helper"
         )
 
     def test_site2_filesystem_vector_store_uses_governed_query_embedding(self):
-        """filesystem_vector_store.py generate_embedding closure must delegate to governed_query_embedding."""
+        """filesystem_vector_store.py generate_embedding closure must delegate to coalesced_query_embedding."""
         src = _read("code_indexer/storage/filesystem_vector_store.py")
-        assert "governed_query_embedding" in src, (
-            "filesystem_vector_store.py must call governed_query_embedding() from governed_call.py"
+        assert "coalesced_query_embedding" in src, (
+            "filesystem_vector_store.py must call coalesced_query_embedding() from governed_call.py"
         )
 
     def test_site3_memory_handler_uses_governed_query_embedding(self):
-        """handlers/search.py _compute_memory_query_vector must delegate to governed_query_embedding."""
+        """handlers/search.py _compute_memory_query_vector must delegate to coalesced_query_embedding."""
         src = _read("code_indexer/server/mcp/handlers/search.py")
-        assert "governed_query_embedding" in src, (
-            "handlers/search.py must call governed_query_embedding() from governed_call.py"
+        assert "coalesced_query_embedding" in src, (
+            "handlers/search.py must call coalesced_query_embedding() from governed_call.py"
         )
 
     def test_site4_reranking_uses_execute_with_backoff(self):
@@ -282,10 +285,10 @@ class TestExecuteWithBackoffWiring:
         )
 
     def test_site5_temporal_search_uses_governed_query_embedding(self):
-        """temporal_search_service.py embedding call must delegate to governed_query_embedding."""
+        """temporal_search_service.py embedding call must delegate to coalesced_query_embedding."""
         src = _read("code_indexer/services/temporal/temporal_search_service.py")
-        assert "governed_query_embedding" in src, (
-            "temporal_search_service.py must call governed_query_embedding() from governed_call.py"
+        assert "coalesced_query_embedding" in src, (
+            "temporal_search_service.py must call coalesced_query_embedding() from governed_call.py"
         )
 
 

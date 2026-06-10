@@ -30,6 +30,10 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
 _MCP_DISPATCH_POOL_MIN: int = 1
 _MCP_DISPATCH_POOL_MAX: int = 1024
 
+# perf - bounds for query_executor_pool_size bootstrap config key (range 1-2048)
+_QUERY_EXECUTOR_POOL_MIN: int = 1
+_QUERY_EXECUTOR_POOL_MAX: int = 2048
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -77,6 +81,18 @@ class CacheConfig:
     payload_max_fetch_size_chars: int = 5000
     payload_cache_ttl_seconds: int = 900
     payload_cleanup_interval_seconds: int = 60
+
+    # Query-path repo-config cache settings (Story #1082).
+    # query_path_cache_enabled: optional kill-switch; when False the per-query
+    #   repo-config cache is bypassed and config loads directly (baseline).
+    # repo_config_cache_ttl_seconds: SHORT, conservative TTL for mutable /
+    #   not-provably-immutable repo paths (proven-immutable .versioned/ snapshot
+    #   paths are cached with NO TTL but still bounded). Self-healing safety net.
+    # repo_config_cache_max_entries: hard LRU bound on EACH sub-cache (immutable
+    #   + mutable) to keep cardinality bounded across refresh cycles (Bug #897).
+    query_path_cache_enabled: bool = True
+    repo_config_cache_ttl_seconds: int = 30
+    repo_config_cache_max_entries: int = 2048
 
 
 @dataclass
@@ -1193,6 +1209,23 @@ class ServerConfig:
     # Range: 1-1024. Default 128.
     mcp_dispatch_pool_size: int = 128
 
+    # perf - Shared, long-lived query executor pool (bootstrap-only).
+    # FilesystemVectorStore.search() runs the index-load task in parallel with the
+    # embedding task (2 sub-tasks per query). Previously each request created its
+    # own ThreadPoolExecutor, so the create/destroy churn serialized concurrent
+    # queries on CPython's process-wide _global_shutdown_lock (71% of worker-thread
+    # py-spy samples in `submit`). This pool is created ONCE at startup and reused.
+    #
+    # Sizing rationale: it must hold ~2 threads per concurrently-served query so
+    # requests' sub-tasks don't starve each other (a tiny shared pool would be
+    # WORSE — it would serialize all requests). Default 256 mirrors
+    # server_threadpool_size (the anyio/Starlette sync-handler capacity): with up
+    # to ~256 concurrent sync query handlers, 256 query-executor workers cover the
+    # worst case without queueing. The fan-out is non-nested (load_index /
+    # generate_embedding never submit back to this pool), so no deadlock risk.
+    # Range: 1-2048.
+    query_executor_pool_size: int = 256
+
     # Story #908 / Epic #907 - Graph-channel anomaly repair (bootstrap-only, never DB).
     # Default True so fresh installs automatically run Phase 3.7 SELF_LOOP repair.
     # Set enable_graph_channel_repair=false in config.json to disable.
@@ -1221,6 +1254,33 @@ class ServerConfig:
     # Excess callers queue up to acquire_timeout seconds then receive GovernorBusyError.
     # Runtime (DB-backed), not bootstrap.
     query_provider_max_concurrency: int = 16
+
+    # Story #1079 Phase E - Server-side embedding request coalescer.
+    # All four are RUNTIME (DB-backed, Web-UI tunable), NOT bootstrap config.json.
+    # coalesce_enabled / coalesce_max_batch_size are read live via getattr in
+    # coalesced_query_embedding / the coalescer registry, so changes take effect
+    # WITHOUT a restart (true hot-reload). coalesce_k_min / coalesce_k_max are
+    # DIFFERENT: they are CONSTRUCTION-SCOPED governor seeds (read once at
+    # ProviderConcurrencyGovernor construction via _read_config_k_bounds and baked
+    # into each lane's limiter clamp + AIMD floor/ceiling) — a change takes effect
+    # on the next governor construction / server restart, exactly like
+    # query_provider_max_concurrency seeds the initial K. They do NOT live-reload.
+    #
+    # coalesce_enabled: kill switch. When False, coalesced_query_embedding
+    #   delegates to governed_query_embedding (governor + AIMD still apply, no
+    #   batch accumulation). Read live each call (hot-reload).
+    coalesce_enabled: bool = True
+    # coalesce_max_batch_size: hard texts-per-batch ceiling. 96 == Cohere's
+    #   _get_texts_per_request() (the smallest provider texts cap), so a sealed
+    #   batch never sub-splits in the provider. Read live at registry build / seal.
+    coalesce_max_batch_size: int = 96
+    # coalesce_k_min / coalesce_k_max: per-lane AIMD K floor/ceiling seeds AND the
+    #   per-lane ResizableLimiter clamp bounds, matching the locked design
+    #   (K_MIN=8, K_MAX=32). Valid range 8 <= k_min <= k_max <= 256; present-but-
+    #   invalid config falls back to the 8/32 defaults with a logged WARNING.
+    #   Construction-scoped seed (see preamble) — NOT live hot-reload.
+    coalesce_k_min: int = 8
+    coalesce_k_max: int = 32
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -2054,6 +2114,17 @@ class ServerConfigManager:
             raise ValueError(
                 f"mcp_dispatch_pool_size must be between {_MCP_DISPATCH_POOL_MIN} "
                 f"and {_MCP_DISPATCH_POOL_MAX}, got {config.mcp_dispatch_pool_size}"
+            )
+
+        # Validate query_executor_pool_size (perf - shared query executor)
+        if not (
+            _QUERY_EXECUTOR_POOL_MIN
+            <= config.query_executor_pool_size
+            <= _QUERY_EXECUTOR_POOL_MAX
+        ):
+            raise ValueError(
+                f"query_executor_pool_size must be between {_QUERY_EXECUTOR_POOL_MIN} "
+                f"and {_QUERY_EXECUTOR_POOL_MAX}, got {config.query_executor_pool_size}"
             )
 
         # Validate port range

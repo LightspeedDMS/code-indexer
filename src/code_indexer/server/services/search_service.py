@@ -46,6 +46,60 @@ def _get_http_client_factory() -> Any:
     return _app.state.http_client_factory
 
 
+def _get_query_executor() -> Any:
+    """Get the shared, long-lived query ThreadPoolExecutor from app.state.
+
+    perf: the server lifespan creates ONE app-level ThreadPoolExecutor
+    (app.state.query_executor) so the FilesystemVectorStore embed||index-load
+    fan-out reuses threads across concurrent requests instead of each request
+    creating/destroying its own pool (which serialized on CPython's
+    process-wide _global_shutdown_lock).
+
+    Returns the executor when running under the server lifespan, or None when
+    app.state has no query_executor (e.g. CLI in-process / unit tests). The
+    None case is an explicit, readable signal that the per-call leaf pool
+    should be used — NOT a silent global (Messi anti-fallback #2).
+
+    Extracted as a module-level function so unit tests can patch it without
+    setting up the full app.state (mirrors _get_http_client_factory()).
+    """
+    from ..app import app as _app
+
+    return getattr(_app.state, "query_executor", None)
+
+
+def _get_repo_config_cache() -> Any:
+    """Get the shared repo-config cache registry from app.state (or None).
+
+    Story #1082: the server lifespan installs ONE RepoConfigCache
+    (app.state.repo_config_cache) so per-query config.json parsing + path
+    resolution is served from a drift-safe cache instead of re-parsing on every
+    request. Returns None when running outside the server lifespan (CLI
+    in-process / unit tests), which is an explicit, readable signal that config
+    should be loaded directly -- NOT a silent fallback (Messi anti-fallback #2).
+
+    Extracted as a module-level function so unit tests can patch it without
+    setting up the full app.state (mirrors _get_query_executor()).
+    """
+    from ..app import app as _app
+
+    return getattr(_app.state, "repo_config_cache", None)
+
+
+def _load_repo_config(repo_path: str) -> Any:
+    """Load the parsed Config for a repo path, via the cache when wired.
+
+    When the app.state RepoConfigCache registry is present, the config is served
+    from it (NO-TTL for predicate-proven immutable .versioned/ snapshot paths;
+    SHORT-TTL for mutable / not-provably-immutable paths). When absent, the
+    config is loaded directly (identical to the pre-#1082 behavior).
+    """
+    registry = _get_repo_config_cache()
+    if registry is not None:
+        return registry.get_config(repo_path)
+    return ConfigManager.create_with_backtrack(Path(repo_path)).get_config()
+
+
 def _get_golden_repos_dir() -> str:
     """Get golden repos directory from app.state configuration."""
     from typing import Optional, cast
@@ -325,14 +379,16 @@ class SemanticSearchService:
             RuntimeError: If embedding generation or vector search fails
         """
         try:
-            # Load repository-specific configuration
-            config_manager = ConfigManager.create_with_backtrack(Path(repo_path))
-            config = config_manager.get_config()
+            # Load repository-specific configuration.
+            # Story #1082: served from the drift-safe RepoConfigCache when the
+            # server lifespan has wired it (NO-TTL for proven-immutable
+            # .versioned/ snapshots, SHORT-TTL otherwise); identical direct load
+            # under CLI in-process. Removes per-query json.load + path resolve()
+            # from the GIL-bound hot path.
+            config = _load_repo_config(repo_path)
 
-            logger.info(
-                f"Loaded repository config from {repo_path}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix (follow-up to Bug #1078): the per-query
+            # "Loaded repository config" INFO log was removed from this hot path.
 
             # Create backend using BackendFactory (Story #526: pass server cache).
             # Bug #881 Phase 3: fan-out callers pass hnsw_cache=None to prevent
@@ -355,10 +411,7 @@ class SemanticSearchService:
             )
             vector_store_client = backend.get_vector_store_client()
 
-            logger.info(
-                f"Using backend: {type(backend).__name__}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Using backend" INFO removed.
 
             # Create embedding service — use provider_name_override when set (Story #593).
             # Bug #899: pass http_client_factory so FaultInjectingSyncTransport intercepts
@@ -374,10 +427,7 @@ class SemanticSearchService:
                 config, embedding_service
             )
 
-            logger.info(
-                f"Using collection: {collection_name}",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Using collection" INFO removed.
 
             # Build filter_conditions from request parameters (Story #375)
             filter_conditions = self._build_filter_conditions(
@@ -420,6 +470,10 @@ class SemanticSearchService:
                     limit=limit,
                     return_timing=True,
                     ef=ef_value,
+                    # perf: reuse the server's shared long-lived executor for the
+                    # embed||index-load fan-out (None under CLI in-process -> leaf
+                    # falls back to a per-call pool).
+                    parallel_executor=_get_query_executor(),
                 )
                 if filter_conditions:
                     search_kwargs["filter_conditions"] = filter_conditions
@@ -429,10 +483,10 @@ class SemanticSearchService:
                 # Bug #1078: gate through concurrency governor to cap concurrent
                 # provider HTTP calls per account-level rate budget.
                 from code_indexer.server.services.governed_call import (
-                    governed_query_embedding,
+                    coalesced_query_embedding,
                 )
 
-                query_embedding = governed_query_embedding(
+                query_embedding = coalesced_query_embedding(
                     embedding_service,
                     query,
                     embedding_purpose=None,
@@ -443,10 +497,7 @@ class SemanticSearchService:
                     collection_name=collection_name,
                 )
 
-            logger.info(
-                f"Found {len(search_results)} results",
-                extra={"correlation_id": get_correlation_id()},
-            )
+            # py-spy logging-lock fix: per-query "Found N results" INFO removed.
 
             # Format results for response
             formatted_results = []

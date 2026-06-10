@@ -480,6 +480,23 @@ class SQLiteLogHandler(logging.Handler):
 
             self._queue.task_done()
 
+    def flush(self) -> None:
+        """Synchronously drain the writer queue without stopping the handler.
+
+        Blocks until every record enqueued before this call has been written by
+        the writer thread (``_writer_loop`` calls ``task_done()`` per item, so
+        ``queue.join()`` is the precise barrier). Unlike :meth:`close`, the
+        handler remains usable afterwards.
+
+        This is the deterministic-drain hook for timing-sensitive callers/tests:
+        prefer ``handler.flush()`` over sleeping or weakening assertions. It is a
+        no-op once the writer thread has stopped (``close()`` already drained).
+        """
+        writer_thread = getattr(self, "_writer_thread", None)
+        if writer_thread is None or not writer_thread.is_alive():
+            return
+        self._queue.join()
+
     def close(self) -> None:
         """Flush remaining queued records, stop writer thread, then close handler.
 

@@ -432,10 +432,10 @@ class TemporalSearchService:
             # FilesystemVectorStore: pre-compute embedding (no parallel support yet).
             # Bug #1078: gate through concurrency governor to cap concurrent provider calls.
             from code_indexer.server.services.governed_call import (
-                governed_query_embedding,
+                coalesced_query_embedding,
             )
 
-            query_embedding = governed_query_embedding(
+            query_embedding = coalesced_query_embedding(
                 self.embedding_provider,
                 query,
                 embedding_purpose=None,

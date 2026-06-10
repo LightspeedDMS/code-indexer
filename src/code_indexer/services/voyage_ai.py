@@ -3,6 +3,7 @@
 import logging
 import math
 import os
+import threading
 import time
 from http import HTTPStatus
 from typing import List, Dict, Any, Optional
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from ..config import VoyageAIConfig
 from .embedding_provider import EmbeddingProvider, EmbeddingResult, BatchEmbeddingResult
+from .provider_backoff import is_rate_limited
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,56 @@ _VOYAGE_MODEL_DIMENSIONS: Dict[str, int] = {
     "voyage-code-2": 1536,
     "voyage-law-2": 1024,
 }
+
+
+# Story #1082: the Voyage model-spec YAML is a STATIC package asset (zero drift).
+# Parse it ONCE per process instead of re-opening + re-parsing it on every
+# VoyageAIClient construction (which happens per query on the server hot path).
+# NO TTL: the source is an unchanging packaged file, deploy-invalidated only.
+_MODEL_SPECS_FALLBACK: Dict[str, Any] = {
+    "voyage_models": {
+        "voyage-code-3": {"token_limit": 120000},
+        "voyage-large-2": {"token_limit": 120000},
+        "voyage-2": {"token_limit": 320000},
+    }
+}
+
+_model_specs_cache: Optional[Dict[str, Any]] = None
+_model_specs_lock = threading.Lock()
+
+
+def _get_voyage_model_specs(console: Optional[Console] = None) -> Dict[str, Any]:
+    """Return the process-wide parsed Voyage model specs (parsed once).
+
+    Thread-safe single-flight: the first caller parses the static YAML under a
+    lock; all subsequent callers reuse the same parsed dict. On parse failure
+    the hardcoded fallback specs are cached so the cost is still paid once.
+    """
+    global _model_specs_cache
+    if _model_specs_cache is not None:
+        return _model_specs_cache
+
+    with _model_specs_lock:
+        if _model_specs_cache is not None:
+            return _model_specs_cache
+        try:
+            module_dir = Path(__file__).parent.parent
+            yaml_path = module_dir / "data" / "voyage_models.yaml"
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                _model_specs_cache = yaml.safe_load(f)
+        except Exception as e:
+            (console or Console()).print(
+                f"[yellow]Warning: Could not load model specs: {e}[/yellow]"
+            )
+            _model_specs_cache = _MODEL_SPECS_FALLBACK
+        return _model_specs_cache
+
+
+def _reset_model_specs_cache_for_tests() -> None:
+    """Clear the process-level model-spec memo (test-only hook)."""
+    global _model_specs_cache
+    with _model_specs_lock:
+        _model_specs_cache = None
 
 
 class VoyageAIClient(EmbeddingProvider):
@@ -133,27 +185,14 @@ class VoyageAIClient(EmbeddingProvider):
                 )
 
     def _load_model_specs(self):
-        """Load model specifications from YAML file."""
-        try:
-            # Get path to YAML file relative to this module
-            module_dir = Path(__file__).parent.parent
-            yaml_path = module_dir / "data" / "voyage_models.yaml"
+        """Bind this client to the process-wide parsed model specs.
 
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                self.model_specs = yaml.safe_load(f)
-
-        except Exception as e:
-            # Fallback to basic specs if YAML loading fails
-            self.console.print(
-                f"[yellow]Warning: Could not load model specs: {e}[/yellow]"
-            )
-            self.model_specs = {
-                "voyage_models": {
-                    "voyage-code-3": {"token_limit": 120000},
-                    "voyage-large-2": {"token_limit": 120000},
-                    "voyage-2": {"token_limit": 320000},
-                }
-            }
+        Story #1082: the static model-spec YAML is parsed ONCE per process by
+        ``_get_voyage_model_specs`` and shared across all clients. This removes
+        the per-construction (per-query) YAML open + ``yaml.safe_load`` from the
+        server hot path while preserving identical behavior and the fallback.
+        """
+        self.model_specs = _get_voyage_model_specs(self.console)
 
     def _count_tokens_accurately(self, text: str) -> int:
         """Count tokens accurately using VoyageAI's embedded tokenizer."""
@@ -477,6 +516,12 @@ class VoyageAIClient(EmbeddingProvider):
                     self._validate_embeddings(batch_embeddings, model_to_use)
                     all_embeddings.extend(batch_embeddings)
                 except Exception as e:
+                    # Re-raise rate-limit (429) signals intact so the
+                    # execute_with_backoff wrapper (and future AIMD signal) can
+                    # classify and retry them; only non-429 errors are wrapped
+                    # in a generic RuntimeError (Story #1079 Phase A).
+                    if is_rate_limited(e):
+                        raise
                     raise RuntimeError(f"Batch embedding request failed: {e}")
 
                 # Reset for next batch
@@ -523,6 +568,12 @@ class VoyageAIClient(EmbeddingProvider):
                 self._validate_embeddings(batch_embeddings, model_to_use)
                 all_embeddings.extend(batch_embeddings)
             except Exception as e:
+                # Re-raise rate-limit (429) signals intact so the
+                # execute_with_backoff wrapper (and future AIMD signal) can
+                # classify and retry them; only non-429 errors are wrapped
+                # in a generic RuntimeError (Story #1079 Phase A).
+                if is_rate_limited(e):
+                    raise
                 raise RuntimeError(f"Batch embedding request failed: {e}")
 
         return all_embeddings

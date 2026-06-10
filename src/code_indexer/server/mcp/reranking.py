@@ -41,11 +41,12 @@ MAX_CANDIDATE_LIMIT = 200  # Hard cap on candidates fetched for reranking
 # Bug #1078 Phase 1: seconds to wait for a governor slot before raising GovernorBusyError.
 _GOVERNOR_ACQUIRE_TIMEOUT_SECS: float = 30.0
 
-# Map reranker client class -> governor budget key.
-# VoyageRerankerClient uses the shared Voyage account budget; CohereRerankerClient uses cohere.
+# Map reranker client class -> governor RERANK-lane key.
+# Story #1079 Phase B+C: the governor is now 4-lane. Rerank calls route to the
+# provider's ":rerank" lane (embedding calls use ":embed" — see governed_call.py).
 _RERANKER_BUDGET: Dict[Type, str] = {
-    VoyageRerankerClient: "voyage",
-    CohereRerankerClient: "cohere",
+    VoyageRerankerClient: "voyage:rerank",
+    CohereRerankerClient: "cohere:rerank",
 }
 
 _DISABLED_HINT = (
@@ -148,7 +149,7 @@ def _attempt_provider_rerank(
         client = client_cls(http_client_factory=_factory)
         # Bug #1078: gate the HTTP call through the concurrency governor AND wrap
         # with execute_with_backoff so 429 sleeps happen OUTSIDE the held slot.
-        _budget = _RERANKER_BUDGET.get(client_cls, "voyage")
+        _budget = _RERANKER_BUDGET.get(client_cls, "voyage:rerank")
         _governor = ProviderConcurrencyGovernor.get_instance()
         rerank_results = execute_with_backoff(
             lambda: _governor.execute(

@@ -40,9 +40,9 @@ class FilesystemBackend(VectorStoreBackend):
 
         # Story #526: Server passes cache explicitly, CLI leaves it None
         self.hnsw_index_cache = hnsw_index_cache
-
-        if hnsw_index_cache is not None:
-            logger.info("HNSW index caching enabled (server mode)")
+        # py-spy logging-lock fix (follow-up to Bug #1078): the per-construction
+        # "HNSW index caching enabled" INFO log was removed. FilesystemBackend is
+        # constructed once per server query, so this fired on every hot-path call.
 
     def initialize(self) -> None:
         """Initialize filesystem storage by creating index directory.

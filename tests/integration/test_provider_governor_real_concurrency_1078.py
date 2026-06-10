@@ -46,10 +46,15 @@ pytestmark = pytest.mark.skipif(
 # Constants
 # ---------------------------------------------------------------------------
 
-CONCURRENCY = 24  # threads launched simultaneously (must be > K=16 to exercise the cap)
-EXPECTED_K = 16  # default query_provider_max_concurrency (Bug #1078 K-sweep knee)
-EXPECTED_MIN_WAITS = CONCURRENCY - EXPECTED_K  # at least 8 acquisitions had to wait
-BURST_DEADLINE_SECS = 120.0  # wall-clock budget for all 20 calls to finish
+# Story #1079 Phase B+C: the governor is now per-LANE + AIMD-adaptive. The embed
+# lane key is "voyage:embed" and K is no longer a fixed 16 — it SEEDS at K_MIN=8
+# (config unset in this test env), and AIMD may additively grow it up to K_MAX=32
+# on sustained success. So the cap assertion is now a BOUND, not an equality.
+LANE = "voyage:embed"
+K_MIN = 8  # AIMD floor (resizable_limiter.K_MIN)
+K_MAX = 32  # AIMD ceiling (resizable_limiter.K_MAX)
+CONCURRENCY = 40  # threads launched simultaneously (> K_MAX to exercise the cap)
+BURST_DEADLINE_SECS = 120.0  # wall-clock budget for all calls to finish
 SENTINEL_CALL_DEADLINE_SECS = 2.0  # governor must self-recover after burst
 
 
@@ -111,15 +116,20 @@ class TestProviderGovernorRealConcurrency:
     def test_embedding_burst_bounds_concurrency(
         self, voyage_provider: "VoyageAIClient"
     ) -> None:
-        """24 simultaneous governed embedding calls — K=16 cap held, ≥8 waited."""
+        """40 simultaneous governed embedding calls — adaptive cap held, no hang.
+
+        Story #1079: the cap is now per-lane and AIMD-adaptive. The high-water
+        mark must stay within [K_MIN, K_MAX] and never exceed the lane's live
+        AIMD K. With CONCURRENCY > the live limit, contention waits must occur.
+        """
         from code_indexer.server.services.provider_concurrency_governor import (
             ProviderConcurrencyGovernor,
         )
 
         governor = ProviderConcurrencyGovernor.get_instance()
-        assert governor._k == EXPECTED_K, (
-            f"Expected default K={EXPECTED_K}, got {governor._k}. "
-            "Reset the singleton or adjust EXPECTED_K."
+        seed_k = governor.aimd(LANE).k
+        assert K_MIN <= seed_k <= K_MAX, (
+            f"Lane {LANE} seeded K={seed_k} outside [{K_MIN}, {K_MAX}]"
         )
 
         # Pre-burst acquire count snapshot (should be zero after fixture reset)
@@ -175,20 +185,29 @@ class TestProviderGovernorRealConcurrency:
             assert len(emb) > 0, f"Result {i} is an empty embedding list"
             assert isinstance(emb[0], float), f"Result {i} element[0] is not float"
 
-        # --- Governor telemetry assertions ---
-        hwm = governor.in_flight_high_water_mark["voyage"]
-        waits = governor.acquire_wait_count["voyage"] - pre_burst_total_acquires
+        # --- Governor telemetry assertions (adaptive cap) ---
+        hwm = governor.in_flight_high_water_mark[LANE]
+        waits = governor.acquire_wait_count[LANE] - pre_burst_total_acquires
+        live_k = governor.aimd(LANE).k
 
-        print(f"[C4] in_flight_high_water_mark[voyage] = {hwm}")
-        print(f"[C4] acquire_wait_count[voyage] = {waits}")
+        print(f"[C4] in_flight_high_water_mark[{LANE}] = {hwm}")
+        print(f"[C4] acquire_wait_count[{LANE}] = {waits}")
+        print(f"[C4] live AIMD K[{LANE}] = {live_k}")
 
-        assert hwm == EXPECTED_K, (
-            f"High-water mark {hwm} != {EXPECTED_K}: "
-            "governor did not cap concurrent calls at K"
+        # The cap must hold within the AIMD bounds and never exceed the live K
+        # ceiling reached during the burst (AIMD may have grown K from the seed).
+        assert K_MIN <= hwm <= K_MAX, (
+            f"High-water mark {hwm} outside AIMD bounds [{K_MIN}, {K_MAX}]: "
+            "governor did not cap concurrent calls"
         )
-        assert waits >= EXPECTED_MIN_WAITS, (
-            f"wait_count {waits} < {EXPECTED_MIN_WAITS}: "
-            "fewer threads waited than expected for K={EXPECTED_K} cap"
+        assert hwm <= live_k, (
+            f"High-water mark {hwm} exceeded the lane's live AIMD K {live_k}: "
+            "limiter let more calls in flight than the current limit"
+        )
+        # CONCURRENCY (40) > K_MAX (32) >= live limit, so contention is guaranteed.
+        assert waits >= 1, (
+            f"wait_count {waits} == 0: with CONCURRENCY={CONCURRENCY} threads and "
+            f"a cap of at most {K_MAX}, at least some acquisitions had to wait"
         )
 
     def test_governor_self_recovery_after_burst(

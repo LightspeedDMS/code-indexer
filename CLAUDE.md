@@ -279,12 +279,33 @@ Persistent storage of reusable Rust evaluator patterns in cidx-meta under `xray-
 
 Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.
 
-### Golden Repo Versioned Path (IMMUTABLE)
+### Golden Repo Versioned Path (mutable-vs-immutable -- resolver-accurate)
 
 - **Base clone** (`golden-repos/{alias}/`): mutable -- where git ops and indexing happen
-- **Versioned snapshot** (`.versioned/{alias}/v_{timestamp}/`): IMMUTABLE -- served to queries
+- **Versioned snapshot** (`.versioned/{alias}/v_{timestamp}/`): IMMUTABLE after creation
 
-Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_repo_path(alias)`. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
+**Resolver reality (Story #1082 audit -- corrects the prior "served to queries = immutable" claim).** `GoldenRepoManager.get_actual_repo_path(alias)` (`server/repositories/golden_repo_manager.py:2150`) is **Priority-1 / Priority-2**: if the **mutable base clone** `golden_repo.clone_path` exists on disk it is returned (line 2206-2216); only when it does NOT exist does it fall through to the latest `.versioned/{alias}/v_*` snapshot (line 2218+). So for GOLDEN/ACTIVATED repos the query path commonly receives the **mutable** path, NOT the immutable snapshot. GLOBAL repos differ: the alias JSON `target_path` is repointed to a `.versioned/{alias}/v_*` snapshot after the first refresh (`global_repos/refresh_scheduler.py:1171/1429/1623`), so `AliasManager.read_alias()` yields the immutable snapshot for global repos.
+
+Consequence for any path-keyed cache: do NOT assume the query-path string is immutable. Use the explicit predicate `is_immutable_versioned_snapshot(path)` (`server/services/query_path_cache.py`) -- it returns True ONLY for a validated `.versioned/{alias}/v_*` shape -- and **default to a SHORT TTL** for anything it does not prove immutable.
+
+Alias JSON `target_path` is authoritative for global repos. Use `GoldenRepoManager.get_actual_repo_path(alias)` for golden/activated. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
+
+### Query-Path Drift-Safe Caching (Story #1082)
+
+Per-query server orchestration glue is cached off the GIL-bound hot path WITHOUT extra RAM or workers, with a precise staleness policy. Single primitive `TTLCache` in `server/services/query_path_cache.py` (thread-safe, per-key **single-flight** -- no thundering herd on cold miss/expiry -- bounded LRU, hit/miss/reload/invalidate/evict counters, optional NO-TTL mode that is STILL bounded).
+
+**Staleness model (do not violate):**
+- **ZERO staleness** for (a) static package model-spec YAML and (b) keys PROVEN immutable by `is_immutable_versioned_snapshot()`. A golden-repo refresh makes a NEW versioned path = new key = cache miss, never an in-place stale read. These use NO TTL but are still bounded (LRU + alias-repoint / old-version invalidation).
+- **BOUNDED staleness <= the configured short TTL `T`** for mutable / not-provably-immutable repo paths (incl. the Priority-1 base clone), provider-config state, and DB metadata. TTL is a self-healing net even where event invalidation exists.
+- **NEVER cached:** auth-bearing rows (api keys / key-hashes, user rows, MCP credentials, permissions, group membership, token validation) -- so revocation / access-gating changes take effect immediately, zero grace, on every node.
+
+**What is implemented:**
+- **Load-once model-spec:** `voyage_ai._get_voyage_model_specs()` / `cohere_embedding._get_cohere_model_specs()` parse the static YAML ONCE per process (was per `VoyageAIClient.__init__`, i.e. per query). HTTP client stays per-request for thread safety -- only the parsed model-spec state is shared.
+- **RepoConfigCache** (`query_path_cache.py`): composes a NO-TTL bounded sub-cache (predicate-proven `.versioned/v_*` paths) + a SHORT-TTL bounded sub-cache (default, everything else). Wired in `startup/lifespan.py` as `app.state.repo_config_cache`; consumed by `search_service._load_repo_config()` (returns None registry -> direct load on CLI/in-process, NOT a fallback). Knobs on `CacheConfig`: `query_path_cache_enabled` (kill-switch), `repo_config_cache_ttl_seconds` (30), `repo_config_cache_max_entries` (2048) -- named, Web-UI-tunable, no hardcoded literals.
+- **`provider_config_digest()`**: normalized digest over ALL behavior-affecting fields (provider, model, key-FINGERPRINT never raw secret, api_endpoint, connect_timeout, timeout, Cohere max_retries/retry_delay/exponential_backoff). Two repos same provider/model/key but different endpoint/timeouts/retries -> distinct digests -> never share state.
+- **`codebase_dir mismatch` de-spam:** `config.py` logs the WARNING at most once per distinct config path (process-local memo); the per-load Bug #1033 NFS multi-mount reconciliation still runs on EVERY load -- no normalized `codebase_dir` persisted to shared state.
+
+**Deliberately deferred (KISS / scope):** explicit refresh-event `invalidate()` wiring through the refresh scheduler (the `invalidate()` API exists + is unit-tested, but Scenario 6 is already satisfied by new-path=new-key + bounded old-version eviction + SHORT TTL); provider-state object cache (the model-spec parse -- the real per-query cost -- is already eliminated by the load-once memo; caching a per-request client is forbidden for thread safety); the confirm-first DB-metadata `list_repos` cache and health-monitor memoization (NOT confirmed non-auth-safe at the call sites in scope, so deferred). NEVER cache auth-bearing data to "improve" any of these.
 
 ### ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)
 
@@ -299,6 +320,24 @@ Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_rep
 `run_delta_analysis` is resumable across crashes via a **per-domain YAML frontmatter journal** — each `dependency-map/<domain>.md` carries its own `last_delta_applied` field; the frontmatter and body are written together in one atomic `os.replace`. No separate cursor file. Cluster correctness inherits from the existing `cidx-meta` `WriteLockManager` lock. Crash-durability scope is process crash / SIGKILL / restart / graceful reboot ONLY (NOT sudden power loss or NFS server crash).
 
 → Full reference: `docs/depmap-resumable-delta-architecture.md`
+
+### Embedding Request Coalescer + 4-Lane Adaptive Governor (Story #1079, refines Bug #1078)
+
+Server-side query-embed coalescing gated by a self-tuning per-lane concurrency governor. Replaces Bug #1078's 2 per-provider budgets. CLI/solo path is untouched.
+
+**Governor — 4 independent lanes** (`server/services/provider_concurrency_governor.py`): `voyage:embed`, `voyage:rerank`, `cohere:embed`, `cohere:rerank` (was 2 per-provider). Each lane owns a `ResizableLimiter` + `AimdController` + ONE sinbin health key (`voyage:embed->voyage-ai`, `voyage:rerank->voyage-reranker`, `cohere:embed->cohere`, `cohere:rerank->cohere-reranker`). `execute(budget, fn, *, acquire_timeout)` API preserved (KeyError on unknown lane; singleton). Lane mapping: `governed_call._get_embedding_budget`->`{provider}:embed`; `reranking._RERANKER_BUDGET`->`{provider}:rerank`.
+- **`ResizableLimiter`** (`server/services/resizable_limiter.py`) replaces `BoundedSemaphore`: lock+condition, runtime-resizable K, per-instance bounds (seeded from config, see below). Its `in_flight`/`high_water` are the SINGLE SOURCE OF TRUTH for per-lane telemetry — the governor reads them directly; do NOT reintroduce hand-incremented counters. `_wait_count` stays governor-maintained. Shrink never kills in-flight work; grow `notify_all`s parked acquirers. `acquire()` is monotonic-deadline-bounded (no hang -> `GovernorBusyError`).
+- **`AimdController`** (`server/services/aimd_controller.py`) drives the limiter via `set_limit` under the limiter's OWN `Condition` (shared lock domain -> race-free, fully lane-independent: a 429 on one lane never changes another lane's K). +1 after `SUCCESS_THRESHOLD` successes up to K_MAX; halve on a canonical 429 (`provider_backoff.is_rate_limited`) down to K_MIN, decrement ONCE PER 429 ATTEMPT; `COOLDOWN_SECONDS` blocks immediate re-grow. Structured WARNING (`old_k`/`new_k`) on each real decrease.
+
+**429 normalization (isolated commit, latent Bug #1078 fix)** — `provider_backoff.is_rate_limited(exc)` is the canonical classifier (true for `httpx.HTTPStatusError` 429 or `ProviderRateLimitedError`). Providers MUST re-raise a 429 INTACT on the `retry=False` query path (Voyage previously masked it as generic `RuntimeError` -> backoff/AIMD never saw it; `voyage_ai.py` now `if is_rate_limited(e): raise` before wrapping). `execute_with_backoff` retries iff `is_rate_limited`. NEVER re-mask a 429.
+
+**`EmbeddingCoalescer`** (`server/services/embedding_coalescer.py`) — one per `:embed` lane; ONE lock; governor is the SOLE limiter (holds NO semaphore/in_flight; dispatches via `execute_with_backoff(lambda: governor.execute(lane, do_call, acquire_timeout))` so backoff sleeps OUTSIDE the slot). Exactly one dispatcher per batch ALWAYS completes every caller's Future (success OR exception — shared fate; no hang past ACQUIRE_TIMEOUT). **Dual-constraint sealing** guarantees one sealed batch == exactly ONE provider HTTP call (no sub-split): seals before a text would exceed EITHER the texts cap (`_get_texts_per_request()`; Voyage has none -> config ceiling) OR `int(provider._get_model_token_limit() * margin)` where the margin is derived from the provider spec (`safety_margin_percentage`, 0.9 fallback) — IDENTICAL to the provider's internal split predicate, using the provider's OWN token counter (`_count_tokens_accurately`/`_count_tokens`). Count-mismatch is a RAISED `ValueError` (survives `python -O`), not `assert`.
+
+**Server-gating + kill switch** — `coalesced_query_embedding` (`server/services/governed_call.py`) is the single entry point on all 4 query sites (`search_service.py`, `mcp/handlers/search.py`, `temporal/temporal_search_service.py`, `storage/filesystem_vector_store.py`); call sites are identical on CLI and server (NO per-site `if cli/server`). `CoalescerRegistry` (`server/services/coalescer_registry.py`) is built ONCE in `startup/lifespan.py` (before `yield`) and cleared after; `get_coalescer_registry()` returns None until then — CLI/solo/daemon NEVER build one, so they stay on the direct `governed_query_embedding` single call (no batching). Provider keys are seeded into env FROM runtime config by `seed_api_keys_on_startup` (lifespan, BEFORE registry build) — a lane whose key is absent is simply absent (explicit, logged; falls back to direct). Any refactor of `lifespan.py` MUST preserve the `set_coalescer_registry`/`clear_coalescer_registry` calls (guard: `tests/unit/server/startup/test_lifespan_coalescer_registry_wiring.py`).
+
+**Runtime config (NOT bootstrap; no env vars; mirrors `memory_retrieval_enabled`)** — `coalesce_enabled` (default True; read LIVE each call -> kill switch + hot-reload), `coalesce_max_batch_size` (default 96 == Cohere texts cap; live ceiling, hot-reloads at seal time), `coalesce_k_min=8`/`coalesce_k_max=32` (construction-scoped AIMD/limiter K bounds seeded into the governor at build; NOT live-reload, clamp-validated with 8/32 fallback). Initial K seed (`query_provider_max_concurrency`) clamps to `[k_min, k_max]`. Observability: governor `current_k` per lane, AIMD-decrease WARNING, coalescer `batches_dispatched`/`texts_coalesced`.
+
+-> Deterministic fault-injection gate: `tests/integration/server/test_coalescer_fault_injection_1079.py`.
 
 ### Database Migrations Must Be Backward Compatible
 

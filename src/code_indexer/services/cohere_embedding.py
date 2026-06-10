@@ -7,6 +7,7 @@ All imports lazy (no module-level imports of cohere SDK).
 import logging
 import math
 import os
+import threading
 import time
 from http import HTTPStatus
 from pathlib import Path
@@ -14,11 +15,66 @@ from typing import Any, Dict, List, Optional
 from typing import Protocol, runtime_checkable
 
 import httpx
+import yaml  # type: ignore[import-untyped]
 from rich.console import Console
 
 from code_indexer.services.embedding_provider import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
+
+
+# Story #1082: the Cohere model-spec YAML is a STATIC package asset (zero drift).
+# Parse it ONCE per process instead of re-opening + re-parsing on every
+# CohereEmbeddingProvider construction (per query on the server hot path).
+# NO TTL: deploy-invalidated packaged file only.
+_COHERE_MODEL_SPECS_FALLBACK: Dict[str, Any] = {
+    "cohere_models": {
+        "embed-v4.0": {
+            "default_dimension": 1536,
+            "dimensions": [256, 512, 1024, 1536],
+            "token_limit": 128000,
+            "texts_per_request": 96,
+        }
+    },
+    "api_constraints": {"safety_margin_percentage": 90},
+}
+
+_cohere_model_specs_cache: Optional[Dict[str, Any]] = None
+_cohere_model_specs_lock = threading.Lock()
+
+
+def _get_cohere_model_specs() -> Dict[str, Any]:
+    """Return the process-wide parsed Cohere model specs (parsed once).
+
+    Thread-safe single-flight; on parse failure the hardcoded fallback is cached
+    so the cost is paid once.
+    """
+    global _cohere_model_specs_cache
+    if _cohere_model_specs_cache is not None:
+        return _cohere_model_specs_cache
+
+    with _cohere_model_specs_lock:
+        if _cohere_model_specs_cache is not None:
+            return _cohere_model_specs_cache
+        try:
+            module_dir = Path(__file__).parent.parent
+            yaml_path = module_dir / "data" / "cohere_models.yaml"
+            with open(yaml_path) as f:
+                _cohere_model_specs_cache = yaml.safe_load(f)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load cohere_models.yaml (%s), using hardcoded fallback for embed-v4.0",
+                exc,
+            )
+            _cohere_model_specs_cache = _COHERE_MODEL_SPECS_FALLBACK
+        return _cohere_model_specs_cache
+
+
+def _reset_model_specs_cache_for_tests() -> None:
+    """Clear the process-level Cohere model-spec memo (test-only hook)."""
+    global _cohere_model_specs_cache
+    with _cohere_model_specs_lock:
+        _cohere_model_specs_cache = None
 
 
 @runtime_checkable
@@ -116,33 +172,14 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 )
 
     def _load_model_specs(self) -> None:
-        """Load model specifications from cohere_models.yaml.
+        """Bind this provider to the process-wide parsed Cohere model specs.
 
-        Falls back to hardcoded embed-v4.0 spec if YAML is missing or unreadable.
+        Story #1082: the static model-spec YAML is parsed ONCE per process by
+        ``_get_cohere_model_specs`` and shared across all providers, removing the
+        per-construction (per-query) YAML open + ``yaml.safe_load`` from the
+        server hot path while preserving identical behavior and the fallback.
         """
-        import yaml
-
-        try:
-            module_dir = Path(__file__).parent.parent
-            yaml_path = module_dir / "data" / "cohere_models.yaml"
-            with open(yaml_path) as f:
-                self.model_specs = yaml.safe_load(f)
-        except Exception as exc:
-            logger.warning(
-                "Failed to load cohere_models.yaml (%s), using hardcoded fallback for embed-v4.0",
-                exc,
-            )
-            self.model_specs = {
-                "cohere_models": {
-                    "embed-v4.0": {
-                        "default_dimension": 1536,
-                        "dimensions": [256, 512, 1024, 1536],
-                        "token_limit": 128000,
-                        "texts_per_request": 96,
-                    }
-                },
-                "api_constraints": {"safety_margin_percentage": 90},
-            }
+        self.model_specs = _get_cohere_model_specs()
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using embedded tokenizer."""

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.113.0] - 2026-06-09
+
+### Added
+- Story #1082: Server query-path per-query overhead elimination with drift-safe caching. Concurrent semantic searches on a single worker were GIL-bound on redundant per-query orchestration work (re-parsing the static model-spec YAML, reloading + path-resolving repo config.json, and emitting a per-query codebase_dir-mismatch WARNING) rather than on embeddings or vector search. Eliminating that redundant work reclaims the wasted core and lifts single-worker front-door throughput.
+  - **Load-once static model-spec**: `voyage_models.yaml` / Cohere specs parsed once per process instead of on every `VoyageAIClient.__init__` (the HTTP client stays per-request for thread safety).
+  - **Drift-safe `RepoConfigCache`** (`server/services/query_path_cache.py`): a thread-safe, single-flight (refcounted key-locks + invalidate-epoch), bounded-LRU `TTLCache` with hit/miss/reload/invalidate/evict counters. NO-TTL only for paths proven immutable by `is_immutable_versioned_snapshot()` (globally-activated `.versioned/v_*` snapshots); SHORT bounded TTL (default 30s) for everything not provably immutable. Provider state keyed on a `provider_config_digest` (key fingerprint, never the raw secret) covering endpoint/timeouts/retries/model. Auth-bearing data (API keys, user rows, MCP credentials, permissions, token validation) is NEVER cached. Runtime kill switch `query_path_cache_enabled`.
+  - **`codebase_dir` mismatch de-spam**: reconciled silently per-node and logged once per config path instead of on every query, preserving the Bug #1033 NFS multi-mount override.
+- Corrected the CLAUDE.md "Golden Repo Versioned Path" invariant: `get_actual_repo_path()` returns the MUTABLE base clone first (Priority-1), not the immutable versioned snapshot — query-path config caching defaults to TTL accordingly.
+- Measured on a single worker (front door, Voyage-only, same box/repo/harness, pre-#1082 vs optimized): per-query `_load_model_specs`/`yaml.safe_load`/config-reload frames present -> absent, cache serving 128,863 hits / 1 miss / 1 reload, codebase_dir warnings 5,658 -> 1, and sustained throughput +33-34% at the saturation knee (~17 -> ~23.6 rps) with byte-identical results and zero new errors. Spec hardened through two Codex GPT-5 reviews before implementation.
+
+### Performance (also shipping in this release)
+- Async server logging: the root logger now routes through a single `QueueHandler` -> `DrainableQueueListener` so request threads only enqueue (formatting and handler I/O run on the listener thread), removing the per-request logging-lock contention found by py-spy under concurrent `/api/query` load. Per-query hot-path INFO logs on the semantic-search path were also removed.
+- Shared long-lived query executor: the embed/index-load fan-out in `FilesystemVectorStore.search()` now uses one app-lifetime `ThreadPoolExecutor` (`app.state.query_executor`) instead of constructing a fresh `ThreadPoolExecutor` per request, eliminating per-request thread create/destroy churn and the associated `_global_shutdown_lock` contention. CLI/solo path unchanged (per-call executor when no server executor is injected).
+
+## [10.112.0] - 2026-06-08
+
+### Added
+- Story #1079: Server-side embedding request coalescer with adaptive per-lane concurrency governance (refines Bug #1078). Concurrent server query-embeds now coalesce into batched provider calls, gated by a self-tuning per-lane governor, so searches succeed under burst load without provider 429 failures at near-zero added latency at low load.
+  - **4 independent governed lanes** (`voyage:embed`, `voyage:rerank`, `cohere:embed`, `cohere:rerank`) replace Bug #1078's 2 shared per-provider budgets, each with its own `ResizableLimiter` (lock+condition, runtime-resizable K, replaces `BoundedSemaphore`), `AimdController` (additive-increase/multiplicative-decrease adaptive concurrency, K_MIN=8/K_MAX=32), and sinbin health key. Lanes adapt fully independently.
+  - **`EmbeddingCoalescer`** (one per `:embed` lane) coalesces concurrent submissions into a single batched `get_embeddings_batch(retry=False)` call through the governor as the SOLE limiter (no second semaphore; backoff sleeps outside the slot). Dual-constraint sealing (provider texts cap AND `_get_model_token_limit()*margin`, using the provider's own token counter) guarantees exactly one provider HTTP call per sealed batch. Shared-fate fan-out completes every coalesced caller's future on success or any exception (no hang).
+  - **Canonical 429 normalization** (`provider_backoff.is_rate_limited`): providers re-raise 429s intact (fixes a latent Bug #1078 gap where VoyageAI masked 429s as generic `RuntimeError`, invisible to backoff retry and AIMD).
+  - **Server-gated**: a coalescer registry is built only in server lifespan; the CLI/solo path keeps the direct governed single call (no batching, no accumulation window). Runtime kill switch (`coalesce_enabled`) and hot-reloadable caps (`coalesce_max_batch_size`), plus `coalesce_k_min`/`coalesce_k_max` AIMD bounds. Per-lane observability (`current_k`, AIMD-decrease logs, coalescing-ratio counters).
+- Validated end-to-end against a live server via the REST front door: a 40-concurrent `/api/query` burst across both providers (Voyage + Cohere) completed with zero 429s and proven coalescing (40 embeds -> 17 Voyage / 27 Cohere batches).
+
 ## [10.111.0] - 2026-06-08
 
 ### Removed
