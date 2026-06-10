@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.115.0] - 2026-06-10
+
+### Added
+- Story #1084 (extends #1083): Production httpx connection pooling for the RERANKER clients. `VoyageRerankerClient` and `CohereRerankerClient` now borrow the factory's pooled keep-alive client (`pooled=True`) instead of building and closing a fresh client + latency transport per rerank call -- eliminating the per-request TLS handshake/connect/DNS/SSLContext churn on the `:rerank` lanes, mirroring the #1083 embed-lane fix (latency transport baked into the pooled client once; auth already per-request so key rotation stays transparent; fault-injection path unchanged with fresh per-call fault-intercepted clients). Code review approved; build-once proven by `tests/unit/server/clients/test_reranker_pooled_httpx_1084.py`.
+
 ## [10.114.0] - 2026-06-10
 
 ### Added
