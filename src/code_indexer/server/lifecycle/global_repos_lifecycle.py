@@ -79,6 +79,14 @@ class GlobalReposLifecycleManager:
             job_tracker=job_tracker,
         )
 
+        # Bug #1084 Phase A5: hand the snapshot manager to the CleanupManager so
+        # versioned-snapshot deletion is backend-correct (cow-daemon DELETE /
+        # FlexClone free / local rmtree) instead of rmtree-only — which leaks the
+        # daemon registry row / FlexClone volume. Deletion stays behind the
+        # CleanupManager's QueryTracker refcount gate.
+        if snapshot_manager is not None:
+            self.cleanup_manager.set_snapshot_manager(snapshot_manager)
+
         # Create GlobalRepoOperations for config access
         self.global_ops = GlobalRepoOperations(str(self.golden_repos_dir))
 

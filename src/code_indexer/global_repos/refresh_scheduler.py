@@ -237,6 +237,121 @@ class RefreshScheduler:
         self._fetch_failure_counts: Dict[str, int] = {}
         self._reclone_cooldowns: Dict[str, float] = {}
 
+    def _is_versioned_snapshot(self, path: str) -> bool:
+        """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
+
+        Delegates to the wired :class:`VersionedSnapshotManager` facade (which
+        knows the backend mount point and recognizes both canonical and legacy
+        cow-daemon shapes). When no snapshot_manager is wired (e.g. unit tests in
+        pure-local mode), falls back to the module-level canonical predicate,
+        which still recognizes the local ``.versioned`` layout.
+        """
+        if self._snapshot_manager is not None:
+            return bool(self._snapshot_manager.is_versioned_snapshot(path))
+        from code_indexer.server.storage.shared.snapshot_paths import (
+            is_versioned_snapshot,
+        )
+
+        return bool(is_versioned_snapshot(path))
+
+    #: Fallback keep-last-N when the configured value is missing or invalid.
+    _DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST = 3
+
+    def _retention_keep_last(self) -> int:
+        """Return the configured keep-last-N, falling back to the safe default.
+
+        A value < 1 would schedule EVERY snapshot for deletion (including the
+        live one once it ages out), so non-positive / unreadable values fall back
+        to :attr:`_DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST`.
+        """
+        try:
+            keep = int(get_config_service().get_config().snapshot_retention_keep_last)
+        except Exception:
+            return self._DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST
+        if keep < 1:
+            return self._DEFAULT_SNAPSHOT_RETENTION_KEEP_LAST
+        return keep
+
+    def _latest_versioned_timestamp(self, alias_name: str) -> Optional[int]:
+        """Return the newest snapshot timestamp for *alias_name*, or None (Bug #1084 A7).
+
+        Uses the discovery API (:meth:`VersionedSnapshotManager.list_snapshots`)
+        when a snapshot_manager is wired — this is backend-correct on cow-daemon
+        where snapshots live under the NFS mount, NOT under
+        ``golden_repos_dir/.versioned``. When no snapshot_manager is wired (unit
+        tests / pure-local), falls back to globbing the local ``.versioned``
+        directory so existing local behavior is preserved.
+        """
+        if self._snapshot_manager is not None:
+            try:
+                snaps = self._snapshot_manager.list_snapshots(alias_name)
+            except Exception as exc:
+                logger.warning(
+                    f"_latest_versioned_timestamp: discovery failed for "
+                    f"{alias_name} (non-fatal): {type(exc).__name__}: {exc}"
+                )
+                return None
+            if not snaps:
+                return None
+            # snaps sorted ascending by ts; last is newest.
+            return int(snaps[-1][1])
+
+        # Local fallback: glob golden_repos_dir/.versioned/{repo}/v_*.
+        repo_name = alias_name.removesuffix("-global")
+        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
+        if not versioned_base.exists():
+            return None
+        timestamps = []
+        for d in versioned_base.iterdir():
+            if d.is_dir() and d.name.startswith("v_"):
+                try:
+                    timestamps.append(int(d.name[2:]))
+                except (ValueError, IndexError):
+                    continue
+        return max(timestamps) if timestamps else None
+
+    def _enforce_retention(self, alias_name: str, current_target: str) -> None:
+        """Schedule deletion of superseded snapshots beyond keep-last-N (Bug #1084 A6).
+
+        After a successful swap, lists snapshots via the discovery API and
+        schedules (through the refcount-gated CleanupManager) every snapshot
+        EXCEPT: the N newest, the current alias ``target_path``, and the alias
+        ``previous_path``. Enabled on local + cow-daemon; on ONTAP the discovery
+        API returns ``[]`` so this is naturally inert. Non-fatal: any failure is
+        logged and swallowed so a refresh never fails on retention.
+        """
+        if self._snapshot_manager is None:
+            return
+        try:
+            keep_last = self._retention_keep_last()
+            snapshots = self._snapshot_manager.list_snapshots(alias_name)
+            if len(snapshots) <= keep_last:
+                return
+
+            # Force-keep set: current target + previous_path (rollback) + N newest.
+            protected: set = set()
+            if current_target:
+                protected.add(current_target)
+            previous_path = self.alias_manager.get_previous_path(alias_name)
+            if previous_path:
+                protected.add(previous_path)
+            # snapshots are sorted ascending by ts; the last keep_last are newest.
+            for path, _ts in snapshots[-keep_last:]:
+                protected.add(path)
+
+            for path, _ts in snapshots:
+                if path not in protected:
+                    logger.info(
+                        f"[retention] Scheduling cleanup of superseded snapshot "
+                        f"{path} (keep_last={keep_last}) for {alias_name}"
+                    )
+                    self.cleanup_manager.schedule_cleanup(path)
+        except Exception as exc:
+            logger.warning(
+                f"[retention] keep-last-N enforcement failed for {alias_name} "
+                f"(non-fatal): {type(exc).__name__}: {exc}"
+            )
+
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
         Get or create a lock for a specific repository.
@@ -1616,11 +1731,18 @@ class RefreshScheduler:
                             )
                         )
 
-                    # Story #236 Fix 1: Only schedule cleanup for versioned snapshots.
-                    # Never schedule cleanup for the master golden repo (golden-repos/{alias}/).
-                    # On first refresh, current_target IS the master golden repo — scheduling it
-                    # for cleanup would permanently destroy the master.
-                    if ".versioned" in current_target:
+                    # Story #236 Fix 1 + Bug #1084 Phase A4: Only schedule cleanup
+                    # for versioned snapshots, never for the master golden repo
+                    # (golden-repos/{repo}/). On first refresh current_target IS the
+                    # master — scheduling it would permanently destroy it. The
+                    # canonical predicate recognizes local AND cow-daemon (canonical
+                    # + legacy) snapshot shapes; the explicit master_path comparison
+                    # makes the Story #236 master-guard backend-independent.
+                    if (
+                        current_target
+                        and self._is_versioned_snapshot(current_target)
+                        and current_target != master_path
+                    ):
                         logger.info(
                             f"Scheduling cleanup of old versioned snapshot: {current_target}"
                         )
@@ -1629,6 +1751,12 @@ class RefreshScheduler:
                         logger.info(
                             f"Preserving master golden repo (not scheduling cleanup): {current_target}"
                         )
+
+                    # Bug #1084 Phase A6: keep-last-N retention (defense in depth).
+                    # Schedule deletion (through the same refcount-gated
+                    # CleanupManager) of all but the N newest snapshots, never the
+                    # current target or previous_path. Inert on ONTAP (discovery []).
+                    self._enforce_retention(alias_name, new_index_path)
 
                     # Update registry timestamp
                     self.registry.update_refresh_timestamp(alias_name)
@@ -2189,40 +2317,20 @@ class RefreshScheduler:
         Returns:
             True if changes detected or first version needed, False otherwise
         """
-        repo_name = alias_name.removesuffix("-global")
-        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
+        # Bug #1084 Phase A7 (Defect C): use the discovery API instead of globbing
+        # golden_repos_dir/.versioned. On cow-daemon the snapshots live under the
+        # NFS mount, so the old glob always missed -> always "first version" ->
+        # spurious re-index + snapshot every cycle.
+        latest_timestamp = self._latest_versioned_timestamp(alias_name)
 
-        # Find all v_* versioned directories
-        if not versioned_base.exists():
+        if latest_timestamp is None:
             logger.debug(
-                f"No .versioned/{repo_name}/ dir found — treating as first version"
+                f"No versioned snapshot found for {alias_name} — treating as first version"
             )
             return True
-
-        version_dirs = [
-            d
-            for d in versioned_base.iterdir()
-            if d.is_dir() and d.name.startswith("v_")
-        ]
-
-        if not version_dirs:
-            logger.debug(
-                f"No v_* dirs in .versioned/{repo_name}/ — treating as first version"
-            )
-            return True
-
-        # Extract timestamp from directory name (v_TIMESTAMP)
-        def parse_timestamp(d: Path) -> int:
-            try:
-                return int(d.name[2:])  # strip "v_" prefix
-            except (ValueError, IndexError):
-                return 0
-
-        latest_version_dir = max(version_dirs, key=parse_timestamp)
-        latest_timestamp = parse_timestamp(latest_version_dir)
 
         logger.debug(
-            f"Latest versioned dir: {latest_version_dir.name} (timestamp={latest_timestamp})"
+            f"Latest versioned snapshot timestamp for {alias_name}: {latest_timestamp}"
         )
 
         # Walk source_path, skip hidden dirs and files
@@ -2405,45 +2513,29 @@ class RefreshScheduler:
         Returns:
             True if restoration succeeded, False on any error
         """
-        repo_name = alias_name.removesuffix("-global")
-        versioned_base = self.golden_repos_dir / ".versioned" / repo_name
-
-        if not versioned_base.exists():
+        # Bug #1084 Phase A7 (Defect E): locate the newest snapshot via the
+        # discovery API instead of globbing golden_repos_dir/.versioned, so a lost
+        # master can be restored on cow-daemon (snapshots live under the NFS mount)
+        # and local alike. cp --reflink=auto reads over the NFS mount fine.
+        if self._snapshot_manager is None:
             logger.warning(
-                f"Reconciliation: {alias_name} has no master and no versioned dir"
+                f"Reconciliation: {alias_name} restore needs snapshot_manager (unwired)"
             )
             return False
 
-        version_dirs = [
-            d
-            for d in versioned_base.iterdir()
-            if d.is_dir() and d.name.startswith("v_")
-        ]
-
-        if not version_dirs:
+        latest_version = self._snapshot_manager.latest_snapshot(alias_name)
+        if not latest_version:
             logger.warning(
-                f"Reconciliation: {alias_name} has no v_* snapshots to restore from"
+                f"Reconciliation: {alias_name} has no snapshot to restore from"
             )
             return False
 
-        def _parse_ts(d: Path) -> int:
-            try:
-                return int(d.name[2:])
-            except (ValueError, IndexError):
-                return 0
-
-        latest_version = max(version_dirs, key=_parse_ts)
         logger.info(
             f"Reconciliation: restoring {alias_name} master from {latest_version} via reverse CoW"
         )
 
         cow_timeout = 600
         try:
-            if self._snapshot_manager is None:
-                raise RuntimeError(
-                    "RefreshScheduler restore invoked without snapshot_manager — wiring bug. "
-                    "Story #1034 Commit 4 requires snapshot_manager injection."
-                )
             self._snapshot_manager._clone_backend.create_clone_at_path(
                 str(latest_version),
                 str(master_path),

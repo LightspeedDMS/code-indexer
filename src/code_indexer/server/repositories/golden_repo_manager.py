@@ -2596,6 +2596,26 @@ class GoldenRepoManager:
                 f"[change_branch] HNSW post-CoW cleanup failed (non-fatal): {e}"
             )
 
+    def _is_versioned_snapshot(self, path: Optional[str]) -> bool:
+        """Return True when *path* is a versioned snapshot (Bug #1084 Phase A4).
+
+        Delegates to the wired :class:`VersionedSnapshotManager` facade (which
+        knows the backend mount point and recognizes both canonical and legacy
+        cow-daemon shapes). When no snapshot_manager is wired, falls back to the
+        module-level canonical predicate (recognizes the local ``.versioned``
+        layout). ``None`` / empty inputs return False (never raise) — this is
+        the None-guard the add-index gate previously lacked.
+        """
+        if not path:
+            return False
+        if self._snapshot_manager is not None:
+            return bool(self._snapshot_manager.is_versioned_snapshot(path))
+        from code_indexer.server.storage.shared.snapshot_paths import (
+            is_versioned_snapshot,
+        )
+
+        return bool(is_versioned_snapshot(path))
+
     def _cb_swap_alias(self, alias: str, new_snapshot_path: str) -> None:
         """Atomically swap alias JSON to new snapshot; schedule old snapshot cleanup."""
         # Import here to avoid circular dependency (alias_manager imports from server)
@@ -2628,7 +2648,16 @@ class GoldenRepoManager:
                 _cache_evict_err,
             )
 
-        if current_target and ".versioned" in current_target:
+        # Bug #1084 Phase A4: schedule cleanup only for versioned snapshots, never
+        # the master base clone (golden-repos/{alias}/). Canonical predicate
+        # recognizes local + cow-daemon (canonical + legacy) shapes; explicit
+        # master-path comparison keeps the master-guard backend-independent.
+        master_path = os.path.join(self.golden_repos_dir, alias)
+        if (
+            current_target
+            and self._is_versioned_snapshot(current_target)
+            and current_target != master_path
+        ):
             try:
                 # Import here to avoid circular dependency (app imports from repos)
                 from code_indexer.server import app as app_module
@@ -2644,6 +2673,23 @@ class GoldenRepoManager:
                 logger.warning(
                     f"[change_branch] Cleanup scheduling failed (non-fatal): {exc}"
                 )
+
+        # Bug #1084 Phase A6: keep-last-N retention (defense in depth) on the
+        # change-branch swap. Runs regardless of the master-guard branch above so
+        # accumulated snapshots are trimmed. Non-fatal — reached via app.state.
+        try:
+            from code_indexer.server import app as app_module
+
+            lifecycle = getattr(app_module.app.state, "global_lifecycle_manager", None)
+            scheduler = (
+                getattr(lifecycle, "refresh_scheduler", None) if lifecycle else None
+            )
+            if scheduler is not None:
+                scheduler._enforce_retention(global_alias, new_snapshot_path)
+        except Exception as exc:
+            logger.warning(
+                f"[change_branch] Retention enforcement failed (non-fatal): {exc}"
+            )
 
     def change_branch(
         self, alias: str, target_branch: str, progress_callback=None
@@ -3224,13 +3270,32 @@ class GoldenRepoManager:
                         new_target=new_snapshot,
                         old_target=current_target,
                     )
-                    # Only schedule cleanup for versioned snapshots (never for master clone)
-                    if ".versioned" in current_target:
+                    # Bug #1084 Phase A4: schedule cleanup only for versioned
+                    # snapshots, never the master clone. Canonical predicate
+                    # recognizes local + cow-daemon (canonical + legacy) shapes;
+                    # None-guarded (this gate previously raised TypeError when
+                    # current_target was None).
+                    master_clone_path = os.path.join(self.golden_repos_dir, alias)
+                    if (
+                        current_target
+                        and self._is_versioned_snapshot(current_target)
+                        and current_target != master_clone_path
+                    ):
                         scheduler.cleanup_manager.schedule_cleanup(current_target)
                     else:
                         logging.info(
                             f"[add_index] Preserving master golden repo (not scheduling cleanup): "
                             f"{current_target}"
+                        )
+
+                    # Bug #1084 Phase A6: keep-last-N retention (defense in depth)
+                    # on the add-index swap. Non-fatal.
+                    try:
+                        scheduler._enforce_retention(global_alias, new_snapshot)
+                    except Exception as _retention_exc:
+                        logging.warning(
+                            f"[add_index] Retention enforcement failed (non-fatal): "
+                            f"{_retention_exc}"
                         )
 
                 # CoW snapshot phase: end marker at 100% after swap completes

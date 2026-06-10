@@ -400,39 +400,38 @@ class CowDaemonBackend:
         name: str,
         timeout: Optional[int] = None,
     ) -> str:
-        """POST to create a clone and poll until completed. Returns absolute path.
+        """Create a versioned snapshot at the CANONICAL layout (Bug #1084).
 
-        Sanitizes namespace and name (replaces dots with underscores) so aliases containing
-        dots (e.g. langfuse_Claude_Code_seba.battig_lightspeeddms.com) pass daemon validation.
-        Daemon stores at {base_path}/{sanitized_ns}/{sanitized_name}; returned path uses
-        mount_point view for CIDX-side consumption.
+        Routes through :meth:`create_clone_at_path` with the canonical
+        destination ``{mount_point}/.versioned/{sanitized_ns}/{sanitized_name}``
+        so that every new cow-daemon snapshot has the same shape as the local
+        backend (``.../.versioned/{ns}/v_<ts>``) and is therefore recognized by
+        the single canonical predicate. The daemon registers clone identity
+        ``(ns, name)`` from the dest parent-dir / leaf names (proven by the
+        activated-repos flow, Bug #1052), so the daemon's SQLite registry is
+        unaffected by the extra ``.versioned`` path segment.
+
+        Sanitizes namespace and name (dots->underscores) so aliases containing
+        dots (e.g. ``langfuse_Claude_Code_seba.battig_...``) pass daemon
+        validation. Returns the canonical CIDX mount-point path.
         """
-        requests = self._requests()
         sanitized_namespace = self._sanitize_identifier(namespace)
         sanitized_name = self._sanitize_identifier(name)
-        body = {
-            "source_path": source_path,
-            "namespace": sanitized_namespace,
-            "name": sanitized_name,
-        }
+        canonical_dest = (
+            f"{self._mount_point}/.versioned/{sanitized_namespace}/{sanitized_name}"
+        )
         logger.info(
-            "CowDaemonBackend.create_clone: source=%s namespace=%s (sanitized from %s) name=%s",
+            "CowDaemonBackend.create_clone: source=%s namespace=%s (sanitized from %s) "
+            "name=%s -> canonical dest=%s",
             source_path,
             sanitized_namespace,
             namespace,
             sanitized_name,
+            canonical_dest,
         )
-        response = requests.post(
-            f"{self._daemon_url}/api/v1/clones",
-            json=body,
-            headers=self._headers(),
+        return self.create_clone_at_path(
+            source_path, canonical_dest, preserve_attrs=True, timeout=timeout
         )
-        response.raise_for_status()
-
-        job_id = response.json()["job_id"]
-        effective_timeout = timeout if timeout is not None else self._timeout
-        clone_path = self._poll_job(job_id, effective_timeout)
-        return self._translate_from_daemon_path(clone_path)
 
     def create_clone_at_path(
         self,
@@ -504,7 +503,13 @@ class CowDaemonBackend:
         )
 
     def delete_clone(self, clone_path: str) -> bool:
-        """DELETE /api/v1/clones/{namespace}/{name}. 404 counts as success (idempotent)."""
+        """DELETE /api/v1/clones/{namespace}/{name}. 404 counts as success (idempotent).
+
+        Derives the daemon clone identity ``(namespace, name)`` from the
+        mount-relative path. Handles BOTH the canonical Bug #1084 shape
+        ``{mount}/.versioned/{ns}/{name}`` (the leading ``.versioned`` segment is
+        skipped) and the legacy shape ``{mount}/{ns}/{name}`` (transition).
+        """
         requests = self._requests()
         mount = Path(self._mount_point)
         path = Path(clone_path)
@@ -517,7 +522,12 @@ class CowDaemonBackend:
                 f"clone_path '{clone_path}' is not under mount_point '{self._mount_point}'"
             )
 
-        parts = relative.parts
+        parts = list(relative.parts)
+        # Bug #1084: canonical snapshots live under a leading ".versioned"
+        # segment. Strip it so (namespace, name) match the daemon registry
+        # identity, which is keyed on the dest parent-dir / leaf names.
+        if parts and parts[0] == ".versioned":
+            parts = parts[1:]
         if len(parts) < 2:
             raise ValueError(
                 f"clone_path '{clone_path}' must have at least namespace/name under mount_point"
@@ -535,21 +545,32 @@ class CowDaemonBackend:
         return True
 
     def list_clones(self, namespace: str) -> List[dict]:
-        """GET /api/v1/clones?namespace={namespace}. Returns list of clone dicts."""
+        """GET /api/v1/clones?namespace={namespace}. Returns list of clone dicts.
+
+        Sanitizes the namespace (dots->underscores) so dotted aliases round-trip
+        symmetrically with create/delete (Bug #1084 Phase A2).
+        """
         requests = self._requests()
+        sanitized_namespace = self._sanitize_identifier(namespace)
         resp = requests.get(
             f"{self._daemon_url}/api/v1/clones",
-            params={"namespace": namespace},
+            params={"namespace": sanitized_namespace},
             headers=self._headers(),
         )
         resp.raise_for_status()
         return list(resp.json())
 
     def clone_exists(self, namespace: str, name: str) -> bool:
-        """GET /api/v1/clones/{namespace}/{name}. Returns True=200, False=404."""
+        """GET /api/v1/clones/{namespace}/{name}. Returns True=200, False=404.
+
+        Sanitizes identifiers (dots->underscores) for symmetry with create/delete
+        (Bug #1084 Phase A2).
+        """
         requests = self._requests()
+        sanitized_namespace = self._sanitize_identifier(namespace)
+        sanitized_name = self._sanitize_identifier(name)
         resp = requests.get(
-            f"{self._daemon_url}/api/v1/clones/{namespace}/{name}",
+            f"{self._daemon_url}/api/v1/clones/{sanitized_namespace}/{sanitized_name}",
             headers=self._headers(),
         )
         if resp.status_code == 404:

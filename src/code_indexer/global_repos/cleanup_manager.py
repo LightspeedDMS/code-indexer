@@ -65,6 +65,22 @@ class CleanupManager:
         self._next_retry_times: Dict[str, float] = {}
         self._stats_lock = threading.Lock()
         self._job_tracker = job_tracker  # Story #314: dashboard visibility
+        # Bug #1084 Phase A5: backend-aware deletion. When set, snapshot-shaped
+        # paths are deleted via VersionedSnapshotManager.delete_snapshot (daemon
+        # DELETE / FlexClone free / local rmtree) instead of a bare rmtree that
+        # would leave a ghost daemon row or leak a FlexClone volume. The refcount
+        # gate in _process_cleanup_queue is unchanged — deletion still only fires
+        # once QueryTracker reports zero active queries for the path.
+        self._snapshot_manager: Optional[object] = None
+
+    def set_snapshot_manager(self, snapshot_manager: object) -> None:
+        """Wire the VersionedSnapshotManager for backend-correct deletion (Bug #1084).
+
+        Set post-construction in lifecycle wiring because the snapshot manager is
+        built after the CleanupManager. Non-None enables backend-aware deletion of
+        versioned snapshots; deletion still occurs only behind the refcount gate.
+        """
+        self._snapshot_manager = snapshot_manager
 
     def schedule_cleanup(self, index_path: str) -> None:
         """Schedule index_path for deletion once its ref count reaches zero."""
@@ -229,7 +245,25 @@ class CleanupManager:
             )
 
     def _delete_index(self, index_path: str) -> None:
-        """Delete an index directory using robust deletion with FD management."""
+        """Delete an index path.
+
+        Bug #1084 Phase A5: versioned snapshots are deleted through the wired
+        :class:`VersionedSnapshotManager` so the deletion is backend-correct
+        (cow-daemon: daemon DELETE keeps the SQLite registry consistent; ONTAP:
+        FlexClone client frees the volume; local: rmtree inside the manager).
+        Non-snapshot paths (and the case where no snapshot manager is wired) fall
+        back to the original robust rmtree. This method only runs AFTER the
+        refcount-zero gate in :meth:`_process_cleanup_queue`.
+        """
+        sm = self._snapshot_manager
+        if sm is not None and sm.is_versioned_snapshot(index_path):  # type: ignore[attr-defined]
+            logger.debug(f"Backend-deleting versioned snapshot: {index_path}")
+            # version_path is the authoritative identifier; backend implementations
+            # derive (namespace, name) from the path. alias is unused in the
+            # CloneBackend-delegated path, so pass empty string.
+            sm.delete_snapshot("", index_path)  # type: ignore[attr-defined]
+            return
+
         path = Path(index_path)
         if not path.exists():
             logger.debug(f"Index path already deleted: {index_path}")

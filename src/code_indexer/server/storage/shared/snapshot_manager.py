@@ -22,14 +22,20 @@ which storage backend was used.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple
+
+from .snapshot_paths import is_versioned_snapshot as _is_versioned_snapshot
 
 if TYPE_CHECKING:
     from .clone_backend import CloneBackend  # pragma: no cover
     from .ontap_flexclone_client import OntapFlexCloneClient  # pragma: no cover
+
+#: Matches a ``v_<unix_ts>`` snapshot leaf name and captures the timestamp.
+_V_TIMESTAMP_CAPTURE_RE = re.compile(r"^v_(\d+)$")
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +189,130 @@ class VersionedSnapshotManager:
             return f"{self._mount_point}/{clone_name}"
         # CoW / filesystem mode
         return str(Path(self._versioned_base) / ".versioned" / alias / f"v_{timestamp}")
+
+    # ------------------------------------------------------------------
+    # Bug #1084 Phase A: canonical predicate facade + discovery API
+    # ------------------------------------------------------------------
+
+    def _backend_mount_point(self) -> Optional[str]:
+        """Return the active backend's mount point, if it has one.
+
+        Used so :meth:`is_versioned_snapshot` can recognize the legacy
+        cow-daemon / flat-ONTAP transition shapes (which require the mount
+        point). LocalCloneBackend and CoW-filesystem mode have no mount point —
+        only the canonical ``.versioned`` shape applies there.
+        """
+        backend = self._clone_backend
+        if backend is not None:
+            mount = getattr(backend, "_mount_point", None)
+            if mount:
+                return str(mount)
+        if self._flexclone is not None:
+            return self._mount_point
+        return None
+
+    def is_versioned_snapshot(self, path: str) -> bool:
+        """Return ``True`` when *path* is a versioned snapshot (Bug #1084).
+
+        Delegates to the single canonical predicate in :mod:`snapshot_paths`,
+        supplying the backend mount point so legacy-shape snapshots are still
+        recognized during the transition window.
+        """
+        return _is_versioned_snapshot(path, mount_point=self._backend_mount_point())
+
+    def list_snapshots(self, alias: str) -> List[Tuple[str, int]]:
+        """Return ``[(snapshot_path, unix_ts), ...]`` for *alias*, sorted ascending.
+
+        *alias* may be the global alias (``"repo-global"``) or the bare repo
+        name; the ``-global`` suffix is stripped to obtain the namespace.
+
+        Backend behaviour:
+        - **cow-daemon:** ``list_clones(sanitized_ns)`` then map each ``v_*``
+          clone to its CIDX mount-point path. Recognizes BOTH canonical and
+          legacy daemon names (the daemon namespace is identical for both).
+        - **local CloneBackend / CoW-filesystem mode:** glob
+          ``{versioned_base}/.versioned/{ns}/v_*``.
+        - **ONTAP / FlexClone:** returns ``[]`` — ``list_clones`` ignores the
+          namespace, so per-alias retention is impossible (spec section 6);
+          per-swap deletion is unaffected.
+        """
+        namespace = alias.removesuffix("-global")
+        backend = self._clone_backend
+
+        if backend is not None:
+            backend_cls = type(backend).__name__
+            if backend_cls == "CowDaemonBackend":
+                return self._list_cow_daemon_snapshots(backend, namespace)
+            if backend_cls == "LocalCloneBackend":
+                return self._list_local_snapshots(namespace)
+            # OntapCloneBackend (and any future namespace-blind backend): disabled.
+            return []
+
+        # No CloneBackend wired.
+        if self._flexclone is not None:
+            # FlexClone mode: list_clones ignores namespace — retention disabled.
+            return []
+        # CoW filesystem mode: glob versioned_base.
+        return self._list_local_snapshots(namespace)
+
+    def latest_snapshot(self, alias: str) -> Optional[str]:
+        """Return the path of the newest snapshot for *alias*, or ``None``."""
+        snaps = self.list_snapshots(alias)
+        if not snaps:
+            return None
+        return snaps[-1][0]
+
+    def _list_local_snapshots(self, namespace: str) -> List[Tuple[str, int]]:
+        """Glob ``{versioned_base}/.versioned/{namespace}/v_*`` for snapshots."""
+        if not self._versioned_base:
+            return []
+        ns_dir = Path(self._versioned_base) / ".versioned" / namespace
+        if not ns_dir.exists():
+            return []
+        result: List[Tuple[str, int]] = []
+        for entry in ns_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            match = _V_TIMESTAMP_CAPTURE_RE.match(entry.name)
+            if match:
+                result.append((str(entry), int(match.group(1))))
+        result.sort(key=lambda item: item[1])
+        return result
+
+    def _list_cow_daemon_snapshots(
+        self, backend: "CloneBackend", namespace: str
+    ) -> List[Tuple[str, int]]:
+        """List cow-daemon snapshots, mapping daemon clones to CIDX mount paths.
+
+        The daemon namespace is the dots->underscores sanitized form of the
+        repo namespace; both canonical and legacy snapshots register under the
+        same daemon namespace, so a single ``list_clones`` call covers both.
+        """
+        sanitize = getattr(backend, "_sanitize_identifier", None)
+        sanitized_ns = sanitize(namespace) if callable(sanitize) else namespace
+        mount = str(getattr(backend, "_mount_point", "")).rstrip("/")
+
+        try:
+            clones = backend.list_clones(sanitized_ns)
+        except Exception as exc:  # pragma: no cover - network/daemon failure path
+            logger.warning(
+                "list_snapshots: cow-daemon list_clones failed for ns '%s': %s",
+                sanitized_ns,
+                exc,
+            )
+            return []
+
+        result: List[Tuple[str, int]] = []
+        for clone in clones:
+            name = clone.get("name", "")
+            match = _V_TIMESTAMP_CAPTURE_RE.match(name)
+            if not match:
+                continue
+            clone_ns = clone.get("namespace", sanitized_ns)
+            snapshot_path = f"{mount}/{clone_ns}/{name}"
+            result.append((snapshot_path, int(match.group(1))))
+        result.sort(key=lambda item: item[1])
+        return result
 
     # ------------------------------------------------------------------
     # FlexClone implementation

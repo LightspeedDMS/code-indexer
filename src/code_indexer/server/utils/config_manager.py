@@ -1282,6 +1282,14 @@ class ServerConfig:
     coalesce_k_min: int = 8
     coalesce_k_max: int = 32
 
+    # Bug #1084 Phase A6 — keep-last-N versioned-snapshot retention. After each
+    # successful alias swap, all but the N newest snapshots are scheduled for
+    # deletion through the refcount-gated CleanupManager (never the current
+    # target or previous_path). Runtime / Web UI configurable. Enabled on local
+    # + cow-daemon; ONTAP discovery returns [] so retention is naturally inert
+    # there until alias-scoped naming lands.
+    snapshot_retention_keep_last: int = 3
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

@@ -85,10 +85,39 @@ def mock_clone_backend():
 
 
 @pytest.fixture
-def mock_snapshot_manager_with_backend(mock_clone_backend):
-    """Module-level mock VersionedSnapshotManager with _clone_backend set."""
+def mock_snapshot_manager_with_backend(mock_clone_backend, golden_repos_dir):
+    """Module-level mock VersionedSnapshotManager with _clone_backend set.
+
+    Bug #1084 Phase A7: _restore_master_from_versioned now resolves the newest
+    snapshot via the discovery API (latest_snapshot). Mirror a real local-backed
+    manager by globbing the temp golden_repos_dir/.versioned/{repo}/v_* dirs so
+    the existing reconciliation assertions (which check the real latest path)
+    continue to hold.
+    """
+    from pathlib import Path
+
     sm = Mock()
     sm._clone_backend = mock_clone_backend
+
+    def _latest_snapshot(alias):
+        repo_name = alias.removesuffix("-global")
+        ns_dir = Path(golden_repos_dir) / ".versioned" / repo_name
+        if not ns_dir.exists():
+            return None
+        best_path = None
+        best_ts = -1
+        for d in ns_dir.iterdir():
+            if d.is_dir() and d.name.startswith("v_"):
+                try:
+                    ts = int(d.name[2:])
+                except (ValueError, IndexError):
+                    continue
+                if ts > best_ts:
+                    best_ts = ts
+                    best_path = str(d)
+        return best_path
+
+    sm.latest_snapshot.side_effect = _latest_snapshot
     return sm
 
 
