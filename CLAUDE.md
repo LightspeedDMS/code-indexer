@@ -473,6 +473,18 @@ cidx watch / watch-stop / stop         # Daemon controls
 
 Primary provider. Cohere also supported since v9.8. Tokenizer: `embedded_voyage_tokenizer.py` (NOT voyageai library). 120k tokens/batch limit, automatic batching. Models: voyage-code-3 (1024 dims, default), voyage-large-2 (1536 dims).
 
+### Production httpx Connection Pooling + Batched Metrics Writer (Story #1083)
+
+**Pooled production embedding client.** `HttpClientFactory` (`server/fault_injection/http_client_factory.py`) owns ONE long-lived keep-alive `httpx.Client` for the production path (fault injection OFF). Providers opt in via `create_sync_client(pooled=True)`; the factory lazily builds the client once (reused `SSLContext` + connection pool, `httpx.Limits(max_keepalive=20, max_connections=40)`) and returns it wrapped in `_BorrowedClientContext` whose `__exit__` is a NO-OP — so the provider's `with _client_ctx as client:` borrows (never closes) the shared client. The pooled client is closed once at lifespan shutdown via `close_pooled_clients()`.
+
+**Key invariants:**
+- **Auth is per-request**, NOT baked into the client: Voyage and Cohere pass `Authorization: Bearer <key>` on the `.post()` call, so the pooled client is auth-agnostic and API-key rotation is transparent (no client rebuild).
+- **Fault-injection path is UNCHANGED.** When `fault_injection_service.enabled`, the factory ignores `pooled` and returns a FRESH per-call client wrapped in `FaultInjectingSyncTransport`, closed per call — every scripted fault still intercepts every call. Pooling is the approved production-only compromise.
+- The latency transport (built once, stateless request timer) is baked into the pooled client on first build. CLI path keeps per-call behavior (no app.state factory).
+- Regression guards: `tests/unit/server/startup/test_lifespan_pooled_client_shutdown_1083.py` (shutdown wiring), `tests/unit/server/fault_injection/test_http_client_factory.py::TestPooledProductionSyncClient`.
+
+**Batched metrics writer.** `api_metrics_service` background `_writer_loop` now drains the queued backlog (bounded by `min(qsize(), _MAX_DRAIN_BATCH)`) and writes ALL events in ONE `upsert_buckets_batch()` transaction per drain (collapsing ~4N per-event `BEGIN EXCLUSIVE` transactions into ~1). Counts are coalesced per bucket key and preserved exactly. `stop_writer()` signals + joins + final-drains on shutdown (wired into lifespan). Both `ApiMetricsSqliteBackend` and `ApiMetricsPostgresBackend` expose `upsert_buckets_batch`. `node_metrics` (interval snapshot writer) and `job_tracker` (low-frequency discrete job-lifecycle writes) do NOT share the per-query hot-path pattern, so batching is not applied to them.
+
 ---
 
 ## Server Development

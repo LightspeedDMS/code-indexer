@@ -356,7 +356,7 @@ class TestCohereRetryLoopBug595Issue1:
         expected_attempts = cohere_provider.config.max_retries + 1
 
         mock_client_cls = MagicMock()
-        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = connection_error
 
         with patch("httpx.Client", mock_client_cls):
@@ -374,7 +374,7 @@ class TestCohereRetryLoopBug595Issue1:
         from unittest.mock import MagicMock
 
         mock_client_cls = MagicMock()
-        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = httpx.TimeoutException(
             "Request timed out"
         )
@@ -389,7 +389,7 @@ class TestCohereRetryLoopBug595Issue1:
         from unittest.mock import MagicMock
 
         mock_client_cls = MagicMock()
-        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = httpx.ConnectError("connection refused")
 
         with patch("httpx.Client", mock_client_cls):
@@ -417,7 +417,7 @@ class TestCohereErrorHandling401Bug595Issue2:
         from unittest.mock import MagicMock
 
         mock_client_cls = MagicMock()
-        mock_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_instance = mock_client_cls.return_value
         http_error = httpx.HTTPStatusError(
             "401 Unauthorized",
             request=type("Req", (), {})(),
@@ -437,7 +437,7 @@ class TestCohereErrorHandling401Bug595Issue2:
         from unittest.mock import MagicMock
 
         mock_client_cls = MagicMock()
-        mock_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_instance = mock_client_cls.return_value
         http_error = httpx.HTTPStatusError(
             "401 Unauthorized",
             request=type("Req", (), {})(),
@@ -518,9 +518,7 @@ class TestCohereHttpxClientContextManagerBug596Issue1:
         mock_response.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()
-        mock_client_cls.return_value.__enter__.return_value.post.return_value = (
-            mock_response
-        )
+        mock_client_cls.return_value.post.return_value = mock_response
 
         with patch("httpx.post") as mock_post:
             with patch("httpx.Client", mock_client_cls):
@@ -533,8 +531,15 @@ class TestCohereHttpxClientContextManagerBug596Issue1:
                     "httpx.post (module-level) must not be used"
                 )
 
-    def test_httpx_client_used_as_context_manager(self, cohere_provider):
-        """httpx.Client must be used as a context manager (__enter__/__exit__ called)."""
+    def test_httpx_client_pooled_borrow_not_closed_per_call(self, cohere_provider):
+        """Story #1083: the pooled client is borrowed, NOT entered/exited per call.
+
+        The provider now requests a pooled keep-alive client (pooled=True) and
+        borrows it via a no-op-close context. So httpx.Client must still be the
+        construction path (not module-level httpx.post), but the client's own
+        __enter__/__exit__ are NOT invoked per request — the borrow context owns
+        the lifecycle, and the pooled client is closed only at lifespan shutdown.
+        """
         from unittest.mock import MagicMock
 
         mock_response = MagicMock()
@@ -542,16 +547,17 @@ class TestCohereHttpxClientContextManagerBug596Issue1:
         mock_response.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()
-        mock_client_cls.return_value.__enter__.return_value.post.return_value = (
-            mock_response
-        )
+        mock_client_cls.return_value.post.return_value = mock_response
 
         with patch("httpx.Client", mock_client_cls):
             cohere_provider._make_sync_request(["test text"])
 
-        # Verify context manager protocol was invoked
-        mock_client_cls.return_value.__enter__.assert_called_once()
-        mock_client_cls.return_value.__exit__.assert_called_once()
+        # httpx.Client must be the construction path.
+        assert mock_client_cls.called
+        # Borrow semantics: the pooled client is NOT context-managed per call,
+        # and must NOT be closed per request.
+        mock_client_cls.return_value.__enter__.assert_not_called()
+        mock_client_cls.return_value.close.assert_not_called()
 
 
 class TestCohereContextManagerProtocolBug596Issue2:
@@ -927,7 +933,7 @@ class TestCohereRetryDelayCapBug602:
         mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()
-        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = [mock_response_429, mock_response_ok]
 
         sleep_calls = []
@@ -962,7 +968,7 @@ class TestCohereRetryDelayCapBug602:
         mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()
-        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = [mock_response_500, mock_response_ok]
 
         sleep_calls = []
@@ -985,7 +991,7 @@ class TestCohereRetryDelayCapBug602:
         mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()
-        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = [
             httpx.ConnectError("connection refused"),
             mock_response_ok,
@@ -1032,7 +1038,7 @@ class TestCohereExponentialBackoffFlagBug603:
 
         # Three 500 responses then success to capture multiple sleep calls
         mock_client_cls = MagicMock()
-        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = [
             mock_response_500,
             mock_response_500,
@@ -1090,7 +1096,7 @@ class TestCohereExponentialBackoffFlagBug603:
         mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
 
         mock_client_cls = MagicMock()
-        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance = mock_client_cls.return_value
         mock_client_instance.post.side_effect = [
             mock_response_500,
             mock_response_500,

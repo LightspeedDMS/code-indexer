@@ -92,8 +92,9 @@ class SyncClientFactory(Protocol):
         self,
         *,
         transport: Optional[httpx.BaseTransport] = None,
+        pooled: bool = False,
         **kwargs: Any,
-    ) -> httpx.Client: ...
+    ) -> Any: ...
 
 
 # Number of embedding values shown in error messages when validating None values
@@ -269,9 +270,16 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 write=self.config.timeout,
                 pool=self.config.timeout,
             )
+            # Story #1083: pooled=True borrows the factory's ONE long-lived
+            # keep-alive client (reused SSLContext + connection pool) instead of
+            # building+closing a fresh client (TLS handshake) per query.  Auth
+            # already travels on the per-request .post() call below, so the pooled
+            # client is auth-agnostic.  Under fault injection the factory ignores
+            # pooled and still returns a fresh per-call fault-intercepted client.
             _client_ctx = self._http_client_factory.create_sync_client(
                 transport=_latency_transport,
                 timeout=_timeout,
+                pooled=True,
             )
             with _client_ctx as client:
                 response = client.post(

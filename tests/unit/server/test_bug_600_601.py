@@ -66,9 +66,15 @@ class TestBug600VoyageHealthMonitor:
 
         fake_response = {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
 
+        # Story #1083: the provider now borrows a pooled client via a borrow
+        # context whose __enter__ returns the raw httpx.Client() instance (not
+        # __enter__.return_value). Mock post on the client instance directly,
+        # mirroring the Cohere tests below.
         with patch("httpx.Client") as mock_client_cls:
             mock_http = MagicMock()
-            mock_client_cls.return_value.__enter__.return_value = mock_http
+            mock_http.__enter__ = MagicMock(return_value=mock_http)
+            mock_http.__exit__ = MagicMock(return_value=False)
+            mock_client_cls.return_value = mock_http
             mock_response = MagicMock()
             mock_response.raise_for_status = MagicMock()
             mock_response.json.return_value = fake_response
@@ -88,9 +94,12 @@ class TestBug600VoyageHealthMonitor:
         from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
         import httpx
 
+        # Story #1083: borrow context returns the raw httpx.Client() instance.
         with patch("httpx.Client") as mock_client_cls:
             mock_http = MagicMock()
-            mock_client_cls.return_value.__enter__.return_value = mock_http
+            mock_http.__enter__ = MagicMock(return_value=mock_http)
+            mock_http.__exit__ = MagicMock(return_value=False)
+            mock_client_cls.return_value = mock_http
             mock_response = MagicMock()
             mock_response.status_code = 500
             mock_response.headers = {}

@@ -34,8 +34,9 @@ class SyncClientFactory(Protocol):
         self,
         *,
         transport: Optional[httpx.BaseTransport] = None,
+        pooled: bool = False,
         **kwargs: Any,
-    ) -> httpx.Client: ...
+    ) -> Any: ...
 
 
 # Timeout (seconds) used by the lightweight health probe (Story #619 HIGH-2)
@@ -312,17 +313,26 @@ class VoyageAIClient(EmbeddingProvider):
                 write=self.config.timeout,
                 pool=self.config.timeout,
             )
+            # Story #1083: auth header travels on the per-request .post() call so
+            # the pooled keep-alive client stays auth-agnostic — API-key rotation
+            # is transparent (no client invalidation/rebuild needed).
             _headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             }
+            # Story #1083: pooled=True borrows the factory's ONE long-lived
+            # keep-alive client (reused SSLContext + connection pool) instead of
+            # building+closing a fresh client per query.  Under fault injection the
+            # factory ignores pooled and still returns a fresh per-call client.
             _client_ctx = self._http_client_factory.create_sync_client(
                 transport=_latency_transport,
-                headers=_headers,
                 timeout=_timeout,
+                pooled=True,
             )
             with _client_ctx as client:
-                response = client.post(self.config.api_endpoint, json=payload)
+                response = client.post(
+                    self.config.api_endpoint, json=payload, headers=_headers
+                )
             response.raise_for_status()
 
             result = response.json()

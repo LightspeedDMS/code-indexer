@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
 
@@ -278,6 +278,95 @@ class ApiMetricsPostgresBackend:
                 conn.commit()
         except Exception as exc:
             logger.warning("ApiMetricsPostgresBackend: upsert_bucket failed: %s", exc)
+
+    def upsert_buckets_batch(
+        self,
+        events: Any,
+        node_id: str = "",
+    ) -> None:
+        """Upsert MANY bucket increments on ONE connection, ONE commit (Story #1083).
+
+        Mirrors ApiMetricsSqliteBackend.upsert_buckets_batch: the background metrics
+        writer drains the whole queue and calls this once per drain instead of one
+        connection+commit per metric event, collapsing the per-event transaction
+        churn into a single transaction.
+
+        Args:
+            events: Iterable of dicts, each ``{"username": str, "metric_type": str,
+                "buckets": {granularity: bucket_start_iso, ...}}``.
+            node_id: Cluster node identifier. Empty string for standalone nodes.
+
+        Raises:
+            ValueError: If any event fails field validation (username, granularity,
+                metric_type, bucket_start).
+
+        Counts are preserved exactly: repeated keys within the batch coalesce into a
+        single ``count + N`` increment.
+        """
+        coalesced: Dict[Tuple[str, str, str, str], int] = {}
+        for event in events:
+            username = event["username"]
+            metric_type = event["metric_type"]
+            buckets = event["buckets"]
+            if not isinstance(username, str) or not username.strip():
+                raise ValueError(
+                    f"username must be a non-empty string, got {username!r}"
+                )
+            if metric_type not in _VALID_METRIC_TYPES:
+                raise ValueError(
+                    f"Invalid metric_type {metric_type!r}. "
+                    f"Must be one of: {sorted(_VALID_METRIC_TYPES)}"
+                )
+            for granularity, bucket_start in buckets.items():
+                if granularity not in _VALID_GRANULARITIES:
+                    raise ValueError(
+                        f"Invalid granularity {granularity!r}. "
+                        f"Must be one of: {sorted(_VALID_GRANULARITIES)}"
+                    )
+                try:
+                    datetime.fromisoformat(bucket_start)
+                except (ValueError, TypeError):
+                    raise ValueError(
+                        f"bucket_start must be a valid ISO 8601 datetime string, "
+                        f"got {bucket_start!r}"
+                    )
+                key = (username, granularity, bucket_start, metric_type)
+                coalesced[key] = coalesced.get(key, 0) + 1
+
+        if not coalesced:
+            return
+
+        try:
+            with self._pool.connection() as conn:
+                for (
+                    username,
+                    granularity,
+                    bucket_start,
+                    metric_type,
+                ), inc in coalesced.items():
+                    conn.execute(
+                        """
+                        INSERT INTO api_metrics_buckets
+                            (username, granularity, bucket_start, metric_type, node_id, count)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (username, granularity, bucket_start, metric_type, node_id)
+                        DO UPDATE SET count = api_metrics_buckets.count + %s
+                        """,
+                        (
+                            username,
+                            granularity,
+                            bucket_start,
+                            metric_type,
+                            node_id,
+                            inc,
+                            inc,
+                        ),
+                    )
+                conn.commit()
+        except Exception as exc:
+            logger.warning(
+                "ApiMetricsPostgresBackend: upsert_buckets_batch failed: %s", exc
+            )
 
     def cleanup_expired_buckets(self) -> None:
         """Delete expired bucket rows per granularity retention policy.
