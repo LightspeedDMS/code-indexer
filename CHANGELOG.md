@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.114.0] - 2026-06-10
+
+### Added
+- Story #1083: Production httpx connection pooling + batched metrics writer (query-path perf). After #1082 removed the per-query orchestration glue, profiling v10.113.0 showed the next single-worker time sinks were (a) building and tearing down a fresh httpx client + TLS handshake on every embedding call (~37% of embed wall-time) and (b) the background metrics writer doing one `BEGIN EXCLUSIVE` SQLite transaction per query (~15% on-CPU).
+  - **Production keep-alive connection pooling**: `HttpClientFactory` now owns one long-lived, thread-safe `httpx.Client` (reused SSLContext + connection pool, sized to the governor concurrency) returned via a no-op-close "borrow" context, built once and closed at lifespan shutdown. The provider sends `Authorization` per-request so the pooled client is auth-agnostic (API-key rotation is transparent, no client rebuild). The latency-tracking transport is baked into the pooled client once (no per-query SSLContext churn). Applied to VoyageAI and Cohere. The fault-injection path is unchanged (fresh per-call fault-intercepted client) — pooling applies only when fault injection is OFF (always true in production).
+  - **Batched metrics writer**: the background `api_metrics` writer drains the queue and commits batched/coalesced transactions instead of one per event (no counts lost; drained on shutdown).
+- Measured single-worker front door, same box/repo/harness, v10.113.0 vs optimized: per-query TLS-handshake/connect/DNS frames collapsed 38-77x, per-query SSLContext construction ~1397 -> 1 sample, metrics-writer CPU ~34% lighter; **throughput +38% at the C=8 knee (22.16 -> 30.65 rps), +33-35% at C=1, ~25% lower CPU per request**, byte-identical results, zero new errors.
+
 ## [10.113.0] - 2026-06-09
 
 ### Added
