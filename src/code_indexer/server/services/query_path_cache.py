@@ -39,6 +39,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from time import monotonic
 from typing import Callable, Dict, Generic, Hashable, Optional, TypeVar
 
@@ -46,18 +47,46 @@ K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")
 
 
+@dataclass
+class _KeyLock:
+    """Refcounted per-key loader lock.
+
+    ``lock`` serializes loaders for one key (single-flight). ``refcount`` tracks
+    how many callers currently hold or are waiting on this key-lock; an entry is
+    reclaimable from the registry ONLY when ``refcount == 0``. ``epoch`` is the
+    per-key invalidate generation: every ``invalidate(key)`` bumps it so a value
+    loaded across an invalidate is never stored as fresh.
+
+    All fields are mutated ONLY under the owning cache's structure ``_lock``.
+    """
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    refcount: int = 0
+    epoch: int = 0
+
+
 class TTLCache(Generic[K, V]):
     """Thread-safe, single-flight, bounded-LRU cache with TTL and counters.
 
     Concurrency model:
     - A single structure lock (``_lock``) guards the store, the counters, and
-      the per-key lock registry. It is held only for O(1) bookkeeping, never
-      across a (potentially slow) loader call.
-    - Each key has its own loader lock. On a miss/expiry, the caller acquires
-      the per-key lock, double-checks freshness, and runs the loader exactly
-      once. Concurrent callers for the SAME key block on that per-key lock
-      (single-flight: no thundering herd), then observe the freshly stored
-      value on the double-check. Callers for DIFFERENT keys never contend.
+      the refcounted per-key lock registry. It is held only for O(1)
+      bookkeeping, never across a (potentially slow) loader call or across the
+      ``with key_lock`` critical section -> no deadlock.
+    - Each key has its own REFCOUNTED loader lock (``_KeyLock``). On a
+      miss/expiry, the caller acquires the key-lock (refcount += 1), double-
+      checks freshness, and runs the loader exactly once. Concurrent callers
+      for the SAME key block on that key-lock (single-flight: no thundering
+      herd), then observe the freshly stored value on the double-check. Callers
+      for DIFFERENT keys never contend.
+    - STRICT single-flight: a key-lock with ``refcount > 0`` is NEVER reclaimed
+      by ``invalidate`` or LRU eviction, so a second concurrent caller for an
+      in-flight key reuses the SAME key-lock (and blocks) instead of minting a
+      new one and starting a second loader.
+    - Invalidate-during-load correctness via a per-key epoch: the loader caller
+      snapshots the key's epoch before loading; ``invalidate(key)`` bumps it; if
+      the epoch advanced during the load, the freshly loaded value is stored as
+      ALREADY-EXPIRED so it is never served as fresh and the next get reloads.
 
     NO-TTL mode: ``ttl_seconds=None`` disables expiry. Entries still obey the
     ``max_entries`` LRU bound and respond to ``invalidate``/``clear``.
@@ -83,7 +112,9 @@ class TTLCache(Generic[K, V]):
         # key -> (value, expires_at_or_None). OrderedDict gives O(1) LRU.
         self._store: "OrderedDict[K, tuple[V, Optional[float]]]" = OrderedDict()
         self._lock = threading.Lock()
-        self._key_locks: Dict[K, threading.Lock] = {}
+        # Refcounted per-key loader locks. A holder with refcount > 0 is pinned
+        # (never reclaimed by invalidate/eviction) -> strict single-flight.
+        self._key_locks: Dict[K, _KeyLock] = {}
 
         self._counters: Dict[str, int] = {
             "hit": 0,
@@ -98,13 +129,38 @@ class TTLCache(Generic[K, V]):
     def _fresh(self, expires_at: Optional[float], now: float) -> bool:
         return expires_at is None or now < expires_at
 
-    def _key_lock(self, key: K) -> threading.Lock:
+    def _acquire_key_lock(self, key: K) -> _KeyLock:
+        """Pin (get-or-create) the key's refcounted holder. Caller MUST release.
+
+        Under ``_lock``: get-or-create the ``_KeyLock`` for ``key`` and bump its
+        refcount. While refcount > 0 the holder cannot be reclaimed by
+        ``invalidate`` or LRU eviction, so a concurrent caller for the same key
+        observes the SAME holder and blocks on its lock (single-flight) rather
+        than minting a new one and starting a second loader.
+        """
         with self._lock:
-            lk = self._key_locks.get(key)
-            if lk is None:
-                lk = threading.Lock()
-                self._key_locks[key] = lk
-            return lk
+            holder = self._key_locks.get(key)
+            if holder is None:
+                holder = _KeyLock()
+                self._key_locks[key] = holder
+            holder.refcount += 1
+            return holder
+
+    def _release_key_lock(self, key: K) -> None:
+        """Drop one refcount; reclaim the holder only when it reaches zero.
+
+        Under ``_lock``: decrement the holder's refcount. The registry entry is
+        reclaimable strictly at ``refcount == 0`` (no in-flight or waiting
+        caller), keeping the registry bounded by ``max_entries`` worth of live
+        holders without ever orphaning an in-flight loader's lock.
+        """
+        with self._lock:
+            holder = self._key_locks.get(key)
+            if holder is None:
+                return
+            holder.refcount -= 1
+            if holder.refcount <= 0:
+                self._key_locks.pop(key, None)
 
     def _try_fresh_hit(self, key: K, now: float) -> tuple[bool, Optional[V]]:
         """Return (hit, value). Bumps hit counter and refreshes LRU on hit."""
@@ -116,18 +172,37 @@ class TTLCache(Generic[K, V]):
                 return True, entry[0]
         return False, None
 
-    def _store_value(self, key: K, value: V, now: float) -> None:
-        """Store a freshly loaded value, enforcing the LRU bound."""
+    def _store_value(
+        self, key: K, value: V, now: float, store_expired: bool = False
+    ) -> None:
+        """Store a freshly loaded value, enforcing the LRU bound.
+
+        When ``store_expired`` is True (the key was invalidated DURING this
+        load, i.e. its epoch advanced), the value is stored with an
+        already-past expiry so it is never served as fresh -- the next get
+        observes the stale entry and reloads. This holds even in NO-TTL mode.
+
+        Key-locks are NOT reclaimed here on eviction: the refcounted registry
+        (``_acquire_key_lock``/``_release_key_lock``) governs key-lock lifetime,
+        so an in-flight key-lock (refcount > 0) survives eviction of its store
+        entry -> strict single-flight.
+        """
         with self._lock:
-            expires_at = None if self._ttl is None else now + self._ttl
+            if store_expired:
+                # Strictly in the past relative to ``now`` so _fresh() == False
+                # on the very next read, regardless of TTL/NO-TTL mode.
+                expires_at: Optional[float] = now - 1.0
+            else:
+                expires_at = None if self._ttl is None else now + self._ttl
             self._store[key] = (value, expires_at)
             self._store.move_to_end(key)
             self._counters["reload"] += 1
-            # Enforce bound (LRU eviction of oldest entries).
+            # Enforce bound (LRU eviction of oldest entries). Key-lock holders
+            # are reclaimed by refcount, NOT here -- evicting an in-flight key's
+            # store entry must NOT orphan its (still-pinned) loader lock.
             while len(self._store) > self._max_entries:
-                evicted_key, _ = self._store.popitem(last=False)
+                self._store.popitem(last=False)
                 self._counters["evict"] += 1
-                self._key_locks.pop(evicted_key, None)
 
     # ---- public API ----
 
@@ -137,38 +212,101 @@ class TTLCache(Generic[K, V]):
         if hit:
             return value  # type: ignore[return-value]
 
-        # Miss or expired: single-flight on the per-key lock.
-        with self._key_lock(key):
-            now = self._time_fn()
-            # Double-check: another thread may have loaded it while we waited.
-            hit, value = self._try_fresh_hit(key, now)
-            if hit:
-                return value  # type: ignore[return-value]
+        # Miss or expired: single-flight on the REFCOUNTED per-key lock. The
+        # holder is pinned (refcount > 0) across the whole critical section, so
+        # a concurrent invalidate/eviction cannot reclaim it and let a sibling
+        # caller start a second loader for the same key.
+        holder = self._acquire_key_lock(key)
+        try:
+            with holder.lock:
+                now = self._time_fn()
+                # Double-check: another thread may have loaded it while we waited.
+                hit, value = self._try_fresh_hit(key, now)
+                if hit:
+                    return value  # type: ignore[return-value]
 
-            with self._lock:
-                self._counters["miss"] += 1
+                with self._lock:
+                    self._counters["miss"] += 1
+                    # Snapshot the invalidate generation BEFORE loading. If
+                    # invalidate(key) bumps it during the load, the result must
+                    # not be cached as fresh.
+                    epoch_before = holder.epoch
 
-            loaded = self._loader(key)
-            self._store_value(key, loaded, self._time_fn())
-            return loaded
+                loaded = self._loader(key)
+
+                with self._lock:
+                    invalidated_mid_load = holder.epoch != epoch_before
+                self._store_value(
+                    key,
+                    loaded,
+                    self._time_fn(),
+                    store_expired=invalidated_mid_load,
+                )
+                return loaded
+        finally:
+            self._release_key_lock(key)
 
     def invalidate(self, key: K) -> None:
-        """Remove a single key. No-op (and not counted) if absent."""
+        """Remove a single key and bump its invalidate epoch.
+
+        Drops any cached entry AND advances the key's ``_KeyLock.epoch`` so a
+        loader that is mid-flight for this key (it holds a pinned holder)
+        detects the invalidate and stores its result as already-expired -- the
+        next get reloads, never serving a value invalidated during its own load.
+
+        A pinned holder (refcount > 0) is NEVER popped here (strict single-
+        flight); an idle holder (refcount == 0) created solely to carry the
+        epoch bump is reclaimed immediately. Counted when the key was cached OR
+        a loader is in-flight (so an invalidate landing mid-load is observable).
+        """
         with self._lock:
-            if key in self._store:
+            was_cached = key in self._store
+            if was_cached:
                 del self._store[key]
-                self._key_locks.pop(key, None)
+
+            holder = self._key_locks.get(key)
+            in_flight = holder is not None and holder.refcount > 0
+            if holder is not None:
+                holder.epoch += 1
+                if holder.refcount <= 0:
+                    # Idle holder -> nothing to pin; drop it to stay bounded.
+                    self._key_locks.pop(key, None)
+
+            if was_cached or in_flight:
                 self._counters["invalidate"] += 1
 
     def clear(self) -> None:
-        """Remove all entries. Counters are preserved for telemetry."""
+        """Remove all entries. Counters are preserved for telemetry.
+
+        Idle key-lock holders (refcount == 0) are dropped. Pinned holders
+        (refcount > 0, an in-flight loader) are PRESERVED so the owning caller
+        can still release them and single-flight is not broken; their epoch is
+        bumped so any value loaded across this clear is stored as expired rather
+        than fresh.
+        """
         with self._lock:
             self._store.clear()
-            self._key_locks.clear()
+            for k in list(self._key_locks.keys()):
+                holder = self._key_locks[k]
+                if holder.refcount <= 0:
+                    del self._key_locks[k]
+                else:
+                    holder.epoch += 1
 
     def size(self) -> int:
         with self._lock:
             return len(self._store)
+
+    def key_lock_count(self) -> int:
+        """Number of live key-lock holders in the registry.
+
+        Bounded by ``max_entries`` worth of live holders at rest (every
+        completed get releases its refcount, making the holder reclaimable), so
+        this never grows with total distinct keys seen -- only with concurrent
+        in-flight/cached keys. Exposed for the bounded-registry regression test.
+        """
+        with self._lock:
+            return len(self._key_locks)
 
     def counters(self) -> Dict[str, int]:
         with self._lock:
