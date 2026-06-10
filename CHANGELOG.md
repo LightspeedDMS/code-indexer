@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.116.0] - 2026-06-10
+
+### Fixed
+- Bug #1084: Versioned snapshots were never deleted on the `cow-daemon` and `ONTAP` clone backends (leaked ~1.25 GB per refresh/branch-change/add-index; 957 leaked on staging). Root cause: cleanup was gated on the local-only substring test `".versioned" in path`, which the non-local backends' path layouts never contain. (Note: GitHub issue #1084 is THIS snapshot-leak bug; the v10.115.0 entry below informally reused the "#1084" label for the reranker-pooling follow-on to #1083 — unrelated.)
+  - **One canonical convention across all backends**: versioned snapshots now live at `<root>/.versioned/{ns}/v_<ts>` on local AND cow-daemon (cow-daemon creates via the existing `create_clone_at_path`). The path convention lives in ONE place -- `is_versioned_snapshot()` in `server/storage/shared/snapshot_paths.py` -- consumed via the `VersionedSnapshotManager` facade. The brittle `".versioned" in path` substring test and `golden_repos_dir/.versioned/{repo}` reconstruction are removed from all decision/discovery paths (grep-enforced by `test_versioned_single_source_bug1084.py`). A transition clause still recognizes pre-migration legacy cow-daemon shapes for cleanup.
+  - **Backend-correct deletion behind the refcount gate**: superseded snapshots are deleted through `VersionedSnapshotManager.delete_snapshot()` (cow-daemon `DELETE` REST -> daemon registry stays consistent, no ghost rows; ONTAP frees the FlexClone volume; local rmtree) -- but ONLY via `CleanupManager`'s preserved QueryTracker refcount-zero gate, so a snapshot serving an in-flight query is never deleted.
+  - **Keep-last-N retention** after each alias swap (`snapshot_retention_keep_last` runtime config, default 3; never deletes the current `target_path` or `previous_path`; enabled on local + cow-daemon; inert on ONTAP pending alias-scoped naming).
+  - **Defect C** (`_has_local_changes`) and **Defect E** (`_restore_master_from_versioned`) now use the backend discovery API (`list_snapshots`/`latest_snapshot`) instead of the local `.versioned` glob -- no more spurious every-cycle re-index/snapshot on cow-daemon, and a lost master is restorable on cow-daemon.
+  - **Secondary consumers reconciled to the canonical predicate**: the provider-index immutability guard (`mcp/handlers/repos.py` -- closes a write-into-snapshot corruption vector on cow-daemon), SCIP repo discovery (`scip_query_service.py` -- SCIP and semantic now resolve the same version), dep-map cidx-meta read (`dependency_map_service.py`), the `query_path_cache` immutability predicate (canonical snapshots gain NO-TTL caching), and `_legacy.py`.
+  - Master base clone is never deleted (incl. first refresh). Manual E2E validated against a REAL CoW Storage Daemon (canonical creation, per-swap daemon deletion with zero ghost rows, legacy-transition cleanup, retention, Defect C/E, master-never-deleted, query continuity). ONTAP canonical-layout/alias-scoped-naming (AC11) and the one-time post-deploy staging snapshot purge (AC12) are deferred/gated per the issue.
+
 ## [10.115.0] - 2026-06-10
 
 ### Added
