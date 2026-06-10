@@ -228,8 +228,11 @@ class VersionedSnapshotManager:
 
         Backend behaviour:
         - **cow-daemon:** ``list_clones(sanitized_ns)`` then map each ``v_*``
-          clone to its CIDX mount-point path. Recognizes BOTH canonical and
-          legacy daemon names (the daemon namespace is identical for both).
+          clone to its CANONICAL ``{mount}/.versioned/{ns}/v_<ts>`` path — the
+          same shape ``create_clone`` writes and alias ``target_path`` /
+          ``previous_path`` carry. Pre-migration LEGACY snapshots
+          (``{mount}/{ns}/v_<ts>``) are intentionally NOT listed; see
+          :meth:`_list_cow_daemon_snapshots` for the transition rationale.
         - **local CloneBackend / CoW-filesystem mode:** glob
           ``{versioned_base}/.versioned/{ns}/v_*``.
         - **ONTAP / FlexClone:** returns ``[]`` — ``list_clones`` ignores the
@@ -282,11 +285,47 @@ class VersionedSnapshotManager:
     def _list_cow_daemon_snapshots(
         self, backend: "CloneBackend", namespace: str
     ) -> List[Tuple[str, int]]:
-        """List cow-daemon snapshots, mapping daemon clones to CIDX mount paths.
+        """List cow-daemon snapshots, mapping daemon clones to CANONICAL CIDX paths.
 
-        The daemon namespace is the dots->underscores sanitized form of the
-        repo namespace; both canonical and legacy snapshots register under the
-        same daemon namespace, so a single ``list_clones`` call covers both.
+        The daemon namespace is the dots->underscores sanitized form of the repo
+        namespace; a single ``list_clones`` call covers every ``v_*`` clone the
+        daemon knows about under that namespace.
+
+        Path shape (Bug #1084 review fix)
+        ---------------------------------
+        Each clone maps to the CANONICAL snapshot path
+        ``{mount}/.versioned/{ns}/v_<ts>`` — the SAME shape that
+        :meth:`CowDaemonBackend.create_clone` writes and that alias
+        ``target_path`` / ``previous_path`` carry. Emitting the canonical shape is
+        what makes the two path-consuming discovery clients correct on cow-daemon:
+
+        * Retention (``RefreshScheduler._enforce_retention``) force-protects the
+          current ``target_path`` and the rollback ``previous_path`` by STRING
+          equality against this list. Canonical-vs-canonical now matches, so the
+          ``previous`` snapshot is never scheduled for deletion (AC10).
+        * Defect-E restore (``RefreshScheduler._restore_master_from_versioned``)
+          uses :meth:`latest_snapshot` as the reverse-clone ``cp`` source; the
+          canonical path actually exists on disk under the NFS mount.
+
+        :meth:`CowDaemonBackend.delete_clone` already strips the leading
+        ``.versioned`` segment before deriving ``(namespace, name)``, so scheduled
+        deletions of these canonical paths still resolve to the correct daemon
+        clone identity.
+
+        Transition (pre-migration legacy snapshots are intentionally NOT listed)
+        -----------------------------------------------------------------------
+        Snapshots created before this convention live at the LEGACY shape
+        ``{mount}/{ns}/v_<ts>`` (no ``.versioned`` segment). They are deliberately
+        excluded from discovery here: dual-listing both shapes would double-count
+        and make ``(ns, name)`` ambiguous. The legacy backlog is reclaimed by two
+        other mechanisms, not by this discovery API:
+
+        * the swap-gate predicate's legacy clause cleans the superseded legacy
+          ``current`` on the first post-deploy refresh, and
+        * the one-time AC12 post-deploy purge clears the historical legacy backlog.
+
+        Retention therefore governs the CANONICAL era only — exactly the snapshots
+        this method now returns.
         """
         sanitize = getattr(backend, "_sanitize_identifier", None)
         sanitized_ns = sanitize(namespace) if callable(sanitize) else namespace
@@ -309,7 +348,9 @@ class VersionedSnapshotManager:
             if not match:
                 continue
             clone_ns = clone.get("namespace", sanitized_ns)
-            snapshot_path = f"{mount}/{clone_ns}/{name}"
+            # CANONICAL shape — identical to what CowDaemonBackend.create_clone
+            # writes and to the alias target_path/previous_path strings.
+            snapshot_path = f"{mount}/.versioned/{clone_ns}/{name}"
             result.append((snapshot_path, int(match.group(1))))
         result.sort(key=lambda item: item[1])
         return result

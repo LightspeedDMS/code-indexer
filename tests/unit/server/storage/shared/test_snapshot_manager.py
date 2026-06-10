@@ -11,6 +11,7 @@ All filesystem CoW tests that need actual path creation use a tmp_path fixture.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -570,12 +571,21 @@ class TestSnapshotManagerDiscoveryLocalBackend:
 class TestSnapshotManagerDiscoveryCowDaemon:
     """list_snapshots / latest_snapshot for the CowDaemonBackend.
 
-    The backend list_clones returns daemon clone dicts; the manager must map
-    them to CIDX mount-point paths and recognize BOTH canonical and legacy
-    snapshot names (transition).
+    The REAL ``CowDaemonBackend.list_clones`` runs — only the ``requests`` HTTP
+    boundary is stubbed (mirrors the CowDaemonBackend HTTP-boundary tests in
+    ``test_clone_backend.py``). The manager maps each daemon ``v_*`` clone to the
+    CANONICAL ``{mount}/.versioned/{ns}/v_<ts>`` path (Bug #1084 review fix) — the
+    same shape ``create_clone`` writes and alias target_path/previous_path carry.
+    Pre-migration legacy snapshots are intentionally not listed (transition).
     """
 
     def _make_cow_manager(self, list_return):
+        """Real backend + manager; stub ONLY the requests module GET response.
+
+        Returns ``(manager, backend, mock_requests_ctx)`` where the third item is
+        a context manager that patches ``sys.modules['requests']`` so the real
+        ``list_clones`` issues no network I/O.
+        """
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
         from code_indexer.server.utils.config_manager import CowDaemonConfig
 
@@ -586,10 +596,16 @@ class TestSnapshotManagerDiscoveryCowDaemon:
                 mount_point="/mnt/cow-storage",
             )
         )
-        # Stub list_clones so no real HTTP happens.
-        backend.list_clones = MagicMock(return_value=list_return)  # type: ignore[method-assign]
         manager = VersionedSnapshotManager(clone_backend=backend)
-        return manager, backend
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = list_return
+        resp.raise_for_status = MagicMock()
+        mock_req = MagicMock()
+        mock_req.get.return_value = resp
+
+        return manager, backend, mock_req
 
     def test_list_snapshots_maps_clones_to_mount_paths(self):
         # Daemon returns clones for the sanitized namespace; v_* names are snapshots.
@@ -598,34 +614,40 @@ class TestSnapshotManagerDiscoveryCowDaemon:
             {"namespace": "my_repo", "name": "v_1700000100"},
             {"namespace": "my_repo", "name": "main"},  # not a snapshot — ignored
         ]
-        manager, backend = self._make_cow_manager(list_return)
+        manager, _backend, mock_req = self._make_cow_manager(list_return)
 
-        snaps = manager.list_snapshots("my-repo-global")
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            snaps = manager.list_snapshots("my-repo-global")
 
-        # Sorted ascending by ts; mapped to mount-relative paths.
+        # Sorted ascending by ts; mapped to CANONICAL .versioned paths.
         assert [ts for _, ts in snaps] == [1700000100, 1700000200]
         paths = [p for p, _ in snaps]
-        assert "/mnt/cow-storage/my_repo/v_1700000100" in paths
-        assert "/mnt/cow-storage/my_repo/v_1700000200" in paths
+        assert "/mnt/cow-storage/.versioned/my_repo/v_1700000100" in paths
+        assert "/mnt/cow-storage/.versioned/my_repo/v_1700000200" in paths
 
     def test_list_snapshots_sanitizes_dotted_alias_namespace(self):
-        # Dotted alias must be sanitized (dots->underscores) before list_clones.
+        # Dotted alias must be sanitized (dots->underscores) before the daemon GET.
         list_return = [{"namespace": "langfuse_x_y", "name": "v_1749000000"}]
-        manager, backend = self._make_cow_manager(list_return)
+        manager, _backend, mock_req = self._make_cow_manager(list_return)
 
-        manager.list_snapshots("langfuse.x.y-global")
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            manager.list_snapshots("langfuse.x.y-global")
 
-        backend.list_clones.assert_called_once_with("langfuse_x_y")
+        # Real backend sanitized the namespace before issuing the daemon GET.
+        mock_req.get.assert_called_once()
+        assert mock_req.get.call_args.kwargs["params"] == {"namespace": "langfuse_x_y"}
 
     def test_latest_snapshot_returns_highest_mount_path(self):
         list_return = [
             {"namespace": "r", "name": "v_1700000000"},
             {"namespace": "r", "name": "v_1700099999"},
         ]
-        manager, _ = self._make_cow_manager(list_return)
+        manager, _backend, mock_req = self._make_cow_manager(list_return)
 
-        latest = manager.latest_snapshot("r-global")
-        assert latest == "/mnt/cow-storage/r/v_1700099999"
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            latest = manager.latest_snapshot("r-global")
+
+        assert latest == "/mnt/cow-storage/.versioned/r/v_1700099999"
 
 
 class TestSnapshotManagerDiscoveryOntapDisabled:
