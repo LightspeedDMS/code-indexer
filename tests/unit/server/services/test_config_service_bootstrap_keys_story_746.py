@@ -83,6 +83,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "coalesce_max_batch_size",  # Story #1079 Phase E — runtime cap
             "coalesce_k_min",  # Story #1079 Phase E — runtime AIMD floor seed
             "coalesce_k_max",  # Story #1079 Phase E — runtime AIMD ceiling seed
+            "snapshot_retention_keep_last",  # Bug #1084 Phase A6 — runtime keep-last-N knob
         }
     )
 
@@ -117,3 +118,14 @@ def test_all_server_config_fields_are_classified() -> None:
         f"Fields appear in both BOOTSTRAP_KEYS and _KNOWN_RUNTIME_KEYS: {overlap}. "
         "Each field must belong to exactly one set."
     )
+
+
+def test_snapshot_retention_keep_last_default_is_three() -> None:
+    """Bug #1084 Phase A6: keep-last-N retention knob defaults to 3 and is runtime
+    (Web UI configurable), NOT bootstrap."""
+    from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
+    from code_indexer.server.utils.config_manager import ServerConfig
+
+    assert ServerConfig(server_dir="/tmp/test").snapshot_retention_keep_last == 3
+    # Runtime field — must NOT be a bootstrap key.
+    assert "snapshot_retention_keep_last" not in BOOTSTRAP_KEYS

@@ -1324,6 +1324,30 @@ class DependencyMapService:
             except OSError as e:
                 logger.warning("Failed to list versioned cidx-meta dirs: %s", e)
 
+        # Bug #1084 B3: on the cow-daemon backend the snapshot lives under the
+        # daemon mount, NOT under golden-repos/.versioned, so the local glob above
+        # finds nothing and the old code fell back to the mutable base clone --
+        # reading a different version than semantic search. Consult the Phase A
+        # discovery API (VersionedSnapshotManager.latest_snapshot) so we read the
+        # alias-pointed snapshot on every backend. Only when no snapshot exists do
+        # we fall through to the live path (preserving read==write consistency).
+        snapshot_manager = getattr(
+            self._golden_repos_manager, "_snapshot_manager", None
+        )
+        if snapshot_manager is not None and hasattr(
+            snapshot_manager, "latest_snapshot"
+        ):
+            try:
+                latest = snapshot_manager.latest_snapshot("cidx-meta")
+                if latest:
+                    return Path(latest)
+            except Exception as e:
+                logger.warning(
+                    "Discovery-API latest_snapshot('cidx-meta') failed, "
+                    "falling back to live path: %s",
+                    e,
+                )
+
         # Fallback: try get_actual_repo_path (handles non-versioned repos)
         try:
             actual_path = self._golden_repos_manager.get_actual_repo_path("cidx-meta")

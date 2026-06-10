@@ -35,13 +35,16 @@ Staleness policy (see Story #1082):
 from __future__ import annotations
 
 import hashlib
-import os
-import re
 import threading
 from collections import OrderedDict
+from pathlib import PurePosixPath
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Callable, Dict, Generic, Hashable, Optional, TypeVar
+
+from code_indexer.server.storage.shared.snapshot_paths import (
+    is_versioned_snapshot as _canonical_is_versioned_snapshot,
+)
 
 K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")
@@ -317,57 +320,54 @@ class TTLCache(Generic[K, V]):
 # Immutable-path predicate (the ONLY gate for NO-TTL caching)
 # ---------------------------------------------------------------------------
 
-# A versioned snapshot path looks like: <golden_repos_dir>/.versioned/<alias>/v_<timestamp>
-# The alias segment must not be empty and the version segment must be v_<digits>.
-_VERSION_SEGMENT_RE = re.compile(r"^v_\d+$")
-
 
 def is_immutable_versioned_snapshot(path: str) -> bool:
-    """Return True ONLY for a validated immutable ``.versioned/{alias}/v_*`` path.
+    """Return True ONLY for a path at or inside an immutable canonical snapshot.
 
-    The immutable golden-repo snapshot layout (see project CLAUDE.md "Golden Repo
-    Versioned Path") is ``.../.versioned/{alias}/v_{timestamp}/...``. A query path
-    that matches this shape is bound to an unchanging source: a golden-repo
-    refresh produces a NEW ``v_*`` directory (a new key / cache miss), never an
-    in-place mutation, so its config can be cached with NO TTL.
+    Bug #1084 B4: the ``.versioned`` decision is delegated to the SINGLE canonical
+    predicate (``snapshot_paths.is_versioned_snapshot``), CANONICAL clause only
+    (``mount_point`` omitted). The immutable golden-repo snapshot layout (project
+    CLAUDE.md "Golden Repo Versioned Path") is ``.../.versioned/{alias}/v_{ts}/``;
+    a refresh produces a NEW ``v_*`` directory (a new key / cache miss), never an
+    in-place mutation, so its config can be cached with NO TTL. Canonical
+    cow-daemon snapshots (``{mount}/.versioned/{ns}/v_*``) now legitimately gain
+    NO-TTL caching.
 
-    Everything else -- the MUTABLE base clone returned by
-    ``GoldenRepoManager.get_actual_repo_path()`` Priority-1, activated CoW
-    clones, and arbitrary paths -- is rejected here and MUST use the default
-    SHORT-TTL cache.
+    LEGACY cow shapes (``{mount}/{ns}/v_*``) and flat ONTAP (``{mount}/v_*``) are
+    deliberately NOT recognized here (the mount point is intentionally withheld):
+    those predate retention and could be deleted, so the NO-TTL immutability
+    promise must not extend to them -- they stay on the SHORT-TTL cache, the safe
+    (self-healing) direction. The MUTABLE base clone and activated CoW clones are
+    likewise rejected and MUST use the default SHORT-TTL cache.
 
-    The check is purely structural (no filesystem access, NFS-safe): it requires
-    a ``.versioned`` segment immediately followed by a non-empty alias segment
-    and then a ``v_<digits>`` segment. Path traversal tokens (``..``) are
-    rejected.
+    The canonical predicate matches the snapshot LEAF (``v_<ts>``); a query path
+    is frequently DEEPER (e.g. ``.../v_42/.code-indexer/config.json``) and is
+    equally immutable. So we also test the path's ancestors: True iff the path
+    itself OR any ancestor is a canonical snapshot. Purely structural (no
+    filesystem access, NFS-safe); traversal tokens are rejected by the canonical
+    predicate's normalization.
     """
     if not path:
         return False
 
-    normalized = os.path.normpath(path)
-    parts = normalized.split(os.sep)
-
-    if ".." in parts:
+    if "/../" in path or path.endswith("/..") or path.startswith("../") or path == "..":
+        # Reject traversal tokens up front (Story #1082 contract). The canonical
+        # predicate would also reject the resulting shape, but be explicit.
         return False
 
-    try:
-        idx = parts.index(".versioned")
-    except ValueError:
-        return False
+    if _canonical_is_versioned_snapshot(path):
+        return True
 
-    # Need at least: .versioned / <alias> / v_<ts>
-    if idx + 2 >= len(parts):
-        return False
+    # Walk ancestors: a subpath inside a canonical snapshot is still immutable.
+    pure = PurePosixPath(path)
+    for ancestor in pure.parents:
+        ancestor_str = str(ancestor)
+        if ancestor_str in ("", "/", "."):
+            break
+        if _canonical_is_versioned_snapshot(ancestor_str):
+            return True
 
-    alias_segment = parts[idx + 1]
-    version_segment = parts[idx + 2]
-
-    if not alias_segment or alias_segment in (".", ".."):
-        return False
-    if not _VERSION_SEGMENT_RE.match(version_segment):
-        return False
-
-    return True
+    return False
 
 
 # ---------------------------------------------------------------------------

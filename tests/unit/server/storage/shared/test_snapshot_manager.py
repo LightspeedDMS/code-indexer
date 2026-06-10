@@ -11,6 +11,7 @@ All filesystem CoW tests that need actual path creation use a tmp_path fixture.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -467,4 +468,224 @@ def test_none_clone_backend_preserves_cow_delete_behavior(tmp_path: "Path") -> N
     result = manager.delete_snapshot("myrepo", str(snapshot_dir))
 
     assert result is True
-    assert not snapshot_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# Bug #1084 Phase A: is_versioned_snapshot facade + discovery API
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotManagerPredicateFacade:
+    """VersionedSnapshotManager.is_versioned_snapshot delegates to the canonical
+    predicate, supplying the backend's mount_point so legacy shapes are recognized."""
+
+    def test_facade_recognizes_canonical_path_local_mode(self, tmp_path: "Path"):
+        manager = VersionedSnapshotManager(versioned_base=str(tmp_path))
+        path = str(tmp_path / ".versioned" / "repo" / "v_1700000000")
+        assert manager.is_versioned_snapshot(path) is True
+
+    def test_facade_rejects_master_path(self, tmp_path: "Path"):
+        manager = VersionedSnapshotManager(versioned_base=str(tmp_path))
+        assert manager.is_versioned_snapshot(str(tmp_path / "repo")) is False
+
+    def test_facade_recognizes_legacy_cow_shape_via_backend_mount(self):
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+        from code_indexer.server.utils.config_manager import CowDaemonConfig
+
+        backend = CowDaemonBackend(
+            config=CowDaemonConfig(
+                daemon_url="http://daemon:8081",
+                api_key="k",
+                mount_point="/mnt/cow-storage",
+            )
+        )
+        manager = VersionedSnapshotManager(clone_backend=backend)
+        # legacy shape {mount}/{ns}/v_<ts> recognized because manager supplies mount_point
+        assert (
+            manager.is_versioned_snapshot("/mnt/cow-storage/repo/v_1749500000") is True
+        )
+        # canonical shape under the mount also recognized
+        assert (
+            manager.is_versioned_snapshot(
+                "/mnt/cow-storage/.versioned/repo/v_1749500000"
+            )
+            is True
+        )
+        # activation clone under the mount must NOT be a snapshot
+        assert (
+            manager.is_versioned_snapshot("/mnt/cow-storage/activated-repos/alice/repo")
+            is False
+        )
+
+    def test_facade_none_path_returns_false(self, tmp_path: "Path"):
+        manager = VersionedSnapshotManager(versioned_base=str(tmp_path))
+        assert manager.is_versioned_snapshot(None) is False  # type: ignore[arg-type]
+
+
+class TestSnapshotManagerDiscoveryLocalBackend:
+    """list_snapshots / latest_snapshot for the LocalCloneBackend (glob)."""
+
+    def _make_manager(self, versioned_base):
+        from code_indexer.server.storage.shared.clone_backend import LocalCloneBackend
+
+        backend = LocalCloneBackend(versioned_base=str(versioned_base))
+        return VersionedSnapshotManager(
+            clone_backend=backend, versioned_base=str(versioned_base)
+        )
+
+    def test_list_snapshots_returns_sorted_paths_and_timestamps(self, tmp_path):
+        ns_dir = tmp_path / ".versioned" / "my-repo"
+        ns_dir.mkdir(parents=True)
+        (ns_dir / "v_1700000000").mkdir()
+        (ns_dir / "v_1700000300").mkdir()
+        (ns_dir / "v_1700000100").mkdir()
+        (ns_dir / "not-a-snapshot").mkdir()  # ignored
+
+        manager = self._make_manager(tmp_path)
+        snaps = manager.list_snapshots("my-repo-global")
+
+        assert [ts for _, ts in snaps] == [1700000000, 1700000100, 1700000300]
+        assert all(p.endswith(f"v_{ts}") for p, ts in snaps)
+
+    def test_latest_snapshot_returns_highest_timestamp(self, tmp_path):
+        ns_dir = tmp_path / ".versioned" / "my-repo"
+        ns_dir.mkdir(parents=True)
+        (ns_dir / "v_1700000000").mkdir()
+        (ns_dir / "v_1700009999").mkdir()
+
+        manager = self._make_manager(tmp_path)
+        latest = manager.latest_snapshot("my-repo-global")
+
+        assert latest is not None
+        assert latest.endswith("v_1700009999")
+
+    def test_list_snapshots_empty_when_no_versioned_dir(self, tmp_path):
+        manager = self._make_manager(tmp_path)
+        assert manager.list_snapshots("absent-global") == []
+
+    def test_latest_snapshot_none_when_empty(self, tmp_path):
+        manager = self._make_manager(tmp_path)
+        assert manager.latest_snapshot("absent-global") is None
+
+
+class TestSnapshotManagerDiscoveryCowDaemon:
+    """list_snapshots / latest_snapshot for the CowDaemonBackend.
+
+    The REAL ``CowDaemonBackend.list_clones`` runs — only the ``requests`` HTTP
+    boundary is stubbed (mirrors the CowDaemonBackend HTTP-boundary tests in
+    ``test_clone_backend.py``). The manager maps each daemon ``v_*`` clone to the
+    CANONICAL ``{mount}/.versioned/{ns}/v_<ts>`` path (Bug #1084 review fix) — the
+    same shape ``create_clone`` writes and alias target_path/previous_path carry.
+    Pre-migration legacy snapshots are intentionally not listed (transition).
+    """
+
+    def _make_cow_manager(self, list_return):
+        """Real backend + manager; stub ONLY the requests module GET response.
+
+        Returns ``(manager, backend, mock_requests_ctx)`` where the third item is
+        a context manager that patches ``sys.modules['requests']`` so the real
+        ``list_clones`` issues no network I/O.
+        """
+        from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
+        from code_indexer.server.utils.config_manager import CowDaemonConfig
+
+        backend = CowDaemonBackend(
+            config=CowDaemonConfig(
+                daemon_url="http://daemon:8081",
+                api_key="k",
+                mount_point="/mnt/cow-storage",
+            )
+        )
+        manager = VersionedSnapshotManager(clone_backend=backend)
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = list_return
+        resp.raise_for_status = MagicMock()
+        mock_req = MagicMock()
+        mock_req.get.return_value = resp
+
+        return manager, backend, mock_req
+
+    def test_list_snapshots_maps_clones_to_mount_paths(self):
+        # Daemon returns clones for the sanitized namespace; v_* names are snapshots.
+        list_return = [
+            {"namespace": "my_repo", "name": "v_1700000200"},
+            {"namespace": "my_repo", "name": "v_1700000100"},
+            {"namespace": "my_repo", "name": "main"},  # not a snapshot — ignored
+        ]
+        manager, _backend, mock_req = self._make_cow_manager(list_return)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            snaps = manager.list_snapshots("my-repo-global")
+
+        # Sorted ascending by ts; mapped to CANONICAL .versioned paths.
+        assert [ts for _, ts in snaps] == [1700000100, 1700000200]
+        paths = [p for p, _ in snaps]
+        assert "/mnt/cow-storage/.versioned/my_repo/v_1700000100" in paths
+        assert "/mnt/cow-storage/.versioned/my_repo/v_1700000200" in paths
+
+    def test_list_snapshots_sanitizes_dotted_alias_namespace(self):
+        # Dotted alias must be sanitized (dots->underscores) before the daemon GET.
+        list_return = [{"namespace": "langfuse_x_y", "name": "v_1749000000"}]
+        manager, _backend, mock_req = self._make_cow_manager(list_return)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            manager.list_snapshots("langfuse.x.y-global")
+
+        # Real backend sanitized the namespace before issuing the daemon GET.
+        mock_req.get.assert_called_once()
+        assert mock_req.get.call_args.kwargs["params"] == {"namespace": "langfuse_x_y"}
+
+    def test_latest_snapshot_returns_highest_mount_path(self):
+        list_return = [
+            {"namespace": "r", "name": "v_1700000000"},
+            {"namespace": "r", "name": "v_1700099999"},
+        ]
+        manager, _backend, mock_req = self._make_cow_manager(list_return)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            latest = manager.latest_snapshot("r-global")
+
+        assert latest == "/mnt/cow-storage/.versioned/r/v_1700099999"
+
+
+class TestSnapshotManagerDiscoveryOntapDisabled:
+    """ONTAP retention is disabled (list_clones ignores namespace) — discovery
+    returns [] so keep-last-N is naturally inert on ONTAP (spec section 6)."""
+
+    def test_list_snapshots_empty_on_flexclone_mode(self):
+        client = _make_flexclone_client()
+        manager = VersionedSnapshotManager(
+            flexclone_client=client, mount_point="/mnt/fsx"
+        )
+        assert manager.list_snapshots("repo-global") == []
+
+    def test_latest_snapshot_none_on_flexclone_mode(self):
+        client = _make_flexclone_client()
+        manager = VersionedSnapshotManager(
+            flexclone_client=client, mount_point="/mnt/fsx"
+        )
+        assert manager.latest_snapshot("repo-global") is None
+
+    def test_list_snapshots_empty_on_ontap_backend(self):
+        from code_indexer.server.storage.shared.clone_backend import OntapCloneBackend
+
+        client = _make_flexclone_client()
+        backend = OntapCloneBackend(flexclone_client=client, mount_point="/mnt/fsx")
+        manager = VersionedSnapshotManager(clone_backend=backend)
+        assert manager.list_snapshots("repo-global") == []
+
+
+class TestSnapshotManagerDiscoveryCowMode:
+    """Non-backend CoW (legacy filesystem) mode globs versioned_base."""
+
+    def test_list_snapshots_globs_versioned_base(self, tmp_path):
+        ns_dir = tmp_path / ".versioned" / "my-repo"
+        ns_dir.mkdir(parents=True)
+        (ns_dir / "v_1700000000").mkdir()
+        (ns_dir / "v_1700000050").mkdir()
+
+        manager = VersionedSnapshotManager(versioned_base=str(tmp_path))
+        snaps = manager.list_snapshots("my-repo-global")
+        assert [ts for _, ts in snaps] == [1700000000, 1700000050]

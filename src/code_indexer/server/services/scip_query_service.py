@@ -127,6 +127,22 @@ class SCIPQueryService:
                 normalized_alias = Path(normalized_alias).name
             normalized_alias = normalized_alias.removesuffix("-global")
 
+        # Bug #1084 B2: a specific-alias query resolves its target_path DIRECTLY
+        # (the authority semantic uses), independent of whether a matching base
+        # clone dir appears in the iteration below. This guarantees SCIP reads the
+        # alias-pointed version even when the mutable base clone is absent (AC #9).
+        if normalized_alias is not None:
+            if (
+                accessible_repos is not None
+                and normalized_alias not in accessible_repos
+            ):
+                return []
+            alias_root = self._resolve_alias_scip_root(normalized_alias)
+            if alias_root is not None:
+                scip_dir = alias_root / ".code-indexer" / "scip"
+                if scip_dir.exists():
+                    return list(scip_dir.glob("**/*.scip.db"))
+
         for repo_dir in golden_repos_path.iterdir():
             # Skip non-directories
             if not repo_dir.is_dir():
@@ -144,12 +160,55 @@ class SCIPQueryService:
             if accessible_repos is not None and repo_dir.name not in accessible_repos:
                 continue
 
+            # Bug #1084 B2: resolve the alias target_path (the SAME authority
+            # semantic search uses) so SCIP reads the version the alias points
+            # to, not the mutable base clone. On cow-daemon the alias target is a
+            # snapshot under the daemon mount while the base clone holds an older
+            # index -- using the base clone produced cross-index version skew
+            # (AC #9). When no alias resolves (e.g. local repos with no alias
+            # JSON, or the synthetic .versioned scan dir), fall back to the
+            # filesystem repo dir (local behavior unchanged).
+            scip_root = self._resolve_alias_scip_root(repo_dir.name) or repo_dir
+
             # Find .scip.db files in the repository's scip directory
-            scip_dir = repo_dir / ".code-indexer" / "scip"
+            scip_dir = scip_root / ".code-indexer" / "scip"
             if scip_dir.exists():
                 scip_files.extend(scip_dir.glob("**/*.scip.db"))
 
         return scip_files
+
+    def _resolve_alias_scip_root(self, repo_name: str) -> Optional[Path]:
+        """Resolve a repo's alias ``target_path`` to its SCIP-bearing root.
+
+        Bug #1084 B2: mirrors the semantic-search resolution (alias is
+        authoritative). Returns the alias target as a :class:`Path` when the
+        ``{repo_name}-global`` (or bare ``{repo_name}``) alias resolves to an
+        existing directory; otherwise ``None`` so the caller falls back to the
+        filesystem layout. Never raises -- any resolution failure degrades to
+        ``None`` (filesystem scan).
+        """
+        try:
+            from code_indexer.global_repos.alias_manager import AliasManager
+
+            aliases_dir = self._golden_repos_dir / "aliases"
+            if not aliases_dir.is_dir():
+                return None
+            alias_manager = AliasManager(str(aliases_dir))
+
+            # Prefer the -global alias (the form semantic resolves), then bare.
+            target = alias_manager.read_alias(f"{repo_name}-global")
+            if not target:
+                target = alias_manager.read_alias(repo_name)
+            if target and Path(target).is_dir():
+                return Path(target)
+        except Exception as exc:  # pragma: no cover - defensive, never fatal
+            logger.debug(
+                "find_scip_files: alias resolution for '%s' failed (%s); "
+                "falling back to filesystem scan",
+                repo_name,
+                exc,
+            )
+        return None
 
     def get_accessible_repos(self, username: str) -> Optional[Set[str]]:
         """

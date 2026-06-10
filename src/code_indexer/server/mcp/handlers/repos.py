@@ -16,6 +16,7 @@ from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoNotFoundError
+from code_indexer.server.storage.shared.snapshot_paths import is_versioned_snapshot
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
@@ -1352,7 +1353,11 @@ def _resolve_golden_repo_base_clone(alias: str) -> Optional[str]:
         return None
 
     parts = Path(versioned_path).parts
-    if ".versioned" in parts:
+    # Bug #1084 B1: route the "is this a snapshot?" decision through the single
+    # canonical predicate (replaces the local-only ".versioned" in parts test).
+    # The base-clone derivation below decomposes a canonical .versioned/{ns}/v_*
+    # path, which is exactly the shape the canonical clause recognizes.
+    if is_versioned_snapshot(versioned_path):
         versioned_idx = parts.index(".versioned")
         if versioned_idx + 1 >= len(parts):
             logger.warning(
@@ -1382,7 +1387,11 @@ def _load_repo_config(repo_path: str) -> Optional[tuple]:
         return None
 
     resolved = Path(repo_path).resolve()
-    if ".versioned" in resolved.parts:
+    # Bug #1084 B1: the immutability guard now uses the single canonical predicate
+    # (replaces the local-only ".versioned" in parts test). Canonical cow-daemon
+    # snapshot paths ({mount}/.versioned/{ns}/v_*) are correctly refused, closing
+    # the one write-path corruption vector (AC #8).
+    if is_versioned_snapshot(str(resolved)):
         logger.error(
             "_load_repo_config called with versioned snapshot path %s -- "
             "refusing (immutable). Use _resolve_golden_repo_base_clone() instead.",
@@ -1534,7 +1543,9 @@ def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
     if not repo_path or not isinstance(repo_path, str):
         return repo_path, repo_alias, False
 
-    is_versioned = ".versioned" in Path(repo_path).parts
+    # Bug #1084 B1: detect snapshots via the single canonical predicate
+    # (replaces the local-only ".versioned" in parts test).
+    is_versioned = is_versioned_snapshot(repo_path)
     if not is_versioned:
         return repo_path, repo_alias, False
 
@@ -1572,7 +1583,19 @@ def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
     resolved_alias = repo_alias or f"{alias_name}-global"
 
     if not base_clone.exists():
-        return repo_path, resolved_alias, True
+        # Bug #1084 B1: the base clone for a cow-daemon repo lives at
+        # golden_repos_dir/{ns}, not under the mount, so this local-shaped
+        # arithmetic cannot reach it. Return the (non-existent) base_clone path
+        # rather than the snapshot path: this is NEVER a writable snapshot, and
+        # the consumer's `actual_path == repo_path and not exists()` guard would
+        # have been DEFEATED on cow-daemon (the snapshot path DOES exist).
+        logger.warning(
+            "_resolve_provider_job_repo_path: base clone %s for versioned "
+            "snapshot %s does not exist -- refusing to index the snapshot.",
+            base_clone,
+            repo_path,
+        )
+        return str(base_clone), resolved_alias, True
 
     logger.info(
         "Provider job: using base clone %s instead of versioned snapshot %s",
@@ -1748,7 +1771,9 @@ def _resolve_versioned_to_base_clone(repo_path: str, repo_alias: str) -> tuple:
         return repo_path, repo_alias, False, f"repo_path must be absolute: {repo_path}"
 
     resolved = Path(repo_path).resolve()
-    is_versioned = ".versioned" in resolved.parts
+    # Bug #1084 B1: detect snapshots via the single canonical predicate
+    # (replaces the local-only ".versioned" in parts test).
+    is_versioned = is_versioned_snapshot(str(resolved))
     if not is_versioned:
         return str(resolved), repo_alias, False, None
 
@@ -1947,7 +1972,11 @@ def _provider_temporal_index_job(
     actual_path, repo_alias, is_versioned = _resolve_provider_job_repo_path(
         repo_path, repo_alias
     )
-    if is_versioned and actual_path == repo_path and not Path(actual_path).exists():
+    # Bug #1084 B1: refuse when a versioned snapshot could not be redirected to an
+    # existing base clone. The resolver now returns the (non-existent) base_clone
+    # path rather than the snapshot path, so check existence of actual_path
+    # directly -- the snapshot itself is NEVER indexed.
+    if is_versioned and not Path(actual_path).exists():
         return {
             "success": False,
             "error": f"Base clone not found for {repo_path}",
