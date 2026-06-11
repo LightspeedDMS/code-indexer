@@ -321,18 +321,24 @@ class VoyageRerankerClient(RerankerClient):
                 "VoyageAI API key not found. "
                 "Set VOYAGE_API_KEY env var (CLI mode) or configure via Web UI (server mode)."
             )
+        # Story #1083/#1084: auth header travels on the per-request .post() call so
+        # the pooled keep-alive client stays auth-agnostic — API-key rotation is
+        # transparent (no client invalidation/rebuild needed).
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        from code_indexer.server.services.latency_tracking_httpx_transport import (
-            build_latency_transport,
-        )
-
-        latency_transport = build_latency_transport()
+        # Story #1084 (extends #1083 to the :rerank lane): pooled=True borrows the
+        # factory's ONE long-lived keep-alive client (reused SSLContext + connection
+        # pool) instead of building+closing a fresh client per rerank request.  The
+        # latency transport is OWNED by the factory and baked into the pooled client
+        # ONCE — the reranker no longer constructs build_latency_transport() (and its
+        # SSLContext) per call, which was the residual per-query churn.  Under fault
+        # injection the factory ignores pooled and still returns a fresh per-call
+        # client (building the latency transport then).
         client_ctx = self._http_client_factory.create_sync_client(
-            transport=latency_transport,
             timeout=self.timeout,
+            pooled=True,
         )
         with client_ctx as client:
             # cast: httpx.Client.post() returns httpx.Response at runtime; mypy
@@ -659,18 +665,24 @@ class CohereRerankerClient(RerankerClient):
                 "Cohere API key not found. "
                 "Set CO_API_KEY env var (CLI mode) or configure via Web UI (server mode)."
             )
+        # Story #1083/#1084: auth header travels on the per-request .post() call so
+        # the pooled keep-alive client stays auth-agnostic — API-key rotation is
+        # transparent (no client invalidation/rebuild needed).
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        from code_indexer.server.services.latency_tracking_httpx_transport import (
-            build_latency_transport,
-        )
-
-        latency_transport = build_latency_transport()
+        # Story #1084 (extends #1083 to the :rerank lane): pooled=True borrows the
+        # factory's ONE long-lived keep-alive client (reused SSLContext + connection
+        # pool) instead of building+closing a fresh client per rerank request.  The
+        # latency transport is OWNED by the factory and baked into the pooled client
+        # ONCE — the reranker no longer constructs build_latency_transport() (and its
+        # SSLContext) per call, which was the residual per-query churn.  Under fault
+        # injection the factory ignores pooled and still returns a fresh per-call
+        # client (building the latency transport then).
         client_ctx = self._http_client_factory.create_sync_client(
-            transport=latency_transport,
             timeout=self.timeout,
+            pooled=True,
         )
         with client_ctx as client:
             # cast: httpx.Client.post() returns httpx.Response at runtime; mypy

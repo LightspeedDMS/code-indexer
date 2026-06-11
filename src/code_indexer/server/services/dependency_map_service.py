@@ -40,6 +40,10 @@ from code_indexer.global_repos.lifecycle_batch_runner import (
 from .activity_journal_service import ActivityJournalService
 from .constants import CIDX_META_REPO
 from .dep_map_health_detector import DepMapHealthDetector
+from .jittered_dispatcher import (
+    DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS,
+    sleep_with_jitter,
+)
 from .metadata_reader import read_current_commit
 from .shared_job_sentinel import AnalysisAlreadyRunningError, SharedJobSentinel
 
@@ -901,6 +905,9 @@ class DependencyMapService:
                     len(domain_list),
                 )
                 break
+            # Bug #1056: jitter between Claude CLI calls to avoid thundering-herd.
+            if domain_idx > 0:
+                sleep_with_jitter(DEFAULT_DEPMAP_DISPATCH_JITTER_SECONDS)
             domain_name = domain["name"]
             domain_status = journal.get("pass2", {}).get(domain_name, {}).get("status")
 
@@ -1316,6 +1323,30 @@ class DependencyMapService:
                     return version_dirs[0]
             except OSError as e:
                 logger.warning("Failed to list versioned cidx-meta dirs: %s", e)
+
+        # Bug #1084 B3: on the cow-daemon backend the snapshot lives under the
+        # daemon mount, NOT under golden-repos/.versioned, so the local glob above
+        # finds nothing and the old code fell back to the mutable base clone --
+        # reading a different version than semantic search. Consult the Phase A
+        # discovery API (VersionedSnapshotManager.latest_snapshot) so we read the
+        # alias-pointed snapshot on every backend. Only when no snapshot exists do
+        # we fall through to the live path (preserving read==write consistency).
+        snapshot_manager = getattr(
+            self._golden_repos_manager, "_snapshot_manager", None
+        )
+        if snapshot_manager is not None and hasattr(
+            snapshot_manager, "latest_snapshot"
+        ):
+            try:
+                latest = snapshot_manager.latest_snapshot("cidx-meta")
+                if latest:
+                    return Path(latest)
+            except Exception as e:
+                logger.warning(
+                    "Discovery-API latest_snapshot('cidx-meta') failed, "
+                    "falling back to live path: %s",
+                    e,
+                )
 
         # Fallback: try get_actual_repo_path (handles non-versioned repos)
         try:

@@ -175,12 +175,29 @@ def make_lifespan(
             log_db_path = Path(server_data_dir) / "logs.db"
             sqlite_handler = SQLiteLogHandler(log_db_path)
             sqlite_handler.setLevel(configured_level)
-            logging.getLogger().addHandler(sqlite_handler)
+            _root_logger = logging.getLogger()
+            _root_logger.addHandler(sqlite_handler)
 
             # Set app state for web routes to access
             app.state.log_db_path = log_db_path
             # Store handler reference so LogsBackend can be injected later (Story #500 AC4)
             app.state.sqlite_log_handler = sqlite_handler
+
+            # py-spy logging-lock fix (follow-up to Bug #1078): route the root
+            # logger through a single QueueHandler whose QueueListener owns the
+            # REAL handlers (the SQLiteLogHandler installed above plus any console
+            # StreamHandler attached by uvicorn / basicConfig). On a request
+            # thread, a logger.info() call now does only a fast enqueue; all
+            # formatting and handler I/O happen on the single listener thread,
+            # off the /api/query hot path. The listener is stopped (drained +
+            # flushed) on shutdown — see the shutdown section below.
+            from code_indexer.server.services.async_logging import (
+                install_queue_logging,
+            )
+
+            _real_handlers = list(_root_logger.handlers)
+            log_queue_listener = install_queue_logging(_real_handlers)
+            app.state.log_queue_listener = log_queue_listener
 
             logger.info(
                 f"SQLite log handler initialized: {log_db_path} (level: {startup_config.log_level})",
@@ -233,6 +250,104 @@ def make_lifespan(
         asyncio.get_running_loop().set_default_executor(_mcp_executor)
         logger.info(
             f"MCP dispatch pool sized to {_mcp_pool_size} threads (Story #1009)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # perf: ONE shared, long-lived ThreadPoolExecutor for the query-path
+        # embed||index-load fan-out (FilesystemVectorStore.search). Reusing this
+        # pool across requests eliminates the per-request executor create/destroy
+        # churn that serialized concurrent queries on CPython's process-wide
+        # _global_shutdown_lock. SemanticSearchService injects it via
+        # app.state.query_executor (see search_service._get_query_executor()).
+        # Mirrors the _mcp_executor / _xray_executor bootstrap-fallback pattern.
+        _DEFAULT_QUERY_POOL_SIZE: int = 256
+        _query_pool_size = (
+            getattr(
+                startup_config, "query_executor_pool_size", _DEFAULT_QUERY_POOL_SIZE
+            )
+            if startup_config is not None
+            else _DEFAULT_QUERY_POOL_SIZE
+        )
+        if _query_pool_size <= 0:
+            raise ValueError(
+                f"query_executor_pool_size must be > 0, got {_query_pool_size}"
+            )
+        _query_executor = ThreadPoolExecutor(max_workers=_query_pool_size)
+        app.state.query_executor = _query_executor
+        logger.info(
+            f"Query executor pool sized to {_query_pool_size} threads (perf)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        # Story #1082: drift-safe per-query repo-config cache. Removes the
+        # per-query config.json json.load + path resolve() from the GIL-bound
+        # hot path. Routes proven-immutable .versioned/{alias}/v_* snapshot
+        # paths to a NO-TTL bounded-LRU sub-cache and everything else (incl. the
+        # MUTABLE base clone returned by get_actual_repo_path Priority-1) to a
+        # SHORT-TTL bounded sub-cache (self-healing safety net). Sized/TTL'd from
+        # named CacheConfig knobs (no hardcoded literals); kill-switch honored.
+        from code_indexer.config import ConfigManager as _ConfigManager
+        from code_indexer.server.services.config_service import (
+            get_config_service as _get_config_service,
+        )
+        from code_indexer.server.services.query_path_cache import (
+            RepoConfigCache as _RepoConfigCache,
+        )
+        from code_indexer.server.utils.config_manager import (
+            CacheConfig as _CacheConfig,
+        )
+
+        try:
+            _cache_cfg = _get_config_service().get_config().cache_config
+        except Exception:
+            # Degraded startup: log and fall back to dataclass defaults (named,
+            # not magic literals) rather than disabling the cache silently.
+            logger.warning(
+                "Failed to read CacheConfig from config service; "
+                "using dataclass defaults for repo-config cache",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            _cache_cfg = _CacheConfig()
+
+        if getattr(_cache_cfg, "query_path_cache_enabled", True):
+
+            def _repo_config_loader(repo_path: str) -> Any:
+                return _ConfigManager.create_with_backtrack(
+                    Path(repo_path)
+                ).get_config()
+
+            app.state.repo_config_cache = _RepoConfigCache(
+                config_ttl_seconds=float(_cache_cfg.repo_config_cache_ttl_seconds),
+                config_max_entries=int(_cache_cfg.repo_config_cache_max_entries),
+                loader=_repo_config_loader,
+            )
+            logger.info(
+                "Repo-config cache wired (ttl=%ss, max_entries=%s) (Story #1082)",
+                _cache_cfg.repo_config_cache_ttl_seconds,
+                _cache_cfg.repo_config_cache_max_entries,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            app.state.repo_config_cache = None
+            logger.info(
+                "Repo-config cache DISABLED via query_path_cache_enabled kill-switch",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Bug #1070: Dedicated xray executor isolated from BJM's 5-worker pool.
+        from code_indexer.server.utils.config_manager import (
+            BackgroundJobsConfig as _BackgroundJobsConfig,
+        )
+
+        _xray_pool_size = _BackgroundJobsConfig().xray_max_concurrent_jobs
+        _xray_executor = ThreadPoolExecutor(max_workers=_xray_pool_size)
+        app.state.xray_executor = _xray_executor
+        from code_indexer.server.mcp.handlers.xray import set_xray_executor
+
+        set_xray_executor(_xray_executor)
+        logger.info(
+            f"xray executor started (max_workers={_xray_pool_size}) (Bug #1070)",
             extra={"correlation_id": get_correlation_id()},
         )
 
@@ -840,6 +955,44 @@ def make_lifespan(
                 )
             )
 
+        # Bug fix: Early ConfigService PG pool so scheduler inits read merged runtime config.
+        # In postgres/cluster mode, ConfigService.set_connection_pool() triggers
+        # _load_runtime_from_pg() which loads claude_integration_config flags (e.g.
+        # description_refresh_enabled, dependency_map_enabled) from the PG server_config
+        # table.  Without this early call those flags stay at bootstrap defaults (False)
+        # when the schedulers below call config_service.get_config() -- permanently
+        # skipping the one-shot startup backfill sweeps even when the operator has
+        # enabled the features in the Web UI.
+        # The late set_connection_pool + start_config_reload call in the cluster block
+        # (~line 2264) is kept for belt-and-suspenders (start_config_reload is
+        # idempotent via its internal _reload_thread.is_alive() guard).
+        if storage_mode == "postgres" and backend_registry is not None:
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                _early_config_pool = (
+                    backend_registry.critical_connection_pool
+                    or backend_registry.connection_pool
+                )
+                if _early_config_pool is not None:
+                    get_config_service().set_connection_pool(_early_config_pool)
+                    logger.info(
+                        "APP-GENERAL-052: ConfigService PG pool set early — "
+                        "scheduler inits will read merged runtime config",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+            except Exception as _early_pool_exc:
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-053",
+                        f"Early ConfigService pool set failed (schedulers will use "
+                        f"bootstrap defaults): {_early_pool_exc}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
         # Startup: Initialize Scheduled Catch-Up Service (Story #23, AC6)
         scheduled_catchup_service = None
         logger.info(
@@ -918,6 +1071,11 @@ def make_lifespan(
                 ),
                 job_tracker=job_tracker,
                 mcp_registration_service=mcp_registration_service,
+                golden_backend=(
+                    backend_registry.golden_repo_metadata
+                    if backend_registry is not None
+                    else None
+                ),
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove
@@ -1138,6 +1296,83 @@ def make_lifespan(
                 format_error_log(
                     "APP-GENERAL-033",
                     f"Failed to initialize data retention scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Startup: Initialize Research Assistant workspace GC (Bug #1085).
+        # Reconciles ~/.cidx-server/research/<uuid> dirs against the live
+        # research_sessions registry, deleting orphans older than retention.
+        # The first sweep (on .start()) IS the startup reconciliation.
+        research_cleanup_scheduler = None
+        logger.info(
+            "Server startup: Initializing research cleanup scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.research_cleanup_service import (
+                ResearchCleanupScheduler,
+                make_backend_live_folder_provider,
+            )
+            from code_indexer.server.services.research_assistant_service import (
+                _default_research_base_dir,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _rcs_get_config_service,
+            )
+
+            _rcs_config_service = _rcs_get_config_service()
+            _rcs_db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+
+            def _research_retention_days_provider() -> float:
+                return float(
+                    _rcs_config_service.get_config().research_session_retention_days
+                )
+
+            # Bug #1085 BLOCKING-1: the live set MUST come from the SAME
+            # research_sessions backend the writers use. In cluster/postgres the
+            # registry's backend is PostgreSQL; in solo it is SQLite. A hardcoded
+            # SQLite-only provider read an EMPTY table in postgres mode -> set()
+            # -> mass-deletion of LIVE sessions. The supplier returns a REAL
+            # backend in every mode (registry's, or a local SQLite backend over
+            # the same DB the solo writers use), so list_sessions() always
+            # reflects the active store.
+            def _research_sessions_backend_supplier():
+                # Resolve the active backend lazily (the registry is only wired
+                # after startup). None -> make_backend_live_folder_provider
+                # raises -> cleanup() aborts with ZERO deletions (fail-safe).
+                if backend_registry is not None:
+                    registry_backend = backend_registry.research_sessions
+                    if registry_backend is not None:
+                        return registry_backend
+                # Solo without a registry: the writers use the local SQLite DB,
+                # so read the live set from a SQLite backend over that SAME DB
+                # -- NOT an empty/absent set (which would over-delete).
+                from code_indexer.server.storage.sqlite_backends import (
+                    ResearchSessionsSqliteBackend,
+                )
+
+                return ResearchSessionsSqliteBackend(_rcs_db_path)
+
+            research_cleanup_scheduler = ResearchCleanupScheduler(
+                research_base_dir=_default_research_base_dir(),
+                retention_days_provider=_research_retention_days_provider,
+                live_folder_provider=make_backend_live_folder_provider(
+                    _research_sessions_backend_supplier
+                ),
+            )
+            research_cleanup_scheduler.start()
+            app.state.research_cleanup_scheduler = research_cleanup_scheduler
+            logger.info(
+                "Research cleanup scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            # Never block server startup on the GC scheduler.
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-054",
+                    f"Failed to initialize research cleanup scheduler: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
@@ -2394,10 +2629,16 @@ def make_lifespan(
                         _cluster_pool
                     )
 
-                    # Bug #581: Sync SSH keys from PG to local ~/.ssh/
+                    # Bug #581 / Bug #1072: Sync SSH keys from PG to local ~/.ssh/
                     try:
                         from code_indexer.server.services.ssh_key_sync_service import (
                             SSHKeySyncService,
+                        )
+                        from code_indexer.server.services.cluster_key_provider import (
+                            load_or_create_fernet_key,
+                        )
+                        from code_indexer.server.services.ssh_key_manager import (
+                            SSHKeyManager,
                         )
 
                         _ssh_backend = (
@@ -2406,7 +2647,24 @@ def make_lifespan(
                             else None
                         )
                         assert _ssh_backend is not None
-                        _ssh_sync = SSHKeySyncService(ssh_keys_backend=_ssh_backend)
+
+                        # Bug #1072: Load (or race-safely create) the Fernet key
+                        # used to encrypt/decrypt SSH private keys in cluster mode.
+                        _ssh_fernet = load_or_create_fernet_key(
+                            _cluster_pool, "ssh_key_encryption_key"
+                        )
+
+                        # Bug #1072: Wire cluster deps into SSHKeyManager so that
+                        # future key registrations encrypt the private content to PG.
+                        SSHKeyManager.set_cluster_dependencies(
+                            _ssh_backend, _ssh_fernet
+                        )
+
+                        # Bug #1072: Pass fernet to sync service so it decrypts
+                        # private keys read from PG before writing to ~/.ssh/.
+                        _ssh_sync = SSHKeySyncService(
+                            ssh_keys_backend=_ssh_backend, fernet=_ssh_fernet
+                        )
                         _sync_result = _ssh_sync.sync()
                         logger.info(
                             "Bug #581: SSH key sync complete: %d written, %d removed, %d unchanged",
@@ -2740,10 +2998,144 @@ def make_lifespan(
                 )
             )
 
+        # Story #1079 Phase E: build the embedding coalescer registry ONCE, after
+        # providers + runtime config are available and fault injection has wired
+        # app.state.http_client_factory. The registry holds one EmbeddingCoalescer
+        # per configured :embed lane; coalesced_query_embedding reads it live and
+        # falls back to the direct governed call when it is absent (CLI/solo never
+        # build one). Non-fatal: a failure leaves no registry, so queries simply
+        # use the direct governed single call.
+        try:
+            from code_indexer.server.services.coalescer_registry import (
+                build_coalescer_registry,
+                set_coalescer_registry,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_cfg_svc,
+            )
+
+            _coalescer_registry = build_coalescer_registry(
+                _get_cfg_svc().get_config(),
+                http_client_factory=getattr(app.state, "http_client_factory", None),
+            )
+            set_coalescer_registry(_coalescer_registry)
+            logger.info(
+                "Embedding coalescer registry built (Story #1079 Phase E)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1079",
+                    f"Failed to build embedding coalescer registry "
+                    f"(queries will use the direct governed call): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         yield  # Server is now running
+
+        # Story #1083: close the pooled production httpx client owned by the
+        # HttpClientFactory. On the production path (fault injection OFF) the
+        # factory builds ONE long-lived keep-alive client (reused SSLContext +
+        # connection pool) lazily on the first query and reuses it across all
+        # queries. Closing it here releases the connections and prevents leaking
+        # the pool across lifespan cycles.
+        _http_client_factory = getattr(app.state, "http_client_factory", None)
+        if _http_client_factory is not None:
+            try:
+                _http_client_factory.close_pooled_clients()
+            except Exception as _pool_close_exc:
+                # Non-fatal LOG+RECOVER (Messi #13): never abort the remaining
+                # shutdown chain, but keep the failure observable for operators.
+                logger.warning(
+                    "Story #1083: failed to close pooled httpx client during "
+                    "shutdown: %s",
+                    _pool_close_exc,
+                )
+
+        # Story #1083: drain the batched API-metrics writer. The writer coalesces
+        # queued metric events into one transaction per drain; stop_writer() signals
+        # the thread, joins it, and performs a final drain so no queued counts are
+        # lost. Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.api_metrics_service import (
+                api_metrics_service as _ams_shutdown,
+            )
+
+            _ams_shutdown.stop_writer()
+        except Exception as _metrics_stop_exc:
+            logger.warning(
+                "Story #1083: failed to drain api-metrics writer during shutdown: %s",
+                _metrics_stop_exc,
+            )
+
+        # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
+        # follow-up to Bug #1078). The listener owns the real handlers behind the
+        # root QueueHandler; stop() drains every queued record and then closes the
+        # real handlers, so no logs are lost on a clean shutdown. Must run before
+        # any other shutdown step that could raise and skip it. Idempotent and
+        # non-fatal — never abort the remaining shutdown chain.
+        _log_queue_listener = getattr(app.state, "log_queue_listener", None)
+        if _log_queue_listener is not None:
+            try:
+                # Drain in-flight records before stopping the listener.
+                _log_queue_listener.flush()
+                _log_queue_listener.stop()
+            except Exception:
+                pass
+            # Detach the IdentityQueueHandler we installed on the root logger so
+            # it is not leaked across lifespan cycles (mirrors the Bug #1060
+            # symmetry below). removeHandler is a no-op if already detached.
+            try:
+                from code_indexer.server.services.async_logging import (
+                    IdentityQueueHandler,
+                )
+
+                _root = logging.getLogger()
+                for _h in list(_root.handlers):
+                    if isinstance(_h, IdentityQueueHandler):
+                        _root.removeHandler(_h)
+            except Exception:
+                pass
+
+        # Shutdown: Remove SQLiteLogHandler from root logger (Bug #1060).
+        # Symmetric with the install in startup: without this, the handler remains
+        # registered (now behind the listener) after lifespan exits, tries to write
+        # to the now-deleted tmp DB, and silently drops subsequent log records from
+        # other tests. close() flushes the handler's own writer queue (Bug #1078).
+        # Idempotent: removeHandler is a no-op if the handler was never added.
+        _sqlite_handler = getattr(app.state, "sqlite_log_handler", None)
+        if _sqlite_handler is not None:
+            try:
+                logging.getLogger().removeHandler(_sqlite_handler)
+                _sqlite_handler.close()
+            except Exception as _slh_exc:
+                # Non-fatal: don't abort the remaining shutdown chain
+                pass
 
         # Story #1009: Shut down the MCP dispatch pool on server shutdown.
         _mcp_executor.shutdown(wait=False)
+        # Bug #1070: Shut down the dedicated xray executor.
+        _xray_executor.shutdown(wait=False)
+        # perf: Shut down the shared query executor (mirror of the two above).
+        _query_executor.shutdown(wait=False)
+
+        # Story #1079 Phase E: clear the process-level coalescer registry so a
+        # subsequent lifespan cycle in the same process does not inherit a stale
+        # registry. Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.coalescer_registry import (
+                clear_coalescer_registry,
+            )
+
+            clear_coalescer_registry()
+        except Exception:
+            logger.debug(
+                "Coalescer registry clear failed (expected during shutdown)",
+                exc_info=True,
+            )
 
         # Prevent test pollution across repeated TestClient/lifespan cycles:
         # the FastAPI lifespan instantiates a real TOTPService and stores it in
@@ -2896,6 +3288,27 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-034",
                         f"Error stopping data retention scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop research cleanup scheduler (Bug #1085)
+        research_cleanup_scheduler_state = getattr(
+            app.state, "research_cleanup_scheduler", None
+        )
+        if research_cleanup_scheduler_state is not None:
+            try:
+                research_cleanup_scheduler_state.stop()
+                logger.info(
+                    "Research cleanup scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-055",
+                        f"Error stopping research cleanup scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

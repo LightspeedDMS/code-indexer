@@ -246,3 +246,136 @@ class TestFtsBootstrap:
             assert isinstance(doc["line_end"], int)
             assert doc["line_start"] >= 1
             assert doc["line_end"] >= doc["line_start"]
+
+
+class TestResumePathReanchoring:
+    """Resume must re-anchor stored absolute paths onto the CURRENT walk root.
+
+    Staging bug (langfuse global repo, cow-daemon backend, ~101 refresh
+    failures): a prior interrupted run stored file paths via
+    ``ProgressiveMetadata.set_files_to_index`` as ABSOLUTE strings carrying the
+    NFS *mount* prefix (e.g. ``/mnt/cow-storage/golden-repos/<repo>/...``).
+    On resume the current ``config.codebase_dir`` is the daemon-LOCAL prefix
+    (e.g. ``/home/jsbattig/cow-storage/golden-repos/<repo>``). The old code
+    used the stored absolute path verbatim, so
+    ``file_path.relative_to(config.codebase_dir)`` raised
+    ``ValueError: ... is not in the subpath of ...`` ->
+    "Hash calculation failed" -> "Git-aware resume failed and fallbacks are
+    disabled". The fix re-anchors stored paths onto the current walk root.
+    """
+
+    def test_reanchors_stale_mount_prefix_onto_current_codebase_dir(self) -> None:
+        """A stored absolute path with a stale mount prefix must re-anchor.
+
+        RED: the current code keeps the stale ``/mnt/...`` path, so
+        ``relative_to(codebase_dir)`` raises ValueError. After the fix the
+        returned path lives under the daemon-local codebase_dir.
+        """
+        repo_leaf = "langfuse_Claude_Code"
+        codebase_dir = Path(f"/home/jsbattig/cow-storage/golden-repos/{repo_leaf}")
+        stored_path = f"/mnt/cow-storage/golden-repos/{repo_leaf}/trace.json"
+
+        reanchored = SmartIndexer._reanchor_resume_path(stored_path, codebase_dir)
+
+        # MUST be under the current walk root (the staging failure mode).
+        assert reanchored.relative_to(codebase_dir) == Path("trace.json")
+        assert reanchored == codebase_dir / "trace.json"
+
+    def test_reanchors_nested_file_with_correct_relative_subpath(self) -> None:
+        """A nested file under the stale prefix re-anchors with full subpath."""
+        repo_leaf = "langfuse_Claude_Code"
+        codebase_dir = Path(f"/home/jsbattig/cow-storage/golden-repos/{repo_leaf}")
+        stored_path = f"/mnt/cow-storage/golden-repos/{repo_leaf}/sub/dir/deep.json"
+
+        reanchored = SmartIndexer._reanchor_resume_path(stored_path, codebase_dir)
+
+        assert reanchored.relative_to(codebase_dir) == Path("sub/dir/deep.json")
+
+    def test_relative_stored_path_joins_to_codebase_dir(self) -> None:
+        """A stored RELATIVE path joins to codebase_dir (legacy behavior kept)."""
+        codebase_dir = Path("/home/jsbattig/cow-storage/golden-repos/repo")
+
+        reanchored = SmartIndexer._reanchor_resume_path("sub/x.py", codebase_dir)
+
+        assert reanchored == codebase_dir / "sub" / "x.py"
+
+    def test_absolute_path_already_under_codebase_dir_unchanged(self) -> None:
+        """Normal/local case: an absolute path already under codebase_dir is
+        returned byte-identical (no re-anchoring side effects)."""
+        codebase_dir = Path("/srv/projects/myrepo")
+        stored_path = "/srv/projects/myrepo/pkg/module.py"
+
+        reanchored = SmartIndexer._reanchor_resume_path(stored_path, codebase_dir)
+
+        assert reanchored == Path(stored_path)
+        assert reanchored.relative_to(codebase_dir) == Path("pkg/module.py")
+
+    def test_unrelatable_absolute_path_returns_stored_path_unchanged(self) -> None:
+        """Anti-silent-failure (#13): if a stored absolute path shares NO leaf
+        with the current codebase_dir, it is returned unchanged so the
+        downstream ``.exists()`` filter (and, if it survives, a genuine
+        relative_to error) still surfaces -- never fabricate a wrong mapping."""
+        codebase_dir = Path("/home/jsbattig/cow-storage/golden-repos/repo")
+        stored_path = "/completely/unrelated/elsewhere/file.py"
+
+        reanchored = SmartIndexer._reanchor_resume_path(stored_path, codebase_dir)
+
+        assert reanchored == Path(stored_path)
+
+
+class TestResumeReanchorWiring:
+    """End-to-end proof that _do_resume_interrupted re-anchors stored paths.
+
+    Reproduces the cow-daemon mount-vs-daemon-local split using a real repo
+    plus a symlinked "mount" alias directory. The prior run is simulated by
+    seeding ProgressiveMetadata with absolute paths under the symlink alias;
+    the current run's codebase_dir is the real (daemon-local) repo path.
+    """
+
+    def test_resume_reanchors_stale_stored_paths_under_codebase_dir(
+        self, tmp_path: Path, mock_vector_store: MagicMock
+    ) -> None:
+        # Real repo (daemon-local equivalent) + a symlinked "mount" alias.
+        repo = tmp_path / "real" / "langfuse_repo"
+        repo.mkdir(parents=True)
+        _create_git_repo(repo)
+        (repo / "trace.json").write_text('{"a": 1}\n')
+
+        mount = tmp_path / "mnt"
+        mount.mkdir()
+        mount_alias = mount / "langfuse_repo"
+        mount_alias.symlink_to(repo, target_is_directory=True)
+
+        # Current run walks the real (daemon-local) path.
+        indexer = _make_indexer(repo, tmp_path, mock_vector_store)
+
+        # Prior run stored the file under the stale MOUNT-alias prefix.
+        stale_stored = str(mount_alias / "trace.json")
+        indexer.progressive_metadata.metadata["files_to_index"] = [stale_stored]
+        indexer.progressive_metadata.metadata["total_files_to_index"] = 1
+        indexer.progressive_metadata.metadata["current_file_index"] = 0
+
+        captured: dict = {}
+
+        def _capture(files, **kwargs):
+            captured["files"] = list(files)
+            from code_indexer.indexing.processor import ProcessingStats
+
+            return ProcessingStats()
+
+        with patch.object(
+            indexer, "process_files_high_throughput", side_effect=_capture
+        ):
+            indexer._do_resume_interrupted(
+                batch_size=50,
+                progress_callback=None,
+                git_status={},
+                provider_name="voyage-ai",
+                model_name="voyage-code-3",
+            )
+
+        assert captured.get("files"), "resume passed no files to the processor"
+        for file_path in captured["files"]:
+            # Every file MUST be under the current walk root (no stale prefix).
+            rel = file_path.relative_to(repo)
+            assert rel == Path("trace.json")

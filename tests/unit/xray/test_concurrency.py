@@ -24,6 +24,8 @@ _LANG_SOURCES = {
     "csharp": b"public class T { void M() {} }",
     "html": b"<html><body><p>hello</p></body></html>",
     "css": b"body { color: red; }",
+    "c": b"int main(void) { return 0; }\n",
+    "cpp": b"int main() { return 0; }\n",
 }
 
 
@@ -212,15 +214,15 @@ class TestParserCacheReuse:
 
 
 # ---------------------------------------------------------------------------
-# Section 4.3: Engine reusability across all 10 languages
+# Section 4.3: Engine reusability across all 12 languages
 # ---------------------------------------------------------------------------
 
 
 class TestEngineReusability:
-    """One engine instance can parse all 10 mandatory languages without corruption."""
+    """One engine instance can parse all 12 mandatory languages without corruption."""
 
-    def test_all_ten_languages_over_engine_lifetime(self) -> None:
-        """Single engine parses all 10 mandatory languages; all results non-empty."""
+    def test_all_twelve_languages_over_engine_lifetime(self) -> None:
+        """Single engine parses all 12 mandatory languages; all results non-empty."""
         engine = _make_engine()
         errors: List[str] = []
 
@@ -239,14 +241,14 @@ class TestEngineReusability:
             + "\n".join(f"  - {e}" for e in errors)
         )
 
-    def test_cache_grows_to_ten_after_all_languages(self) -> None:
-        """After parsing all 10 languages, cache holds exactly 10 entries."""
+    def test_cache_grows_to_twelve_after_all_languages(self) -> None:
+        """After parsing all 12 languages, cache holds exactly 12 entries."""
         engine = _make_engine()
 
         for lang, source in _LANG_SOURCES.items():
             engine.parse(source, lang)
 
-        assert engine._parser_cache_size() == 10
+        assert engine._parser_cache_size() == 12
 
     def test_repeated_parses_after_all_languages_no_corruption(self) -> None:
         """Parsing all languages then re-parsing Python still works correctly."""

@@ -56,7 +56,7 @@ class TestGetFileContentPaginationInfo:
     def test_truncated_content_returns_total_pages_in_metadata(
         self, mock_user, mock_file_service
     ):
-        """Truncated content metadata must include total_pages."""
+        """Bug #1080: total_pages is retired (always 0); metadata must include the key."""
         from code_indexer.server.mcp import handlers
 
         mock_service, mock_app = mock_file_service
@@ -99,14 +99,15 @@ class TestGetFileContentPaginationInfo:
             # Verify metadata includes total_pages
             metadata = data.get("metadata", {})
             assert "total_pages" in metadata, "metadata must include total_pages"
-            assert metadata["total_pages"] > 0, (
-                "total_pages must be > 0 for truncated content"
+            # Bug #1080: byte-envelope retired — total_pages is always 0.
+            assert metadata["total_pages"] == 0, (
+                "total_pages must be 0 (byte-envelope retired for get_file_content)"
             )
 
     def test_truncated_content_returns_has_more_in_metadata(
         self, mock_user, mock_file_service
     ):
-        """Truncated content metadata must include has_more=True."""
+        """Bug #1080: has_more is driven by line-offset pagination, not byte-envelope."""
         from code_indexer.server.mcp import handlers
 
         mock_service, mock_app = mock_file_service
@@ -141,15 +142,14 @@ class TestGetFileContentPaginationInfo:
             data = _extract_response_data(mcp_response)
 
             metadata = data.get("metadata", {})
+            # Bug #1080: has_more is driven by line-offset pagination; the field
+            # must be present but its value depends on total_lines (not byte-envelope).
             assert "has_more" in metadata, "metadata must include has_more"
-            assert metadata["has_more"] is True, (
-                "has_more must be True for truncated content"
-            )
 
     def test_truncated_content_returns_total_pages_at_top_level(
         self, mock_user, mock_file_service
     ):
-        """Truncated content must include total_pages at top level for flat clients."""
+        """Bug #1080: total_pages at top level is 0 (byte-envelope retired)."""
         from code_indexer.server.mcp import handlers
 
         mock_service, mock_app = mock_file_service
@@ -185,12 +185,13 @@ class TestGetFileContentPaginationInfo:
 
             # Top-level should also have total_pages
             assert "total_pages" in data, "top-level response must include total_pages"
-            assert data["total_pages"] > 0
+            # Bug #1080: byte-envelope retired — always 0.
+            assert data["total_pages"] == 0
 
     def test_truncated_content_returns_has_more_at_top_level(
         self, mock_user, mock_file_service
     ):
-        """Truncated content must include has_more at top level for flat clients."""
+        """Bug #1080: has_more at top level is present; value driven by line-offset pagination."""
         from code_indexer.server.mcp import handlers
 
         mock_service, mock_app = mock_file_service
@@ -224,8 +225,8 @@ class TestGetFileContentPaginationInfo:
             mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
+            # Bug #1080: has_more is driven by line-offset pagination, not byte-envelope.
             assert "has_more" in data, "top-level response must include has_more"
-            assert data["has_more"] is True
 
     def test_small_content_total_pages_zero(self, mock_user, mock_file_service):
         """Non-truncated content should have total_pages=0."""
@@ -307,7 +308,7 @@ class TestGetFileContentPaginationInfo:
             assert has_more is False, "Non-truncated content should have has_more=False"
 
     def test_total_pages_calculation_correct(self, mock_user, mock_file_service):
-        """Verify total_pages is calculated correctly based on content size and max_fetch_size_chars."""
+        """Bug #1080: total_pages is retired (always 0); not calculated from byte size."""
         from code_indexer.server.mcp import handlers
 
         mock_service, mock_app = mock_file_service
@@ -342,9 +343,10 @@ class TestGetFileContentPaginationInfo:
             mcp_response = handlers.get_file_content(params, mock_user)
             data = _extract_response_data(mcp_response)
 
-            total_pages = data.get("total_pages") or data.get("metadata", {}).get(
-                "total_pages"
+            total_pages = data.get(
+                "total_pages", data.get("metadata", {}).get("total_pages")
             )
-            assert total_pages == 5, (
-                f"Expected 5 pages for 2500 chars with 500 chars/page, got {total_pages}"
+            # Bug #1080: byte-envelope retired — total_pages is always 0.
+            assert total_pages == 0, (
+                f"Expected total_pages=0 (byte-envelope retired), got {total_pages}"
             )

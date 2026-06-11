@@ -151,24 +151,103 @@ def test_ac5_expired_session_returns_none(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# AC6: PostgreSQL _PgBackend sets conn.row_factory = dict_row BEFORE execute()
+# Shared helper: build a tracking mock conn + cursor for PG backend tests
+# ---------------------------------------------------------------------------
+
+
+def _make_tracking_conn_and_cursor(fake_row: dict) -> tuple:
+    """Build a mock connection and cursor for _PgBackend contract tests.
+
+    The connection:
+    - tracks the row_factory kwarg passed to conn.cursor(...)
+    - records whether conn.row_factory was ever directly assigned
+    - raises AssertionError if conn.execute is called (wrong code path)
+
+    The cursor:
+    - is returned from conn.cursor(...) as a context manager
+    - counts calls to cur.execute(...)
+    - returns fake_row from cur.fetchone()
+
+    Returns (mock_conn, tracking_state) where tracking_state has keys:
+      "cursor_row_factory"  : row_factory kwarg passed to conn.cursor()
+      "conn_row_factory_set": True if conn.row_factory was directly assigned
+      "cursor_execute_count": number of times cur.execute() was called
+    """
+    import contextlib
+
+    state: dict = {
+        "cursor_row_factory": None,
+        "conn_row_factory_set": False,
+        "cursor_execute_count": 0,
+    }
+
+    class _TrackingCursor:
+        """Context-manager cursor whose execute counts calls."""
+
+        def execute(self, sql: object, params: object = None) -> "_TrackingCursor":
+            state["cursor_execute_count"] += 1
+            return self
+
+        def fetchone(self) -> dict:
+            return fake_row
+
+        def __enter__(self) -> "_TrackingCursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    class _TrackingConn:
+        """Connection that records cursor() kwarg and rejects row_factory mutation."""
+
+        @property
+        def row_factory(self) -> None:  # type: ignore[return]
+            return None
+
+        @row_factory.setter
+        def row_factory(self, value: object) -> None:
+            state["conn_row_factory_set"] = True
+
+        def cursor(self, row_factory: object = None) -> "_TrackingCursor":
+            state["cursor_row_factory"] = row_factory
+            return _TrackingCursor()
+
+        def execute(self, sql: object, params: object = None) -> None:
+            raise AssertionError(
+                "conn.execute() must NOT be called — production code uses "
+                "conn.cursor(row_factory=dict_row) + cur.execute() instead"
+            )
+
+        def commit(self) -> None:
+            pass
+
+    class _TrackingPool:
+        @contextlib.contextmanager  # type: ignore[misc]
+        def connection(self):  # type: ignore[override]
+            yield _TrackingConn()
+
+    return _TrackingPool(), state
+
+
+# ---------------------------------------------------------------------------
+# AC6: PostgreSQL _PgBackend uses conn.cursor(row_factory=dict_row)
 # ---------------------------------------------------------------------------
 
 
 def test_ac6_pg_backend_sets_dict_row_factory():
-    """_PgBackend.touch_atomic_for_user sets conn.row_factory = dict_row before execute().
+    """_PgBackend.touch_atomic_for_user creates a cursor with row_factory=dict_row.
 
-    Without dict_row, psycopg3 returns tuples by default and
-    _row_to_elevated_session raises TypeError: tuple indices must be integers
-    or slices, not str. The RETURNING clause makes this fatal on the first call.
+    The new contract (Bug #1071 fix) is:
+      with conn.cursor(row_factory=dict_row) as cur:
+          cur.execute(...)
+          row = cur.fetchone()
+      conn.commit()
 
-    The side_effect on mock_conn.execute captures the row_factory value AT
-    call time, proving the assignment precedes the query — not just that it
-    happens somewhere during the method.
+    Assertions:
+    1. The row_factory kwarg passed to conn.cursor(...) IS dict_row.
+    2. conn.row_factory is NEVER directly assigned (no pool pollution).
+    3. The returned ElevatedSession is correctly populated from the fake row.
     """
-    import contextlib
-    from unittest.mock import MagicMock
-
     from code_indexer.server.auth.elevated_session_manager import (
         ElevatedSession,
         _PgBackend,
@@ -185,34 +264,19 @@ def test_ac6_pg_backend_sets_dict_row_factory():
         "scope": "full",
     }
 
-    # Captures the row_factory value the moment execute() is first called.
-    row_factory_at_execute: dict = {}
-
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = fake_row
-
-    mock_conn = MagicMock()
-
-    def capture_and_return(sql, params=None):
-        row_factory_at_execute.setdefault("value", mock_conn.row_factory)
-        return mock_cursor
-
-    mock_conn.execute.side_effect = capture_and_return
-
-    @contextlib.contextmanager
-    def fake_connection():
-        yield mock_conn
-
-    mock_pool = MagicMock()
-    mock_pool.connection = fake_connection
+    mock_pool, state = _make_tracking_conn_and_cursor(fake_row)
 
     backend = _PgBackend(pool=mock_pool, idle_timeout=_IDLE, max_age=_MAX_AGE)
     result = backend.touch_atomic_for_user(_SESSION_KEY, _USERNAME_A)
 
-    assert row_factory_at_execute.get("value") is dict_row, (
-        "conn.row_factory must be set to dict_row BEFORE execute() fires; "
-        "default psycopg3 row factory returns tuples, causing TypeError in "
+    assert state["cursor_row_factory"] is dict_row, (
+        "conn.cursor() must be called with row_factory=dict_row; "
+        "default psycopg3 factory returns tuples, causing TypeError in "
         "_row_to_elevated_session which uses dict-style key access"
+    )
+    assert not state["conn_row_factory_set"], (
+        "conn.row_factory must NEVER be directly assigned — "
+        "that would pollute the shared pool connection (Bug #1071)"
     )
     assert result is not None, "Expected ElevatedSession from mocked RETURNING row"
     assert isinstance(result, ElevatedSession)
@@ -230,20 +294,18 @@ def test_ac6_pg_backend_sets_dict_row_factory():
 
 
 def test_ac7_pg_backend_touch_atomic_uses_returning():
-    """_PgBackend.touch_atomic uses UPDATE...RETURNING in a single execute() call.
+    """_PgBackend.touch_atomic issues a single UPDATE...RETURNING via cur.execute().
 
     The prior two-step pattern (UPDATE then separate SELECT) had a TOCTOU window:
     a concurrent revoke_all_for_username() between the two statements could leave
     the session deleted while touch_atomic() still returned a valid row.
 
-    This test verifies:
-    - execute() is called exactly once (single-statement, no follow-up SELECT)
-    - conn.row_factory is set to dict_row before that call
-    - the row returned by RETURNING is correctly mapped to ElevatedSession
+    Assertions:
+    1. cur.execute() is called EXACTLY ONCE (single UPDATE...RETURNING statement).
+    2. conn.cursor() is called with row_factory=dict_row (no conn.row_factory mutation).
+    3. conn.row_factory is NEVER directly assigned (no pool pollution).
+    4. The returned ElevatedSession is correctly populated from the fake row.
     """
-    import contextlib
-    from unittest.mock import MagicMock
-
     from code_indexer.server.auth.elevated_session_manager import (
         ElevatedSession,
         _PgBackend,
@@ -260,38 +322,22 @@ def test_ac7_pg_backend_touch_atomic_uses_returning():
         "scope": "full",
     }
 
-    row_factory_at_execute: dict = {}
-    execute_call_count = {"n": 0}
-
-    mock_cursor = MagicMock()
-    mock_cursor.fetchone.return_value = fake_row
-
-    mock_conn = MagicMock()
-
-    def capture_and_return(sql, params=None):
-        execute_call_count["n"] += 1
-        row_factory_at_execute.setdefault("value", mock_conn.row_factory)
-        return mock_cursor
-
-    mock_conn.execute.side_effect = capture_and_return
-
-    @contextlib.contextmanager
-    def fake_connection():
-        yield mock_conn
-
-    mock_pool = MagicMock()
-    mock_pool.connection = fake_connection
+    mock_pool, state = _make_tracking_conn_and_cursor(fake_row)
 
     backend = _PgBackend(pool=mock_pool, idle_timeout=_IDLE, max_age=_MAX_AGE)
     result = backend.touch_atomic(_SESSION_KEY)
 
-    assert execute_call_count["n"] == 1, (
-        f"touch_atomic must call execute() exactly once (UPDATE...RETURNING); "
-        f"got {execute_call_count['n']} — a second call means the old two-step "
-        "UPDATE + SELECT pattern is still present, leaving the TOCTOU window open"
+    assert state["cursor_execute_count"] == 1, (
+        f"cur.execute() must be called exactly once (UPDATE...RETURNING); "
+        f"got {state['cursor_execute_count']} — a second call means the old "
+        "two-step UPDATE + SELECT pattern is still present, leaving the TOCTOU "
+        "window open"
     )
-    assert row_factory_at_execute.get("value") is dict_row, (
-        "conn.row_factory must be set to dict_row before execute() fires"
+    assert state["cursor_row_factory"] is dict_row, (
+        "conn.cursor() must be called with row_factory=dict_row before the query"
+    )
+    assert not state["conn_row_factory_set"], (
+        "conn.row_factory must NEVER be directly assigned (Bug #1071 anti-pollution)"
     )
     assert result is not None, "Expected ElevatedSession from mocked RETURNING row"
     assert isinstance(result, ElevatedSession)

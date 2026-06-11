@@ -86,6 +86,18 @@ class SyncJobsPostgresBackend:
     @staticmethod
     def _row_to_dict(row) -> Dict[str, Any]:
         """Convert a psycopg row (sequence) to a sync job dictionary."""
+
+        # Handle JSONB columns: psycopg3 returns dicts/lists, but strings from migration.
+        # Also avoids the falsy-guard bug where `if val` coerces {} / [] to None.
+        def _json_col(val: Any) -> Any:
+            if val is None:
+                return None
+            if isinstance(val, (dict, list)):
+                return val  # Already parsed by psycopg3
+            if isinstance(val, str):
+                return json.loads(val)
+            return val
+
         return sanitize_row(
             {
                 "job_id": row[0],
@@ -99,12 +111,12 @@ class SyncJobsPostgresBackend:
                 "repository_url": row[8],
                 "progress": row[9],
                 "error_message": row[10],
-                "phases": json.loads(row[11]) if row[11] else None,
-                "phase_weights": json.loads(row[12]) if row[12] else None,
+                "phases": _json_col(row[11]),
+                "phase_weights": _json_col(row[12]),
                 "current_phase": row[13],
-                "progress_history": json.loads(row[14]) if row[14] else None,
-                "recovery_checkpoint": json.loads(row[15]) if row[15] else None,
-                "analytics_data": json.loads(row[16]) if row[16] else None,
+                "progress_history": _json_col(row[14]),
+                "recovery_checkpoint": _json_col(row[15]),
+                "analytics_data": _json_col(row[16]),
             }
         )
 
@@ -231,20 +243,27 @@ class SyncJobsPostgresBackend:
         return count
 
     def cleanup_old_completed(self, cutoff_iso: str) -> int:
-        """Delete completed sync jobs older than cutoff_iso.
+        """Delete completed or failed sync jobs older than cutoff_iso.
+
+        Bug #1068: must filter by completed_at (not created_at) and must include
+        both 'completed' and 'failed' statuses to match the SQLite retention path.
 
         Args:
-            cutoff_iso: ISO 8601 timestamp; completed jobs before this are deleted.
+            cutoff_iso: ISO 8601 timestamp; jobs whose completed_at is before this
+                        are deleted (provided their status is 'completed' or 'failed').
 
         Returns:
             Number of rows deleted.
         """
         with self._pool.connection() as conn:
-            result = conn.execute(
-                "DELETE FROM sync_jobs WHERE status = 'completed' AND created_at < %s",
-                (cutoff_iso,),
-            )
-            deleted = result.rowcount if result.rowcount else 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM sync_jobs"
+                    " WHERE status IN ('completed', 'failed')"
+                    " AND completed_at < %s",
+                    (cutoff_iso,),
+                )
+                deleted: int = cur.rowcount if cur.rowcount else 0
             conn.commit()
         return deleted
 

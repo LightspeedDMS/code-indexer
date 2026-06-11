@@ -171,7 +171,8 @@ class DatabaseSchema:
             description TEXT,
             created_at TEXT,
             imported_at TEXT,
-            is_imported BOOLEAN DEFAULT FALSE
+            is_imported BOOLEAN DEFAULT FALSE,
+            private_key TEXT
         )
     """
 
@@ -754,6 +755,9 @@ class DatabaseSchema:
             # Story #1032 AC12: actor_username column for audit trail
             # (mirrors PostgreSQL migration 026).
             self._migrate_background_jobs_actor_username(conn)
+            # Bug #1072 Chunk 1: private_key column for cluster-aware SSH key storage
+            # (mirrors PostgreSQL migration 027).
+            self._migrate_ssh_keys_private_key(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -806,6 +810,24 @@ class DatabaseSchema:
             conn.execute("ALTER TABLE background_jobs ADD COLUMN actor_username TEXT")
             conn.commit()
             logger.info("Migrated background_jobs schema: added actor_username column")
+
+    def _migrate_ssh_keys_private_key(self, conn: sqlite3.Connection) -> None:
+        """
+        Add private_key column to ssh_keys table (Bug #1072 Chunk 1).
+
+        Stores encrypted private key content for cluster-aware SSH key distribution.
+        Existing rows get NULL (file-path-only mode — no stored content).
+
+        Idempotent: checks for existing column via PRAGMA table_info before adding.
+        Backward-compatible: nullable column, no NOT NULL constraint.
+        """
+        cursor = conn.execute("PRAGMA table_info(ssh_keys)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "private_key" not in existing_columns:
+            conn.execute("ALTER TABLE ssh_keys ADD COLUMN private_key TEXT")
+            conn.commit()
+            logger.info("Migrated ssh_keys schema: added private_key column")
 
     def _migrate_user_git_credentials(self, conn: sqlite3.Connection) -> None:
         """

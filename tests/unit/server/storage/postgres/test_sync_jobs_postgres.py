@@ -511,6 +511,109 @@ class TestClose:
 
 
 # ---------------------------------------------------------------------------
+# cleanup_old_completed — Bug #1068 column/status consistency
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupOldCompleted:
+    """
+    Bug #1068: cleanup_old_completed must DELETE by completed_at (not created_at)
+    and must filter status IN ('completed', 'failed') to match SQLite behaviour.
+    """
+
+    def test_cleanup_old_completed_uses_completed_at_column(self):
+        """
+        Given a cutoff ISO timestamp
+        When cleanup_old_completed() is called
+        Then the DELETE SQL references completed_at, NOT created_at.
+
+        Rationale: retention intent is "delete jobs whose COMPLETION is older
+        than N hours". A job created long ago but completed recently must be
+        KEPT until its completion crosses the cutoff.
+        """
+        from code_indexer.server.storage.postgres.sync_jobs_backend import (
+            SyncJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=2)
+        backend = SyncJobsPostgresBackend(pool)
+
+        backend.cleanup_old_completed(cutoff_iso="2026-01-01T00:00:00+00:00")
+
+        cur.execute.assert_called_once()
+        sql, params = cur.execute.call_args[0]
+        assert "completed_at" in sql, (
+            "DELETE must filter by completed_at, not created_at (Bug #1068)."
+        )
+        assert "created_at" not in sql, (
+            "DELETE must NOT filter by created_at — that is the wrong column (Bug #1068)."
+        )
+
+    def test_cleanup_old_completed_uses_failed_status_filter(self):
+        """
+        Given a cutoff ISO timestamp
+        When cleanup_old_completed() is called
+        Then the SQL includes both 'completed' AND 'failed' in the status filter.
+
+        Rationale: SQLite path filters status IN ('completed', 'failed').
+        PG must match to delete the same rows across both backends.
+        """
+        from code_indexer.server.storage.postgres.sync_jobs_backend import (
+            SyncJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=1)
+        backend = SyncJobsPostgresBackend(pool)
+
+        backend.cleanup_old_completed(cutoff_iso="2026-01-01T00:00:00+00:00")
+
+        cur.execute.assert_called_once()
+        sql, params = cur.execute.call_args[0]
+        assert "failed" in sql, (
+            "DELETE must include 'failed' in status filter to match SQLite (Bug #1068)."
+        )
+        assert "completed" in sql, (
+            "DELETE must include 'completed' in status filter (Bug #1068)."
+        )
+
+    def test_cleanup_old_completed_returns_deleted_count(self):
+        """
+        cleanup_old_completed returns the rowcount from the DELETE statement.
+        """
+        from code_indexer.server.storage.postgres.sync_jobs_backend import (
+            SyncJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=3)
+        backend = SyncJobsPostgresBackend(pool)
+
+        result = backend.cleanup_old_completed(cutoff_iso="2026-01-01T00:00:00+00:00")
+
+        assert result == 3, f"Expected 3 rows deleted, got {result}."
+
+    def test_cleanup_old_completed_passes_cutoff_as_param(self):
+        """
+        The cutoff ISO string must be passed as a query parameter, not
+        interpolated directly into the SQL string (SQL injection safety).
+        """
+        from code_indexer.server.storage.postgres.sync_jobs_backend import (
+            SyncJobsPostgresBackend,
+        )
+
+        cutoff = "2026-03-15T12:00:00+00:00"
+        pool, conn, cur = _make_pool(rowcount=0)
+        backend = SyncJobsPostgresBackend(pool)
+
+        backend.cleanup_old_completed(cutoff_iso=cutoff)
+
+        cur.execute.assert_called_once()
+        _, params = cur.execute.call_args[0]
+        assert cutoff in params, (
+            f"cutoff_iso '{cutoff}' must appear in query params, not interpolated into SQL."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Protocol conformance
 # ---------------------------------------------------------------------------
 

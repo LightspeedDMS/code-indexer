@@ -280,7 +280,11 @@ class TestOntapCloneBackendCreateClone:
         from code_indexer.server.storage.shared.clone_backend import OntapCloneBackend
 
         client = self._make_mock_client()
-        backend = OntapCloneBackend(flexclone_client=client, mount_point="/mnt/fsx")
+        backend = OntapCloneBackend(
+            flexclone_client=client,
+            mount_point="/mnt/fsx",
+            visibility_waiter=_noop_visibility_waiter,
+        )
 
         backend.create_clone("/ignored/source", "cidx", "cidx_clone_myrepo_1700000000")
 
@@ -291,7 +295,11 @@ class TestOntapCloneBackendCreateClone:
         from code_indexer.server.storage.shared.clone_backend import OntapCloneBackend
 
         client = self._make_mock_client()
-        backend = OntapCloneBackend(flexclone_client=client, mount_point="/mnt/fsx")
+        backend = OntapCloneBackend(
+            flexclone_client=client,
+            mount_point="/mnt/fsx",
+            visibility_waiter=_noop_visibility_waiter,
+        )
 
         backend.create_clone("/src", "cidx", "my-clone")
 
@@ -303,7 +311,11 @@ class TestOntapCloneBackendCreateClone:
         from code_indexer.server.storage.shared.clone_backend import OntapCloneBackend
 
         client = self._make_mock_client()
-        backend = OntapCloneBackend(flexclone_client=client, mount_point="/mnt/fsx")
+        backend = OntapCloneBackend(
+            flexclone_client=client,
+            mount_point="/mnt/fsx",
+            visibility_waiter=_noop_visibility_waiter,
+        )
 
         result = backend.create_clone("/src", "cidx", "my-clone")
 
@@ -527,10 +539,24 @@ def _make_cow_config(timeout_seconds: int = 30):
     )
 
 
+def _noop_visibility_waiter(_path: str) -> None:
+    """No-op NFS visibility waiter for tests that assert HTTP/path behaviour.
+
+    The real read-after-create barrier (Bug #1084) polls os.path.isdir on the
+    returned dest; these tests use synthetic dest paths that never exist on
+    disk, so a no-op waiter avoids the bounded real poll. The barrier itself is
+    covered by tests/unit/server/storage/shared/test_nfs_visibility_bug1084.py.
+    """
+    return None
+
+
 def _make_cow_backend(timeout_seconds: int = 30):
     from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
 
-    return CowDaemonBackend(config=_make_cow_config(timeout_seconds=timeout_seconds))
+    return CowDaemonBackend(
+        config=_make_cow_config(timeout_seconds=timeout_seconds),
+        visibility_waiter=_noop_visibility_waiter,
+    )
 
 
 def _mock_requests_module(post_resp=None, get_resp=None, delete_resp=None):
@@ -554,27 +580,46 @@ def _mock_requests_module(post_resp=None, get_resp=None, delete_resp=None):
 
 
 class TestCowDaemonBackendCreateClone:
-    """Tests for CowDaemonBackend.create_clone() HTTP + poll loop."""
+    """Tests for CowDaemonBackend.create_clone() canonical layout (Bug #1084).
 
-    def test_create_clone_posts_to_clones_endpoint(self):
-        """create_clone POSTs to /api/v1/clones with source, namespace, name."""
+    create_clone now routes versioned snapshots through the canonical
+    ``{mount}/.versioned/{ns}/{name}`` layout (delegates to create_clone_at_path).
+    """
+
+    def test_create_clone_posts_canonical_dest_path(self):
+        """create_clone POSTs a dest_path under {mount}/.versioned/{ns}/{name}."""
         backend = _make_cow_backend()
         post_resp = _make_response(202, {"job_id": "job-123"})
-        poll_resp = _make_response(
-            200, {"status": "completed", "clone_path": "ns/name"}
-        )
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "x"})
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone("/src/repo", "ns", "name")
+            backend.create_clone("/src/repo", "ns", "v_123")
 
         mock_req.post.assert_called_once()
         call_kwargs = mock_req.post.call_args
         assert "/api/v1/clones" in call_kwargs[0][0]
         body = call_kwargs[1]["json"]
         assert body["source_path"] == "/src/repo"
+        # Canonical dest: {mount}/.versioned/{ns}/{name}
+        assert body["dest_path"] == "/mnt/nfs/cidx/.versioned/ns/v_123"
+        # daemon identity derived from dest parent/name (ns, v_123)
         assert body["namespace"] == "ns"
-        assert body["name"] == "name"
+        assert body["name"] == "v_123"
+
+    def test_create_clone_returns_canonical_mount_path(self):
+        """create_clone returns the canonical mount-point path (not the daemon clone_path)."""
+        backend = _make_cow_backend()
+        post_resp = _make_response(202, {"job_id": "j"})
+        done_resp = _make_response(
+            200, {"status": "completed", "clone_path": "ignored"}
+        )
+        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=done_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            result = backend.create_clone("/src", "myns", "v_777")
+
+        assert result == "/mnt/nfs/cidx/.versioned/myns/v_777"
 
     def test_create_clone_sends_bearer_auth(self):
         """create_clone includes Authorization Bearer header on POST."""
@@ -584,7 +629,7 @@ class TestCowDaemonBackendCreateClone:
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone("/src", "ns", "c")
+            backend.create_clone("/src", "ns", "v_1")
 
         headers = mock_req.post.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer test-api-key"
@@ -602,24 +647,10 @@ class TestCowDaemonBackendCreateClone:
 
         with patch.dict(sys.modules, {"requests": mock_req}):
             with patch("time.sleep"):
-                result = backend.create_clone("/src", "ns", "done")
+                result = backend.create_clone("/src", "ns", "v_99")
 
         assert mock_req.get.call_count == 3
-        assert result == "/mnt/nfs/cidx/ns/done"
-
-    def test_create_clone_returns_mount_point_plus_clone_path(self):
-        """create_clone returns mount_point/clone_path from completed job."""
-        backend = _make_cow_backend()
-        post_resp = _make_response(202, {"job_id": "j"})
-        done_resp = _make_response(
-            200, {"status": "completed", "clone_path": "myns/my-clone"}
-        )
-        mock_req = _mock_requests_module(post_resp=post_resp, get_resp=done_resp)
-
-        with patch.dict(sys.modules, {"requests": mock_req}):
-            result = backend.create_clone("/src", "myns", "my-clone")
-
-        assert result == "/mnt/nfs/cidx/myns/my-clone"
+        assert result == "/mnt/nfs/cidx/.versioned/ns/v_99"
 
     def test_create_clone_raises_runtime_error_on_failed_job(self):
         """create_clone raises RuntimeError when job status is 'failed'."""
@@ -644,41 +675,40 @@ class TestCowDaemonBackendCreateClone:
                 backend.create_clone("/src", "ns", "clone")
 
     def test_create_clone_sanitizes_namespace_with_dots(self):
-        """Story #1034: alias with dots must be sanitized before sending to daemon
-        (daemon _validate_identifier rejects dots in namespace/name)."""
+        """Bug #1084: dotted alias sanitized (dots->underscores) in the canonical dest."""
         backend = _make_cow_backend()
         post_resp = _make_response(202, {"job_id": "job-san"})
-        poll_resp = _make_response(
-            200, {"status": "completed", "clone_path": "alias_with_dots/v_123"}
-        )
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "x"})
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
-            backend.create_clone("/src/repo", "alias.with.dots", "v_123")
+            result = backend.create_clone("/src/repo", "alias.with.dots", "v_123")
 
         body = mock_req.post.call_args[1]["json"]
+        # Canonical dest carries the sanitized namespace under .versioned/.
+        assert body["dest_path"] == "/mnt/nfs/cidx/.versioned/alias_with_dots/v_123"
         assert body["namespace"] == "alias_with_dots"
         assert body["name"] == "v_123"
+        assert result == "/mnt/nfs/cidx/.versioned/alias_with_dots/v_123"
 
     def test_create_clone_sanitizes_name_with_dots(self):
-        """Story #1034: name with dots must be sanitized before sending to daemon."""
+        """Bug #1084: dotted name sanitized (dots->underscores) in the canonical dest."""
         backend = _make_cow_backend()
         post_resp = _make_response(202, {"job_id": "job-san2"})
-        poll_resp = _make_response(
-            200, {"status": "completed", "clone_path": "ns/v_1_2_3"}
-        )
+        poll_resp = _make_response(200, {"status": "completed", "clone_path": "x"})
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
         with patch.dict(sys.modules, {"requests": mock_req}):
             backend.create_clone("/src/repo", "ns", "v_1.2.3")
 
         body = mock_req.post.call_args[1]["json"]
+        assert body["dest_path"] == "/mnt/nfs/cidx/.versioned/ns/v_1_2_3"
         assert body["namespace"] == "ns"
         assert body["name"] == "v_1_2_3"
 
     def test_create_clone_translates_daemon_path_when_storage_path_set(self):
-        """Story #1034: when daemon_storage_path is set, daemon absolute clone_path is
-        translated back to CIDX mount-point view, not double-prefixed."""
+        """Bug #1084: canonical dest is translated to daemon-local form when
+        daemon_storage_path is set; returned path is the canonical CIDX mount view."""
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
         from code_indexer.server.utils.config_manager import CowDaemonConfig
 
@@ -690,27 +720,32 @@ class TestCowDaemonBackendCreateClone:
             timeout_seconds=30,
             daemon_storage_path="/home/jsbattig/cow-storage",
         )
-        backend = CowDaemonBackend(config=config)
+        backend = CowDaemonBackend(
+            config=config, visibility_waiter=_noop_visibility_waiter
+        )
 
         post_resp = _make_response(202, {"job_id": "job-tr"})
-        # Daemon returns clone_path as absolute daemon-local path (without leading slash)
         poll_resp = _make_response(
-            200,
-            {
-                "status": "completed",
-                "clone_path": "home/jsbattig/cow-storage/langfuse_Claude_Code_seba_battig/v_123",
-            },
+            200, {"status": "completed", "clone_path": "ignored"}
         )
         mock_req = _mock_requests_module(post_resp=post_resp, get_resp=poll_resp)
 
+        # Source is the base clone under the mount (real refresh flow); when
+        # daemon_storage_path is set, BOTH source and dest are translated to the
+        # daemon-local storage path.
+        source = "/mnt/cow-storage/langfuse_alias"
         with patch.dict(sys.modules, {"requests": mock_req}):
-            result = backend.create_clone("/src/repo", "langfuse.alias", "v_123")
+            result = backend.create_clone(source, "langfuse.alias", "v_123")
 
-        # Should be /mnt/cow-storage/langfuse_Claude_Code_seba_battig/v_123,
-        # NOT /mnt/cow-storage/home/jsbattig/cow-storage/...
-        assert result == "/mnt/cow-storage/langfuse_Claude_Code_seba_battig/v_123"
-        # namespace must be sanitized in the POST body
+        # Returned path is the canonical CIDX mount-point view.
+        assert result == "/mnt/cow-storage/.versioned/langfuse_alias/v_123"
         body = mock_req.post.call_args[1]["json"]
+        # source + dest translated to daemon-local storage path, dest still canonical.
+        assert body["source_path"] == "/home/jsbattig/cow-storage/langfuse_alias"
+        assert (
+            body["dest_path"]
+            == "/home/jsbattig/cow-storage/.versioned/langfuse_alias/v_123"
+        )
         assert body["namespace"] == "langfuse_alias"
 
 
@@ -769,6 +804,35 @@ class TestCowDaemonBackendDeleteClone:
         headers = mock_req.delete.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer test-api-key"
 
+    def test_delete_clone_canonical_path_skips_versioned_segment(self):
+        """Bug #1084: canonical {mount}/.versioned/{ns}/v_* derives (ns, v_*),
+        skipping the leading .versioned segment so the daemon DELETE targets
+        the right clone identity."""
+        backend = _make_cow_backend()
+        del_resp = _make_response(204)
+        mock_req = _mock_requests_module(delete_resp=del_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            result = backend.delete_clone(
+                "/mnt/nfs/cidx/.versioned/my_repo/v_1700000000"
+            )
+
+        url = mock_req.delete.call_args[0][0]
+        assert url.endswith("/api/v1/clones/my_repo/v_1700000000")
+        assert result is True
+
+    def test_delete_clone_legacy_path_parses_ns_name(self):
+        """Bug #1084: legacy {mount}/{ns}/v_* (no .versioned) still parses (ns, v_*)."""
+        backend = _make_cow_backend()
+        del_resp = _make_response(204)
+        mock_req = _mock_requests_module(delete_resp=del_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.delete_clone("/mnt/nfs/cidx/legacy_ns/v_1699999999")
+
+        url = mock_req.delete.call_args[0][0]
+        assert url.endswith("/api/v1/clones/legacy_ns/v_1699999999")
+
 
 class TestCowDaemonBackendListClones:
     """Tests for CowDaemonBackend.list_clones()."""
@@ -789,6 +853,18 @@ class TestCowDaemonBackendListClones:
         assert "/api/v1/clones" in call_args[0][0]
         assert call_args[1]["params"]["namespace"] == "ns"
         assert result == data
+
+    def test_list_clones_sanitizes_dotted_namespace(self):
+        """Bug #1084: list_clones sanitizes dots->underscores (symmetry with create/delete)."""
+        backend = _make_cow_backend()
+        get_resp = _make_response(200, [])
+        get_resp.json.return_value = []
+        mock_req = _mock_requests_module(get_resp=get_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.list_clones("langfuse.alias.x")
+
+        assert mock_req.get.call_args[1]["params"]["namespace"] == "langfuse_alias_x"
 
     def test_list_clones_sends_bearer_auth(self):
         """list_clones includes Authorization Bearer header."""
@@ -852,6 +928,18 @@ class TestCowDaemonBackendCloneExists:
 
         url = mock_req.get.call_args[0][0]
         assert "myns/mycl" in url
+
+    def test_clone_exists_sanitizes_dotted_identifiers(self):
+        """Bug #1084: clone_exists sanitizes dots->underscores (symmetry with create/delete)."""
+        backend = _make_cow_backend()
+        get_resp = _make_response(200)
+        mock_req = _mock_requests_module(get_resp=get_resp)
+
+        with patch.dict(sys.modules, {"requests": mock_req}):
+            backend.clone_exists("ns.with.dots", "v_1.2")
+
+        url = mock_req.get.call_args[0][0]
+        assert url.endswith("/api/v1/clones/ns_with_dots/v_1_2")
 
 
 # ---------------------------------------------------------------------------
@@ -1295,7 +1383,9 @@ class TestCowDaemonBackendPathTranslation:
         from code_indexer.server.storage.shared.clone_backend import CowDaemonBackend
 
         config = self._make_cow_config_with_translation()
-        backend = CowDaemonBackend(config=config)
+        backend = CowDaemonBackend(
+            config=config, visibility_waiter=_noop_visibility_waiter
+        )
 
         post_resp = _make_response(202, {"job_id": "job-translate"})
         poll_resp = _make_response(200, {"status": "completed", "clone_path": "ns/cl"})

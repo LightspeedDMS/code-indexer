@@ -214,37 +214,44 @@ class TestUsernameDefaultAnonymous:
 
 
 class TestWriterLoopNodeId:
-    """Test that _writer_loop forwards node_id to every upsert_bucket call."""
+    """Test that the batched writer forwards node_id to upsert_buckets_batch.
 
-    def test_writer_loop_passes_node_id_to_upsert(self, tmp_path):
-        """When _node_id is set, each upsert_bucket call must receive that node_id."""
+    Story #1083: the writer now drains queued events and writes them via a single
+    upsert_buckets_batch(events, node_id=...) call instead of per-event
+    upsert_bucket — so node_id is forwarded once per batch.
+    """
+
+    def test_writer_loop_passes_node_id_to_batch_upsert(self, tmp_path):
+        """When _node_id is set, the batched write must receive that node_id."""
         from unittest.mock import MagicMock
         from code_indexer.server.services.api_metrics_service import ApiMetricsService
 
         db_file = str(tmp_path / "test_metrics.db")
 
-        # Build a mock backend that records every upsert_bucket invocation
+        # Build a mock backend that records every upsert_buckets_batch invocation
         mock_backend = MagicMock()
-        mock_backend.upsert_bucket = MagicMock()
+        mock_backend.upsert_buckets_batch = MagicMock()
 
         service = ApiMetricsService()
         service.initialize(
             db_file, storage_backend=mock_backend, node_id="test-node-42"
         )
+        try:
+            service.increment_semantic_search(username="alice")
 
-        service.increment_semantic_search(username="alice")
-
-        # Wait for the background writer to drain the queue
-        assert _poll_until(lambda: mock_backend.upsert_bucket.called), (
-            "upsert_bucket must be called within timeout"
-        )
-
-        # Every upsert_bucket call for this metric must carry node_id="test-node-42"
-        for actual_call in mock_backend.upsert_bucket.call_args_list:
-            _, kwargs = actual_call
-            assert kwargs.get("node_id") == "test-node-42", (
-                f"Expected node_id='test-node-42' but got {kwargs!r}"
+            # Wait for the background writer to drain the queue
+            assert _poll_until(lambda: mock_backend.upsert_buckets_batch.called), (
+                "upsert_buckets_batch must be called within timeout"
             )
+
+            # Every batched write must carry node_id="test-node-42"
+            for actual_call in mock_backend.upsert_buckets_batch.call_args_list:
+                _, kwargs = actual_call
+                assert kwargs.get("node_id") == "test-node-42", (
+                    f"Expected node_id='test-node-42' but got {kwargs!r}"
+                )
+        finally:
+            service.stop_writer()
 
 
 class TestGetMetricsBackwardCompat:

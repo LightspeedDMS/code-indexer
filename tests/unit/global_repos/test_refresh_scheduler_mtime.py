@@ -63,6 +63,26 @@ def mock_snapshot_manager(temp_golden_repos_dir):
         return str(versioned_path)
 
     mgr.create_snapshot.side_effect = _create_snapshot
+
+    # Bug #1084 Phase A7: _has_local_changes now uses the discovery API. Mirror a
+    # real local-backed VersionedSnapshotManager by globbing the temp .versioned
+    # dirs these tests create, returning [(path, ts), ...] sorted ascending.
+    def _list_snapshots(alias):
+        repo_name = alias.removesuffix("-global")
+        ns_dir = Path(temp_golden_repos_dir) / ".versioned" / repo_name
+        if not ns_dir.exists():
+            return []
+        out = []
+        for d in ns_dir.iterdir():
+            if d.is_dir() and d.name.startswith("v_"):
+                try:
+                    out.append((str(d), int(d.name[2:])))
+                except (ValueError, IndexError):
+                    continue
+        out.sort(key=lambda x: x[1])
+        return out
+
+    mgr.list_snapshots.side_effect = _list_snapshots
     return mgr
 
 

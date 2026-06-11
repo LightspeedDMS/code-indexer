@@ -3,6 +3,7 @@
 import logging
 import math
 import os
+import threading
 import time
 from http import HTTPStatus
 from typing import List, Dict, Any, Optional
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from ..config import VoyageAIConfig
 from .embedding_provider import EmbeddingProvider, EmbeddingResult, BatchEmbeddingResult
+from .provider_backoff import is_rate_limited
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +34,9 @@ class SyncClientFactory(Protocol):
         self,
         *,
         transport: Optional[httpx.BaseTransport] = None,
+        pooled: bool = False,
         **kwargs: Any,
-    ) -> httpx.Client: ...
+    ) -> Any: ...
 
 
 # Timeout (seconds) used by the lightweight health probe (Story #619 HIGH-2)
@@ -54,6 +57,56 @@ _VOYAGE_MODEL_DIMENSIONS: Dict[str, int] = {
     "voyage-code-2": 1536,
     "voyage-law-2": 1024,
 }
+
+
+# Story #1082: the Voyage model-spec YAML is a STATIC package asset (zero drift).
+# Parse it ONCE per process instead of re-opening + re-parsing it on every
+# VoyageAIClient construction (which happens per query on the server hot path).
+# NO TTL: the source is an unchanging packaged file, deploy-invalidated only.
+_MODEL_SPECS_FALLBACK: Dict[str, Any] = {
+    "voyage_models": {
+        "voyage-code-3": {"token_limit": 120000},
+        "voyage-large-2": {"token_limit": 120000},
+        "voyage-2": {"token_limit": 320000},
+    }
+}
+
+_model_specs_cache: Optional[Dict[str, Any]] = None
+_model_specs_lock = threading.Lock()
+
+
+def _get_voyage_model_specs(console: Optional[Console] = None) -> Dict[str, Any]:
+    """Return the process-wide parsed Voyage model specs (parsed once).
+
+    Thread-safe single-flight: the first caller parses the static YAML under a
+    lock; all subsequent callers reuse the same parsed dict. On parse failure
+    the hardcoded fallback specs are cached so the cost is still paid once.
+    """
+    global _model_specs_cache
+    if _model_specs_cache is not None:
+        return _model_specs_cache
+
+    with _model_specs_lock:
+        if _model_specs_cache is not None:
+            return _model_specs_cache
+        try:
+            module_dir = Path(__file__).parent.parent
+            yaml_path = module_dir / "data" / "voyage_models.yaml"
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                _model_specs_cache = yaml.safe_load(f)
+        except Exception as e:
+            (console or Console()).print(
+                f"[yellow]Warning: Could not load model specs: {e}[/yellow]"
+            )
+            _model_specs_cache = _MODEL_SPECS_FALLBACK
+        return _model_specs_cache
+
+
+def _reset_model_specs_cache_for_tests() -> None:
+    """Clear the process-level model-spec memo (test-only hook)."""
+    global _model_specs_cache
+    with _model_specs_lock:
+        _model_specs_cache = None
 
 
 class VoyageAIClient(EmbeddingProvider):
@@ -133,27 +186,14 @@ class VoyageAIClient(EmbeddingProvider):
                 )
 
     def _load_model_specs(self):
-        """Load model specifications from YAML file."""
-        try:
-            # Get path to YAML file relative to this module
-            module_dir = Path(__file__).parent.parent
-            yaml_path = module_dir / "data" / "voyage_models.yaml"
+        """Bind this client to the process-wide parsed model specs.
 
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                self.model_specs = yaml.safe_load(f)
-
-        except Exception as e:
-            # Fallback to basic specs if YAML loading fails
-            self.console.print(
-                f"[yellow]Warning: Could not load model specs: {e}[/yellow]"
-            )
-            self.model_specs = {
-                "voyage_models": {
-                    "voyage-code-3": {"token_limit": 120000},
-                    "voyage-large-2": {"token_limit": 120000},
-                    "voyage-2": {"token_limit": 320000},
-                }
-            }
+        Story #1082: the static model-spec YAML is parsed ONCE per process by
+        ``_get_voyage_model_specs`` and shared across all clients. This removes
+        the per-construction (per-query) YAML open + ``yaml.safe_load`` from the
+        server hot path while preserving identical behavior and the fallback.
+        """
+        self.model_specs = _get_voyage_model_specs(self.console)
 
     def _count_tokens_accurately(self, text: str) -> int:
         """Count tokens accurately using VoyageAI's embedded tokenizer."""
@@ -231,9 +271,23 @@ class VoyageAIClient(EmbeddingProvider):
             return False
 
     def _make_sync_request(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        retry: bool = True,
     ) -> Dict[str, Any]:
-        """Make synchronous request to VoyageAI API."""
+        """Make synchronous request to VoyageAI API.
+
+        Args:
+            texts: Text strings to embed.
+            model: Override model name; defaults to self.config.model.
+            retry: When True (default, INDEXING path), retries on 500/network errors
+                with exponential back-off and time.sleep inside this method.
+                When False (QUERY path), makes exactly ONE HTTP attempt and raises
+                immediately on any error — sleep and retry are handled OUTSIDE the
+                governor slot by execute_with_backoff in the caller.
+        """
         from .provider_health_monitor import ProviderHealthMonitor
 
         model_name = model or self.config.model
@@ -241,72 +295,92 @@ class VoyageAIClient(EmbeddingProvider):
         # Prepare request payload
         payload = {"input": texts, "model": model_name}
 
-        # Retry logic
+        def _single_attempt() -> Dict[str, Any]:
+            """Execute ONE HTTP call and return the parsed JSON dict."""
+            _start = time.time()
+            _timeout = httpx.Timeout(
+                connect=self.config.connect_timeout,
+                read=self.config.timeout,
+                write=self.config.timeout,
+                pool=self.config.timeout,
+            )
+            # Story #1083: auth header travels on the per-request .post() call so
+            # the pooled keep-alive client stays auth-agnostic — API-key rotation
+            # is transparent (no client invalidation/rebuild needed).
+            _headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            # Story #1083 (+ residual): pooled=True borrows the factory's ONE
+            # long-lived keep-alive client (reused SSLContext + connection pool)
+            # instead of building+closing a fresh client per query.  The latency
+            # transport is OWNED by the factory and baked into the pooled client
+            # ONCE — the provider no longer constructs build_latency_transport()
+            # (and its SSLContext) per call, which was the residual per-query
+            # churn.  Under fault injection the factory ignores pooled and still
+            # returns a fresh per-call client (building the latency transport then).
+            _client_ctx = self._http_client_factory.create_sync_client(
+                timeout=_timeout,
+                pooled=True,
+            )
+            with _client_ctx as client:
+                response = client.post(
+                    self.config.api_endpoint, json=payload, headers=_headers
+                )
+            response.raise_for_status()
+
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError(f"Unexpected response format: {type(result)}")
+
+            latency_ms = (time.time() - _start) * 1000
+            ProviderHealthMonitor.get_instance().record_call(
+                "voyage-ai", latency_ms, success=True
+            )
+            return result
+
+        # --- Single-attempt path (QUERY, retry=False) ---
+        # One call, no sleep. All errors propagate immediately to the caller
+        # (execute_with_backoff handles 429 retries OUTSIDE the governor slot).
+        if not retry:
+            _start_single = time.time()
+            try:
+                return _single_attempt()
+            except Exception:
+                latency_ms = (time.time() - _start_single) * 1000
+                ProviderHealthMonitor.get_instance().record_call(
+                    "voyage-ai", latency_ms, success=False
+                )
+                raise
+
+        # --- Retry loop (INDEXING path, retry=True) ---
+        # Keeps original behaviour: retries on 500/network errors with back-off sleep.
+        # 429 still propagates immediately (handled by execute_with_backoff in query path).
         last_exception: Optional[Exception] = None
         _start = time.time()
         for attempt in range(self.config.max_retries + 1):
             try:
                 _start = time.time()
-                try:
-                    from code_indexer.server.services.latency_tracking_httpx_transport import (
-                        build_latency_transport,
-                    )
-
-                    _latency_transport = build_latency_transport()
-                except ImportError:
-                    # Server module not available in CLI-only deployments.
-                    _latency_transport = None
-                _timeout = httpx.Timeout(
-                    connect=self.config.connect_timeout,
-                    read=self.config.timeout,
-                    write=self.config.timeout,
-                    pool=self.config.timeout,
-                )
-                _headers = {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                }
-                _client_ctx = self._http_client_factory.create_sync_client(
-                    transport=_latency_transport,
-                    headers=_headers,
-                    timeout=_timeout,
-                )
-                with _client_ctx as client:
-                    response = client.post(self.config.api_endpoint, json=payload)
-                response.raise_for_status()
-
-                result = response.json()
-
-                if isinstance(result, dict):
-                    latency_ms = (time.time() - _start) * 1000
-                    ProviderHealthMonitor.get_instance().record_call(
-                        "voyage-ai", latency_ms, success=True
-                    )
-                    return result
-                else:
-                    raise ValueError(f"Unexpected response format: {type(result)}")
-
+                return _single_attempt()
             except httpx.HTTPStatusError as e:
                 last_exception = e
-                if (
-                    e.response.status_code == 429
-                ):  # Rate limit - use server-driven backoff
-                    # Check for Retry-After header from server
+                if e.response.status_code == 429:
+                    if not retry:
+                        # Query path: propagate immediately so execute_with_backoff
+                        # can sleep OUTSIDE the governor slot.
+                        raise
+                    # Indexing path (retry=True): back off and retry as before.
                     retry_after = e.response.headers.get("retry-after")
                     if retry_after:
-                        wait_time = float(retry_after)
+                        wait_time = min(float(retry_after), 300.0)
                     else:
-                        # Fall back to exponential backoff
                         wait_time = self.config.retry_delay * (
                             2**attempt if self.config.exponential_backoff else 1
                         )
-
-                    # Cap maximum wait time to 5 minutes to prevent excessive delays
-                    wait_time = min(wait_time, 300.0)
-
                     if attempt < self.config.max_retries:
                         time.sleep(wait_time)
                         continue
+                    raise
                 elif e.response.status_code >= 500:  # Server error
                     wait_time = self.config.retry_delay * (
                         2**attempt if self.config.exponential_backoff else 1
@@ -358,9 +432,15 @@ class VoyageAIClient(EmbeddingProvider):
         model: Optional[str] = None,
         embedding_purpose: Optional[str] = None,
     ) -> List[float]:
-        """Generate embedding for given text."""
-        # Use get_embeddings_batch internally with single-item array
-        batch_result = self.get_embeddings_batch([text], model)
+        """Generate embedding for given text (QUERY path).
+
+        Uses retry=False so that exactly one HTTP attempt is made per
+        governor slot acquisition. The execute_with_backoff wrapper in the
+        caller handles 429 retries OUTSIDE the governor slot.
+        """
+        # Use get_embeddings_batch internally with single-item array and retry=False
+        # so no time.sleep() runs while the governor slot is held (Bug #1078 C2).
+        batch_result = self.get_embeddings_batch([text], model, retry=False)
 
         # Extract first result from batch response
         return batch_result[0]
@@ -371,8 +451,20 @@ class VoyageAIClient(EmbeddingProvider):
         model: Optional[str] = None,
         *,
         embedding_purpose: str = "document",
+        retry: bool = True,
     ) -> List[List[float]]:
-        """Generate embeddings with dynamic token-aware batching (90% safety margin)."""
+        """Generate embeddings with dynamic token-aware batching (90% safety margin).
+
+        Args:
+            texts: Texts to embed.
+            model: Override model name.
+            embedding_purpose: "document" (indexing) or "query".
+            retry: When True (default, INDEXING path), each _make_sync_request call
+                retries on 500/network errors with back-off sleep.
+                When False (QUERY path, set by get_embedding), exactly one HTTP
+                attempt is made — sleep is handled OUTSIDE the governor slot by
+                execute_with_backoff (Bug #1078 C2).
+        """
         if not texts:
             return []
 
@@ -393,7 +485,7 @@ class VoyageAIClient(EmbeddingProvider):
             if current_tokens + chunk_tokens > safety_limit and current_batch:
                 # Submit current batch before it gets too large
                 try:
-                    result = self._make_sync_request(current_batch, model)
+                    result = self._make_sync_request(current_batch, model, retry=retry)
 
                     # LAYER 3 VALIDATION: Validate all embeddings from API before processing
                     for idx, item in enumerate(result["data"]):
@@ -428,6 +520,12 @@ class VoyageAIClient(EmbeddingProvider):
                     self._validate_embeddings(batch_embeddings, model_to_use)
                     all_embeddings.extend(batch_embeddings)
                 except Exception as e:
+                    # Re-raise rate-limit (429) signals intact so the
+                    # execute_with_backoff wrapper (and future AIMD signal) can
+                    # classify and retry them; only non-429 errors are wrapped
+                    # in a generic RuntimeError (Story #1079 Phase A).
+                    if is_rate_limited(e):
+                        raise
                     raise RuntimeError(f"Batch embedding request failed: {e}")
 
                 # Reset for next batch
@@ -441,7 +539,7 @@ class VoyageAIClient(EmbeddingProvider):
         # Process final batch if not empty
         if current_batch:
             try:
-                result = self._make_sync_request(current_batch, model)
+                result = self._make_sync_request(current_batch, model, retry=retry)
 
                 # LAYER 3 VALIDATION: Validate all embeddings from API before processing
                 for idx, item in enumerate(result["data"]):
@@ -474,6 +572,12 @@ class VoyageAIClient(EmbeddingProvider):
                 self._validate_embeddings(batch_embeddings, model_to_use)
                 all_embeddings.extend(batch_embeddings)
             except Exception as e:
+                # Re-raise rate-limit (429) signals intact so the
+                # execute_with_backoff wrapper (and future AIMD signal) can
+                # classify and retry them; only non-429 errors are wrapped
+                # in a generic RuntimeError (Story #1079 Phase A).
+                if is_rate_limited(e):
+                    raise
                 raise RuntimeError(f"Batch embedding request failed: {e}")
 
         return all_embeddings

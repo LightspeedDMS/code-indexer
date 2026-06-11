@@ -164,6 +164,59 @@ class GlobalReposSqliteBackend:
 
         return result
 
+    def list_due_repos(self, limit: int, now: float) -> list:
+        """
+        Return repos whose next_refresh is due (i.e. <= now), oldest-first, capped.
+
+        Bug #1063 Part 1: enables capped oldest-first due-query so the
+        RefreshScheduler never submits more than `limit` repos in one poll cycle.
+
+        Ordering uses CAST(next_refresh AS REAL) to ensure numeric comparison;
+        without the cast, TEXT column ordering is lexicographic and would produce
+        wrong results when timestamps differ in leading digit length.
+
+        Args:
+            limit: Maximum number of repos to return (0 = empty list).
+            now: Current Unix timestamp (float); repos with next_refresh <= now are due.
+
+        Returns:
+            List of repo dicts ordered by next_refresh ASC (oldest first).
+        """
+        if limit <= 0:
+            return []
+
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT alias_name, repo_name, repo_url, index_path, created_at,
+                      last_refresh, enable_temporal, temporal_options, enable_scip,
+                      next_refresh
+               FROM global_repos
+               WHERE next_refresh IS NOT NULL
+                 AND CAST(next_refresh AS REAL) <= ?
+               ORDER BY CAST(next_refresh AS REAL) ASC
+               LIMIT ?""",
+            (now, limit),
+        )
+
+        result = []
+        for row in cursor.fetchall():
+            alias = row[0]
+            result.append(
+                {
+                    "alias_name": alias,
+                    "repo_name": row[1],
+                    "repo_url": row[2],
+                    "index_path": row[3],
+                    "created_at": row[4],
+                    "last_refresh": row[5],
+                    "enable_temporal": bool(row[6]),
+                    "temporal_options": json.loads(row[7]) if row[7] else None,
+                    "enable_scip": bool(row[8]),
+                    "next_refresh": row[9],
+                }
+            )
+        return result
+
     def delete_repo(self, alias_name: str) -> bool:
         """
         Delete a repository by alias.
@@ -1500,6 +1553,7 @@ class SSHKeysSqliteBackend:
         email: Optional[str] = None,
         description: Optional[str] = None,
         is_imported: bool = False,
+        private_key: Optional[str] = None,
     ) -> None:
         """Create a new SSH key record."""
         now = datetime.now(timezone.utc).isoformat()
@@ -1507,7 +1561,18 @@ class SSHKeysSqliteBackend:
         def operation(conn):
             conn.execute(
                 """INSERT INTO ssh_keys (name, fingerprint, key_type, private_path, public_path,
-                   public_key, email, description, created_at, is_imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   public_key, email, description, created_at, is_imported,
+                   private_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     fingerprint = excluded.fingerprint,
+                     key_type = excluded.key_type,
+                     private_path = excluded.private_path,
+                     public_path = excluded.public_path,
+                     public_key = excluded.public_key,
+                     email = excluded.email,
+                     description = excluded.description,
+                     is_imported = excluded.is_imported,
+                     private_key = excluded.private_key""",
                 (
                     name,
                     fingerprint,
@@ -1519,6 +1584,7 @@ class SSHKeysSqliteBackend:
                     description,
                     now,
                     is_imported,
+                    private_key,
                 ),
             )
             return None
@@ -1531,7 +1597,8 @@ class SSHKeysSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT name, fingerprint, key_type, private_path, public_path, public_key,
-               email, description, created_at, imported_at, is_imported FROM ssh_keys WHERE name = ?""",
+               email, description, created_at, imported_at, is_imported,
+               private_key FROM ssh_keys WHERE name = ?""",
             (name,),
         )
         row = cursor.fetchone()
@@ -1551,6 +1618,7 @@ class SSHKeysSqliteBackend:
             "imported_at": row[9],
             "is_imported": bool(row[10]),
             "hosts": hosts,
+            "private_key": row[11],
         }
 
     def _get_hosts_for_key(self, conn: Any, key_name: str) -> list:
@@ -1602,7 +1670,8 @@ class SSHKeysSqliteBackend:
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
             """SELECT name, fingerprint, key_type, private_path, public_path, public_key,
-               email, description, created_at, imported_at, is_imported FROM ssh_keys"""
+               email, description, created_at, imported_at, is_imported,
+               private_key FROM ssh_keys"""
         )
         results = []
         for row in cursor.fetchall():
@@ -1622,6 +1691,7 @@ class SSHKeysSqliteBackend:
                     "imported_at": row[9],
                     "is_imported": bool(row[10]),
                     "hosts": hosts,
+                    "private_key": row[11],
                 }
             )
         return results
@@ -2525,6 +2595,98 @@ class BackgroundJobsSqliteBackend:
         self._conn_manager.execute_atomic(operation)
         logger.debug(f"Saved background job: {job_id}")
 
+    def atomic_claim_insert(
+        self,
+        job_id: str,
+        operation_type: str,
+        status: str,
+        created_at: str,
+        username: str,
+        progress: int,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_admin: bool = False,
+        cancelled: bool = False,
+        repo_alias: Optional[str] = None,
+        resolution_attempts: int = 0,
+        claude_actions: Optional[List[str]] = None,
+        failure_reason: Optional[str] = None,
+        extended_error: Optional[Dict[str, Any]] = None,
+        language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
+    ) -> None:
+        """Insert a new background job using a plain INSERT (no OR IGNORE).
+
+        Unlike save_job which uses INSERT OR IGNORE, this method uses a plain
+        INSERT so that sqlite3.IntegrityError is raised when
+        idx_active_job_per_repo is violated by a duplicate pending/running row
+        for the same (operation_type, repo_alias). The caller translates this
+        into DuplicateJobError.
+
+        Do NOT modify save_job — its INSERT OR IGNORE is intentional for other
+        callers that must survive duplicate inserts.
+
+        Raises:
+            sqlite3.IntegrityError: When idx_active_job_per_repo rejects the
+                INSERT due to a duplicate active job for (operation_type, repo_alias).
+        """
+
+        def operation(conn):
+            conn.execute(
+                """INSERT INTO background_jobs
+                   (job_id, operation_type, status, created_at, started_at, completed_at,
+                    result, error, progress, username, is_admin, cancelled, repo_alias,
+                    resolution_attempts, claude_actions, failure_reason, extended_error,
+                    language_resolution_status, current_phase, phase_detail,
+                    progress_info, metadata, executing_node, claimed_at, actor_username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    job_id,
+                    operation_type,
+                    status,
+                    created_at,
+                    started_at,
+                    completed_at,
+                    json.dumps(result) if result else None,
+                    error,
+                    progress,
+                    username,
+                    1 if is_admin else 0,
+                    1 if cancelled else 0,
+                    repo_alias,
+                    resolution_attempts,
+                    json.dumps(claude_actions) if claude_actions else None,
+                    failure_reason,
+                    json.dumps(extended_error) if extended_error else None,
+                    (
+                        json.dumps(language_resolution_status)
+                        if language_resolution_status
+                        else None
+                    ),
+                    current_phase,
+                    phase_detail,
+                    json.dumps(progress_info)
+                    if isinstance(progress_info, dict)
+                    else progress_info,
+                    json.dumps(metadata) if metadata else None,
+                    executing_node,
+                    claimed_at,
+                    actor_username,
+                ),
+            )
+            return None
+
+        self._conn_manager.execute_atomic(operation)
+        logger.debug(f"Atomic claim insert background job: {job_id}")
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get job details by job ID."""
         conn = self._conn_manager.get_connection()
@@ -2641,6 +2803,7 @@ class BackgroundJobsSqliteBackend:
         operation_type: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """List background jobs with optional filtering and pagination."""
         conn = self._conn_manager.get_connection()
@@ -2664,6 +2827,12 @@ class BackgroundJobsSqliteBackend:
         if operation_type:
             conditions.append("operation_type = ?")
             params.append(operation_type)
+        if exclude_operation_types:
+            placeholders = ", ".join(["?"] * len(exclude_operation_types))
+            conditions.append(
+                f"(operation_type IS NULL OR operation_type NOT IN ({placeholders}))"
+            )
+            params.extend(exclude_operation_types)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
@@ -2673,6 +2842,67 @@ class BackgroundJobsSqliteBackend:
 
         cursor = conn.execute(query, params)
         return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _build_jobs_filter_where(
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        exclude_ids: Optional[set] = None,
+    ) -> tuple:
+        """Build the WHERE clause and params list for background_jobs queries.
+
+        Returns (where_clause: str, params: List[Any]).  The where_clause is
+        either empty or starts with ' WHERE '.  Both list_jobs_filtered and
+        list_job_ids_filtered call this helper so the filter logic cannot drift
+        between the two methods.
+
+        Args:
+            status: Filter by exact status value (e.g. 'completed', 'failed')
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match against repo_alias, username,
+                         operation_type, and error columns
+            username: When set, scope results to this owner's jobs (H2 non-admin)
+            exclude_ids: Set of job_ids to exclude
+        """
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        # H2: Non-admin username scoping for DB-stored completed jobs
+        if username is not None:
+            conditions.append("username = ?")
+            params.append(username)
+
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        if operation_type:
+            conditions.append("operation_type = ?")
+            params.append(operation_type)
+
+        if search_text:
+            # Case-insensitive LIKE across key text columns
+            like_pattern = f"%{search_text}%"
+            conditions.append(
+                "(LOWER(repo_alias) LIKE LOWER(?)"
+                " OR LOWER(username) LIKE LOWER(?)"
+                " OR LOWER(operation_type) LIKE LOWER(?)"
+                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?))"
+            )
+            params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
+
+        if exclude_ids:
+            placeholders = ",".join("?" * len(exclude_ids))
+            conditions.append(f"job_id NOT IN ({placeholders})")
+            params.extend(list(exclude_ids))
+
+        where_clause = ""
+        if conditions:
+            where_clause = " WHERE " + " AND ".join(conditions)
+
+        return where_clause, params
 
     def list_jobs_filtered(
         self,
@@ -2712,41 +2942,13 @@ class BackgroundJobsSqliteBackend:
                                 executing_node, claimed_at, actor_username
                          FROM background_jobs"""
 
-        conditions: List[str] = []
-        params: List[Any] = []
-
-        # H2: Non-admin username scoping for DB-stored completed jobs
-        if username is not None:
-            conditions.append("username = ?")
-            params.append(username)
-
-        if status:
-            conditions.append("status = ?")
-            params.append(status)
-
-        if operation_type:
-            conditions.append("operation_type = ?")
-            params.append(operation_type)
-
-        if search_text:
-            # Case-insensitive LIKE across key text columns
-            like_pattern = f"%{search_text}%"
-            conditions.append(
-                "(LOWER(repo_alias) LIKE LOWER(?)"
-                " OR LOWER(username) LIKE LOWER(?)"
-                " OR LOWER(operation_type) LIKE LOWER(?)"
-                " OR LOWER(COALESCE(error, '')) LIKE LOWER(?))"
-            )
-            params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
-
-        if exclude_ids:
-            placeholders = ",".join("?" * len(exclude_ids))
-            conditions.append(f"job_id NOT IN ({placeholders})")
-            params.extend(list(exclude_ids))
-
-        where_clause = ""
-        if conditions:
-            where_clause = " WHERE " + " AND ".join(conditions)
+        where_clause, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+            exclude_ids=exclude_ids,
+        )
 
         # Count query (no LIMIT/OFFSET) for accurate total
         count_query = f"SELECT COUNT(*) FROM background_jobs{where_clause}"
@@ -2765,6 +2967,52 @@ class BackgroundJobsSqliteBackend:
         jobs = [self._row_to_dict(row) for row in cursor.fetchall()]
 
         return jobs, total_count
+
+    # Safety cap for list_job_ids_filtered: worst-case upper bound.
+    # At 14k jobs/day with 30-day retention the table holds ~420k rows; a cap
+    # of 50,000 is an order-of-magnitude ceiling that keeps the query bounded.
+    _JOB_IDS_CAP = 50_000
+
+    def list_job_ids_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        cap: Optional[int] = None,
+    ) -> set:
+        """Return the set of job_ids matching the given filters.
+
+        Uses the same WHERE clause as list_jobs_filtered (via
+        _build_jobs_filter_where) so the two methods cannot drift.
+
+        A safety cap (default _JOB_IDS_CAP = 50,000) is applied as LIMIT so
+        this query is always bounded regardless of table size.
+
+        Args:
+            status: Filter by exact status value
+            operation_type: Filter by exact operation_type value
+            search_text: Case-insensitive LIKE match (same columns as list_jobs_filtered)
+            username: When set, scope results to this owner's jobs
+            cap: Override the default safety cap (for testing)
+
+        Returns:
+            set[str] of matching job_ids.
+        """
+        conn = self._conn_manager.get_connection()
+        effective_cap = cap if cap is not None else self._JOB_IDS_CAP
+
+        where_clause, params = self._build_jobs_filter_where(
+            status=status,
+            operation_type=operation_type,
+            search_text=search_text,
+            username=username,
+        )
+
+        query = f"SELECT job_id FROM background_jobs{where_clause} ORDER BY created_at DESC LIMIT ?"
+        params_with_cap = list(params) + [effective_cap]
+        cursor = conn.execute(query, params_with_cap)
+        return {row[0] for row in cursor.fetchall()}
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job by ID."""
@@ -3666,6 +3914,101 @@ class ApiMetricsSqliteBackend:
                 """,
                 (username, granularity, bucket_start, metric_type, node_id),
             )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def upsert_buckets_batch(
+        self,
+        events: Any,
+        node_id: str = "",
+    ) -> None:
+        """Upsert MANY bucket increments in ONE transaction (Story #1083).
+
+        The background metrics writer drains the whole queue and calls this once
+        per drain instead of one BEGIN EXCLUSIVE transaction per metric event,
+        collapsing ~4N DB-wide-exclusive transactions into 1.
+
+        Args:
+            events: Iterable of dicts, each ``{"username": str, "metric_type": str,
+                "buckets": {granularity: bucket_start_iso, ...}}`` — one per drained
+                metric event. The four-tier bucket map is precomputed by the caller.
+            node_id: Cluster node identifier. Empty string for standalone nodes.
+
+        Raises:
+            ValueError: If any event fails the same field validation as
+                ``upsert_bucket`` (username, granularity, metric_type, bucket_start,
+                node_id).
+
+        Counts are preserved exactly: repeated (username, granularity, bucket_start,
+        metric_type, node_id) keys within the batch are coalesced into a single
+        ``count + N`` increment so the total equals the number of events.
+        """
+        if not isinstance(node_id, str):
+            raise ValueError(f"node_id must be a string, got {node_id!r}")
+        if node_id != "" and not node_id.strip():
+            raise ValueError(f"node_id must not be whitespace-only, got {node_id!r}")
+
+        # Coalesce identical bucket keys into a single +N increment. Validation
+        # mirrors upsert_bucket so the batch path rejects exactly what the single
+        # path would (no silent acceptance of bad input — MESSI #13).
+        coalesced: Dict[Tuple[str, str, str, str], int] = {}
+        for event in events:
+            username = event["username"]
+            metric_type = event["metric_type"]
+            buckets = event["buckets"]
+            if not isinstance(username, str) or not username.strip():
+                raise ValueError(
+                    f"username must be a non-empty string, got {username!r}"
+                )
+            if metric_type not in self._VALID_METRIC_TYPES:
+                raise ValueError(
+                    f"Invalid metric_type {metric_type!r}. "
+                    f"Must be one of: {sorted(self._VALID_METRIC_TYPES)}"
+                )
+            for granularity, bucket_start in buckets.items():
+                if granularity not in self._VALID_GRANULARITIES:
+                    raise ValueError(
+                        f"Invalid granularity {granularity!r}. "
+                        f"Must be one of: {sorted(self._VALID_GRANULARITIES)}"
+                    )
+                try:
+                    datetime.fromisoformat(bucket_start)
+                except (ValueError, TypeError):
+                    raise ValueError(
+                        f"bucket_start must be a valid ISO 8601 datetime string, "
+                        f"got {bucket_start!r}"
+                    )
+                key = (username, granularity, bucket_start, metric_type)
+                coalesced[key] = coalesced.get(key, 0) + 1
+
+        if not coalesced:
+            return
+
+        def operation(conn: Any) -> None:
+            for (
+                username,
+                granularity,
+                bucket_start,
+                metric_type,
+            ), inc in coalesced.items():
+                conn.execute(
+                    """
+                    INSERT INTO api_metrics_buckets
+                        (username, granularity, bucket_start, metric_type, node_id, count)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(username, granularity, bucket_start, metric_type, node_id)
+                    DO UPDATE SET count = count + ?
+                    """,
+                    (
+                        username,
+                        granularity,
+                        bucket_start,
+                        metric_type,
+                        node_id,
+                        inc,
+                        inc,
+                    ),
+                )
 
         self._conn_manager.execute_atomic(operation)
 

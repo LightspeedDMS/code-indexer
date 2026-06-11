@@ -7,19 +7,60 @@ Implements AC5: SQLite Log Storage Infrastructure
 - Supports thread-safe concurrent writes
 - Stores extra fields: correlation_id, user_id, request_path
 - Stores arbitrary extra data as JSON
+
+Bug #1078 fix: emit() no longer performs synchronous DB I/O while holding the
+Python logging handler lock.  Instead it extracts the record fields (fast,
+CPU-only) and enqueues them.  A dedicated daemon writer thread drains the
+queue and performs the actual insert.  This eliminates the lock-contention
+bottleneck observed under concurrent server load (32 query threads parked on
+logging/__init__.py:901 acquire while the holder was inside emit ->
+execute_atomic -> get_connection).
 """
 
 import json
 import logging
+import queue
 import sqlite3
+import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of pending log records to buffer.  Records beyond this are
+# dropped with a counter increment (anti-unbounded-memory — Messi Rule #14).
+_QUEUE_MAXSIZE = 10_000
+
+# How long the writer loop polls before checking the stop event (seconds).
+_QUEUE_POLL_TIMEOUT_S = 0.5
+
+# How long close() waits for the writer thread to finish draining (seconds).
+_CLOSE_DRAIN_TIMEOUT_S = 5.0
+
+# How long to block (bounded) on queue.Full for ERROR/CRITICAL records before
+# giving up and incrementing the dropped counter.
+_HIGH_SEVERITY_QUEUE_TIMEOUT_S = 2.0
+
+# Minimum seconds between throttled stderr drop-warnings (anti-spam).
+_STDERR_THROTTLE_S = 10.0
+
+# Type alias for the items we put on the queue.
+_LogItem = Tuple[
+    str,  # timestamp
+    str,  # level
+    str,  # source
+    str,  # message
+    Optional[str],  # correlation_id
+    Optional[str],  # user_id
+    Optional[str],  # request_path
+    Optional[str],  # extra_data (JSON string or None)
+    Optional[str],  # alias
+]
 
 
 class SQLiteLogHandler(logging.Handler):
@@ -45,8 +86,9 @@ class SQLiteLogHandler(logging.Handler):
         - idx_logs_source
 
     Thread Safety:
-        Uses thread-local connections for thread-safe concurrent writes.
-        Each thread gets its own database connection.
+        emit() only enqueues; all DB writes happen on the dedicated writer
+        thread (_writer_loop).  The logging handler lock is released before
+        any I/O, eliminating the Bug #1078 lock-contention bottleneck.
     """
 
     def __init__(self, db_path: Path, logs_backend: Optional[Any] = None):
@@ -78,13 +120,56 @@ class SQLiteLogHandler(logging.Handler):
         # can aggregate and filter logs per node in cluster deployments.
         self._node_id: Optional[str] = None
 
+        # Bug #1078: async writer queue and state.
+        self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
+        self._stop_event: threading.Event = threading.Event()
+        self._dropped: int = 0  # records dropped due to queue.Full
+        self._last_stderr_warn: float = 0.0
+        self._writer_thread: Optional[threading.Thread] = None
+
         if logs_backend is not None:
             # AC2: Skip SQLite init entirely when backend provided at construction.
             # No local database file is created in PG mode.
+            self._start_writer()
             return
 
         # Create database and schema on initialization
         self._init_database()
+        self._start_writer()
+
+    def _start_writer(self) -> None:
+        """Start the single daemon writer thread (Bug #1078).
+
+        Single source of truth for writer-thread construction so the two
+        __init__ branches (backend-injected vs direct-SQLite) don't duplicate it.
+        """
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            daemon=True,
+            name="sqlite-log-writer",
+        )
+        self._writer_thread.start()
+
+    @property
+    def dropped_count(self) -> int:
+        """Number of log records dropped due to a saturated writer queue."""
+        return self._dropped
+
+    def _record_drop(self) -> None:
+        """Count a dropped record and surface it via a throttled stderr warning.
+
+        Uses stderr rather than logging because we are inside a logging handler;
+        logging here would recurse. Throttled to avoid flooding stderr under
+        sustained saturation (Bug #1078 — drops must never be invisible).
+        """
+        self._dropped += 1
+        now = time.monotonic()
+        if now - self._last_stderr_warn >= _STDERR_THROTTLE_S:
+            self._last_stderr_warn = now
+            sys.stderr.write(
+                f"[SQLiteLogHandler] dropped {self._dropped} log record(s) "
+                "(writer queue saturated)\n"
+            )
 
     def set_logs_backend(self, backend: Any) -> None:
         """Inject LogsBackend for delegated writes (Story #500 AC4).
@@ -184,11 +269,14 @@ class SQLiteLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         """
-        Emit a log record to the SQLite database.
+        Enqueue a log record for writing by the background writer thread.
+
+        Bug #1078 fix: this method does ONLY fast, CPU-only work under the
+        logging handler lock.  No DB I/O, no get_connection, no execute_atomic.
+        The actual INSERT is performed by _writer_loop on the writer thread.
 
         Re-entry guard (Bug #731): if this thread is already inside emit(),
-        silently drop the recursive call to prevent deadlocks caused by
-        DatabaseConnectionManager logging while the root-logger lock is held.
+        silently drop the recursive call to prevent deadlocks.
 
         Args:
             record: LogRecord instance to write to database
@@ -266,58 +354,157 @@ class SQLiteLogHandler(logging.Handler):
             if extra_data:
                 extra_data_json = json.dumps(extra_data)
 
-            if self._logs_backend is not None:
-                # Delegated path (Story #500 AC4): route through injected LogsBackend.
-                # Supports both SQLite and PostgreSQL backends transparently.
-                # node_id is injected by set_node_id() in cluster mode (Story #501 AC3).
-                # alias carries the repo tag for lifecycle-runner rows
-                # (Story #876 Phase C).
-                self._logs_backend.insert_log(
-                    timestamp=timestamp,
-                    level=level,
-                    source=source,
-                    message=message,
-                    correlation_id=correlation_id,
-                    user_id=user_id,
-                    request_path=request_path,
-                    extra_data=extra_data_json,
-                    node_id=self._node_id,
-                    alias=alias,
-                )
-            else:
-                # Direct-SQLite path (backwards compatible, no backend injected).
-                # alias is persisted to its own column to stay consistent with
-                # the delegated path (Story #876 Phase C).
-                def _do_insert(conn: sqlite3.Connection) -> None:
-                    conn.execute(
-                        """
-                    INSERT INTO logs (timestamp, level, source, message, correlation_id, user_id, request_path, extra_data, alias)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (
-                            timestamp,
-                            level,
-                            source,
-                            message,
-                            correlation_id,
-                            user_id,
-                            request_path,
-                            extra_data_json,
-                            alias,
-                        ),
-                    )
+            item: _LogItem = (
+                timestamp,
+                level,
+                source,
+                message,
+                correlation_id,
+                user_id,
+                request_path,
+                extra_data_json,
+                alias,
+            )
 
-                DatabaseConnectionManager.get_instance(
-                    str(self.db_path)
-                ).execute_atomic(_do_insert)
+            # Enqueue for the writer thread — non-blocking on the common path.
+            # On queue.Full: ERROR/CRITICAL records block briefly rather than be
+            # lost (they're rare; a short bounded wait cannot recreate the
+            # original stall, which was EVERY log doing a synchronous DB write
+            # under the handler lock). Lower-severity records drop and are
+            # counted + surfaced to stderr (anti-silent-failure, Bug #1078).
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                if record.levelno >= logging.ERROR:
+                    try:
+                        self._queue.put(item, timeout=_HIGH_SEVERITY_QUEUE_TIMEOUT_S)
+                    except queue.Full:
+                        self._record_drop()
+                else:
+                    self._record_drop()
 
         except Exception:
-            # Don't let logging failures crash the application
-            # Use handleError to report the issue
+            # Don't let logging failures crash the application;
+            # use handleError to report the issue via stderr (if raiseExceptions).
             self.handleError(record)
         finally:
             self._emit_guard.active = False
 
+    def _writer_loop(self) -> None:
+        """Background daemon thread: drain queue and perform actual DB writes.
+
+        Runs until the stop event is set AND the queue is empty.  Uses a
+        bounded poll timeout so the thread exits cleanly on shutdown.
+
+        Writer-thread re-entry guard: while this thread is inside insert_log()
+        or execute_atomic(), any logging it triggers must not re-enqueue.
+        We set _emit_guard.active = True on this thread before each DB write
+        so that recursive calls to emit() from within the DB layer are dropped
+        rather than re-enqueued (replacing the old cross-thread deadlock with a
+        clean drop — Bug #731 / Bug #1078).
+        """
+        while True:
+            try:
+                item = self._queue.get(timeout=_QUEUE_POLL_TIMEOUT_S)
+            except queue.Empty:
+                if self._stop_event.is_set():
+                    break
+                continue
+
+            (
+                timestamp,
+                level,
+                source,
+                message,
+                correlation_id,
+                user_id,
+                request_path,
+                extra_data_json,
+                alias,
+            ) = item
+
+            # Set the re-entry guard for THIS thread while we do DB I/O.
+            # Any logging triggered by the DB layer will be dropped cleanly.
+            self._emit_guard.active = True
+            try:
+                if self._logs_backend is not None:
+                    # Delegated path (Story #500 AC4): route through injected
+                    # LogsBackend.  Supports both SQLite and PostgreSQL backends
+                    # transparently.  node_id is injected by set_node_id() in
+                    # cluster mode (Story #501 AC3).  alias carries the repo tag
+                    # for lifecycle-runner rows (Story #876 Phase C).
+                    self._logs_backend.insert_log(
+                        timestamp=timestamp,
+                        level=level,
+                        source=source,
+                        message=message,
+                        correlation_id=correlation_id,
+                        user_id=user_id,
+                        request_path=request_path,
+                        extra_data=extra_data_json,
+                        node_id=self._node_id,
+                        alias=alias,
+                    )
+                else:
+                    # Direct-SQLite path (backwards compatible, no backend
+                    # injected).  alias is persisted to its own column to stay
+                    # consistent with the delegated path (Story #876 Phase C).
+                    def _do_insert(conn: sqlite3.Connection) -> None:
+                        conn.execute(
+                            """
+                        INSERT INTO logs (timestamp, level, source, message, correlation_id, user_id, request_path, extra_data, alias)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                            (
+                                timestamp,
+                                level,
+                                source,
+                                message,
+                                correlation_id,
+                                user_id,
+                                request_path,
+                                extra_data_json,
+                                alias,
+                            ),
+                        )
+
+                    DatabaseConnectionManager.get_instance(
+                        str(self.db_path)
+                    ).execute_atomic(_do_insert)
+            except Exception:
+                # DB write failures must not crash the writer thread.
+                # We can't log here (would recurse), so swallow silently.
+                pass
+            finally:
+                self._emit_guard.active = False
+
+            self._queue.task_done()
+
+    def flush(self) -> None:
+        """Synchronously drain the writer queue without stopping the handler.
+
+        Blocks until every record enqueued before this call has been written by
+        the writer thread (``_writer_loop`` calls ``task_done()`` per item, so
+        ``queue.join()`` is the precise barrier). Unlike :meth:`close`, the
+        handler remains usable afterwards.
+
+        This is the deterministic-drain hook for timing-sensitive callers/tests:
+        prefer ``handler.flush()`` over sleeping or weakening assertions. It is a
+        no-op once the writer thread has stopped (``close()`` already drained).
+        """
+        writer_thread = getattr(self, "_writer_thread", None)
+        if writer_thread is None or not writer_thread.is_alive():
+            return
+        self._queue.join()
+
     def close(self) -> None:
-        """Close handler. Connections are managed by DatabaseConnectionManager."""
+        """Flush remaining queued records, stop writer thread, then close handler.
+
+        Signals the writer thread to stop, waits for the queue to drain (up to
+        _CLOSE_DRAIN_TIMEOUT_S), then joins the thread.  Called by logging
+        shutdown; must not hang indefinitely.
+        """
+        self._stop_event.set()
+        if hasattr(self, "_writer_thread") and self._writer_thread is not None:
+            self._writer_thread.join(timeout=_CLOSE_DRAIN_TIMEOUT_S)
         super().close()

@@ -365,6 +365,8 @@ class JobTracker:
         username: str,
         repo_alias: str,
         metadata: Optional[Dict[str, Any]] = None,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
     ) -> TrackedJob:
         """
         Atomically register a new pending job unless an active duplicate exists.
@@ -376,6 +378,11 @@ class JobTracker:
 
         repo_alias must be non-empty because the index predicate excludes
         NULL — passing None would silently disable the atomic gate.
+
+        Args:
+            is_admin: Whether this is an admin job (persisted to DB on INSERT).
+            actor_username: Who actually triggered the job (AC12 audit trail).
+                When None, the submitter (username) is the actor.
 
         Raises:
             ValueError: If any required string field is None, empty, or
@@ -398,7 +405,9 @@ class JobTracker:
             metadata=metadata,
         )
 
-        self._atomic_insert_or_raise(job)
+        self._atomic_insert_or_raise(
+            job, is_admin=is_admin, actor_username=actor_username
+        )
 
         with self._lock:
             self._active_jobs[job_id] = job
@@ -615,10 +624,70 @@ class JobTracker:
         with self._lock:
             return list(self._active_jobs.values())
 
+    @staticmethod
+    def _build_exclusion_where_clause(exclude_types: List[str]) -> tuple:
+        """
+        Return (sql_fragment, params_tuple) for NULL-safe operation_type exclusion.
+
+        Uses IS NULL guard so rows with NULL operation_type are never silently
+        dropped (SQL NULL NOT IN (...) evaluates to UNKNOWN, not FALSE).
+
+        Raises:
+            ValueError: If exclude_types is empty (caller must check truthiness).
+        """
+        if not exclude_types:
+            raise ValueError("exclude_types must be non-empty")
+        placeholders = ",".join("?" * len(exclude_types))
+        fragment = f"(operation_type IS NULL OR operation_type NOT IN ({placeholders}))"
+        return fragment, tuple(exclude_types)
+
+    def _query_sqlite_recent_jobs(
+        self,
+        seen_ids: set,
+        cutoff_iso: Optional[str],
+        limit: int,
+        exclude_operation_types: Optional[List[str]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute the SQLite historical query and return job dicts not in seen_ids.
+
+        Updates seen_ids in-place for each accepted row to prevent intra-query
+        duplicates. Caller is responsible for pre-validating limit > 0.
+        """
+        conn = self._conn_manager.get_connection()
+        where_parts: List[str] = []
+        params: List[Any] = []
+
+        if cutoff_iso:
+            where_parts.append("created_at >= ?")
+            params.append(cutoff_iso)
+
+        if exclude_operation_types:
+            excl_fragment, excl_params = self._build_exclusion_where_clause(
+                exclude_operation_types
+            )
+            where_parts.append(excl_fragment)
+            params.extend(excl_params)
+
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        sql = (
+            f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
+            f"{where_clause} ORDER BY created_at DESC LIMIT ?"
+        )
+        params.append(limit)
+        rows: List[Dict[str, Any]] = []
+        for row in conn.execute(sql, params).fetchall():
+            job = _row_to_tracked_job(row)
+            if job.job_id not in seen_ids:
+                seen_ids.add(job.job_id)
+                rows.append(_tracked_job_to_dict(job))
+        return rows
+
     def get_recent_jobs(
         self,
         limit: int = 20,
         time_filter: str = "24h",
+        exclude_operation_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Merge active in-memory jobs + recent historical jobs from the store.
@@ -627,20 +696,34 @@ class JobTracker:
         Historical jobs are filtered by created_at within the time window.
 
         Args:
-            limit: Maximum number of historical records from the store.
+            limit: Maximum number of historical records from the store (> 0).
             time_filter: "1h", "24h", "7d", "30d", or "all".
+            exclude_operation_types: Optional list of operation_type values to
+                omit (e.g. ["xray_search", "xray_explore"]). None returns all.
 
         Returns:
             List of job dicts (most-recently-created first), deduped by job_id.
+
+        Raises:
+            ValueError: If limit is not a positive integer.
         """
-        # Collect active jobs first (always included)
+        if limit <= 0:
+            raise ValueError(f"limit must be a positive integer, got {limit}")
+
         with self._lock:
-            active_snapshot = list(self._active_jobs.values())
+            active_snapshot = [
+                _tracked_job_to_dict(j) for j in self._active_jobs.values()
+            ]
 
-        seen_ids = {j.job_id for j in active_snapshot}
-        result = [_tracked_job_to_dict(j) for j in active_snapshot]
+        if exclude_operation_types:
+            excl_set = set(exclude_operation_types)
+            active_snapshot = [
+                j for j in active_snapshot if j.get("operation_type") not in excl_set
+            ]
 
-        # Compute cutoff ISO string
+        seen_ids = {j["job_id"] for j in active_snapshot}
+        result = list(active_snapshot)
+
         cutoff_iso: Optional[str] = None
         if time_filter != "all":
             delta_map = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}
@@ -649,8 +732,10 @@ class JobTracker:
             cutoff_iso = cutoff.isoformat()
 
         if self._backend is not None:
-            # Fetch from backend and filter client-side by cutoff
-            historical = self._backend.list_jobs(limit=limit)
+            historical = self._backend.list_jobs(
+                limit=limit,
+                exclude_operation_types=exclude_operation_types or None,
+            )
             for job_dict in historical:
                 if job_dict["job_id"] in seen_ids:
                     continue
@@ -661,29 +746,11 @@ class JobTracker:
             result.sort(key=_status_priority_sort_key)
             return result
 
-        # Query SQLite for historical jobs
-        conn = self._conn_manager.get_connection()
-        if cutoff_iso:
-            sql = (
-                f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
-                "WHERE created_at >= ? "
-                "ORDER BY created_at DESC LIMIT ?"
+        result.extend(
+            self._query_sqlite_recent_jobs(
+                seen_ids, cutoff_iso, limit, exclude_operation_types
             )
-            cursor = conn.execute(sql, (cutoff_iso, limit))
-        else:
-            sql = (
-                f"SELECT {_SELECT_COLUMNS} FROM background_jobs "
-                "ORDER BY created_at DESC LIMIT ?"
-            )
-            cursor = conn.execute(sql, (limit,))
-
-        for row in cursor.fetchall():
-            job = _row_to_tracked_job(row)
-            if job.job_id not in seen_ids:
-                seen_ids.add(job.job_id)
-                result.append(_tracked_job_to_dict(job))
-
-        # Story #328: Sort with running/pending jobs first, then by time
+        )
         result.sort(key=_status_priority_sort_key)
         return result
 
@@ -965,7 +1032,12 @@ class JobTracker:
     # Private SQLite helpers
     # ------------------------------------------------------------------
 
-    def _atomic_insert_or_raise(self, job: TrackedJob) -> None:
+    def _atomic_insert_or_raise(
+        self,
+        job: TrackedJob,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
+    ) -> None:
         """
         Insert a job row atomically, translating a unique-index violation on
         idx_active_job_per_repo (Story #876 Phase C) into DuplicateJobError.
@@ -980,12 +1052,18 @@ class JobTracker:
         If the lookup for the blocking row returns None, raises RuntimeError
         — treating an inconsistent database state as a hard error rather
         than substituting a fallback value (Messi Rule #2 anti-fallback).
+
+        Args:
+            is_admin: Persisted to the DB row on INSERT (AC12 audit trail).
+            actor_username: Persisted to the DB row on INSERT (AC12 audit trail).
         """
         assert job.repo_alias is not None, (
             "atomic insert requires non-null repo_alias — partial index excludes NULL"
         )
         try:
-            self._atomic_insert_impl(job)
+            self._atomic_insert_impl(
+                job, is_admin=is_admin, actor_username=actor_username
+            )
             return
         except (sqlite3.IntegrityError, _BackendUniqueViolation):
             pass
@@ -1005,7 +1083,12 @@ class JobTracker:
             existing_job_id=existing_id,
         )
 
-    def _atomic_insert_impl(self, job: TrackedJob) -> None:
+    def _atomic_insert_impl(
+        self,
+        job: TrackedJob,
+        is_admin: bool = False,
+        actor_username: Optional[str] = None,
+    ) -> None:
         """
         Raw INSERT that surfaces partial-unique-index violations.
 
@@ -1014,10 +1097,19 @@ class JobTracker:
         narrow try/except that translates psycopg's IntegrityError /
         UniqueViolation into the _BackendUniqueViolation marker without
         importing psycopg. All other exceptions are re-raised.
+
+        Args:
+            is_admin: Persisted to the is_admin column (AC12 audit trail).
+            actor_username: Persisted to the actor_username column (AC12).
         """
         if self._backend is not None:
             try:
-                self._backend.save_job(
+                # Use atomic_claim_insert (plain INSERT, no OR IGNORE) so that
+                # sqlite3.IntegrityError / psycopg UniqueViolation propagates
+                # when idx_active_job_per_repo is violated.  save_job uses
+                # INSERT OR IGNORE which silently swallows the violation and
+                # makes the try/except below dead code (Bug #1065).
+                self._backend.atomic_claim_insert(
                     job_id=job.job_id,
                     operation_type=job.operation_type,
                     status=job.status,
@@ -1031,6 +1123,8 @@ class JobTracker:
                     repo_alias=job.repo_alias,
                     progress_info=job.progress_info,
                     metadata=job.metadata,
+                    is_admin=is_admin,
+                    actor_username=actor_username,
                 )
             except Exception as exc:
                 # Narrow detection: translate only the known unique-violation
@@ -1046,8 +1140,8 @@ class JobTracker:
                    (job_id, operation_type, status, created_at, started_at,
                     completed_at, result, error, progress, username,
                     is_admin, cancelled, repo_alias, resolution_attempts,
-                    progress_info, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)""",
+                    progress_info, metadata, actor_username)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?)""",
                 (
                     job.job_id,
                     job.operation_type,
@@ -1059,9 +1153,11 @@ class JobTracker:
                     job.error,
                     job.progress,
                     job.username,
+                    1 if is_admin else 0,
                     job.repo_alias,
                     _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
+                    actor_username,
                 ),
             )
 

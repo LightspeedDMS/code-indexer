@@ -132,7 +132,7 @@ def test_parse_tests_python_file(py_file: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Section 1c: Per-language fixture corpus (all 10 languages x 4 fixture types)
+# Section 1c: Per-language fixture corpus (all 12 languages x 4 fixture types)
 # ---------------------------------------------------------------------------
 
 _FIXTURE_PARAMS = [
@@ -148,6 +148,8 @@ _FIXTURE_PARAMS = [
         "csharp",
         "html",
         "css",
+        "c",
+        "cpp",
     ]
     for fixture_type in ["smoke", "realistic", "advanced", "pathological"]
 ]
@@ -161,7 +163,7 @@ _FIXTURE_PARAMS = [
 def test_fixture_corpus_parses(lang: str, fixture_type: str) -> None:
     """Each language fixture must parse to a tree with child_count > 0.
 
-    This exercises all 40 fixture files (10 languages x 4 types).
+    This exercises all 48 fixture files (12 languages x 4 types).
     """
     fixture_dir = FIXTURES / lang
     candidates = list(fixture_dir.glob(f"{fixture_type}.*"))

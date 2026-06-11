@@ -1506,6 +1506,13 @@ Rules:
                 log_label,
                 result.cli_used,
             )
+        if not result.success:
+            # Bug #1069: raise so callers' except-blocks can distinguish a
+            # genuine dispatch failure (retryable → return None) from a
+            # successful dispatch where Claude chose not to edit (no-op →
+            # return _DELTA_NOOP).  Without this raise, all failure modes look
+            # like mtime-unchanged and would wrongly return _DELTA_NOOP.
+            raise RuntimeError(f"{log_label} dispatch failed: {result.error}")
         return str(result.output)
 
     def run_pass_2_per_domain(
@@ -3203,21 +3210,28 @@ Rules:
                 )
                 return _DELTA_NOOP
             if not self._verify_file_modified(temp_file, original_mtime, domain_name):
-                return None
+                # Bug #1069: mtime unchanged means Claude made no edit — this is a
+                # legitimate no-op, NOT a retryable failure.  Return _DELTA_NOOP so
+                # the service retry loop breaks instead of re-invoking Claude.
+                return _DELTA_NOOP
             updated = self._read_file_if_changed(
                 temp_file, existing_content, domain_name, "Delta merge"
             )
+            if updated is None:
+                # Bug #1069: byte-identical content means Claude rewrote the file
+                # with no net change — also a legitimate no-op.  Return _DELTA_NOOP
+                # to prevent wrongful retries (each retry = new 20-min Claude call).
+                return _DELTA_NOOP
             # Bug #834 (Step 3): defensive sanitization — Claude should never add
             # frontmatter to the body-only temp file, but strip it if it does and
             # log a WARNING so the violation is visible (Messi Rule #13).
-            if updated is not None:
-                stripped = _strip_leading_yaml_frontmatter(updated)
-                if stripped != updated:
-                    logger.warning(
-                        f"Claude returned frontmatter in body-only path for "
-                        f"'{domain_name}'; stripped it"
-                    )
-                    updated = stripped
+            stripped = _strip_leading_yaml_frontmatter(updated)
+            if stripped != updated:
+                logger.warning(
+                    f"Claude returned frontmatter in body-only path for "
+                    f"'{domain_name}'; stripped it"
+                )
+                updated = stripped
             return updated
         finally:
             self._cleanup_temp_file(temp_file)

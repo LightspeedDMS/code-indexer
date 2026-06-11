@@ -1,14 +1,14 @@
 """Read-only git handler functions for CIDX MCP server.
 
 Covers: git_file_history, git_log, git_show_commit, git_file_at_revision,
-git_diff (both older handle_git_diff and newer git_diff), git_blame,
-git_search_commits, git_search_diffs, git_status, git_fetch,
-git_branch_list, git_conflict_status.
+git_diff, git_blame, git_search_commits, git_search_diffs, git_status,
+git_fetch, git_branch_list, git_conflict_status.
 
-The older handle_git_* variants are still referenced by omni handlers
-(_omni_git_log, _omni_git_search_commits) and must be included here.
-The newer git_diff / git_log variants overwrite the HANDLER_REGISTRY entries
-for those keys (matching the order in the original _legacy.py).
+The older handle_git_log variant is still referenced by the omni handler
+(_omni_git_log) and must be included here.  The newer git_diff / git_log
+variants overwrite the HANDLER_REGISTRY entries for those keys (matching
+the order in the original _legacy.py).  handle_git_diff was removed in
+Bug #1081 — only git_diff (the live paginated variant) remains.
 
 Shared helpers that remain in _legacy.py and are accessed via _get_legacy():
   _resolve_git_repo_path, _resolve_repo_path, _is_git_repo,
@@ -399,58 +399,21 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "rerank_time_ms": 0,
             }
 
-        # Story #35: Build full log result for potential caching
-        full_log_data = {
-            "commits": commits,
-            "total_count": result.total_count,
-        }
-
-        # Story #35: Apply token-based truncation with cache handle support
-        payload_cache = getattr(
-            _handler_utils.app_module.app.state, "payload_cache", None
-        )
-        config_service = get_config_service()
-        content_limits = config_service.get_config().content_limits_config
-
-        # Initialize truncation fields
-        cache_handle = None
-        truncated = False
-        total_tokens = 0
-        preview_tokens = 0
-        total_pages = 0
-        has_more = False
-
-        # Serialize log result to JSON for token counting and caching
-        log_json = json_module.dumps(full_log_data)
-
-        if payload_cache is not None and log_json and content_limits is not None:
-            from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-            truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = truncation_helper.truncate_and_cache(
-                content=log_json,
-                content_type="log",
-            )
-
-            cache_handle = truncation_result.cache_handle
-            truncated = truncation_result.truncated
-            total_tokens = truncation_result.original_tokens
-            preview_tokens = truncation_result.preview_tokens
-            total_pages = truncation_result.total_pages
-            has_more = truncation_result.has_more
-
+        # Bug #1080 (Finding #3): byte-envelope (TruncationHelper / cache_handle) is fully
+        # retired for git_log.  All requested commits are always returned in full; the
+        # byte-cut preview/cache_handle pattern has no navigable continuation axis for
+        # clients and so is incoherent.  has_more/total_pages remain False/0.
         return _mcp_response(
             {
                 "success": True,
                 "commits": commits,
                 "total_count": result.total_count,
-                # Story #35: Truncation metadata fields
-                "cache_handle": cache_handle,
-                "truncated": truncated,
-                "total_tokens": total_tokens,
-                "preview_tokens": preview_tokens,
-                "total_pages": total_pages,
-                "has_more": has_more,
+                "cache_handle": None,
+                "truncated": False,
+                "total_tokens": 0,
+                "preview_tokens": 0,
+                "total_pages": 0,
+                "has_more": False,
                 # Story #660: Reranking telemetry
                 "query_metadata": {
                     "reranker_used": _rerank_meta["reranker_used"],
@@ -647,160 +610,6 @@ def handle_git_file_at_revision(args: Dict[str, Any], user: User) -> Dict[str, A
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_diff tool - get diff between revisions.
-
-    Story #34: When diff exceeds git_diff_max_tokens, stores full diff in
-    PayloadCache and returns cache_handle for paginated retrieval.
-    """
-    from code_indexer.server.mcp.handlers import _utils as _handler_utils
-
-    leg = _get_legacy()
-    _resolve_git_repo_path = leg._resolve_git_repo_path
-
-    repository_alias = args.get("repository_alias")
-    from_revision = args.get("from_revision")
-
-    # Validate required parameters
-    if not repository_alias:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: repository_alias"}
-        )
-    if not from_revision:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: from_revision"}
-        )
-
-    # Story #1039: bare-to-global alias fallback (read-only handler).
-    if isinstance(repository_alias, str) and not repository_alias.endswith("-global"):
-        _arm = getattr(_handler_utils.app_module, "activated_repo_manager", None)
-        _grm = getattr(_handler_utils.app_module, "golden_repo_manager", None)
-        if _arm is not None and _grm is not None:
-            if not _arm.user_has_activated_repo(user.username, repository_alias):
-                from ._global_fallback import try_global_fallback
-
-                _promoted = try_global_fallback(repository_alias, _grm)
-                if _promoted is not None:
-                    logger.info(
-                        "bare-alias fallback: %r -> %r for user %r",
-                        repository_alias,
-                        _promoted,
-                        user.username,
-                    )
-                    args["repository_alias"] = _promoted
-                    repository_alias = _promoted
-
-    try:
-        # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
-        if error_msg is not None:
-            return _mcp_response({"success": False, "error": error_msg})
-        assert repo_path is not None  # narrowed by error_msg check above
-
-        # Create service and execute query
-        from code_indexer.global_repos.git_operations import GitOperationsService
-
-        service = GitOperationsService(Path(repo_path))
-        result = service.get_diff(
-            from_revision=from_revision,
-            to_revision=args.get("to_revision"),
-            path=args.get("path"),
-            context_lines=args.get("context_lines", 3),
-            stat_only=args.get("stat_only", False),
-        )
-
-        # Convert dataclasses to dicts for JSON serialization
-        files = [
-            {
-                "path": f.path,
-                "old_path": f.old_path,
-                "status": f.status,
-                "insertions": f.insertions,
-                "deletions": f.deletions,
-                "hunks": [
-                    {
-                        "old_start": h.old_start,
-                        "old_count": h.old_count,
-                        "new_start": h.new_start,
-                        "new_count": h.new_count,
-                        "content": h.content,
-                    }
-                    for h in f.hunks
-                ],
-            }
-            for f in result.files
-        ]
-
-        # Story #34: Build full diff result for potential caching
-        full_diff_data = {
-            "from_revision": result.from_revision,
-            "to_revision": result.to_revision,
-            "files": files,
-            "total_insertions": result.total_insertions,
-            "total_deletions": result.total_deletions,
-            "stat_summary": result.stat_summary,
-        }
-
-        # Story #34: Apply token-based truncation with cache handle support
-        payload_cache = getattr(
-            _handler_utils.app_module.app.state, "payload_cache", None
-        )
-        config_service = get_config_service()
-        content_limits = config_service.get_config().content_limits_config
-
-        # Initialize truncation fields
-        cache_handle = None
-        truncated = False
-        total_tokens = 0
-        preview_tokens = 0
-        total_pages = 0
-        has_more = False
-
-        # Serialize diff result to JSON for token counting and caching
-        diff_json = json_module.dumps(full_diff_data)
-
-        if payload_cache is not None and diff_json and content_limits is not None:
-            from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-            truncation_helper = TruncationHelper(payload_cache, content_limits)
-            truncation_result = truncation_helper.truncate_and_cache(
-                content=diff_json,
-                content_type="diff",
-            )
-
-            cache_handle = truncation_result.cache_handle
-            truncated = truncation_result.truncated
-            total_tokens = truncation_result.original_tokens
-            preview_tokens = truncation_result.preview_tokens
-            total_pages = truncation_result.total_pages
-            has_more = truncation_result.has_more
-
-        return _mcp_response(
-            {
-                "success": True,
-                "from_revision": result.from_revision,
-                "to_revision": result.to_revision,
-                "files": files,
-                "total_insertions": result.total_insertions,
-                "total_deletions": result.total_deletions,
-                "stat_summary": result.stat_summary,
-                # Story #34: Truncation metadata fields
-                "cache_handle": cache_handle,
-                "truncated": truncated,
-                "total_tokens": total_tokens,
-                "preview_tokens": preview_tokens,
-                "total_pages": total_pages,
-                "has_more": has_more,
-            }
-        )
-
-    except Exception as e:
-        logger.exception(
-            f"Error in git_diff: {e}", extra={"correlation_id": get_correlation_id()}
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
 # Bug #1008: line count above which blame output is cached and preview-truncated
 BLAME_TRUNCATION_LINE_THRESHOLD = 200
 
@@ -853,64 +662,18 @@ def _serialize_blame_lines(blame_lines: list) -> List[dict]:
     ]
 
 
-def _apply_blame_truncation(
-    lines: List[dict], payload_cache: Any, content_limits: Any
-) -> tuple:
-    """Run PayloadCache + TruncationHelper on blame lines, returning (preview_lines, meta).
-
-    When payload_cache or content_limits is unavailable, logs a warning and gracefully
-    returns (full_lines, _BLAME_TRUNC_ZERO). This fallback is intentional: truncation
-    infrastructure may not be configured in all deployments, and failing hard would
-    break all blame responses on those deployments.
-    """
-    if payload_cache is None or content_limits is None:
-        logger.warning(
-            "Blame truncation infrastructure unavailable "
-            "(payload_cache=%s content_limits=%s); returning full response",
-            payload_cache is None,
-            content_limits is None,
-        )
-        return lines, _BLAME_TRUNC_ZERO.copy()
-
-    blame_json = json_module.dumps({"lines": lines})
-    from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-    tr = TruncationHelper(payload_cache, content_limits).truncate_and_cache(
-        content=blame_json,
-        content_type="blame",
-    )
-    preview_lines = (
-        json_module.loads(tr.preview).get("lines", lines) if tr.truncated else lines
-    )
-    return preview_lines, {
-        "cache_handle": tr.cache_handle,
-        "truncated": tr.truncated,
-        "total_tokens": tr.original_tokens,
-        "preview_tokens": tr.preview_tokens,
-        "total_pages": tr.total_pages,
-        "has_more": tr.has_more,
-    }
-
-
 def _build_git_blame_response(
     result: Any, lines: List[dict], total_lines: int, handler_utils: Any
 ) -> dict:
-    """Build the success response dict for git_blame, applying truncation when needed.
+    """Build the success response dict for git_blame.
 
-    When total_lines exceeds BLAME_TRUNCATION_LINE_THRESHOLD, fetches payload_cache
-    from app.state (may be None — _apply_blame_truncation logs a warning and falls
-    back to the full response in that deployment-specific case) and runs TruncationHelper.
+    Bug #1080 (Finding #3): byte-envelope (TruncationHelper / cache_handle) is fully
+    retired for git_blame.  All requested blame lines are returned in full; the
+    byte-cut preview/cache_handle pattern has no navigable continuation axis and is
+    incoherent.  The BLAME_TRUNCATION_LINE_THRESHOLD branch is removed — all responses
+    use _BLAME_TRUNC_ZERO (cache_handle=None, truncated=False, has_more=False).
     """
-    if total_lines > BLAME_TRUNCATION_LINE_THRESHOLD:
-        payload_cache = getattr(
-            handler_utils.app_module.app.state, "payload_cache", None
-        )
-        content_limits = get_config_service().get_config().content_limits_config
-        response_lines, trunc_meta = _apply_blame_truncation(
-            lines, payload_cache, content_limits
-        )
-    else:
-        response_lines, trunc_meta = lines, _BLAME_TRUNC_ZERO.copy()
+    response_lines, trunc_meta = lines, _BLAME_TRUNC_ZERO.copy()
 
     return {
         "success": True,
@@ -1635,7 +1398,7 @@ def git_conflict_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Newer git_diff / git_log variants — these overwrite the HANDLER_REGISTRY
 # entries for "git_diff" and "git_log" (same ordering as original _legacy.py).
-# The older handle_git_diff / handle_git_log remain reachable for omni helpers.
+# The older handle_git_log remains reachable for omni helpers.
 # ---------------------------------------------------------------------------
 
 
@@ -1879,7 +1642,6 @@ def _register(registry: dict) -> None:
     registry["git_log"] = handle_git_log
     registry["git_show_commit"] = handle_git_show_commit
     registry["git_file_at_revision"] = handle_git_file_at_revision
-    registry["git_diff"] = handle_git_diff
     registry["git_blame"] = handle_git_blame
     registry["git_file_history"] = handle_git_file_history
     registry["git_search_commits"] = handle_git_search_commits

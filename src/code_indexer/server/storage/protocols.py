@@ -203,6 +203,35 @@ class BackgroundJobsBackend(Protocol):
         claimed_at: Optional[str] = None,
     ) -> None: ...
 
+    def atomic_claim_insert(
+        self,
+        job_id: str,
+        operation_type: str,
+        status: str,
+        created_at: str,
+        username: str,
+        progress: int,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_admin: bool = False,
+        cancelled: bool = False,
+        repo_alias: Optional[str] = None,
+        resolution_attempts: int = 0,
+        claude_actions: Optional[List[str]] = None,
+        failure_reason: Optional[str] = None,
+        extended_error: Optional[Dict[str, Any]] = None,
+        language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
+        current_phase: Optional[str] = None,
+        phase_detail: Optional[str] = None,
+        progress_info: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
+        actor_username: Optional[str] = None,
+    ) -> None: ...
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]: ...
 
     def update_job(self, job_id: str, **kwargs: Any) -> None: ...
@@ -224,7 +253,17 @@ class BackgroundJobsBackend(Protocol):
         exclude_ids: Optional[Any] = None,
         limit: Optional[int] = None,
         offset: int = 0,
+        username: Optional[str] = None,
     ) -> tuple: ...
+
+    def list_job_ids_filtered(
+        self,
+        status: Optional[str] = None,
+        operation_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        username: Optional[str] = None,
+        cap: Optional[int] = None,
+    ) -> set: ...
 
     def delete_job(self, job_id: str) -> bool: ...
 

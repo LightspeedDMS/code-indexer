@@ -152,7 +152,9 @@ def main(argv: List[str]) -> int:
             continue
         changed, domain, injected = inject_into_file(f, n)
         if changed:
-            print(f"injected {injected} self-loop row(s) into {f.name} (domain={domain})")
+            print(
+                f"injected {injected} self-loop row(s) into {f.name} (domain={domain})"
+            )
             total_injected += injected
         else:
             print(f"skipped {f.name} (no Outgoing Dependencies table)")

@@ -460,6 +460,60 @@ class TestClaudeResponseParsing:
         with pytest.raises(ValueError, match="Missing required field: status"):
             scanner.parse_claude_response(json.dumps(response_json))
 
+    def test_parse_claude_response_pacemaker_preamble(self, scanner):
+        """Staging bug: pace-maker prepends a § telemetry line at byte 0.
+
+        The bare json.loads at scanner.py:431 raised
+        ``Invalid JSON response from Claude: Expecting value:
+        line 1 column 1 (char 0)`` for this shape. The parser must strip the
+        § preamble and parse the real CLI-wrapper JSON.
+        """
+        response_json = {
+            "status": "SUCCESS",
+            "max_log_id_processed": 300,
+            "issues_created": [],
+            "duplicates_skipped": 0,
+            "potential_duplicates_commented": 0,
+        }
+        raw = "§ △0.0 ◎surg ■other ◇1.0 ↻1\n\n" + json.dumps(response_json)
+
+        result = scanner.parse_claude_response(raw)
+
+        assert result["status"] == "SUCCESS"
+        assert result["max_log_id_processed"] == 300
+
+    def test_parse_claude_response_pacemaker_and_warning_preamble(self, scanner):
+        """§ telemetry plus a leading ``Warning:`` line both get stripped."""
+        response_json = {"status": "FAILURE", "error": "Database connection timeout"}
+        raw = (
+            "§ △0.0 ◎surg ■other ◇1.0 ↻1\n"
+            "Warning: no stdin data received, continuing\n" + json.dumps(response_json)
+        )
+
+        result = scanner.parse_claude_response(raw)
+
+        assert result["status"] == "FAILURE"
+        assert "timeout" in result["error"].lower()
+
+    def test_parse_claude_response_code_fence_wrapped(self, scanner):
+        """Markdown ```json fences around the response are stripped."""
+        response_json = {"status": "SUCCESS", "max_log_id_processed": 1}
+        raw = "```json\n" + json.dumps(response_json) + "\n```"
+
+        result = scanner.parse_claude_response(raw)
+
+        assert result["status"] == "SUCCESS"
+
+    def test_parse_claude_response_empty_still_raises(self, scanner):
+        """A genuinely empty response is a loud error, not a false success."""
+        with pytest.raises(ValueError, match="Invalid JSON response from Claude"):
+            scanner.parse_claude_response("")
+
+    def test_parse_claude_response_pacemaker_only_raises(self, scanner):
+        """All telemetry, no payload -> must NOT be silently treated as success."""
+        with pytest.raises(ValueError, match="Invalid JSON response from Claude"):
+            scanner.parse_claude_response("§ △0.0 ◎surg ■other ◇1.0 ↻1")
+
 
 class TestIssueClassification:
     """Test issue classification prefixes (AC4)."""

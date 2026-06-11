@@ -11,8 +11,13 @@ import os
 import random
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Union, Set
+from typing import List, Dict, Any, Optional, Tuple, Union, Set, TYPE_CHECKING
 from datetime import datetime
+
+if TYPE_CHECKING:
+    # Imported only for type-checking so the runtime CLI startup import budget
+    # is unaffected (concurrent.futures stays a lazy import inside search()).
+    from concurrent.futures import Executor
 import threading
 import numpy as np
 import logging
@@ -217,6 +222,7 @@ class FilesystemVectorStore:
         base_path: Path,
         project_root: Optional[Path] = None,
         hnsw_index_cache: Optional[Any] = None,
+        id_index_cache: Optional[Any] = None,
     ):
         """Initialize filesystem vector store.
 
@@ -224,6 +230,7 @@ class FilesystemVectorStore:
             base_path: Base directory for all collections
             project_root: Root directory of the project being indexed (for git operations)
             hnsw_index_cache: Optional HNSW index cache for server-side performance (Story #526)
+            id_index_cache: Optional id_index cache for server-side performance (Bug #1078)
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -269,6 +276,10 @@ class FilesystemVectorStore:
         # Story #526: Server-side HNSW index cache for 1800x performance improvement
         # When set, caches hnswlib.Index objects with TTL-based eviction
         self.hnsw_index_cache = hnsw_index_cache
+
+        # Bug #1078: Server-side id_index cache to eliminate per-query pathlib deserialization
+        # (~33% GIL time). Mirrors HNSW cache pattern. None in CLI/standalone mode.
+        self.id_index_cache = id_index_cache
 
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}
@@ -698,6 +709,9 @@ class FilesystemVectorStore:
         # Invalidate HNSW cache if present (server-side cache must be refreshed)
         if self.hnsw_index_cache is not None:
             self.hnsw_index_cache.invalidate(str(collection_path))
+        # Bug #1078: invalidate id_index cache in lockstep with HNSW (same rebuild event)
+        if self.id_index_cache is not None:
+            self.id_index_cache.invalidate(str(collection_path))
 
         self.logger.info(
             f"Filtered HNSW rebuild complete for '{collection_name}': "
@@ -2347,6 +2361,7 @@ class FilesystemVectorStore:
         prefetch_limit: Optional[int] = None,
         ef: int = 50,
         subdirectory: Optional[str] = None,
+        parallel_executor: Optional["Executor"] = None,
     ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         """Search for similar vectors using parallel execution of index loading and embedding generation.
 
@@ -2369,6 +2384,13 @@ class FilesystemVectorStore:
             lazy_load: If True, load payloads on-demand with early exit (optimization for restrictive filters)
             prefetch_limit: How many candidate IDs to fetch from HNSW (default: limit * 2 or limit * 15 for lazy_load)
             subdirectory: Optional subdirectory path (e.g., "multimodal_index")
+            parallel_executor: Optional SHARED, long-lived ThreadPoolExecutor for the
+                index-load || embedding fan-out. SERVER PATH: the server injects its
+                app-level query executor here so concurrent requests reuse threads
+                instead of each creating/destroying a per-request pool (which serialized
+                on CPython's process-wide _global_shutdown_lock). CLI/SOLO/DAEMON PATH:
+                leave None — a per-call ThreadPoolExecutor(max_workers=2) is created and
+                cleaned up exactly as before (single-user, no concurrency/churn problem).
 
         Returns:
             List of results with id, score, payload (including content), and staleness
@@ -2456,35 +2478,70 @@ class FilesystemVectorStore:
 
             # Load ID index in same thread (parallel with embedding generation)
             t_id = time.time()
-            with self._id_index_lock:
-                if collection_name not in self._id_index:
-                    self._id_index[collection_name] = self._load_id_index(
-                        collection_name
-                    )
-                id_index = self._id_index[collection_name]
+            if self.id_index_cache is not None:
+                # Bug #1078: use shared cross-query cache (server mode)
+                id_index = self.id_index_cache.get_or_load(
+                    str(collection_path.resolve()),
+                    lambda: self._load_id_index(collection_name),
+                )
+            else:
+                with self._id_index_lock:
+                    if collection_name not in self._id_index:
+                        self._id_index[collection_name] = self._load_id_index(
+                            collection_name
+                        )
+                    id_index = self._id_index[collection_name]
             id_load_ms = (time.time() - t_id) * 1000
 
             return hnsw_index, id_index, hnsw_load_ms, id_load_ms
 
         def generate_embedding():
-            """Generate query embedding in parallel thread."""
-            t0 = time.time()
-            embedding = embedding_provider.get_embedding(
-                query, embedding_purpose="query"
+            """Generate query embedding in parallel thread.
+
+            Bug #1078: the HTTP call is gated through the concurrency governor so
+            at most K concurrent serving-path embedding requests reach VoyageAI/Cohere.
+            The HNSW-load worker (load_index) runs freely — it makes no provider calls.
+            """
+            from code_indexer.server.services.governed_call import (
+                coalesced_query_embedding,
             )
+
+            t0 = time.time()
+            embedding = coalesced_query_embedding(embedding_provider, query)
             embedding_time_ms = (time.time() - t0) * 1000
             return embedding, embedding_time_ms
 
-        # Execute both operations in parallel using ThreadPoolExecutor
+        # Execute both operations in parallel.
+        #
+        # Anti-fallback explicit branch (Messi #2): the SERVER passes a shared,
+        # long-lived executor; the CLI/solo/daemon does NOT. This is intentionally
+        # two readable paths, never a silent global.
+        #
+        # SERVER PATH (parallel_executor injected): submit to the shared pool and
+        # gather — DO NOT shut it down (it is owned by the app lifespan). This
+        # eliminates the per-request ThreadPoolExecutor create/destroy churn that
+        # serialized concurrent queries on CPython's _global_shutdown_lock.
+        #
+        # CLI PATH (parallel_executor is None): single-user, not concurrent — keep
+        # the original per-call ThreadPoolExecutor(max_workers=2) context manager,
+        # so CLI behaviour and the CLI startup import budget are unchanged.
         parallel_start = time.time()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            # Submit both tasks
-            index_future = executor.submit(load_index)
-            embedding_future = executor.submit(generate_embedding)
-
-            # Wait for both to complete and gather results
+        if parallel_executor is not None:
+            index_future = parallel_executor.submit(load_index)
+            embedding_future = parallel_executor.submit(generate_embedding)
+            # .result() re-raises any sub-task exception in the caller's thread —
+            # identical exception propagation to the `with` form below.
             hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
             query_vector, embedding_ms = embedding_future.result()
+        else:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit both tasks
+                index_future = executor.submit(load_index)
+                embedding_future = executor.submit(generate_embedding)
+
+                # Wait for both to complete and gather results
+                hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
+                query_vector, embedding_ms = embedding_future.result()
 
         # Calculate actual parallel execution time (wall clock)
         parallel_load_ms = (time.time() - parallel_start) * 1000

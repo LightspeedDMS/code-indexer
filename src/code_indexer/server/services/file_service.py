@@ -230,6 +230,23 @@ class FileListingService:
 
             return cast(str, activated_path)
 
+        except FileNotFoundError as e:
+            # Expected not-found: a repo simply absent on disk (e.g. a stale
+            # activation record whose directory is gone). Callers (Story #1039
+            # global recovery + clean not-found response) depend on this raise,
+            # but it is NOT a server error -- log at DEBUG, never ERROR, to
+            # avoid [CACHE-GENERAL-011] spam for an expected condition.
+            logger.debug(
+                format_error_log(
+                    "CACHE-GENERAL-011",
+                    "Repository path not found (expected)",
+                    repo_id=repo_id,
+                    username=username,
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-011"),
+            )
+            raise
         except Exception as e:
             logger.error(
                 format_error_log(
@@ -241,8 +258,6 @@ class FileListingService:
                 ),
                 extra=get_log_extra("CACHE-GENERAL-011"),
             )
-            if isinstance(e, FileNotFoundError):
-                raise
             raise RuntimeError(f"Unable to access repository {repo_id}: {e}")
 
     def _collect_files(self, repo_path: str) -> List[FileInfo]:

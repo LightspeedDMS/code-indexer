@@ -409,49 +409,127 @@ def _parse_pagination_params(params: Dict[str, Any]) -> Any:
     return offset, limit
 
 
+def _read_chunk(
+    content: str,
+    offset: int,
+    total_lines: int,
+    max_chars: int,
+) -> tuple:
+    """Select whole lines from content up to the character budget (Bug #1080).
+
+    Args:
+        content: Full text content starting at `offset` (may be many lines).
+        offset: 1-indexed line number of the first line in `content`.
+        total_lines: Total number of lines in the original file.
+        max_chars: Maximum character budget for the returned chunk.
+
+    Returns:
+        (chunk_text, returned_lines, has_more, next_offset, truncated)
+
+    Design rules:
+    - Never byte-cut mid-line: the budget BREAK fires only when len(selected) > 0.
+    - Pathological single unit > budget: emit it whole (one-response budget overrun).
+    - next_offset strictly advances so pagination always terminates.
+    """
+    # Split on \n ONLY — matches f.readlines() / content.count("\n") semantics used by
+    # FileListingService to compute total_lines.  str.splitlines() also splits on \x0c,
+    # \v, \x1c–\x1e, \x85,  ,  , etc., yielding more "lines" than the service
+    # reports, which breaks returned_lines > total_lines invariant (Bug #1080).
+    _parts = content.split("\n")
+    all_lines = [p + "\n" for p in _parts[:-1]]
+    if _parts[-1]:
+        all_lines.append(_parts[-1])
+    if not all_lines:
+        return "", 0, False, None, False
+
+    selected: list[str] = []
+    char_count = 0
+    for line in all_lines:
+        # Honor the budget, but always emit at least one line (termination guarantee).
+        if char_count + len(line) > max_chars and len(selected) > 0:
+            break
+        selected.append(line)
+        char_count += len(line)
+
+    returned_lines = len(selected)
+    last_line = offset + returned_lines - 1
+    has_more = last_line < total_lines
+    next_offset = offset + returned_lines if has_more else None
+    chunk_text = "".join(selected)
+    truncated = has_more  # truncated iff there are more lines beyond what was returned
+    return chunk_text, returned_lines, has_more, next_offset, truncated
+
+
 def _build_file_content_response(
     result: dict, file_path: str, repository_alias: str
 ) -> Dict[str, Any]:
-    """Build the MCP response for get_file_content with truncation support."""
+    """Build the MCP response for get_file_content.
+
+    Bug #1080 fix: replaces TruncationHelper byte-cut with line-aware read_chunk.
+    The domain unit (file lines) is the single source of truth for pagination.
+    cache_handle / total_pages are retired for this tool (line-offset pagination
+    is self-contained; no opaque byte-envelope needed).
+    """
     file_content = result.get("content", "")
     metadata = result.get("metadata", {})
 
-    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
     config_service = get_config_service()
     content_limits = config_service.get_config().content_limits_config
 
-    cache_handle = None
-    truncated = False
-    total_tokens = 0
-    preview_tokens = 0
-    total_pages = 0
-    has_more = False
-
-    if payload_cache is not None and file_content and content_limits is not None:
-        from code_indexer.server.cache.truncation_helper import TruncationHelper
-
-        truncation_helper = TruncationHelper(payload_cache, content_limits)
-        truncation_result = truncation_helper.truncate_and_cache(
-            content=file_content,
-            content_type="file",
+    # Apply line-aware chunk selection when we have a token budget configured.
+    if file_content and content_limits is not None:
+        max_chars = int(
+            int(content_limits.file_content_max_tokens)
+            * int(content_limits.chars_per_token)
+        )
+        offset = int(metadata.get("offset") or 1)
+        total_lines = int(metadata.get("total_lines") or 0)
+        estimated_tokens_before = len(file_content) // int(
+            content_limits.chars_per_token
         )
 
-        file_content = truncation_result.preview
-        cache_handle = truncation_result.cache_handle
-        truncated = truncation_result.truncated
-        total_tokens = truncation_result.original_tokens
-        preview_tokens = truncation_result.preview_tokens
-        total_pages = truncation_result.total_pages
-        has_more = truncation_result.has_more
+        file_content, returned_lines, has_more, next_offset, truncated = _read_chunk(
+            content=file_content,
+            offset=offset,
+            total_lines=total_lines,
+            max_chars=max_chars,
+        )
+
+        # Recompute metadata from what was ACTUALLY returned.
+        estimated_tokens = len(file_content) // int(content_limits.chars_per_token)
+        metadata["returned_lines"] = returned_lines
+        metadata["has_more"] = has_more
+        metadata["next_offset"] = next_offset
+        metadata["truncated"] = truncated
+        metadata["truncated_at_line"] = (
+            (offset + returned_lines - 1) if truncated else None
+        )
+        metadata["estimated_tokens"] = estimated_tokens
+        metadata["requires_pagination"] = has_more
+        metadata["pagination_hint"] = (
+            f"More content available. Use offset={next_offset} to continue reading."
+            if has_more
+            else None
+        )
+        total_tokens = estimated_tokens_before
+        preview_tokens = estimated_tokens
+    else:
+        total_tokens = 0
+        preview_tokens = 0
+        has_more = metadata.get("has_more", False)
+        truncated = metadata.get("truncated", False)
+
+    # cache_handle and total_pages are retired for get_file_content (Bug #1080):
+    # pagination is purely line-offset based; no byte-envelope needed.
+    cache_handle = None
+    total_pages = 0
 
     content_blocks = [{"type": "text", "text": file_content}] if file_content else []
 
     metadata["cache_handle"] = cache_handle
-    metadata["truncated"] = truncated
     metadata["total_tokens"] = total_tokens
     metadata["preview_tokens"] = preview_tokens
     metadata["total_pages"] = total_pages
-    metadata["has_more"] = has_more
 
     wiki_enabled_repos = _get_wiki_enabled_repos()
     _enrich_with_wiki_url(metadata, file_path, repository_alias, wiki_enabled_repos)
@@ -759,16 +837,46 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 skip_truncation=True,
             )
         else:
-            result = _utils.app_module.file_service.get_file_content(
-                repository_alias=repository_alias,
-                file_path=file_path,
-                username=user.username,
-                offset=offset,
-                limit=limit,
-                skip_truncation=True,
-            )
+            try:
+                result = _utils.app_module.file_service.get_file_content(
+                    repository_alias=repository_alias,
+                    file_path=file_path,
+                    username=user.username,
+                    offset=offset,
+                    limit=limit,
+                    skip_truncation=True,
+                )
+            except FileNotFoundError as not_found:
+                # Story #1039 recovery: the user's own activation of this bare
+                # alias could not be resolved (e.g. a stale activation record
+                # whose on-disk directory is gone).  If the golden repo is
+                # globally active, recover via the ``-global`` form -- matching
+                # search_code's bare-alias fallback.  Otherwise surface a clean
+                # not-found (handled by the `except FileNotFoundError` below);
+                # an EXPECTED not-found must never escalate to an unhandled
+                # "Unexpected error" traceback (anti-silent-failure #13).
+                recovered = _recover_file_content_via_global(
+                    repository_alias=repository_alias,
+                    file_path=file_path,
+                    user=user,
+                    offset=offset,
+                    limit=limit,
+                )
+                if recovered is None:
+                    raise not_found
+                result, repository_alias = recovered
 
         return _build_file_content_response(result, file_path, repository_alias)
+    except FileNotFoundError as not_found:
+        # Expected condition -- clean MCP error, NO traceback / ERROR escalation.
+        return _mcp_response(
+            {
+                "success": False,
+                "error": str(not_found),
+                "file_content": [],
+                "metadata": {},
+            }
+        )
     except Exception as e:
         logger.exception(
             f"Unexpected error in get_file_content: {e}",
@@ -777,6 +885,56 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": str(e), "file_content": [], "metadata": {}}
         )
+
+
+def _recover_file_content_via_global(
+    repository_alias: str,
+    file_path: str,
+    user: User,
+    offset: Optional[int],
+    limit: Optional[int],
+) -> Optional[Tuple[dict, str]]:
+    """Recover file content via the ``-global`` form of a bare alias.
+
+    Used when the user's own activation of *repository_alias* could not be
+    resolved (Story #1039).  Returns ``(result, "<alias>-global")`` when the
+    bare alias is globally active and its versioned path resolves, or ``None``
+    when no global recovery is possible (caller then surfaces a clean
+    not-found).  NEVER applied to an already ``-global`` alias.
+    """
+    if not isinstance(repository_alias, str) or repository_alias.endswith("-global"):
+        return None
+
+    _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    if _grm is None:
+        return None
+
+    from ._global_fallback import try_global_fallback
+
+    promoted = try_global_fallback(repository_alias, _grm)
+    if promoted is None:
+        return None
+
+    target_path, error_resp = _resolve_global_repo_target(
+        promoted, user, {"file_content": [], "metadata": {}}
+    )
+    if error_resp is not None or target_path is None:
+        return None
+
+    logger.info(
+        "bare-alias recovery: %r -> %r for user %r (own activation unresolved)",
+        repository_alias,
+        promoted,
+        user.username,
+    )
+    result = _utils.app_module.file_service.get_file_content_by_path(
+        repo_path=target_path,
+        file_path=file_path,
+        offset=offset,
+        limit=limit,
+        skip_truncation=True,
+    )
+    return result, promoted
 
 
 def _normalize_browse_params(params: Dict[str, Any]) -> Dict[str, Any]:

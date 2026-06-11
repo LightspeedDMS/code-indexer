@@ -16,7 +16,12 @@ import math
 import os
 import re
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+
+from code_indexer.server.services.jittered_dispatcher import (
+    DEFAULT_LIFECYCLE_DISPATCH_JITTER_SECONDS,
+    dispatch_parallel_with_jitter,
+)
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -118,6 +123,7 @@ def _do_write(
 
     content = f"---\n{frontmatter_yaml}---\n\n{description_body}\n"
 
+    cidx_meta_path.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(cidx_meta_path))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -423,6 +429,7 @@ class LifecycleBatchRunner:
         estimated_seconds_per_repo: int = _DEFAULT_ESTIMATED_SECONDS_PER_REPO,
         sub_batch_size_override: Optional[int] = None,
         tracking_backend: Optional[Any] = None,
+        journal_callback: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         if not isinstance(golden_repos_dir, (str, os.PathLike)):
             raise ValueError(
@@ -460,6 +467,7 @@ class LifecycleBatchRunner:
         self._estimated_seconds_per_repo: int = estimated_seconds_per_repo
         self._sub_batch_size_override: Optional[int] = sub_batch_size_override
         self._tracking_backend: Optional[Any] = tracking_backend
+        self._journal_callback: Optional[Callable[[str, str], None]] = journal_callback
 
     @staticmethod
     def compute_sub_batch_size(
@@ -546,26 +554,48 @@ class LifecycleBatchRunner:
         sub-batch — all repos in the batch are attempted. Only BaseException
         subclasses that are not Exception (e.g. KeyboardInterrupt) propagate.
         """
-        with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
-            futures = {
-                pool.submit(self._process_one_repo, alias, parent_job_id): alias
-                for alias in sub_batch
-            }
-            for future in as_completed(futures):
-                alias = futures[future]
-                exc = future.exception()
-                if exc is not None:
-                    if isinstance(exc, Exception):
-                        # Log the failure; the sub-batch continues for other repos.
-                        _logger.error(
-                            "lifecycle-runner: failed to process alias %r: %s: %s",
-                            alias,
-                            type(exc).__name__,
-                            exc,
+        futures_list = dispatch_parallel_with_jitter(
+            sub_batch,
+            concurrency=self._concurrency,
+            base_jitter_seconds=DEFAULT_LIFECYCLE_DISPATCH_JITTER_SECONDS,
+            worker_fn=lambda alias: self._process_one_repo(alias, parent_job_id),
+        )
+        futures_to_alias = dict(zip(futures_list, sub_batch))
+        for future in as_completed(futures_list):
+            alias = futures_to_alias[future]
+            exc = future.exception()
+            if exc is not None:
+                if isinstance(exc, Exception):
+                    # Log the failure; the sub-batch continues for other repos.
+                    _logger.error(
+                        "lifecycle-runner: failed to process alias %r: %s: %s",
+                        alias,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    if self._journal_callback is not None:
+                        try:
+                            self._journal_callback(
+                                alias,
+                                f"failed: {type(exc).__name__}: {exc}",
+                            )
+                        except Exception as cb_exc:
+                            _logger.debug(
+                                "lifecycle-runner: journal_callback raised (non-fatal): %s",
+                                cb_exc,
+                            )
+                else:
+                    # BaseException (e.g. KeyboardInterrupt) — re-raise immediately.
+                    raise exc
+            else:
+                if self._journal_callback is not None:
+                    try:
+                        self._journal_callback(alias, "succeeded")
+                    except Exception as cb_exc:
+                        _logger.debug(
+                            "lifecycle-runner: journal_callback raised (non-fatal): %s",
+                            cb_exc,
                         )
-                    else:
-                        # BaseException (e.g. KeyboardInterrupt) — re-raise immediately.
-                        raise exc
 
     def _process_one_repo(self, alias: str, parent_job_id: str) -> None:
         """

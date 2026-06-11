@@ -88,6 +88,7 @@ BOOTSTRAP_KEYS = frozenset(
         "server_threadpool_size",  # startup threadpool config
         "pace_maker_clone_path",  # Story #997 - bootstrap-only (written by auto-updater pre-DB)
         "mcp_dispatch_pool_size",  # Story #1009 - asyncio default executor size
+        "query_executor_pool_size",  # perf - shared query executor size (created at startup, pre-DB)
         "enable_predeactivation_leak_scan",  # Story #1032 - bootstrap flag to restore pre-flight leak scan
         "orphan_trash_sweep_per_startup_cap",  # Story #1032 HIGH #3 - cap startup orphan sweep entries
         "clone_backend",  # Story #510 / #1034 - needed pre-DB by build_snapshot_manager() at lifespan startup
@@ -854,6 +855,19 @@ class ConfigService:
         # Story #22 - Configurable service display name
         elif key == "service_display_name":
             config.service_display_name = str(value)
+        # Story #1079 Phase E - embedding coalescer runtime settings. Tunable via
+        # the existing config-update path (no separate HTML widget — mirrors how
+        # query_provider_max_concurrency is a top-level runtime field). The kill
+        # switch (coalesce_enabled=False) and caps hot-reload because the helper /
+        # registry read them live.
+        elif key == "coalesce_enabled":
+            config.coalesce_enabled = _parse_bool(value)
+        elif key == "coalesce_max_batch_size":
+            config.coalesce_max_batch_size = int(value)
+        elif key == "coalesce_k_min":
+            config.coalesce_k_min = int(value)
+        elif key == "coalesce_k_max":
+            config.coalesce_k_max = int(value)
         else:
             raise ValueError(f"Unknown server setting: {key}")
 

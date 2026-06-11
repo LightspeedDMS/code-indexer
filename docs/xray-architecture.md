@@ -2,6 +2,17 @@
 
 This document captures the X-Ray search engine architecture and MCP handler shim invariants extracted from project CLAUDE.md. It defines the two-phase orchestration (regex driver → sandboxed evaluator) and the async job submission pattern.
 
+## Supported Languages
+
+The Rust xray-core engine supports 17 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp. The Python xray engine supports 12 (hcl conditional via `_hcl_available()`; c and cpp added in Story #1077).
+
+C and C++ extensions and verified node kinds (confirmed against tree-sitter-c 0.24.2 and tree-sitter-cpp 0.23.4):
+
+- **C** — extensions `.c`, `.h`. Root `translation_unit`. Function definition `function_definition`. Function call `call_expression`. Struct `struct_specifier`. `if_statement` / `for_statement` / `while_statement`. String literal `string_literal`. Comment `comment`. C has no exception constructs.
+- **C++** — extensions `.cc`, `.cpp`, `.cxx`, `.c++`, `.hpp`, `.hh`, `.hxx`, `.h++`. Root `translation_unit`. Function definition `function_definition`. Function call `call_expression`. Class `class_specifier` (also `struct_specifier`). Namespace `namespace_definition`. Template `template_declaration`. `if_statement` / `for_statement` / `while_statement`. Try/catch `try_statement` / `catch_clause`. String literal `string_literal`. Comment `comment`.
+
+`.h` maps to the C grammar (GitHub-Linguist default). A C++ header named `.h` parses under the C grammar and may produce ERROR nodes on C++-only syntax; name C++ headers `.hpp`/`.hh`/`.hxx`/`.h++` to parse them under the C++ grammar.
+
 `src/code_indexer/xray/search_engine.py` — `XRaySearchEngine` is the two-phase orchestrator:
 
 - **Phase 1 (driver, regex)**: regex walk over `repo_path` via `_run_phase1_driver`. Applies the `pattern` regex to file content (`search_target='content'`) or relative path (`search_target='filename'`). Honors `path`, `include_patterns` / `exclude_patterns` (fnmatch / ripgrep glob), `case_sensitive`, `multiline`, `pcre2`, and `context_lines`. Content searches delegate to `RegexSearchService` (ripgrep-backed). Returns a sorted, deduplicated list of candidate `Path` objects together with their per-file Phase 1 hit list, stored in `self._last_phase1_positions[path]` as a list of dicts: `{line_number, line_content, column, byte_offset, context_before, context_after}`.
@@ -60,6 +71,61 @@ This document captures the X-Ray search engine architecture and MCP handler shim
 Tool docs: `src/code_indexer/server/mcp/tool_docs/search/xray_search.md`, `src/code_indexer/server/mcp/tool_docs/search/xray_explore.md`. Registered in `HANDLER_REGISTRY` via `_legacy.py` (`_xray_register`).
 
 **Files**: `src/code_indexer/xray/search_engine.py`, `src/code_indexer/xray/sandbox.py`, `src/code_indexer/server/mcp/handlers/xray.py`. Tests: `tests/unit/xray/test_search_engine.py`, `tests/unit/xray/test_sandbox*.py`, `tests/unit/server/mcp/test_xray_search_handler.py`.
+
+## xray_search_batch MCP Tool (Story #1055)
+
+Cross-repo, multi-expression X-Ray sweep in ONE background job. Distinct from `xray_search` omni path: returns a single `job_id` (not `job_ids`), accepts N repo aliases x M scan bundles (matrix), and tags every match with `repository_alias`, `scan_index`, and `pattern_name`.
+
+`src/code_indexer/server/mcp/handlers/xray_batch.py` — `handle_xray_search_batch` is the MCP handler shim:
+
+- **Auth check**: `user.has_permission("query_repos")` or returns `auth_required`.
+- **Parameter validation**:
+  - `repository_alias` required (string, list, or JSON array). Max 50 aliases after dedup.
+  - `scans` required (non-empty list). Max 50 bundles.
+  - Each scan bundle: `driver_regex` required; `evaluator_code` and `pattern_name` mutually exclusive; inline `evaluator_code` validated via `validate_rust_evaluator()` before job submission.
+  - `timeout_seconds` in `[10, 7200]` (wider than single-repo xray_search — matrix covers many cells).
+  - `await_seconds` in `[0, 30]` (lower than xray_search — batch rarely completes inline).
+  - `max_results` >= 1 when provided (per-cell file cap, not a global cap).
+- **Repository alias resolution**: each alias resolved via `_resolve_repo_path`. Global-alias fallback applied via `try_global_fallback` when alias unresolvable but a `{alias}-global` golden repo is active. Unresolvable aliases become `error_level="repo"` entries in `errors[]`. If ALL aliases fail: synchronous `no_repositories_resolved` error. If SOME fail: job submitted over resolved subset with `partial=True`.
+- **Job submission**: ONE job via `background_job_manager.submit_job(operation_type="xray_search_batch", repo_alias=None, ...)`. The worker `_run_xray_batch_job` is closed over all resolved state.
+- **Optional inline await**: same `_await_job_result` pattern as `xray_search` but with `await_seconds` capped at 30.
+
+`_run_xray_batch_job` — the matrix worker function (runs in the background job thread):
+
+- Iterates `resolved_repos x scans` (outer=repos, inner=scans) with between-cell cancellation checks via `bjm.jobs.get(job_id).cancelled`.
+- Per cell: calls `resolve_batch_evaluator(scan, repo_alias, cidx_meta_path)` then `XRaySearchEngine().run(...)`. Cell exceptions are caught and recorded as `error_level="cell"` entries.
+- Progress advances once per REPO (not per cell or file): `progress_callback(repos_completed/total * 100, ...)`.
+- Timeout checked per cell via `time.monotonic()` against `deadline`.
+- Sets `partial=True` whenever any error, evaluation_error, timeout, or cancellation occurs.
+- Returns unified result dict: `matches[]`, `errors[]`, `evaluation_errors[]`, counters (`total_repos`, `total_scans`, `total_cells`, `repos_completed`), and boolean flags (`partial`, `timeout`, `cancelled`).
+
+`resolve_batch_evaluator(scan, repo_alias, cidx_meta_path)` — pure per-cell helper:
+
+- Resolution order: inline `evaluator_code` → `pattern_name` (repo-specific scope then `__any__/`) → default accept-all evaluator.
+- Instantiates `XrayPatternService(cidx_meta_path, refresh_scheduler=None)` — no live app state.
+- Returns `(evaluator_code_str, error_dict_or_None)`. On `pattern_not_found` or malformed YAML: returns `(None, {"error": "pattern_not_found"|"cell_execution_error", ...})`.
+
+`_truncate_xray_batch_result(result, payload_cache)` — batch-specific result truncation:
+
+- Serializes combined matches + errors + evaluation_errors as JSON.
+- If serialized size <= inline threshold: returns original result dict.
+- Otherwise: stores full JSON in `PayloadCache`, returns truncated dict with first 3 entries of each list plus `cache_handle`, `has_more`, `truncated`, `fetch_tool_hint`.
+
+**Unified polled result shape** (GET /api/jobs/{job_id}):
+
+- `matches[]` — each entry: `{repository_alias, scan_index, pattern_name, file_path, line_number, pattern, snippet, ...}`.
+- `errors[]` — `error_level="repo"` (no `scan_index`) or `error_level="cell"` (with `scan_index`).
+- `evaluation_errors[]` — per-file evaluator failures: `{repository_alias, scan_index, file_path, error_type, error_message}`.
+- Counters: `total_repos`, `total_scans`, `total_cells`, `repos_completed`.
+- Flags: `partial` (bool), `timeout` (bool), `cancelled` (bool).
+
+`partial=True` triggers: any repo error, any cell error, any evaluation_error, timeout, cancellation, or per-cell `partial=True` (max_results cap hit).
+
+REST shim: `POST /api/xray/search/batch` in `src/code_indexer/server/routes/xray_routes.py`. Converts Pydantic body to params dict, delegates to `handle_xray_search_batch`, translates MCP error envelope to HTTP status codes.
+
+Tool doc: `src/code_indexer/server/mcp/tool_docs/search/xray_search_batch.md`. Registered in `HANDLER_REGISTRY` via `_legacy.py` (`_xray_batch_register`).
+
+**Files**: `src/code_indexer/server/mcp/handlers/xray_batch.py`, `src/code_indexer/server/routes/xray_routes.py`. Tests: `tests/unit/server/mcp/test_xray_search_batch_handler.py`.
 
 ## Sandbox: current allowed nodes
 

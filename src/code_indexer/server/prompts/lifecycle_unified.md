@@ -13,7 +13,14 @@ MCP tools (registered globally, always available):
 
 **What to produce:**
 
-1. **description** (500-2000 chars): A comprehensive, factual summary of what this repository does — its purpose, domain, primary capabilities, key features, and typical use cases. Be thorough but avoid marketing language. Include the main technologies used and what problems the project solves.
+1. **description**: A meaningful, factual summary of what this repository does. Cover, at the level of detail the repository actually warrants:
+   - **Purpose** — the problem the project solves and who it is for.
+   - **Domain(s)** — the functional area(s) it operates in (e.g. web framework, HTTP client, CLI tooling, data validation, observability).
+   - **High-level capabilities** — its primary features and what a consumer can do with it.
+   - **Key technologies** — the main language(s), frameworks, and notable dependencies, stated only when evidenced in the repo.
+   - **Integration surface** — how it is consumed (library import, CLI, service/API, etc.), when discernible.
+
+   Write as much as the repository genuinely supports and no more — a small single-purpose library needs only a few sentences; a large multi-domain system warrants several paragraphs. Do not pad to hit a length, and do not truncate real substance to stay short. Be thorough but factual; avoid marketing language and unverified claims. The description must be a non-empty, self-contained summary that reads well on its own.
 
 2. **lifecycle** — six required fields describing the CI/CD and build ecosystem:
    - `ci_system`: the CI system in use (e.g., "github-actions", "gitlab-ci", "jenkins", "circleci", "none")
@@ -89,7 +96,7 @@ The JSON object MUST match this schema. The six lifecycle fields are REQUIRED. A
 
 ```
 {
-  "description": "<500-2000 char string, comprehensive and non-empty>",
+  "description": "<non-empty, factual summary covering purpose, domain(s), high-level capabilities, key technologies, and integration surface — length proportional to what the repository actually warrants>",
   "lifecycle": {
     "ci_system": "<non-empty string>",
     "deployment_target": "<non-empty string>",

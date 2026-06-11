@@ -429,8 +429,17 @@ class TemporalSearchService:
             # Type: Tuple[List[Dict[str, Any]], Dict[str, Any]] when return_timing=True
             raw_results, _timing_info = search_result  # type: ignore
         else:
-            # FilesystemVectorStore: pre-compute embedding (no parallel support yet)
-            query_embedding = self.embedding_provider.get_embedding(query)
+            # FilesystemVectorStore: pre-compute embedding (no parallel support yet).
+            # Bug #1078: gate through concurrency governor to cap concurrent provider calls.
+            from code_indexer.server.services.governed_call import (
+                coalesced_query_embedding,
+            )
+
+            query_embedding = coalesced_query_embedding(
+                self.embedding_provider,
+                query,
+                embedding_purpose=None,
+            )
             raw_results = self.vector_store_client.search(
                 query_vector=query_embedding,
                 filter_conditions=filter_conditions,  # Apply user-specified filters (language, path, etc.)

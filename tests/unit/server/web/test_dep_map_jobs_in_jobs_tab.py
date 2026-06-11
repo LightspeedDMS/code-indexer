@@ -52,6 +52,9 @@ def _run_get_all_jobs(bg_jobs: list, tracker_jobs: list):
     """Run _get_all_jobs() with mocked tracking systems and return (jobs, total, pages)."""
     bg_manager = MagicMock()
     bg_manager.get_jobs_for_display.return_value = (bg_jobs, len(bg_jobs), 1)
+    # list_display_job_ids must return a set of all bg job ids so the dedup
+    # single-query path works correctly (replacing the old all-pages loop).
+    bg_manager.list_display_job_ids.return_value = {j["job_id"] for j in bg_jobs}
 
     job_tracker = MagicMock()
     job_tracker.get_recent_jobs.return_value = tracker_jobs
@@ -138,4 +141,76 @@ class TestGetAllJobsDeduplication:
         assert len(matching) == 1, (
             f"Job {JOB_ID_SHARED!r} appears {len(matching)} times; "
             "deduplication required when job exists in both tracking systems"
+        )
+
+    def test_cross_page_dedup_no_duplicate(self):
+        """A tracker job whose job_id is also a BG job on page 1 must NOT appear
+        as an extra on page 2.
+
+        Scenario:
+          - BG manager has 60 jobs (page_size=50): page 1 = bg-000..bg-049,
+            page 2 = bg-050..bg-059.
+          - Tracker has 1 job whose job_id == "bg-000" (a BG job on page 1).
+          - When we fetch page 2, bg_page_ids only contains bg-050..bg-059.
+          - Bug: "bg-000" is not in bg_page_ids, so it is added to extra_jobs,
+            making it appear on page 2 as well → cross-page duplicate.
+          - Fix: extra_jobs must be computed against the full BG-displayed id set
+            (all BG pages), not just the current page.
+        """
+        from code_indexer.server.web import routes
+
+        page_size = 50
+        n_bg = 60  # 2 pages: 50 on page 1, 10 on page 2
+        bg_rows = [
+            _make_job_dict(f"bg-{i:03d}", SYNC_TYPE, STATUS_COMPLETED)
+            for i in range(n_bg)
+        ]
+        # Tracker has 1 job whose id matches a BG job on page 1
+        tracker_job = _make_job_dict("bg-000", DEP_MAP_FULL_TYPE, STATUS_COMPLETED)
+
+        def fake_get_jobs_for_display(
+            status_filter=None,
+            type_filter=None,
+            search_text=None,
+            page: int = 1,
+            page_size: int = 50,
+            is_admin: bool = False,
+            username=None,
+        ):
+            offset = (page - 1) * page_size
+            rows = bg_rows[offset : offset + page_size]
+            total = n_bg
+            total_pages_val = max(1, (total + page_size - 1) // page_size)
+            return rows, total, total_pages_val
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_jobs_for_display.side_effect = fake_get_jobs_for_display
+        # list_display_job_ids returns the FULL set of bg job ids in one query,
+        # so "bg-000" (on page 1) is known to be a BG job when evaluating page 2.
+        mock_mgr.list_display_job_ids.return_value = {r["job_id"] for r in bg_rows}
+
+        mock_tracker = MagicMock()
+        mock_tracker.get_recent_jobs.return_value = [tracker_job]
+
+        all_seen: list = []
+        with (
+            patch.object(routes, "_get_background_job_manager", return_value=mock_mgr),
+            patch.object(routes, "_get_job_tracker", return_value=mock_tracker),
+            patch.object(
+                routes, "_apply_job_filters", side_effect=lambda jobs, *a, **k: jobs
+            ),
+        ):
+            for page in range(1, 3):
+                jobs, total_count, total_pages = routes._get_all_jobs(
+                    page=page, page_size=page_size, is_admin=True
+                )
+                all_seen.extend(j["job_id"] for j in jobs)
+
+        # "bg-000" must appear exactly once across all pages (from BG, not as an extra)
+        duplicates = [jid for jid in set(all_seen) if all_seen.count(jid) > 1]
+        assert not duplicates, (
+            f"Cross-page dedup failure: job(s) appear on multiple pages: {duplicates}. "
+            f"'bg-000' (a BG job on page 1) leaked into page 2 as a tracker extra. "
+            f"extra_jobs must be computed against the full BG id set, not just the "
+            f"current page's id set."
         )

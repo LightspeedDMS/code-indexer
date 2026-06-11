@@ -50,17 +50,25 @@ class TestBug483ProgressRegression:
         where 25 appears before the function's first emission of 0, creating
         a visible 25->0 regression in the UI.
 
-        After the fix, the sequence must NOT contain 25 followed by a lower value.
-        Specifically: 25 must not appear in the sequence when the function
+        After the fix, the sequence must NOT contain 25 when the function
         manages its own progress (accepts progress_callback).
+
+        Note: Bug #1063 Part 2 adds progress debouncing.  Not every progress
+        tick necessarily results in a DB persist.  This test now tracks
+        in-memory progress values (read after each callback invocation) in
+        addition to persisted values, so intermediate ticks suppressed by the
+        debounce are still observable.
         """
-        recorded_values = []
+        # in-memory values captured after each progress_callback invocation
+        in_memory_values = []
+        # persisted values captured each time _persist_jobs fires
+        persisted_values = []
         original_persist = self.manager._persist_jobs
 
         def capturing_persist(job_id=None):
             """Capture the progress value every time it is persisted."""
             if job_id and job_id in self.manager.jobs:
-                recorded_values.append(self.manager.jobs[job_id].progress)
+                persisted_values.append(self.manager.jobs[job_id].progress)
             original_persist(job_id=job_id)
 
         self.manager._persist_jobs = capturing_persist
@@ -74,8 +82,18 @@ class TestBug483ProgressRegression:
             """
             if progress_callback:
                 progress_callback(0, phase="semantic", detail="starting...")
+                # Read in-memory state immediately after each tick
+                with self.manager._lock:
+                    for j in self.manager.jobs.values():
+                        in_memory_values.append(j.progress)
                 progress_callback(50, phase="semantic", detail="halfway...")
+                with self.manager._lock:
+                    for j in self.manager.jobs.values():
+                        in_memory_values.append(j.progress)
                 progress_callback(100, phase="semantic", detail="done")
+                with self.manager._lock:
+                    for j in self.manager.jobs.values():
+                        in_memory_values.append(j.progress)
             return {"success": True}
 
         job_id = self.manager.submit_job(
@@ -91,20 +109,33 @@ class TestBug483ProgressRegression:
                 break
             time.sleep(0.05)
 
-        # Assert: 25 must NOT appear in the recorded sequence when a function
-        # manages its own progress. The hardcoded 25 in the manager should only
-        # fire for functions WITHOUT progress_callback.
-        assert 25 not in recorded_values, (
+        # Assert: 25 must NOT appear in in-memory values captured right after
+        # each callback invocation.  This is the critical bug #483 guard: the
+        # hardcoded manager-injected 25 must not appear ahead of the function's
+        # own first emission of 0.
+        assert 25 not in in_memory_values, (
             f"Bug #483 regression: hardcoded 25 fired even though function accepts "
-            f"progress_callback. Full sequence: {recorded_values}. "
+            f"progress_callback. In-memory sequence: {in_memory_values}. "
             f"This means the manager emitted 25 before the function's own first "
             f"emission (0), causing a visible 25->0 regression in the UI."
         )
 
-        # Verify the sequence contains the function's own emissions
-        assert 0 in recorded_values, f"Expected 0 in sequence {recorded_values}"
-        assert 50 in recorded_values, f"Expected 50 in sequence {recorded_values}"
-        assert 100 in recorded_values, f"Expected 100 in sequence {recorded_values}"
+        # Verify the function's own emissions reached in-memory state.
+        # (Debounce may suppress some DB persists but in-memory must always reflect ticks.)
+        assert 0 in in_memory_values, (
+            f"Expected 0 in in-memory sequence {in_memory_values}"
+        )
+        assert 50 in in_memory_values, (
+            f"Expected 50 in in-memory sequence {in_memory_values}"
+        )
+        assert 100 in in_memory_values, (
+            f"Expected 100 in in-memory sequence {in_memory_values}"
+        )
+
+        # Terminal persist must have fired (100 in persisted values).
+        assert 100 in persisted_values, (
+            f"Expected terminal persist of 100 in persisted_values={persisted_values}"
+        )
 
         # Job must have completed
         final = self.manager.get_job_status(job_id, username="test_user")

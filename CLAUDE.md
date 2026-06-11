@@ -194,7 +194,7 @@ Query capability is the core product value. NEVER remove or break: query functio
 **Key invariants**:
 - Raw `tree_sitter.Node` NEVER exposed to evaluator code -- always wrapped in `XRayNode` (`__slots__ = ("_node",)`, normal assignment, NO `object.__setattr__`).
 - `supported_languages`/`extension_map` are INSTANCE-level (conditional `terraform`/`.tf` when HCL grammar present in Python; mandatory in Rust).
-- 15 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy. Python xray supports 10 (hcl conditional via `_hcl_available()`). Extensions mjs/cjs map to the javascript grammar.
+- 17 mandatory languages in Rust xray-core: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp. Python xray supports 12 (hcl conditional via `_hcl_available()`; c, cpp added in Story #1077). Extensions mjs/cjs map to the javascript grammar; c uses `.c`/`.h`, cpp uses `.cc`/`.cpp`/`.cxx`/`.c++`/`.hpp`/`.hh`/`.hxx`/`.h++` (a `.h` C++ header parses under the C grammar and may emit ERROR nodes on C++-only syntax).
 - **Dependency**: `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` -- CORE deps since v10.2.1.
 
 ### X-Ray Sandbox Security Boundary (Epic #968 / Story #970)
@@ -279,12 +279,55 @@ Persistent storage of reusable Rust evaluator patterns in cidx-meta under `xray-
 
 Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.
 
-### Golden Repo Versioned Path (IMMUTABLE)
+### Golden Repo Versioned Path (mutable-vs-immutable -- resolver-accurate)
 
 - **Base clone** (`golden-repos/{alias}/`): mutable -- where git ops and indexing happen
-- **Versioned snapshot** (`.versioned/{alias}/v_{timestamp}/`): IMMUTABLE -- served to queries
+- **Versioned snapshot** (`.versioned/{alias}/v_{timestamp}/`): IMMUTABLE after creation
 
-Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_repo_path(alias)`. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
+**Resolver reality (Story #1082 audit -- corrects the prior "served to queries = immutable" claim).** `GoldenRepoManager.get_actual_repo_path(alias)` (`server/repositories/golden_repo_manager.py:2150`) is **Priority-1 / Priority-2**: if the **mutable base clone** `golden_repo.clone_path` exists on disk it is returned (line 2206-2216); only when it does NOT exist does it fall through to the latest `.versioned/{alias}/v_*` snapshot (line 2218+). So for GOLDEN/ACTIVATED repos the query path commonly receives the **mutable** path, NOT the immutable snapshot. GLOBAL repos differ: the alias JSON `target_path` is repointed to a `.versioned/{alias}/v_*` snapshot after the first refresh (`global_repos/refresh_scheduler.py:1171/1429/1623`), so `AliasManager.read_alias()` yields the immutable snapshot for global repos.
+
+Consequence for any path-keyed cache: do NOT assume the query-path string is immutable. Use the explicit predicate `is_immutable_versioned_snapshot(path)` (`server/services/query_path_cache.py`) -- it returns True ONLY for a validated `.versioned/{alias}/v_*` shape -- and **default to a SHORT TTL** for anything it does not prove immutable.
+
+Alias JSON `target_path` is authoritative for global repos. Use `GoldenRepoManager.get_actual_repo_path(alias)` for golden/activated. NEVER modify/checkout/index inside `.versioned/`. See memory: `feedback_versioned_path_trap.md`.
+
+### Query-Path Drift-Safe Caching (Story #1082)
+
+Per-query server orchestration glue is cached off the GIL-bound hot path WITHOUT extra RAM or workers, with a precise staleness policy. Single primitive `TTLCache` in `server/services/query_path_cache.py` (thread-safe, per-key **single-flight** -- no thundering herd on cold miss/expiry -- bounded LRU, hit/miss/reload/invalidate/evict counters, optional NO-TTL mode that is STILL bounded).
+
+**Staleness model (do not violate):**
+- **ZERO staleness** for (a) static package model-spec YAML and (b) keys PROVEN immutable by `is_immutable_versioned_snapshot()`. A golden-repo refresh makes a NEW versioned path = new key = cache miss, never an in-place stale read. These use NO TTL but are still bounded (LRU + alias-repoint / old-version invalidation).
+- **BOUNDED staleness <= the configured short TTL `T`** for mutable / not-provably-immutable repo paths (incl. the Priority-1 base clone), provider-config state, and DB metadata. TTL is a self-healing net even where event invalidation exists.
+- **NEVER cached:** auth-bearing rows (api keys / key-hashes, user rows, MCP credentials, permissions, group membership, token validation) -- so revocation / access-gating changes take effect immediately, zero grace, on every node.
+
+**What is implemented:**
+- **Load-once model-spec:** `voyage_ai._get_voyage_model_specs()` / `cohere_embedding._get_cohere_model_specs()` parse the static YAML ONCE per process (was per `VoyageAIClient.__init__`, i.e. per query). HTTP client stays per-request for thread safety -- only the parsed model-spec state is shared.
+- **RepoConfigCache** (`query_path_cache.py`): composes a NO-TTL bounded sub-cache (predicate-proven `.versioned/v_*` paths) + a SHORT-TTL bounded sub-cache (default, everything else). Wired in `startup/lifespan.py` as `app.state.repo_config_cache`; consumed by `search_service._load_repo_config()` (returns None registry -> direct load on CLI/in-process, NOT a fallback). Knobs on `CacheConfig`: `query_path_cache_enabled` (kill-switch), `repo_config_cache_ttl_seconds` (30), `repo_config_cache_max_entries` (2048) -- named, Web-UI-tunable, no hardcoded literals.
+- **`provider_config_digest()`**: normalized digest over ALL behavior-affecting fields (provider, model, key-FINGERPRINT never raw secret, api_endpoint, connect_timeout, timeout, Cohere max_retries/retry_delay/exponential_backoff). Two repos same provider/model/key but different endpoint/timeouts/retries -> distinct digests -> never share state.
+- **`codebase_dir mismatch` de-spam:** `config.py` logs the WARNING at most once per distinct config path (process-local memo); the per-load Bug #1033 NFS multi-mount reconciliation still runs on EVERY load -- no normalized `codebase_dir` persisted to shared state.
+
+**Deliberately deferred (KISS / scope):** explicit refresh-event `invalidate()` wiring through the refresh scheduler (the `invalidate()` API exists + is unit-tested, but Scenario 6 is already satisfied by new-path=new-key + bounded old-version eviction + SHORT TTL); provider-state object cache (the model-spec parse -- the real per-query cost -- is already eliminated by the load-once memo; caching a per-request client is forbidden for thread safety); the confirm-first DB-metadata `list_repos` cache and health-monitor memoization (NOT confirmed non-auth-safe at the call sites in scope, so deferred). NEVER cache auth-bearing data to "improve" any of these.
+
+### Canonical Versioned-Snapshot Convention + Backend-Aware Cleanup (Bug #1084 Phase A)
+
+Old versioned snapshots used to leak forever on the cow-daemon/ONTAP backends because cleanup was gated on the literal substring `".versioned" in current_target`, which only matches the LocalCloneBackend layout. Phase A replaces that with ONE canonical convention + ONE predicate + backend-aware deletion.
+
+**Single canonical predicate -- `src/code_indexer/server/storage/shared/snapshot_paths.py`:**
+- `is_versioned_snapshot(path, *, mount_point=None) -> bool` is the ONLY authority. Canonical rule: path contains a `/.versioned/` segment AND leaf matches `v_\d+` AND the immediate parent is the namespace dir (`.../.versioned/{ns}/v_<ts>`). Transition clause (recognition only, NEVER created): legacy cow-daemon `{mount}/{ns}/v_<ts>` and flat ONTAP `{mount}/v_<ts>` are recognized ONLY when `mount_point` is supplied. `{mount}/activated-repos/...` and the master base clone (`golden_repos_dir/{repo}`) MUST be False.
+- Facade: `VersionedSnapshotManager.is_versioned_snapshot(path)` supplies the backend mount automatically. Callers hold the facade; never reimplement the substring test. Scheduler/manager helpers `_is_versioned_snapshot` delegate to the facade (module predicate fallback when no snapshot_manager is wired).
+
+**Canonical cow-daemon layout + sanitization symmetry (`clone_backend.py`):** `CowDaemonBackend.create_clone` routes versioned snapshots through `create_clone_at_path(dest={mount}/.versioned/{sanitized_ns}/{sanitized_name})` (daemon registers identity `(ns, name)` from dest parent/leaf -- DB unaffected). `delete_clone` skips a leading `.versioned` segment when parsing `(ns, name)` (handles canonical AND legacy). `_sanitize_identifier` (dots->underscores) is applied uniformly across create/delete/list_clones/clone_exists. Local backend unchanged (already canonical); ONTAP layout unchanged (gated -- per-swap delete-by-basename still works).
+
+**Discovery API (`VersionedSnapshotManager`):** `list_snapshots(alias) -> [(path, ts)]` (ascending) and `latest_snapshot(alias) -> Optional[str]`. cow-daemon: `list_clones(sanitized_ns)` mapped to mount paths (canonical + legacy share the daemon ns). local/CoW-fs: glob `golden_repos_dir/.versioned/{ns}`. ONTAP/FlexClone: returns `[]` (retention disabled -- `list_clones` ignores namespace). Reconstruction sites MUST use this API, never re-glob `golden_repos_dir/.versioned`.
+
+**Three cleanup gates (Defect A) -- `refresh_scheduler.py` swap site, `golden_repo_manager.py` `_cb_swap_alias` + add-index:** all use `current_target and <facade>.is_versioned_snapshot(current_target) and current_target != master_path` (master_path = `golden_repos_dir/{repo}`). All None-guarded (add-index previously raised TypeError on None).
+
+**Backend-correct deletion behind the refcount gate (Defect B) -- `cleanup_manager.py`:** `CleanupManager` is handed the snapshot manager via `set_snapshot_manager()` (wired in `lifecycle/global_repos_lifecycle.py`). Its `_delete_index` calls `snapshot_manager.delete_snapshot("", path)` for predicate-recognized snapshots (daemon DELETE / FlexClone free / local rmtree-inside-manager); rmtree remains the fallback for non-snapshot/local paths. The QueryTracker refcount-zero gate + backoff + circuit breaker are UNCHANGED -- deletion still only fires after refcount reaches zero. Direct swap-site deletion remains forbidden (would delete snapshots under in-flight NFS queries).
+
+**Keep-last-N retention (defense in depth) -- `RefreshScheduler._enforce_retention`:** after each successful swap (all 3 sites) lists via the discovery API and schedules (through the same refcount-gated CleanupManager) all but the N newest, NEVER the current `target_path` or `previous_path` (the latter read via `AliasManager.get_previous_path`, which this finally wires -- Defect D). N = runtime knob `ServerConfig.snapshot_retention_keep_last` (default 3, Web-UI configurable; values < 1 fall back to 3). Enabled on local + cow-daemon; inert on ONTAP (discovery returns []).
+
+**Defect C/E -- `refresh_scheduler.py`:** `_has_local_changes` and `_restore_master_from_versioned` use the discovery API (`_latest_versioned_timestamp` / `latest_snapshot`) instead of the `golden_repos_dir/.versioned` glob, so change-detection is correct and a lost master is restorable on cow-daemon.
+
+**Phase B (NOT done here):** secondary `.versioned`-substring consumers (provider-index write guard in `repos.py`, `query_path_cache.is_immutable_versioned_snapshot`, SCIP discovery, dep-map cidx-meta read, `_legacy.py`) still need migration to the canonical predicate / discovery API. The ONTAP canonical-layout + alias-scoped naming work is gated on confirming ONTAP is deployed.
 
 ### ActivatedRepoManager clone_backend Wiring (Story #1034 / Bug #1044)
 
@@ -299,6 +342,24 @@ Alias JSON `target_path` is authoritative. Use `GoldenRepoManager.get_actual_rep
 `run_delta_analysis` is resumable across crashes via a **per-domain YAML frontmatter journal** — each `dependency-map/<domain>.md` carries its own `last_delta_applied` field; the frontmatter and body are written together in one atomic `os.replace`. No separate cursor file. Cluster correctness inherits from the existing `cidx-meta` `WriteLockManager` lock. Crash-durability scope is process crash / SIGKILL / restart / graceful reboot ONLY (NOT sudden power loss or NFS server crash).
 
 → Full reference: `docs/depmap-resumable-delta-architecture.md`
+
+### Embedding Request Coalescer + 4-Lane Adaptive Governor (Story #1079, refines Bug #1078)
+
+Server-side query-embed coalescing gated by a self-tuning per-lane concurrency governor. Replaces Bug #1078's 2 per-provider budgets. CLI/solo path is untouched.
+
+**Governor — 4 independent lanes** (`server/services/provider_concurrency_governor.py`): `voyage:embed`, `voyage:rerank`, `cohere:embed`, `cohere:rerank` (was 2 per-provider). Each lane owns a `ResizableLimiter` + `AimdController` + ONE sinbin health key (`voyage:embed->voyage-ai`, `voyage:rerank->voyage-reranker`, `cohere:embed->cohere`, `cohere:rerank->cohere-reranker`). `execute(budget, fn, *, acquire_timeout)` API preserved (KeyError on unknown lane; singleton). Lane mapping: `governed_call._get_embedding_budget`->`{provider}:embed`; `reranking._RERANKER_BUDGET`->`{provider}:rerank`.
+- **`ResizableLimiter`** (`server/services/resizable_limiter.py`) replaces `BoundedSemaphore`: lock+condition, runtime-resizable K, per-instance bounds (seeded from config, see below). Its `in_flight`/`high_water` are the SINGLE SOURCE OF TRUTH for per-lane telemetry — the governor reads them directly; do NOT reintroduce hand-incremented counters. `_wait_count` stays governor-maintained. Shrink never kills in-flight work; grow `notify_all`s parked acquirers. `acquire()` is monotonic-deadline-bounded (no hang -> `GovernorBusyError`).
+- **`AimdController`** (`server/services/aimd_controller.py`) drives the limiter via `set_limit` under the limiter's OWN `Condition` (shared lock domain -> race-free, fully lane-independent: a 429 on one lane never changes another lane's K). +1 after `SUCCESS_THRESHOLD` successes up to K_MAX; halve on a canonical 429 (`provider_backoff.is_rate_limited`) down to K_MIN, decrement ONCE PER 429 ATTEMPT; `COOLDOWN_SECONDS` blocks immediate re-grow. Structured WARNING (`old_k`/`new_k`) on each real decrease.
+
+**429 normalization (isolated commit, latent Bug #1078 fix)** — `provider_backoff.is_rate_limited(exc)` is the canonical classifier (true for `httpx.HTTPStatusError` 429 or `ProviderRateLimitedError`). Providers MUST re-raise a 429 INTACT on the `retry=False` query path (Voyage previously masked it as generic `RuntimeError` -> backoff/AIMD never saw it; `voyage_ai.py` now `if is_rate_limited(e): raise` before wrapping). `execute_with_backoff` retries iff `is_rate_limited`. NEVER re-mask a 429.
+
+**`EmbeddingCoalescer`** (`server/services/embedding_coalescer.py`) — one per `:embed` lane; ONE lock; governor is the SOLE limiter (holds NO semaphore/in_flight; dispatches via `execute_with_backoff(lambda: governor.execute(lane, do_call, acquire_timeout))` so backoff sleeps OUTSIDE the slot). Exactly one dispatcher per batch ALWAYS completes every caller's Future (success OR exception — shared fate; no hang past ACQUIRE_TIMEOUT). **Dual-constraint sealing** guarantees one sealed batch == exactly ONE provider HTTP call (no sub-split): seals before a text would exceed EITHER the texts cap (`_get_texts_per_request()`; Voyage has none -> config ceiling) OR `int(provider._get_model_token_limit() * margin)` where the margin is derived from the provider spec (`safety_margin_percentage`, 0.9 fallback) — IDENTICAL to the provider's internal split predicate, using the provider's OWN token counter (`_count_tokens_accurately`/`_count_tokens`). Count-mismatch is a RAISED `ValueError` (survives `python -O`), not `assert`.
+
+**Server-gating + kill switch** — `coalesced_query_embedding` (`server/services/governed_call.py`) is the single entry point on all 4 query sites (`search_service.py`, `mcp/handlers/search.py`, `temporal/temporal_search_service.py`, `storage/filesystem_vector_store.py`); call sites are identical on CLI and server (NO per-site `if cli/server`). `CoalescerRegistry` (`server/services/coalescer_registry.py`) is built ONCE in `startup/lifespan.py` (before `yield`) and cleared after; `get_coalescer_registry()` returns None until then — CLI/solo/daemon NEVER build one, so they stay on the direct `governed_query_embedding` single call (no batching). Provider keys are seeded into env FROM runtime config by `seed_api_keys_on_startup` (lifespan, BEFORE registry build) — a lane whose key is absent is simply absent (explicit, logged; falls back to direct). Any refactor of `lifespan.py` MUST preserve the `set_coalescer_registry`/`clear_coalescer_registry` calls (guard: `tests/unit/server/startup/test_lifespan_coalescer_registry_wiring.py`).
+
+**Runtime config (NOT bootstrap; no env vars; mirrors `memory_retrieval_enabled`)** — `coalesce_enabled` (default True; read LIVE each call -> kill switch + hot-reload), `coalesce_max_batch_size` (default 96 == Cohere texts cap; live ceiling, hot-reloads at seal time), `coalesce_k_min=8`/`coalesce_k_max=32` (construction-scoped AIMD/limiter K bounds seeded into the governor at build; NOT live-reload, clamp-validated with 8/32 fallback). Initial K seed (`query_provider_max_concurrency`) clamps to `[k_min, k_max]`. Observability: governor `current_k` per lane, AIMD-decrease WARNING, coalescer `batches_dispatched`/`texts_coalesced`.
+
+-> Deterministic fault-injection gate: `tests/integration/server/test_coalescer_fault_injection_1079.py`.
 
 ### Database Migrations Must Be Backward Compatible
 
@@ -350,6 +411,8 @@ Four modules: mcp_parser, parser_tables, parser_hygiene, parser_graph. Anomalies
 Sync runs BEFORE indexing in refresh path. All git ops on mutable base path only (`get_cidx_meta_path()`). NEVER inside `.versioned/` snapshots. Push failures deferred (after indexing); conflict failures short-circuit immediately. Conflict resolution via Claude CLI (600s timeout).
 
 `XrayPatternService` (Bug #1037) also acquires the coarse `cidx-meta` write lock via `_run_with_coarse_lock` (mirror of `MemoryStoreService` pattern at `memory_store_service.py:372`) so xray pattern writes serialize with refresh-scheduler / memory-store / dep-map activity on the shared git index.
+
+**Cluster git-remote SSH auth (worker-leader fix).** The backup's git push/fetch authenticates via `build_non_interactive_git_env()` (`git/git_subprocess_env.py`), whose `GIT_SSH_COMMAND` carries NO `-i`/`-F` -- so git resolves the deploy key purely through node-local `~/.ssh/config` (Host github.com -> IdentityFile). On every node startup `SSHKeySyncService.sync()` (`services/ssh_key_sync_service.py`, wired in `startup/lifespan.py`) materializes deploy keys from PG (`ssh_keys`, encrypted private_key) to `~/.ssh/<name>` (600/644) AND -- critically for cluster mode -- regenerates the CIDX-managed `~/.ssh/config` section via `SSHConfigManager` from each key's `hosts` (the `ssh_key_hosts` junction). IdentityFile ALWAYS points at the node's OWN synced key path (`ssh_dir/<name>`), never the originating node's `private_path`. Without the config materialization, worker nodes received the key file but no Host mapping, so a worker-leader's backup failed `Permission denied (publickey)`. The config write is idempotent (change-detected -- avoids per-startup trailing-newline drift) and non-fatal (failures surface in the sync `errors` list, never roll back key materialization). Operator action: the deploy key must exist in the `ssh_keys` table with a host assignment to `github.com` (via the `manage_ssh_key` MCP tool) -- nodes converge from PG, not from manual `~/.ssh` setup.
 
 -> Full reference: `docs/cidx-meta-backup.md`
 
@@ -433,6 +496,18 @@ cidx watch / watch-stop / stop         # Daemon controls
 ## Embedding Provider (VoyageAI)
 
 Primary provider. Cohere also supported since v9.8. Tokenizer: `embedded_voyage_tokenizer.py` (NOT voyageai library). 120k tokens/batch limit, automatic batching. Models: voyage-code-3 (1024 dims, default), voyage-large-2 (1536 dims).
+
+### Production httpx Connection Pooling + Batched Metrics Writer (Story #1083)
+
+**Pooled production embedding client.** `HttpClientFactory` (`server/fault_injection/http_client_factory.py`) owns ONE long-lived keep-alive `httpx.Client` for the production path (fault injection OFF). Providers opt in via `create_sync_client(pooled=True)`; the factory lazily builds the client once (reused `SSLContext` + connection pool, `httpx.Limits(max_keepalive=20, max_connections=40)`) and returns it wrapped in `_BorrowedClientContext` whose `__exit__` is a NO-OP — so the provider's `with _client_ctx as client:` borrows (never closes) the shared client. The pooled client is closed once at lifespan shutdown via `close_pooled_clients()`.
+
+**Key invariants:**
+- **Auth is per-request**, NOT baked into the client: Voyage and Cohere pass `Authorization: Bearer <key>` on the `.post()` call, so the pooled client is auth-agnostic and API-key rotation is transparent (no client rebuild).
+- **Fault-injection path is UNCHANGED.** When `fault_injection_service.enabled`, the factory ignores `pooled` and returns a FRESH per-call client wrapped in `FaultInjectingSyncTransport`, closed per call — every scripted fault still intercepts every call. Pooling is the approved production-only compromise.
+- The latency transport (built once, stateless request timer) is baked into the pooled client on first build. CLI path keeps per-call behavior (no app.state factory).
+- Regression guards: `tests/unit/server/startup/test_lifespan_pooled_client_shutdown_1083.py` (shutdown wiring), `tests/unit/server/fault_injection/test_http_client_factory.py::TestPooledProductionSyncClient`.
+
+**Batched metrics writer.** `api_metrics_service` background `_writer_loop` now drains the queued backlog (bounded by `min(qsize(), _MAX_DRAIN_BATCH)`) and writes ALL events in ONE `upsert_buckets_batch()` transaction per drain (collapsing ~4N per-event `BEGIN EXCLUSIVE` transactions into ~1). Counts are coalesced per bucket key and preserved exactly. `stop_writer()` signals + joins + final-drains on shutdown (wired into lifespan). Both `ApiMetricsSqliteBackend` and `ApiMetricsPostgresBackend` expose `upsert_buckets_batch`. `node_metrics` (interval snapshot writer) and `job_tracker` (low-frequency discrete job-lifecycle writes) do NOT share the per-query hot-path pattern, so batching is not applied to them.
 
 ---
 

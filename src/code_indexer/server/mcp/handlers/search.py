@@ -316,7 +316,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         if _elided > 0
         else repr(_aliases_preview)
     )
-    logger.info(
+    # py-spy logging-lock fix (follow-up to Bug #1078): demoted from INFO to
+    # DEBUG so this per-query audit line no longer acquires the logging handler
+    # lock on the hot path at default log levels (operators can re-enable via
+    # DEBUG when diagnosing fan-out expansion).
+    logger.debug(
         f"_omni_search_code post-expansion: user={user.username!r} "
         f"correlation_id={get_correlation_id()!r} "
         f"expanded_count={len(repo_aliases)} "
@@ -474,6 +478,13 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
     This is called once per request and the vector is shared with memory
     retrieval (GAP 1: zero duplicate Voyage API calls).
 
+    Bug #1078: the HTTP call is gated through ProviderConcurrencyGovernor so
+    memory-retrieval embeddings do not bypass the per-budget concurrency cap.
+
+    Bug #899 (fault-injection factory wired here): previously VoyageAIClient was
+    constructed without an http_client_factory, bypassing fault injection in Phase 5
+    E2E tests. Now passes _get_http_client_factory() from search_service.
+
     Returns:
         A non-empty list of floats on success.
         An empty list on any error (logged at WARNING); the caller must check
@@ -482,12 +493,30 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
     try:
         from code_indexer.config import VoyageAIConfig
         from code_indexer.services.voyage_ai import VoyageAIClient
+        from code_indexer.server.services.search_service import _get_http_client_factory
+        from code_indexer.server.services.governed_call import (
+            coalesced_query_embedding,
+        )
 
-        provider = VoyageAIClient(VoyageAIConfig())
+        # Bug #899 fix: pass factory so fault injection intercepts this client.
+        # AttributeError guard: app.state not set in unit-test environments without
+        # full lifespan; None is equivalent to the pre-#899 default (no fault injection).
+        try:
+            _factory = _get_http_client_factory()
+        except AttributeError:
+            logger.warning(
+                "http_client_factory not available on app.state; "
+                "VoyageAIClient using default transport (fault injection inactive). "
+                "This is expected only in unit-test environments, not in production."
+            )
+            _factory = None
+
+        provider = VoyageAIClient(VoyageAIConfig(), http_client_factory=_factory)
         # cast: EmbeddingProvider.get_embedding is typed as returning Any upstream
         # (broad protocol), but for VoyageAIClient it always yields a List[float].
         return cast(
-            List[float], provider.get_embedding(query_text, embedding_purpose="query")
+            List[float],
+            coalesced_query_embedding(provider, query_text),
         )
     except Exception as exc:
         logger.warning(
@@ -908,9 +937,12 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repository_alias = _parse_json_string_array(repository_alias)
         params["repository_alias"] = repository_alias
 
-        # Bug #881 Phase 1 entry log: operators can audit every search_code call
+        # Bug #881 Phase 1 entry log: operators can audit every search_code call.
+        # py-spy logging-lock fix (follow-up to Bug #1078): demoted INFO -> DEBUG
+        # so this per-query audit line does not acquire the logging handler lock
+        # on the hot path at default levels. Re-enable via DEBUG to audit calls.
         _query_log = str(params.get("query_text", ""))[:_QUERY_LOG_TRUNCATION_LIMIT]
-        logger.info(
+        logger.debug(
             f"search_code entry: user={user.username!r} "
             f"correlation_id={get_correlation_id()!r} "
             f"repository_alias={repository_alias!r} "
@@ -963,9 +995,12 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         else:
             _result = _search_activated_repo(params, user)
 
-        # Bug #881 Phase 1 exit log: elapsed_ms and result_count for every call
+        # Bug #881 Phase 1 exit log: elapsed_ms and result_count for every call.
+        # py-spy logging-lock fix (follow-up to Bug #1078): demoted INFO -> DEBUG
+        # so this per-query audit line does not acquire the logging handler lock
+        # on the hot path at default levels.
         _elapsed_ms = int((time.monotonic() - _search_start) * 1000)
-        logger.info(
+        logger.debug(
             f"search_code complete: correlation_id={get_correlation_id()!r} "
             f"result_count=0 elapsed_ms={_elapsed_ms}ms",
             extra={"correlation_id": get_correlation_id()},

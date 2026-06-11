@@ -10,15 +10,19 @@ Mocking strategy:
 - _git_commit on service: mocked (avoids real git repo requirement)
 - background_job_manager: mocked (avoids full server bootstrap)
 - _resolve_repo_path: mocked (avoids live alias manager)
+- _get_job_tracker, _get_xray_executor, asyncio.get_running_loop: mocked
+  for tests that reach the job submission path (Bug #1070 async path)
 - App module state: patched minimally
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, cast
+from typing import Any, Dict, Generator, Optional, cast
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -70,6 +74,58 @@ def _make_cidx_meta(tmp_path: Path) -> Path:
     cidx_meta = tmp_path / "data" / "golden-repos" / "cidx-meta"
     cidx_meta.mkdir(parents=True, exist_ok=True)
     return cidx_meta
+
+
+@contextmanager
+def _xray_single_repo_env(
+    repo_path: str = "/fake/repo/path",
+    resolved_future: "Optional[asyncio.Future]" = None,
+) -> Generator:
+    """Patch infra boundaries for the single-repo Bug #1070 path.
+
+    Yields (mock_bjm, mock_job_tracker, mock_xray_executor, mock_loop).
+    If resolved_future is None, a PENDING future is used.
+    """
+    mock_bjm = MagicMock()
+    mock_jt = MagicMock()
+    mock_jt.register_job.return_value = MagicMock()
+    mock_exec = MagicMock()
+    mock_app = MagicMock()
+    mock_app.background_job_manager = mock_bjm
+    mock_app.activated_repo_manager = None
+    mock_app.golden_repo_manager = None
+
+    if resolved_future is None:
+        resolved_future = asyncio.Future()  # pending
+
+    loop_instance = MagicMock()
+    loop_instance.run_in_executor.return_value = resolved_future
+
+    with (
+        patch("code_indexer.server.mcp.handlers._utils.app_module", mock_app),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
+            return_value=repo_path,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._get_background_job_manager",
+            return_value=mock_bjm,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._get_job_tracker",
+            return_value=mock_jt,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray._get_xray_executor",
+            return_value=mock_exec,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers.xray.validate_rust_evaluator"
+        ) as mock_validate,
+        patch("asyncio.get_running_loop", return_value=loop_instance),
+    ):
+        mock_validate.return_value = MagicMock(ok=True)
+        yield mock_bjm, mock_jt, mock_exec, loop_instance
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +268,7 @@ class TestXraySearchPatternName:
         mock.submit_job.return_value = "test-job-id"
         return mock
 
-    def test_pattern_name_and_evaluator_code_mutually_exclusive(
+    async def test_pattern_name_and_evaluator_code_mutually_exclusive(
         self, tmp_path: Path
     ) -> None:
         """AC5: Both pattern_name and evaluator_code provided returns mutually_exclusive_params."""
@@ -231,7 +287,7 @@ class TestXraySearchPatternName:
                 "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
                 return_value="/some/path",
             ):
-                result = handle_xray_search(
+                result = await handle_xray_search(
                     {
                         "repository_alias": "myrepo-global",
                         "pattern": "def ",
@@ -245,15 +301,12 @@ class TestXraySearchPatternName:
         body = _parse_response(result)
         assert body["error"] == "mutually_exclusive_params"
 
-    def test_pattern_name_loads_stored_pattern(self, tmp_path: Path) -> None:
+    async def test_pattern_name_loads_stored_pattern(self, tmp_path: Path) -> None:
         """AC5: pattern_name (without evaluator_code) loads pattern and submits job."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
         from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
         user = _make_user()
-        mock_bjm = self._make_mock_bjm()
-        mock_app = MagicMock()
-        mock_app.background_job_manager = mock_bjm
         cidx_meta = _make_cidx_meta(tmp_path)
 
         # Pre-store a pattern
@@ -264,33 +317,33 @@ class TestXraySearchPatternName:
                 pattern_yaml=MINIMAL_PATTERN_YAML,
             )
 
-        with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
-            mock_app,
+        with (
+            _xray_single_repo_env(repo_path="/some/path") as (
+                mock_bjm,
+                mock_jt,
+                mock_exec,
+                mock_loop,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+                return_value=cidx_meta,
+            ),
         ):
-            with patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
-                return_value="/some/path",
-            ):
-                with patch(
-                    "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
-                    return_value=cidx_meta,
-                ):
-                    result = handle_xray_search(
-                        {
-                            "repository_alias": "myrepo-global",
-                            "pattern": "def ",
-                            "search_target": "content",
-                            "pattern_name": "my-pattern",
-                        },
-                        user=user,
-                    )
+            result = await handle_xray_search(
+                {
+                    "repository_alias": "myrepo-global",
+                    "pattern": "def ",
+                    "search_target": "content",
+                    "pattern_name": "my-pattern",
+                },
+                user=user,
+            )
 
         body = _parse_response(result)
         # Should have submitted a job (not an error)
         assert "job_id" in body
 
-    def test_pattern_name_not_found_returns_error(self, tmp_path: Path) -> None:
+    async def test_pattern_name_not_found_returns_error(self, tmp_path: Path) -> None:
         """AC5: pattern_name that doesn't exist returns pattern_not_found error."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
 
@@ -312,7 +365,7 @@ class TestXraySearchPatternName:
                     "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
                     return_value=cidx_meta,
                 ):
-                    result = handle_xray_search(
+                    result = await handle_xray_search(
                         {
                             "repository_alias": "myrepo-global",
                             "pattern": "def ",
@@ -325,15 +378,14 @@ class TestXraySearchPatternName:
         body = _parse_response(result)
         assert body["error"] == "pattern_not_found"
 
-    def test_pattern_params_applied_to_resolved_pattern(self, tmp_path: Path) -> None:
+    async def test_pattern_params_applied_to_resolved_pattern(
+        self, tmp_path: Path
+    ) -> None:
         """AC8: pattern_params overrides are passed to resolved pattern."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_search
         from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
         user = _make_user()
-        mock_bjm = self._make_mock_bjm()
-        mock_app = MagicMock()
-        mock_app.background_job_manager = mock_bjm
         cidx_meta = _make_cidx_meta(tmp_path)
 
         # Pre-store a parametrized pattern
@@ -341,40 +393,28 @@ class TestXraySearchPatternName:
         with patch.object(svc, "_git_commit"):
             svc.store_xray_pattern(scope="__any__", pattern_yaml=PARAM_PATTERN_YAML)
 
-        # Capture what evaluator_code was passed to the job
-        submitted_evaluator: list = []
-
-        def capture_submit(**kwargs: Any) -> str:
-            # The job fn is a closure — we capture it and call it with a noop progress
-            func = kwargs.get("func")
-            if func is not None:
-                submitted_evaluator.append(func)
-            return "test-job-id"
-
-        mock_bjm.submit_job.side_effect = capture_submit
-
-        with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
-            mock_app,
+        with (
+            _xray_single_repo_env(repo_path="/some/path") as (
+                mock_bjm,
+                mock_jt,
+                mock_exec,
+                mock_loop,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+                return_value=cidx_meta,
+            ),
         ):
-            with patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
-                return_value="/some/path",
-            ):
-                with patch(
-                    "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
-                    return_value=cidx_meta,
-                ):
-                    result = handle_xray_search(
-                        {
-                            "repository_alias": "myrepo-global",
-                            "pattern": "def ",
-                            "search_target": "content",
-                            "pattern_name": "deep-nesting",
-                            "pattern_params": {"DEPTH_THRESHOLD": 6},
-                        },
-                        user=user,
-                    )
+            result = await handle_xray_search(
+                {
+                    "repository_alias": "myrepo-global",
+                    "pattern": "def ",
+                    "search_target": "content",
+                    "pattern_name": "deep-nesting",
+                    "pattern_params": {"DEPTH_THRESHOLD": 6},
+                },
+                user=user,
+            )
 
         body = _parse_response(result)
         assert "job_id" in body
@@ -388,7 +428,7 @@ class TestXraySearchPatternName:
 class TestXrayExplorePatternName:
     """AC5: xray_explore accepts pattern_name; mutually exclusive with evaluator_code."""
 
-    def test_pattern_name_and_evaluator_code_mutually_exclusive(
+    async def test_pattern_name_and_evaluator_code_mutually_exclusive(
         self, tmp_path: Path
     ) -> None:
         """AC5: Both pattern_name and evaluator_code in xray_explore returns error."""
@@ -408,7 +448,7 @@ class TestXrayExplorePatternName:
                 "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
                 return_value="/some/path",
             ):
-                result = handle_xray_explore(
+                result = await handle_xray_explore(
                     {
                         "repository_alias": "myrepo-global",
                         "pattern": "def ",
@@ -422,43 +462,41 @@ class TestXrayExplorePatternName:
         body = _parse_response(result)
         assert body["error"] == "mutually_exclusive_params"
 
-    def test_pattern_name_loads_stored_pattern_in_explore(self, tmp_path: Path) -> None:
+    async def test_pattern_name_loads_stored_pattern_in_explore(
+        self, tmp_path: Path
+    ) -> None:
         """AC5: pattern_name in xray_explore loads pattern and submits job."""
         from code_indexer.server.mcp.handlers.xray import handle_xray_explore
         from code_indexer.server.services.xray_pattern_service import XrayPatternService
 
         user = _make_user()
-        mock_bjm = MagicMock()
-        mock_bjm.submit_job.return_value = "test-job-id"
-        mock_app = MagicMock()
-        mock_app.background_job_manager = mock_bjm
         cidx_meta = _make_cidx_meta(tmp_path)
 
         svc = XrayPatternService(cidx_meta)
         with patch.object(svc, "_git_commit"):
             svc.store_xray_pattern(scope="__any__", pattern_yaml=MINIMAL_PATTERN_YAML)
 
-        with patch(
-            "code_indexer.server.mcp.handlers.xray._utils.app_module",
-            mock_app,
+        with (
+            _xray_single_repo_env(repo_path="/some/path") as (
+                mock_bjm,
+                mock_jt,
+                mock_exec,
+                mock_loop,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
+                return_value=cidx_meta,
+            ),
         ):
-            with patch(
-                "code_indexer.server.mcp.handlers.xray._resolve_repo_path",
-                return_value="/some/path",
-            ):
-                with patch(
-                    "code_indexer.server.mcp.handlers.xray._get_cidx_meta_path",
-                    return_value=cidx_meta,
-                ):
-                    result = handle_xray_explore(
-                        {
-                            "repository_alias": "myrepo-global",
-                            "pattern": "def ",
-                            "search_target": "content",
-                            "pattern_name": "my-pattern",
-                        },
-                        user=user,
-                    )
+            result = await handle_xray_explore(
+                {
+                    "repository_alias": "myrepo-global",
+                    "pattern": "def ",
+                    "search_target": "content",
+                    "pattern_name": "my-pattern",
+                },
+                user=user,
+            )
 
         body = _parse_response(result)
         assert "job_id" in body

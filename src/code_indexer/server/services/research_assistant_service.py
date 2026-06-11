@@ -59,6 +59,18 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 MAX_SESSION_SIZE = 100 * 1024 * 1024  # 100MB
 
 
+def _default_research_base_dir() -> Path:
+    """
+    Default root directory for Research Assistant session workspaces.
+
+    Bug #1085: this is the single seam through which the research root is
+    resolved. Production keeps the historical ``~/.cidx-server/research``
+    location; tests inject an isolated temp dir via ``research_base_dir`` so
+    they never write into the developer's real ``$HOME``.
+    """
+    return Path.home() / ".cidx-server" / "research"
+
+
 class ResearchAssistantService:
     """
     Service for managing research sessions and chat messages.
@@ -80,6 +92,7 @@ class ResearchAssistantService:
         github_token: Optional[str] = None,
         job_tracker=None,
         storage_backend=None,
+        research_base_dir: Optional[Path] = None,
     ):
         """
         Initialize ResearchAssistantService.
@@ -90,9 +103,20 @@ class ResearchAssistantService:
             job_tracker: Optional JobTracker for dashboard visibility (Story #314).
             storage_backend: Optional ResearchSessionsBackend for cluster-aware storage (Story #522).
                              When provided, all DB operations delegate to the backend.
+            research_base_dir: Root dir for session workspaces (Bug #1085 seam). When
+                             None, defaults to ``~/.cidx-server/research`` (production
+                             behavior). Tests inject an isolated temp dir so they never
+                             write into the developer's real ``$HOME``.
         """
         # Story #522: Optional backend for cluster-aware storage
         self._backend = storage_backend
+
+        # Bug #1085: base-dir seam for research session workspaces.
+        self._research_base_dir: Path = (
+            Path(research_base_dir)
+            if research_base_dir is not None
+            else _default_research_base_dir()
+        )
 
         if db_path is not None:
             self.db_path = db_path
@@ -436,7 +460,7 @@ class ResearchAssistantService:
         Returns:
             Dictionary with session data (id, name, folder_path, created_at, updated_at)
         """
-        folder_path = str(Path.home() / ".cidx-server" / "research" / "default")
+        folder_path = str(self._research_base_dir / "default")
 
         # Story #522: delegate to backend when available
         if self._backend is not None:
@@ -781,8 +805,8 @@ class ResearchAssistantService:
         # Generate UUID for session
         session_id = str(uuid.uuid4())
 
-        # Create folder path
-        folder_path = str(Path.home() / ".cidx-server" / "research" / session_id)
+        # Create folder path (Bug #1085: via the base-dir seam)
+        folder_path = str(self._research_base_dir / session_id)
 
         # Story #522: delegate to backend when available
         if self._backend is not None:

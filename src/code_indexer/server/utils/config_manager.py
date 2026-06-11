@@ -30,6 +30,10 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
 _MCP_DISPATCH_POOL_MIN: int = 1
 _MCP_DISPATCH_POOL_MAX: int = 1024
 
+# perf - bounds for query_executor_pool_size bootstrap config key (range 1-2048)
+_QUERY_EXECUTOR_POOL_MIN: int = 1
+_QUERY_EXECUTOR_POOL_MAX: int = 2048
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -77,6 +81,18 @@ class CacheConfig:
     payload_max_fetch_size_chars: int = 5000
     payload_cache_ttl_seconds: int = 900
     payload_cleanup_interval_seconds: int = 60
+
+    # Query-path repo-config cache settings (Story #1082).
+    # query_path_cache_enabled: optional kill-switch; when False the per-query
+    #   repo-config cache is bypassed and config loads directly (baseline).
+    # repo_config_cache_ttl_seconds: SHORT, conservative TTL for mutable /
+    #   not-provably-immutable repo paths (proven-immutable .versioned/ snapshot
+    #   paths are cached with NO TTL but still bounded). Self-healing safety net.
+    # repo_config_cache_max_entries: hard LRU bound on EACH sub-cache (immutable
+    #   + mutable) to keep cardinality bounded across refresh cycles (Bug #897).
+    query_path_cache_enabled: bool = True
+    repo_config_cache_ttl_seconds: int = 30
+    repo_config_cache_max_entries: int = 2048
 
 
 @dataclass
@@ -681,6 +697,23 @@ class BackgroundJobsConfig:
     # Default 8 (Story #1009: enlarged from 2 for burst concurrency)
     subprocess_max_workers: int = 8
 
+    # Bug #1063 Part 1: per-cycle refresh submission budget.
+    # Default -1 means "derive from max_concurrent_background_jobs // 2" in
+    # __post_init__. Set explicitly to override the derived default.
+    max_concurrent_refresh_jobs: int = -1
+
+    # Bug #1070: dedicated xray executor pool size.
+    # xray_search and xray_explore are read-only and must NOT share the 5-worker
+    # BJM pool with refresh/indexing/depmap. This dedicated pool serves only xray
+    # compute and allows up to 20 concurrent xray jobs without starvation.
+    xray_max_concurrent_jobs: int = 20
+
+    def __post_init__(self) -> None:
+        if self.max_concurrent_refresh_jobs < 0:
+            self.max_concurrent_refresh_jobs = max(
+                1, self.max_concurrent_background_jobs // 2
+            )
+
 
 @dataclass
 class DataRetentionConfig:
@@ -1176,6 +1209,23 @@ class ServerConfig:
     # Range: 1-1024. Default 128.
     mcp_dispatch_pool_size: int = 128
 
+    # perf - Shared, long-lived query executor pool (bootstrap-only).
+    # FilesystemVectorStore.search() runs the index-load task in parallel with the
+    # embedding task (2 sub-tasks per query). Previously each request created its
+    # own ThreadPoolExecutor, so the create/destroy churn serialized concurrent
+    # queries on CPython's process-wide _global_shutdown_lock (71% of worker-thread
+    # py-spy samples in `submit`). This pool is created ONCE at startup and reused.
+    #
+    # Sizing rationale: it must hold ~2 threads per concurrently-served query so
+    # requests' sub-tasks don't starve each other (a tiny shared pool would be
+    # WORSE — it would serialize all requests). Default 256 mirrors
+    # server_threadpool_size (the anyio/Starlette sync-handler capacity): with up
+    # to ~256 concurrent sync query handlers, 256 query-executor workers cover the
+    # worst case without queueing. The fan-out is non-nested (load_index /
+    # generate_embedding never submit back to this pool), so no deadlock risk.
+    # Range: 1-2048.
+    query_executor_pool_size: int = 256
+
     # Story #908 / Epic #907 - Graph-channel anomaly repair (bootstrap-only, never DB).
     # Default True so fresh installs automatically run Phase 3.7 SELF_LOOP repair.
     # Set enable_graph_channel_repair=false in config.json to disable.
@@ -1195,6 +1245,65 @@ class ServerConfig:
     # Runtime (Web UI): pace-maker mode before Claude CLI invocations.
     # Values: "disabled" (no-op), "on" (enforce pacing-only), "off" (actively disable)
     pace_maker_mode: str = "disabled"
+
+    # Bug #1078 Phase 1 - Per-budget concurrency cap for serving-path embedding/rerank calls.
+    # Controls the BoundedSemaphore K in ProviderConcurrencyGovernor. Default 16 — diminishing-
+    # returns knee from the Bug #1078 3-run K-sweep (K=16 best conc-50 latency/throughput;
+    # K=32 regresses). K is PER PROCESS, so a 3-node cluster runs up to 3x this many concurrent
+    # provider calls — keep within the provider's concurrent-request budget.
+    # Excess callers queue up to acquire_timeout seconds then receive GovernorBusyError.
+    # Runtime (DB-backed), not bootstrap.
+    query_provider_max_concurrency: int = 16
+
+    # Story #1079 Phase E - Server-side embedding request coalescer.
+    # All four are RUNTIME (DB-backed, Web-UI tunable), NOT bootstrap config.json.
+    # coalesce_enabled / coalesce_max_batch_size are read live via getattr in
+    # coalesced_query_embedding / the coalescer registry, so changes take effect
+    # WITHOUT a restart (true hot-reload). coalesce_k_min / coalesce_k_max are
+    # DIFFERENT: they are CONSTRUCTION-SCOPED governor seeds (read once at
+    # ProviderConcurrencyGovernor construction via _read_config_k_bounds and baked
+    # into each lane's limiter clamp + AIMD floor/ceiling) — a change takes effect
+    # on the next governor construction / server restart, exactly like
+    # query_provider_max_concurrency seeds the initial K. They do NOT live-reload.
+    #
+    # coalesce_enabled: kill switch. When False, coalesced_query_embedding
+    #   delegates to governed_query_embedding (governor + AIMD still apply, no
+    #   batch accumulation). Read live each call (hot-reload).
+    coalesce_enabled: bool = True
+    # coalesce_max_batch_size: hard texts-per-batch ceiling. 96 == Cohere's
+    #   _get_texts_per_request() (the smallest provider texts cap), so a sealed
+    #   batch never sub-splits in the provider. Read live at registry build / seal.
+    coalesce_max_batch_size: int = 96
+    # coalesce_k_min / coalesce_k_max: per-lane AIMD K floor/ceiling seeds AND the
+    #   per-lane ResizableLimiter clamp bounds, matching the locked design
+    #   (K_MIN=8, K_MAX=32). Valid range 8 <= k_min <= k_max <= 256; present-but-
+    #   invalid config falls back to the 8/32 defaults with a logged WARNING.
+    #   Construction-scoped seed (see preamble) — NOT live hot-reload.
+    coalesce_k_min: int = 8
+    coalesce_k_max: int = 32
+
+    # Bug #1084 Phase A6 — keep-last-N versioned-snapshot retention. After each
+    # successful alias swap, all but the N newest snapshots are scheduled for
+    # deletion through the refcount-gated CleanupManager (never the current
+    # target or previous_path). Runtime / Web UI configurable. Enabled on local
+    # + cow-daemon; ONTAP discovery returns [] so retention is naturally inert
+    # there until alias-scoped naming lands.
+    snapshot_retention_keep_last: int = 3
+
+    # Bug #1084 (staging follow-up) — NFS read-after-create visibility deadline
+    # (seconds) for the versioned-snapshot barrier. Staging PROVED that under
+    # concurrent reflink load a freshly-created versioned dir can take >15s to
+    # propagate to the scheduler node over NFS; the barrier now also READDIRs the
+    # parent to bust the dir-entry cache, and this generous 60s ceiling is the
+    # safety net before failing loud. Runtime / Web UI tunable; non-positive
+    # values fall back to the module default. NOT bootstrap.
+    nfs_visibility_timeout_seconds: float = 60.0
+
+    # Bug #1085 — Research Assistant session-workspace GC retention (days). The
+    # ResearchCleanupService deletes orphaned ~/.cidx-server/research/<uuid>
+    # dirs (no live research_sessions row) older than this many days. Runtime /
+    # Web-UI tunable. 0 (or negative) disables the sweep entirely.
+    research_session_retention_days: int = 7
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -1730,11 +1839,15 @@ class ServerConfigManager:
             config_dict["background_jobs_config"].pop("cleanup_max_age_hours", None)
 
         # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
+        # Unknown keys are filtered for rolling-upgrade safety — same fields() pattern
+        # used for ClaudeIntegrationConfig, MemoryRetrievalConfig, CodexIntegrationConfig.
         if "background_jobs_config" in config_dict and isinstance(
             config_dict["background_jobs_config"], dict
         ):
+            _bg = config_dict["background_jobs_config"]
+            _bg_allowed = {f.name for f in fields(BackgroundJobsConfig)}
             config_dict["background_jobs_config"] = BackgroundJobsConfig(
-                **config_dict["background_jobs_config"]
+                **{k: v for k, v in _bg.items() if k in _bg_allowed}
             )
 
         # Story #32: Convert content_limits_config dict to ContentLimitsConfig
@@ -2024,6 +2137,17 @@ class ServerConfigManager:
             raise ValueError(
                 f"mcp_dispatch_pool_size must be between {_MCP_DISPATCH_POOL_MIN} "
                 f"and {_MCP_DISPATCH_POOL_MAX}, got {config.mcp_dispatch_pool_size}"
+            )
+
+        # Validate query_executor_pool_size (perf - shared query executor)
+        if not (
+            _QUERY_EXECUTOR_POOL_MIN
+            <= config.query_executor_pool_size
+            <= _QUERY_EXECUTOR_POOL_MAX
+        ):
+            raise ValueError(
+                f"query_executor_pool_size must be between {_QUERY_EXECUTOR_POOL_MIN} "
+                f"and {_QUERY_EXECUTOR_POOL_MAX}, got {config.query_executor_pool_size}"
             )
 
         # Validate port range
