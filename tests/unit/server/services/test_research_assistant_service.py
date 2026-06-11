@@ -7,6 +7,7 @@ Following TDD methodology: Write failing tests FIRST, then implement.
 """
 
 import pytest
+import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -25,9 +26,8 @@ class TestResearchAssistantStorage:
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "test.db")
         yield db_path
-        # Cleanup
-        Path(db_path).unlink(missing_ok=True)
-        Path(temp_dir).rmdir()
+        # Cleanup (robust: SQLite may leave -wal/-shm files, so rmdir() fails)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.fixture
     def research_service(self, temp_db):
@@ -252,9 +252,8 @@ class TestResearchSessionManagement:
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "test.db")
         yield db_path
-        # Cleanup
-        Path(db_path).unlink(missing_ok=True)
-        Path(temp_dir).rmdir()
+        # Cleanup (robust: SQLite may leave -wal/-shm files, so rmdir() fails)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.fixture
     def research_service(self, temp_db):
@@ -287,8 +286,14 @@ class TestResearchSessionManagement:
         except ValueError:
             pytest.fail(f"Session id '{session['id']}' is not a valid UUID")
 
-    def test_create_session_creates_folder_and_softlink(self, research_service):
-        """Test AC2: create_session creates folder at ~/.cidx-server/research/{uuid}/."""
+    def test_create_session_creates_folder_and_softlink(
+        self, research_service, isolated_research_base_dir
+    ):
+        """Test AC2: create_session creates folder under the research base dir/{uuid}/.
+
+        Bug #1085: the base dir is the isolated test root (autouse-redirected),
+        NOT the developer's real ~/.cidx-server/research.
+        """
         session = research_service.create_session()
 
         folder_path = Path(session["folder_path"])
@@ -297,8 +302,8 @@ class TestResearchSessionManagement:
         assert folder_path.exists(), f"Session folder must be created at {folder_path}"
         assert folder_path.is_dir(), "Session folder must be a directory"
 
-        # Verify folder is in correct location
-        expected_parent = Path.home() / ".cidx-server" / "research"
+        # Verify folder is in the (isolated) research base dir
+        expected_parent = isolated_research_base_dir
         assert folder_path.parent == expected_parent, (
             f"Session folder must be in {expected_parent}"
         )
