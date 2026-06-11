@@ -14,7 +14,10 @@ import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, cast
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.resizable_limiter import ResizableLimiter
 
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.xray.sandbox import validate_rust_evaluator
@@ -181,6 +184,31 @@ def _get_xray_executor() -> ThreadPoolExecutor:
             "xray_executor not available: set_xray_executor() was not called during startup"
         )
     return cast(ThreadPoolExecutor, executor)
+
+
+def set_xray_cell_limiter(limiter: "ResizableLimiter") -> None:
+    """Store the xray cell concurrency limiter on app.state (called from lifespan).
+
+    All xray scan executions (xray_search, xray_explore, xray_search_batch cells)
+    compete for the same N slots globally. N is driven by xray_worker_threads config.
+
+    Raises:
+        RuntimeError: If the app instance is not yet available (startup wiring error).
+    """
+    app = getattr(_utils.app_module, "app", None)
+    if app is None:
+        raise RuntimeError(
+            "set_xray_cell_limiter called before app is available — startup wiring error"
+        )
+    app.state.xray_cell_limiter = limiter
+
+
+def _get_xray_cell_limiter() -> "Optional[ResizableLimiter]":
+    """Return the xray cell limiter from app.state, or None if not wired (CLI/test)."""
+    app = getattr(_utils.app_module, "app", None)
+    if app is None:
+        return None
+    return getattr(app.state, "xray_cell_limiter", None)
 
 
 def _get_job_tracker() -> Any:
@@ -506,6 +534,19 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             def _job() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
                 from code_indexer.xray.search_engine import XRaySearchEngine as _E
 
+                _limiter = _get_xray_cell_limiter()
+                _slot = False
+                if _limiter is not None:
+                    _slot = _limiter.acquire(timeout=float(t))
+                    if not _slot:
+                        return {
+                            "error": "xray_cell_queue_timeout",
+                            "message": (
+                                f"Timed out waiting for an xray worker slot after "
+                                f"{t}s — server busy with other xray jobs."
+                            ),
+                        }
+
                 def _on_spawned(proc) -> None:  # type: ignore[no-untyped-def]
                     bjm.register_child_process(jid, proc)
 
@@ -529,6 +570,8 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
                     )
                 finally:
                     bjm.unregister_child_processes(jid)
+                    if _slot and _limiter is not None:
+                        _limiter.release()
                 return _truncate_xray_result(result)
 
             return _job
@@ -663,6 +706,19 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
     def job_fn() -> Dict[str, Any]:  # type: ignore[no-untyped-def]
         from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
 
+        _limiter = _get_xray_cell_limiter()
+        _slot = False
+        if _limiter is not None:
+            _slot = _limiter.acquire(timeout=float(effective_timeout))
+            if not _slot:
+                return {
+                    "error": "xray_cell_queue_timeout",
+                    "message": (
+                        f"Timed out waiting for an xray worker slot after "
+                        f"{effective_timeout}s — server busy with other xray jobs."
+                    ),
+                }
+
         def _on_spawned(proc) -> None:  # type: ignore[no-untyped-def]
             bjm.register_child_process(job_id, proc)
 
@@ -686,6 +742,8 @@ async def handle_xray_search(params: Dict[str, Any], user: User) -> Dict[str, An
             )
         finally:
             bjm.unregister_child_processes(job_id)
+            if _slot and _limiter is not None:
+                _limiter.release()
         return _truncate_xray_result(result)
 
     future = loop.run_in_executor(xray_executor, job_fn)
@@ -740,6 +798,19 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
     def job_fn(progress_callback):  # type: ignore[no-untyped-def]
         from code_indexer.xray.search_engine import XRaySearchEngine as _Engine
 
+        _limiter = _get_xray_cell_limiter()
+        _slot = False
+        if _limiter is not None:
+            _slot = _limiter.acquire(timeout=float(effective_timeout))
+            if not _slot:
+                return {
+                    "error": "xray_cell_queue_timeout",
+                    "message": (
+                        f"Timed out waiting for an xray worker slot after "
+                        f"{effective_timeout}s — server busy with other xray jobs."
+                    ),
+                }
+
         def _on_spawned(proc):  # type: ignore[no-untyped-def]
             if bjm is not None and job_id_holder:
                 bjm.register_child_process(job_id_holder[0], proc)
@@ -767,6 +838,8 @@ def _make_xray_explore_job_fn(  # type: ignore[no-untyped-def]
         finally:
             if bjm is not None and job_id_holder:
                 bjm.unregister_child_processes(job_id_holder[0])
+            if _slot and _limiter is not None:
+                _limiter.release()
         return result
 
     return job_fn

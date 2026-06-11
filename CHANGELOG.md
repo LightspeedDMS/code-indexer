@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.120.0] - 2026-06-11
+
+### Added
+- **Global xray cell concurrency limiter.** All xray scan executions (`xray_search`, `xray_explore`, each cell in `xray_search_batch`) now compete for a shared pool of N slots governed by the existing `xray_worker_threads` Web UI setting (default 4). Implemented via `ResizableLimiter` stored on `app.state.xray_cell_limiter`; live-resizes when `xray_worker_threads` is updated via the config service. On acquire timeout the affected call returns `error: xray_cell_queue_timeout`; batch cells set `timeout=True, partial=True` on the job result. Prevents a single high-fan-out batch from monopolising Rust xray-core workers under concurrent load. 6/6 unit tests green; `server-fast-automation.sh` all 6 chunks pass.
+
 ## [10.119.0] - 2026-06-11
 
 ### Fixed

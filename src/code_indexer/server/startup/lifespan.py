@@ -351,6 +351,41 @@ def make_lifespan(
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Global xray cell concurrency limiter — shared by xray_search, xray_explore,
+        # and xray_search_batch cells. Sized from runtime xray_worker_threads config (default 4).
+        from code_indexer.server.services.resizable_limiter import (
+            ResizableLimiter as _ResizableLimiter,
+        )
+
+        try:
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_cfg,
+            )
+
+            _xray_cell_limit: int = (
+                _get_cfg().get_config().xray_config.xray_worker_threads
+            )  # type: ignore[union-attr]
+        except Exception as _exc:
+            _xray_cell_limit = 4  # safe default if config not yet available
+            logger.warning(
+                "xray_worker_threads config unavailable, defaulting cell limiter to %d: %s",
+                _xray_cell_limit,
+                _exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        _xray_cell_limiter = _ResizableLimiter(
+            initial=_xray_cell_limit, k_min=1, k_max=50
+        )
+        app.state.xray_cell_limiter = _xray_cell_limiter
+        from code_indexer.server.mcp.handlers.xray import set_xray_cell_limiter
+
+        set_xray_cell_limiter(_xray_cell_limiter)
+        logger.info(
+            "xray cell limiter started (limit=%d) — shared gate for all xray scan executions",
+            _xray_cell_limit,
+            extra={"correlation_id": get_correlation_id()},
+        )
+
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
         logger.info(
             "Server startup: Initializing SQLite database schema",

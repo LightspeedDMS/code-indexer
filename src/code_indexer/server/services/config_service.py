@@ -1813,6 +1813,21 @@ class ConfigService:
             xray.xray_timeout_seconds = int(value)
         elif key == "xray_worker_threads":
             xray.xray_worker_threads = int(value)
+            try:
+                from code_indexer.server.mcp.handlers.xray import (
+                    _get_xray_cell_limiter as _gcl,
+                )
+
+                _cl = _gcl()
+                if _cl is not None:
+                    _cl.set_limit(int(value))
+            except Exception as exc:
+                logger.warning(
+                    "Failed to live-reload xray cell limiter for "
+                    "xray_worker_threads=%s: %s",
+                    value,
+                    exc,
+                )
         else:
             raise ValueError(f"Unknown xray setting: {key}")
 
