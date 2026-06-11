@@ -1300,6 +1300,83 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize Research Assistant workspace GC (Bug #1085).
+        # Reconciles ~/.cidx-server/research/<uuid> dirs against the live
+        # research_sessions registry, deleting orphans older than retention.
+        # The first sweep (on .start()) IS the startup reconciliation.
+        research_cleanup_scheduler = None
+        logger.info(
+            "Server startup: Initializing research cleanup scheduler",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            from code_indexer.server.services.research_cleanup_service import (
+                ResearchCleanupScheduler,
+                make_backend_live_folder_provider,
+            )
+            from code_indexer.server.services.research_assistant_service import (
+                _default_research_base_dir,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _rcs_get_config_service,
+            )
+
+            _rcs_config_service = _rcs_get_config_service()
+            _rcs_db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
+
+            def _research_retention_days_provider() -> float:
+                return float(
+                    _rcs_config_service.get_config().research_session_retention_days
+                )
+
+            # Bug #1085 BLOCKING-1: the live set MUST come from the SAME
+            # research_sessions backend the writers use. In cluster/postgres the
+            # registry's backend is PostgreSQL; in solo it is SQLite. A hardcoded
+            # SQLite-only provider read an EMPTY table in postgres mode -> set()
+            # -> mass-deletion of LIVE sessions. The supplier returns a REAL
+            # backend in every mode (registry's, or a local SQLite backend over
+            # the same DB the solo writers use), so list_sessions() always
+            # reflects the active store.
+            def _research_sessions_backend_supplier():
+                # Resolve the active backend lazily (the registry is only wired
+                # after startup). None -> make_backend_live_folder_provider
+                # raises -> cleanup() aborts with ZERO deletions (fail-safe).
+                if backend_registry is not None:
+                    registry_backend = backend_registry.research_sessions
+                    if registry_backend is not None:
+                        return registry_backend
+                # Solo without a registry: the writers use the local SQLite DB,
+                # so read the live set from a SQLite backend over that SAME DB
+                # -- NOT an empty/absent set (which would over-delete).
+                from code_indexer.server.storage.sqlite_backends import (
+                    ResearchSessionsSqliteBackend,
+                )
+
+                return ResearchSessionsSqliteBackend(_rcs_db_path)
+
+            research_cleanup_scheduler = ResearchCleanupScheduler(
+                research_base_dir=_default_research_base_dir(),
+                retention_days_provider=_research_retention_days_provider,
+                live_folder_provider=make_backend_live_folder_provider(
+                    _research_sessions_backend_supplier
+                ),
+            )
+            research_cleanup_scheduler.start()
+            app.state.research_cleanup_scheduler = research_cleanup_scheduler
+            logger.info(
+                "Research cleanup scheduler started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            # Never block server startup on the GC scheduler.
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-054",
+                    f"Failed to initialize research cleanup scheduler: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Activated Repository Reaper Scheduler (Story #967)
         activated_reaper_scheduler = None
         logger.info(
@@ -3211,6 +3288,27 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-034",
                         f"Error stopping data retention scheduler: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop research cleanup scheduler (Bug #1085)
+        research_cleanup_scheduler_state = getattr(
+            app.state, "research_cleanup_scheduler", None
+        )
+        if research_cleanup_scheduler_state is not None:
+            try:
+                research_cleanup_scheduler_state.stop()
+                logger.info(
+                    "Research cleanup scheduler stopped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-055",
+                        f"Error stopping research cleanup scheduler: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

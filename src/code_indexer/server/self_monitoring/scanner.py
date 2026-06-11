@@ -11,6 +11,9 @@ import logging
 import sqlite3
 from typing import Dict, List, Optional, cast
 
+from code_indexer.server.self_monitoring.llm_response_parser import (
+    extract_json_from_llm_response,
+)
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
@@ -427,9 +430,14 @@ class LogScanner:
         Raises:
             ValueError: If JSON is invalid or missing required fields
         """
+        # pace-maker is installed on cluster nodes and prepends a § telemetry
+        # line (and sometimes a "Warning:" line / markdown code fences) to the
+        # server's own `claude -p` stdout. A bare json.loads then fails at
+        # char 0. Strip that noise and extract the real JSON payload, while
+        # still raising loudly on a genuinely empty/garbage response.
         try:
-            cli_response = json.loads(response_str)
-        except json.JSONDecodeError as e:
+            cli_response = extract_json_from_llm_response(response_str)
+        except (ValueError, TypeError) as e:
             raise ValueError(f"Invalid JSON response from Claude: {e}")
 
         # Handle CLI wrapper format (--output-format json returns wrapper)

@@ -19,7 +19,12 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
+
+from code_indexer.server.storage.shared.nfs_visibility import (
+    NFS_VISIBILITY_TIMEOUT_SECONDS,
+    wait_for_nfs_visibility,
+)
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
@@ -227,10 +232,25 @@ class OntapCloneBackend:
     """
 
     def __init__(
-        self, flexclone_client: "OntapFlexCloneClient", mount_point: str
+        self,
+        flexclone_client: "OntapFlexCloneClient",
+        mount_point: str,
+        visibility_waiter: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._client = flexclone_client
         self._mount_point = mount_point.rstrip("/")
+        # Bug #1084 read-after-create barrier: FlexClone volumes are NFS-mounted,
+        # so a freshly junctioned clone may not be visible on this node yet.
+        # Wait for the mount path before returning. Injectable for tests.
+        self._visibility_waiter: Callable[[str], None] = (
+            visibility_waiter
+            if visibility_waiter is not None
+            else (
+                lambda path: wait_for_nfs_visibility(
+                    path, timeout=NFS_VISIBILITY_TIMEOUT_SECONDS
+                )
+            )
+        )
 
     def create_clone(self, _source_path: str, namespace: str, name: str) -> str:
         """Create a FlexClone volume and return its mount path.
@@ -240,7 +260,11 @@ class OntapCloneBackend:
         """
         junction_path = f"/{name}"
         self._client.create_clone(name, junction_path=junction_path)
-        return f"{self._mount_point}/{name}"
+        clone_path = f"{self._mount_point}/{name}"
+        # Bug #1084: the FlexClone junction is reached over NFS — wait until the
+        # mount path is visible on this node before handing it back.
+        self._visibility_waiter(clone_path)
+        return clone_path
 
     def create_clone_at_path(
         self,
@@ -289,13 +313,32 @@ class CowDaemonBackend:
     Auth: ``Authorization: Bearer {api_key}`` on every request.
     """
 
-    def __init__(self, config: "CowDaemonConfig") -> None:
+    def __init__(
+        self,
+        config: "CowDaemonConfig",
+        visibility_waiter: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self._daemon_url = config.daemon_url.rstrip("/")
         self._api_key = config.api_key
         self._mount_point = config.mount_point.rstrip("/")
         self._poll_interval = config.poll_interval_seconds
         self._timeout = config.timeout_seconds
         self._daemon_storage_path = (config.daemon_storage_path or "").rstrip("/")
+        # Bug #1084 read-after-create barrier: the daemon creates the snapshot
+        # on its local XFS; this (scheduler) node reaches it over NFS and may
+        # have a NEGATIVE dcache entry for the brand-new canonical parent chain.
+        # Wait for the returned dest to be visible before handing it back so no
+        # consumer (snapshot create, activated-repo clone, ...) ENOENTs on it.
+        # Injectable for tests (no real NFS, no real sleeps).
+        self._visibility_waiter: Callable[[str], None] = (
+            visibility_waiter
+            if visibility_waiter is not None
+            else (
+                lambda path: wait_for_nfs_visibility(
+                    path, timeout=NFS_VISIBILITY_TIMEOUT_SECONDS
+                )
+            )
+        )
 
     # Lazy import; direct type annotation is not possible without making requests
     # a hard dependency at import time.
@@ -470,6 +513,11 @@ class CowDaemonBackend:
         job_id = response.json()["job_id"]
         effective_timeout = timeout if timeout is not None else self._timeout
         self._poll_job(job_id, effective_timeout)
+        # Bug #1084: the daemon reported success on ITS local XFS, but this node
+        # reads the snapshot over NFS. Bust the negative dcache and wait until the
+        # canonical dest is visible here before returning — otherwise downstream
+        # subprocess.run(cwd=dest) ENOENTs in a read-after-create race.
+        self._visibility_waiter(dest_path)
         return dest_path  # Return CIDX-view path; caller does file ops via NFS mount
 
     def _poll_job(self, job_id: str, timeout: Optional[float] = None) -> str:

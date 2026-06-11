@@ -837,16 +837,46 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 skip_truncation=True,
             )
         else:
-            result = _utils.app_module.file_service.get_file_content(
-                repository_alias=repository_alias,
-                file_path=file_path,
-                username=user.username,
-                offset=offset,
-                limit=limit,
-                skip_truncation=True,
-            )
+            try:
+                result = _utils.app_module.file_service.get_file_content(
+                    repository_alias=repository_alias,
+                    file_path=file_path,
+                    username=user.username,
+                    offset=offset,
+                    limit=limit,
+                    skip_truncation=True,
+                )
+            except FileNotFoundError as not_found:
+                # Story #1039 recovery: the user's own activation of this bare
+                # alias could not be resolved (e.g. a stale activation record
+                # whose on-disk directory is gone).  If the golden repo is
+                # globally active, recover via the ``-global`` form -- matching
+                # search_code's bare-alias fallback.  Otherwise surface a clean
+                # not-found (handled by the `except FileNotFoundError` below);
+                # an EXPECTED not-found must never escalate to an unhandled
+                # "Unexpected error" traceback (anti-silent-failure #13).
+                recovered = _recover_file_content_via_global(
+                    repository_alias=repository_alias,
+                    file_path=file_path,
+                    user=user,
+                    offset=offset,
+                    limit=limit,
+                )
+                if recovered is None:
+                    raise not_found
+                result, repository_alias = recovered
 
         return _build_file_content_response(result, file_path, repository_alias)
+    except FileNotFoundError as not_found:
+        # Expected condition -- clean MCP error, NO traceback / ERROR escalation.
+        return _mcp_response(
+            {
+                "success": False,
+                "error": str(not_found),
+                "file_content": [],
+                "metadata": {},
+            }
+        )
     except Exception as e:
         logger.exception(
             f"Unexpected error in get_file_content: {e}",
@@ -855,6 +885,56 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         return _mcp_response(
             {"success": False, "error": str(e), "file_content": [], "metadata": {}}
         )
+
+
+def _recover_file_content_via_global(
+    repository_alias: str,
+    file_path: str,
+    user: User,
+    offset: Optional[int],
+    limit: Optional[int],
+) -> Optional[Tuple[dict, str]]:
+    """Recover file content via the ``-global`` form of a bare alias.
+
+    Used when the user's own activation of *repository_alias* could not be
+    resolved (Story #1039).  Returns ``(result, "<alias>-global")`` when the
+    bare alias is globally active and its versioned path resolves, or ``None``
+    when no global recovery is possible (caller then surfaces a clean
+    not-found).  NEVER applied to an already ``-global`` alias.
+    """
+    if not isinstance(repository_alias, str) or repository_alias.endswith("-global"):
+        return None
+
+    _grm = getattr(_utils.app_module, "golden_repo_manager", None)
+    if _grm is None:
+        return None
+
+    from ._global_fallback import try_global_fallback
+
+    promoted = try_global_fallback(repository_alias, _grm)
+    if promoted is None:
+        return None
+
+    target_path, error_resp = _resolve_global_repo_target(
+        promoted, user, {"file_content": [], "metadata": {}}
+    )
+    if error_resp is not None or target_path is None:
+        return None
+
+    logger.info(
+        "bare-alias recovery: %r -> %r for user %r (own activation unresolved)",
+        repository_alias,
+        promoted,
+        user.username,
+    )
+    result = _utils.app_module.file_service.get_file_content_by_path(
+        repo_path=target_path,
+        file_path=file_path,
+        offset=offset,
+        limit=limit,
+        skip_truncation=True,
+    )
+    return result, promoted
 
 
 def _normalize_browse_params(params: Dict[str, Any]) -> Dict[str, Any]:

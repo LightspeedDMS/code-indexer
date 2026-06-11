@@ -1290,6 +1290,12 @@ class ServerConfig:
     # there until alias-scoped naming lands.
     snapshot_retention_keep_last: int = 3
 
+    # Bug #1085 — Research Assistant session-workspace GC retention (days). The
+    # ResearchCleanupService deletes orphaned ~/.cidx-server/research/<uuid>
+    # dirs (no live research_sessions row) older than this many days. Runtime /
+    # Web-UI tunable. 0 (or negative) disables the sweep entirely.
+    research_session_retention_days: int = 7
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

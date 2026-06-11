@@ -60,3 +60,57 @@ def _disable_pace_maker_guard():
             "code_indexer.server.services.research_assistant_service.enforce_pace_maker_config"
         ):
             yield
+
+
+@pytest.fixture
+def isolated_research_base_dir(tmp_path_factory):
+    """
+    Bug #1085: isolated root for Research Assistant session workspaces.
+
+    Every research test (service, security-flags, cli-injection) is redirected
+    here via the autouse ``_isolate_research_home`` fixture so that NO test ever
+    writes into the developer's real ``~/.cidx-server/research``.
+
+    The root is allocated via ``tmp_path_factory`` in its OWN pytest-managed temp
+    directory (NOT the per-test ``tmp_path``), so the autouse redirect never
+    pollutes the ``tmp_path`` that unrelated tests inspect. pytest removes the
+    factory dirs automatically, so workspaces are torn down after the run.
+    """
+    return tmp_path_factory.mktemp("research_home")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_research_home(isolated_research_base_dir):
+    """
+    Bug #1085 (autouse): redirect the Research Assistant default base dir to the
+    isolated temp dir for the duration of every test in this package.
+
+    This patches the single ``_default_research_base_dir`` seam so even services
+    constructed the legacy way (``ResearchAssistantService(db_path=temp_db)``
+    with no explicit ``research_base_dir``) land under the per-test tmp dir and
+    are auto-removed by pytest -- the root cause of the 22k leaked dirs.
+
+    Under ``PYTHONPATH=./src`` the service is importable under two distinct
+    module objects (``code_indexer...`` and ``src.code_indexer...``); test files
+    import via the ``src.`` namespace, so both aliases must be patched.
+    """
+    import contextlib
+    import importlib
+
+    module_names = [
+        "code_indexer.server.services.research_assistant_service",
+        "src.code_indexer.server.services.research_assistant_service",
+    ]
+    with contextlib.ExitStack() as stack:
+        for module_name in module_names:
+            try:
+                importlib.import_module(module_name)
+            except ImportError:
+                continue
+            stack.enter_context(
+                patch(
+                    f"{module_name}._default_research_base_dir",
+                    return_value=isolated_research_base_dir,
+                )
+            )
+        yield
