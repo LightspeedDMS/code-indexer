@@ -1290,6 +1290,15 @@ class ServerConfig:
     # there until alias-scoped naming lands.
     snapshot_retention_keep_last: int = 3
 
+    # Bug #1084 (staging follow-up) — NFS read-after-create visibility deadline
+    # (seconds) for the versioned-snapshot barrier. Staging PROVED that under
+    # concurrent reflink load a freshly-created versioned dir can take >15s to
+    # propagate to the scheduler node over NFS; the barrier now also READDIRs the
+    # parent to bust the dir-entry cache, and this generous 60s ceiling is the
+    # safety net before failing loud. Runtime / Web UI tunable; non-positive
+    # values fall back to the module default. NOT bootstrap.
+    nfs_visibility_timeout_seconds: float = 60.0
+
     # Bug #1085 — Research Assistant session-workspace GC retention (days). The
     # ResearchCleanupService deletes orphaned ~/.cidx-server/research/<uuid>
     # dirs (no live research_sessions row) older than this many days. Runtime /

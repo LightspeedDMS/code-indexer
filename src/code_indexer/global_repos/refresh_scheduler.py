@@ -35,7 +35,7 @@ from code_indexer.server.services.cidx_meta_backup import (
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.storage.shared.nfs_visibility import (
-    NFS_VISIBILITY_TIMEOUT_SECONDS,
+    _configured_visibility_timeout,
     wait_for_nfs_visibility,
 )
 from code_indexer.server.utils.config_manager import ScipConfig, ServerResourceConfig
@@ -2183,7 +2183,7 @@ class RefreshScheduler:
             # cidx fix-config steps below. Idempotent and fast when already
             # visible; raises (anti-fallback) if it never appears.
             wait_for_nfs_visibility(
-                str(versioned_path), timeout=NFS_VISIBILITY_TIMEOUT_SECONDS
+                str(versioned_path), timeout=_configured_visibility_timeout()
             )
 
             # Step 3: Fix git status on clone (only if .git exists) — non-fatal

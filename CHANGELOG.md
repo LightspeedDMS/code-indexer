@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.118.0] - 2026-06-11
+
+### Fixed
+The staging canary surfaced the deeper cause behind the cow-daemon/NFS refresh failures that v10.117.0's read-after-create barrier had converted from a silent crash into a loud timeout. Two distinct, proven bugs — diagnosed with live concurrent-load measurement on the 3-node staging cluster, fixed and validated.
+
+- **cow-storage-daemon asyncio cross-loop bug (the real root cause — fixed in the separate `cow-storage-daemon` repo, deployed to the staging daemon).** Under ANY concurrent clone-create load the daemon returned HTTP 500 with `RuntimeError: got Future attached to a different loop`, killing the clone job so the snapshot never landed and CIDX's barrier timed out. Cause: the daemon builds its `MetadataStore`/`CloneManager` (and their `asyncio.Lock`s) via `asyncio.run(_create())` on a loop that is then CLOSED, while uvicorn serves on a different loop; in Python 3.9 a Lock created at construction binds to the (now-dead) creation loop, so contended `acquire()` parks a Future on the wrong loop. Uncontended acquisition takes a futureless fast path — which is why single/idle refreshes worked and the failure only appeared under the auto-scheduler's concurrent refresh wave. Fix: lazy, loop-aware lock accessors that bind to `get_running_loop()` and rebind on loop change. Proven live: 8 concurrent creates went from 4x HTTP 500 to zero, and the langfuse-global (3.3 GB) refresh now completes.
+- **NFS read-after-create visibility lag under concurrent load (CIDX side).** With the daemon fixed, refreshes still intermittently hit `NFS read-after-create visibility timeout` when a large reflink ran alongside another create: a newly-created snapshot dir was instantly visible when idle but took >15s to propagate to the scheduler node under concurrent metadata churn (NFS client directory / negative-lookup caching). `wait_for_nfs_visibility` now forces a fresh `listdir(parent)` READDIR on each poll — refreshing the client's directory-entry cache far more aggressively than the prior GETATTR-only ancestor stat, so a child the create side already has resolves immediately even under load — and the timeout becomes a runtime-tunable `ServerConfig.nfs_visibility_timeout_seconds` (default raised 15s -> 60s) wired into both clone backends and the refresh-scheduler barrier. Bounded + fail-loud preserved (the readdir is best-effort; the authoritative `isdir`/deadline checks still raise on a genuine timeout). Local backend still does no wait.
+
 ## [10.117.0] - 2026-06-10
 
 ### Fixed
