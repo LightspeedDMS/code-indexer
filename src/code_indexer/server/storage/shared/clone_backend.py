@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
 from code_indexer.server.storage.shared.nfs_visibility import (
-    NFS_VISIBILITY_TIMEOUT_SECONDS,
+    _configured_visibility_timeout,
     wait_for_nfs_visibility,
 )
 
@@ -247,7 +247,7 @@ class OntapCloneBackend:
             if visibility_waiter is not None
             else (
                 lambda path: wait_for_nfs_visibility(
-                    path, timeout=NFS_VISIBILITY_TIMEOUT_SECONDS
+                    path, timeout=_configured_visibility_timeout()
                 )
             )
         )
@@ -335,7 +335,7 @@ class CowDaemonBackend:
             if visibility_waiter is not None
             else (
                 lambda path: wait_for_nfs_visibility(
-                    path, timeout=NFS_VISIBILITY_TIMEOUT_SECONDS
+                    path, timeout=_configured_visibility_timeout()
                 )
             )
         )
