@@ -1312,7 +1312,7 @@ def make_lifespan(
         try:
             from code_indexer.server.services.research_cleanup_service import (
                 ResearchCleanupScheduler,
-                make_db_live_folder_provider,
+                make_backend_live_folder_provider,
             )
             from code_indexer.server.services.research_assistant_service import (
                 _default_research_base_dir,
@@ -1329,10 +1329,37 @@ def make_lifespan(
                     _rcs_config_service.get_config().research_session_retention_days
                 )
 
+            # Bug #1085 BLOCKING-1: the live set MUST come from the SAME
+            # research_sessions backend the writers use. In cluster/postgres the
+            # registry's backend is PostgreSQL; in solo it is SQLite. A hardcoded
+            # SQLite-only provider read an EMPTY table in postgres mode -> set()
+            # -> mass-deletion of LIVE sessions. The supplier returns a REAL
+            # backend in every mode (registry's, or a local SQLite backend over
+            # the same DB the solo writers use), so list_sessions() always
+            # reflects the active store.
+            def _research_sessions_backend_supplier():
+                # Resolve the active backend lazily (the registry is only wired
+                # after startup). None -> make_backend_live_folder_provider
+                # raises -> cleanup() aborts with ZERO deletions (fail-safe).
+                if backend_registry is not None:
+                    registry_backend = backend_registry.research_sessions
+                    if registry_backend is not None:
+                        return registry_backend
+                # Solo without a registry: the writers use the local SQLite DB,
+                # so read the live set from a SQLite backend over that SAME DB
+                # -- NOT an empty/absent set (which would over-delete).
+                from code_indexer.server.storage.sqlite_backends import (
+                    ResearchSessionsSqliteBackend,
+                )
+
+                return ResearchSessionsSqliteBackend(_rcs_db_path)
+
             research_cleanup_scheduler = ResearchCleanupScheduler(
                 research_base_dir=_default_research_base_dir(),
                 retention_days_provider=_research_retention_days_provider,
-                live_folder_provider=make_db_live_folder_provider(_rcs_db_path),
+                live_folder_provider=make_backend_live_folder_provider(
+                    _research_sessions_backend_supplier
+                ),
             )
             research_cleanup_scheduler.start()
             app.state.research_cleanup_scheduler = research_cleanup_scheduler

@@ -56,6 +56,82 @@ class TestLifespanResearchCleanupWiring:
             "(before the yield)"
         )
 
+    def test_live_set_is_backend_aware_not_sqlite_only(self):
+        """Bug #1085 BLOCKING-1 guard: the live set must be sourced from the
+        ACTIVE research_sessions backend (postgres in cluster / sqlite in solo),
+        via ``make_backend_live_folder_provider`` over ``research_sessions``.
+
+        A SQLite-only provider read an EMPTY table in postgres mode and caused
+        mass-deletion of live sessions. This guard fails if the wiring regresses
+        to using ONLY make_db_live_folder_provider as the live source.
+        """
+        source = _LIFESPAN_PATH.read_text()
+        assert "make_backend_live_folder_provider" in source, (
+            "lifespan must wire the backend-aware live-set provider "
+            "(make_backend_live_folder_provider)"
+        )
+        assert "backend_registry.research_sessions" in source, (
+            "lifespan must source the live set from backend_registry.research_sessions"
+        )
+
+        ctor_args = self._scheduler_ctor_args(source)
+        arg_value = self._kwarg_value(ctor_args, "live_folder_provider")
+        assert arg_value is not None, (
+            "ResearchCleanupScheduler must receive a live_folder_provider= argument"
+        )
+        assert "make_backend_live_folder_provider" in arg_value, (
+            "the backend-aware provider must be the scheduler's "
+            "live_folder_provider= argument value (got: " + arg_value + ")"
+        )
+
+    @staticmethod
+    def _scheduler_ctor_args(source: str) -> str:
+        """Return the argument text inside ResearchCleanupScheduler(...).
+
+        Parenthesis-matched from the ctor open paren to its matching close
+        paren -- no distance heuristic / magic number.
+        """
+        ctor_open = source.find("ResearchCleanupScheduler(")
+        assert ctor_open != -1, "ResearchCleanupScheduler(...) must be constructed"
+        scan = ctor_open + len("ResearchCleanupScheduler(")
+        depth = 1
+        for i in range(scan, len(source)):
+            ch = source[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return source[scan:i]
+        raise AssertionError("unterminated ResearchCleanupScheduler( call")
+
+    @staticmethod
+    def _kwarg_value(ctor_args: str, name: str):
+        """Extract the value expression of ``name=...`` from a ctor arg block.
+
+        Bounded by the next TOP-LEVEL comma (depth 0 across () [] {}) or the end
+        of the block, so the returned expression is exactly that one argument's
+        value -- never bleeding into sibling arguments.
+        """
+        key = name + "="
+        start = ctor_args.find(key)
+        if start == -1:
+            return None
+        i = start + len(key)
+        depth = 0
+        out = []
+        while i < len(ctor_args):
+            ch = ctor_args[i]
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                break
+            out.append(ch)
+            i += 1
+        return "".join(out).strip()
+
     def test_stop_after_yield(self):
         source = _LIFESPAN_PATH.read_text()
         yield_pos = source.find("yield  # Server is now running")

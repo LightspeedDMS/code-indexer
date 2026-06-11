@@ -38,7 +38,9 @@ class TestResearchCleanupService:
     def test_orphan_dir_removed(self, tmp_path):
         """An aged orphan (no live DB row) is deleted."""
         base = tmp_path / "research"
-        orphan = _make_session_dir(base, "aaaaaaaa-orphan", age_days=10)
+        orphan = _make_session_dir(
+            base, "aaaaaaaa-0000-4000-8000-000000000001", age_days=10
+        )
 
         svc = ResearchCleanupService(
             research_base_dir=base,
@@ -102,7 +104,9 @@ class TestResearchCleanupService:
         import logging
 
         base = tmp_path / "research"
-        orphan = _make_session_dir(base, "eeeeeeee-fail", age_days=10)
+        orphan = _make_session_dir(
+            base, "eeeeeeee-0000-4000-8000-00000000000f", age_days=10
+        )
 
         svc = ResearchCleanupService(
             research_base_dir=base,
@@ -211,14 +215,19 @@ class TestResearchCleanupService:
     def test_broken_symlink_inside_dir_is_skipped_gracefully(self, tmp_path):
         """A dangling symlink inside an aged orphan is skipped; the orphan deletes."""
         base = tmp_path / "research"
-        d = _make_session_dir(base, "44444444-brokenlink", age_days=100)
+        d = _make_session_dir(
+            base, "44444444-0000-4000-8000-000000000044", age_days=100
+        )
         # A real broken symlink: stat() on it raises OSError during the walks.
         dangling = d / "uploads" / "dead_link"
         dangling.symlink_to(d / "uploads" / "no_such_target")
-        # Re-age the dir so the new symlink does not make it look recent.
+        # Re-age the dir AND the new symlink so nothing looks recent. Recency is
+        # now symlink-safe (lstat), so the dangling link's OWN mtime counts and
+        # must be aged like the rest of this aged orphan (Bug #1085 N-1).
         old = time.time() - 100 * 24 * 3600
         os.utime(d, (old, old))
         os.utime(d / "uploads", (old, old))
+        os.utime(dangling, (old, old), follow_symlinks=False)
 
         svc = ResearchCleanupService(
             research_base_dir=base,
@@ -322,7 +331,9 @@ class TestResearchCleanupScheduler:
         )
 
         base = tmp_path / "research"
-        orphan = _make_session_dir(base, "11111111-orphan", age_days=10)
+        orphan = _make_session_dir(
+            base, "11111111-0000-4000-8000-000000000011", age_days=10
+        )
 
         ran = threading.Event()
 

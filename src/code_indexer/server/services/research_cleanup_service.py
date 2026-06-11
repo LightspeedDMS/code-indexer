@@ -20,19 +20,81 @@ NEVER deletes a directory it cannot prove is an orphan (no live row).
 """
 
 import logging
+import os
 import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional, Set
+from typing import Any, Callable, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 # Default sweep cadence: hourly. Mirrors the data-retention cadence scale.
 DEFAULT_RESEARCH_CLEANUP_INTERVAL_SECONDS = 3600
+
+# Non-UUID session dir name that must ALWAYS be preserved (the default chat).
+DEFAULT_SESSION_DIR_NAME = "default"
+
+
+def _is_session_dir_name(name: str) -> bool:
+    """True iff ``name`` is a valid Research Assistant session folder name.
+
+    A session folder is either the literal ``"default"`` chat directory or a
+    name that parses as a ``uuid.UUID`` (the session-id shape used by
+    ``create_session()``). ANY other name (e.g. ``important-do-not-delete``)
+    is NOT a session dir and must never be a deletion candidate (Bug #1085
+    BLOCKING-2: blast radius = every aged immediate child of the research base).
+    """
+    if name == DEFAULT_SESSION_DIR_NAME:
+        return False  # 'default' is a session dir, but NEVER reapable -> exclude
+    try:
+        uuid.UUID(name)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def make_backend_live_folder_provider(
+    backend_supplier: Callable[[], Any],
+) -> Callable[[], Set[str]]:
+    """Build a live-folder provider backed by the ACTIVE research_sessions store.
+
+    Bug #1085 BLOCKING-1: the live set MUST come from the same backend the
+    writers use -- ``ResearchSessionsBackend`` from ``backend_registry`` -- which
+    is PostgreSQL in cluster/``storage_mode: postgres`` and SQLite in solo. The
+    previous SQLite-only provider read a table that is EMPTY in postgres mode and
+    silently returned ``set()`` (no exception), so EVERY aged research dir was
+    treated as an orphan and DELETED -- including live users' sessions.
+
+    ``backend_supplier()`` resolves the active backend lazily on each sweep
+    (the registry is only available after startup wiring). Two FAIL-SAFE rules:
+
+    * If the supplier returns ``None`` (registry/backend not wired in a mode
+      where sessions are expected) -> raise ``RuntimeError``.
+    * If ``list_sessions()`` raises -> the exception PROPAGATES.
+
+    Either way ``ResearchCleanupService.cleanup()`` catches the exception and
+    aborts the sweep with ZERO deletions. An untrustworthy live set is ALWAYS
+    treated as "delete nothing", never "everything is an orphan".
+    """
+
+    def _provider() -> Set[str]:
+        backend = backend_supplier()
+        if backend is None:
+            raise RuntimeError(
+                "research_sessions backend unavailable; refusing to compute a "
+                "live set (fail-safe: no deletions)"
+            )
+        sessions = backend.list_sessions()
+        return {
+            str(s["folder_path"]) for s in sessions if s.get("folder_path") is not None
+        }
+
+    return _provider
 
 
 def make_db_live_folder_provider(db_path: str) -> Callable[[], Set[str]]:
@@ -143,21 +205,39 @@ class ResearchCleanupService:
             )
         return dirs
 
+    def _walk_no_follow(self, path: Path):
+        """Yield ``os.DirEntry`` for every entry under ``path``, symlink-safe.
+
+        Uses ``os.scandir`` and NEVER descends into a symlinked directory
+        (``entry.is_dir(follow_symlinks=False)``). A symlink entry itself is
+        yielded (so its OWN lstat mtime/size is considered) but its target is
+        never traversed -- so the ``code-indexer`` / ``issue_manager.py``
+        symlinks to real repos are not walked (review N-1). Bounded: a tree of
+        non-symlinked real dirs only.
+        """
+        stack = [path]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        yield entry
+                        # Only descend into REAL subdirectories, never symlinks.
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+            except OSError:
+                # Dir vanished / unreadable mid-scan; skip it, keep going.
+                continue
+
     def _is_recently_modified(self, path: Path) -> bool:
-        """True if the dir (or any entry within) was modified recently."""
+        """True if the dir (or any non-symlinked entry within) was modified
+        recently. Symlink-safe: symlink entries are lstat'd (their own mtime),
+        and symlinked subdirs are NOT descended into (review N-1)."""
         threshold_seconds = self.recent_modification_hours * 3600
         now = time.time()
         try:
-            if (now - path.stat().st_mtime) < threshold_seconds:
+            if (now - os.lstat(path).st_mtime) < threshold_seconds:
                 return True
-            for entry in path.rglob("*"):
-                try:
-                    if (now - entry.stat().st_mtime) < threshold_seconds:
-                        return True
-                except OSError:
-                    # Entry vanished mid-scan; ignore and keep checking.
-                    continue
-            return False
         except OSError as e:
             # On stat error, be conservative: treat as recently modified so we
             # do NOT delete a dir we cannot prove is safe.
@@ -167,6 +247,18 @@ class ResearchCleanupService:
                 e,
             )
             return True
+
+        for entry in self._walk_no_follow(path):
+            try:
+                # follow_symlinks=False -> lstat the entry itself, never its
+                # (possibly fresh, real-repo) target.
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                # Entry vanished mid-scan; ignore and keep checking.
+                continue
+            if (now - st.st_mtime) < threshold_seconds:
+                return True
+        return False
 
     def _age_days(self, path: Path) -> Optional[float]:
         """Age of the dir in days, or None if it cannot be determined."""
@@ -181,16 +273,15 @@ class ResearchCleanupService:
             return None
 
     def _dir_size(self, path: Path) -> int:
+        """Symlink-safe size: counts real files only, never following symlinks
+        into (or descending symlinked subdirs toward) real-repo targets."""
         total = 0
-        try:
-            for entry in path.rglob("*"):
-                try:
-                    if entry.is_file() and not entry.is_symlink():
-                        total += entry.stat().st_size
-                except OSError:
-                    continue
-        except OSError:
-            pass
+        for entry in self._walk_no_follow(path):
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
         return total
 
     # ------------------------------------------------------------------
@@ -233,6 +324,19 @@ class ResearchCleanupService:
         result.dirs_scanned = len(dirs)
 
         for path in dirs:
+            # Safety 0 (Bug #1085 BLOCKING-2): only uuid-shaped session dirs are
+            # EVER deletion candidates. 'default' and any non-UUID name (e.g. a
+            # stray 'important-do-not-delete') are preserved + logged, never
+            # rmtree'd -- this bounds the blast radius to real session folders.
+            if not _is_session_dir_name(path.name):
+                result.dirs_preserved += 1
+                logger.warning(
+                    "Research cleanup: skipping non-session dir %s "
+                    "(name is not a session-id / 'default'); preserving",
+                    path,
+                )
+                continue
+
             # Safety 1: never delete a dir mapping to a live registry row.
             if str(path) in live_folders:
                 result.dirs_preserved += 1
