@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.122.0] - 2026-06-11
+
+### Fixed
+- **Bug #1091 (Config UI: description refresh help text misleading).** The Web UI config screen help text for `description_refresh_enabled` and `description_refresh_interval_hours` omitted critical behavioral details. Updated both the view and edit sections to clarify: (1) the enabled toggle gates two one-shot startup backfill sweeps (lifecycle metadata repair and terse-description regeneration) in addition to the periodic loop — disabling stops ALL automated description activity; (2) the interval governs only the periodic loop and does not delay the startup backfills, which always run immediately at scheduler start.
+- **SCIP context timeout tests broken by Bug #1088 fast-fail.** `TestSCIPQueryServiceContextTimeout` tests assumed `get_smart_context` would always be reached; our Bug #1088 pre-flight check caused early return when no SCIP files existed. Added `patch.object(service, 'find_scip_files', return_value=[...])` to both tests so the fast-fail is bypassed and they exercise what they were designed to test (timeout forwarding and propagation).
+
 ## [10.121.0] - 2026-06-11
 
 ### Fixed

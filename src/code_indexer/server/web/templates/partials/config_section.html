@@ -2265,12 +2265,12 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Description Refresh Enabled</td>
                         <td class="config-value">{{ 'Yes' if config.claude_cli.description_refresh_enabled else 'No' }}</td>
-                        <td class="config-note"><small>Enable periodic repository description regeneration (default: No)</small></td>
+                        <td class="config-note"><small>When enabled: (1) runs two one-shot startup backfill sweeps at server start — repairs broken lifecycle metadata and regenerates terse repository descriptions; (2) starts the periodic refresh daemon that re-describes each repository on the configured interval. Disabling stops ALL automated description activity including the startup backfills. (default: No)</small></td>
                     </tr>
                     <tr>
                         <td class="config-label">Description Refresh Interval (hours)</td>
                         <td class="config-value">{{ config.claude_cli.description_refresh_interval_hours }}</td>
-                        <td class="config-note"><small>How often to regenerate repository descriptions (default: 24)</small></td>
+                        <td class="config-note"><small>Controls how often the periodic description refresh loop re-describes each repository. Uses uniform-random scheduling across the full interval to avoid thundering herds. Does NOT affect the one-shot startup backfill sweeps, which always run immediately when the scheduler starts. (default: 24, min: 1)</small></td>
                     </tr>
                     <tr>
                         <td class="config-label">Research Assistant Timeout (seconds)</td>
@@ -2374,12 +2374,12 @@ function saveLlmCredsConfig() {
                         <option value="true" {% if config.claude_cli.description_refresh_enabled %}selected{% endif %}>Yes</option>
                         <option value="false" {% if not config.claude_cli.description_refresh_enabled %}selected{% endif %}>No</option>
                     </select>
-                    <small>Enable periodic repository description regeneration (default: No)</small>
+                    <small>When enabled: (1) runs two one-shot startup backfill sweeps at server start — repairs broken lifecycle metadata and regenerates terse repository descriptions; (2) starts the periodic refresh daemon that re-describes each repository on the configured interval. Disabling stops ALL automated description activity including the startup backfills. (default: No)</small>
                 </label>
                 <label for="claude-refresh-interval">
                     Description Refresh Interval (hours)
                     <input type="number" id="claude-refresh-interval" name="description_refresh_interval_hours" value="{{ config.claude_cli.description_refresh_interval_hours }}" min="1">
-                    <small>How often to regenerate repository descriptions (default: 24)</small>
+                    <small>Controls how often the periodic description refresh loop re-describes each repository. Uses uniform-random scheduling across the full interval to avoid thundering herds. Does NOT affect the one-shot startup backfill sweeps, which always run immediately when the scheduler starts. (default: 24, min: 1)</small>
                 </label>
                 <label for="claude-research-timeout">
                     Research Assistant Timeout (seconds)
