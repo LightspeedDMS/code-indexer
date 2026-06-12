@@ -1189,8 +1189,9 @@ class DescriptionRefreshScheduler:
             if self._claude_cli_manager:
                 logger.info(f"Submitting description refresh for {alias}")
 
-                # Bug #984: check quarantine state BEFORE calling _get_refresh_prompt()
-                # so that already-quarantined repos never trigger the warning inside it.
+                # Bug #984: check quarantine state FIRST, before dispatching any
+                # refresh work through the LifecycleBatchRunner path, so that
+                # already-quarantined repos are skipped without further processing.
                 if (
                     self._prompt_failure_counts[alias]
                     >= PROMPT_FAILURE_QUARANTINE_THRESHOLD
