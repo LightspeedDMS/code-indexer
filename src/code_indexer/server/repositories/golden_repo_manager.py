@@ -281,6 +281,7 @@ class GoldenRepoManager:
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
         submitter_username: str = "admin",
+        skip_pre_flight_git_validation: bool = False,
     ) -> str:
         """
         Add a golden repository.
@@ -343,8 +344,9 @@ class GoldenRepoManager:
         if alias in self.golden_repos:
             raise GoldenRepoError(f"Golden repository alias '{alias}' already exists")
 
-        # Skip git validation for local:// URLs (Story #538)
-        if not repo_url.startswith("local://"):
+        # Skip git validation for local:// URLs (Story #538) or when caller
+        # explicitly opts out (Story #1092: batch-create fast path).
+        if not skip_pre_flight_git_validation and not repo_url.startswith("local://"):
             if not self._validate_git_repository(repo_url):
                 raise GitOperationError(
                     f"Invalid or inaccessible git repository: {repo_url}"
