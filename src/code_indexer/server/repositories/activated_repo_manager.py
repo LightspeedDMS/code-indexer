@@ -1562,7 +1562,7 @@ class ActivatedRepoManager:
             raise GitOperationError(f"Failed to list branches: {str(e)}")
 
     def get_repository(
-        self, username: str, user_alias: str
+        self, username: str, user_alias: str, *, touch: bool = True
     ) -> Optional[Dict[str, Any]]:
         """
         Get repository metadata with fresh discovered_repos for composite repos.
@@ -1573,6 +1573,9 @@ class ActivatedRepoManager:
         Args:
             username: Username
             user_alias: User's alias for the repository
+            touch: If True (default), stamp last_accessed and persist metadata.
+                   Set to False for read-only admin/dashboard paths so the reaper
+                   is not defeated by non-access reads.
 
         Returns:
             Repository metadata dictionary or None if not found
@@ -1603,11 +1606,12 @@ class ActivatedRepoManager:
                         f"Using cached list."
                     )
 
-            # Update last_accessed timestamp
-            metadata["last_accessed"] = datetime.now(timezone.utc).isoformat()
+            if touch:
+                # Update last_accessed timestamp
+                metadata["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
-            # Save updated metadata
-            self._save_metadata(username, user_alias, metadata)
+                # Save updated metadata
+                self._save_metadata(username, user_alias, metadata)
 
             return metadata
 
@@ -1647,6 +1651,53 @@ class ActivatedRepoManager:
         if metadata is None:
             return False
         return bool(metadata.get("wiki_enabled", False))
+
+    def touch_last_accessed(
+        self,
+        username: str,
+        user_alias: str,
+        throttle_seconds: float = 3600,
+    ) -> None:
+        """Stamp last_accessed for an activated repo, throttled to avoid excessive writes.
+
+        Reads metadata directly (no composite-repo refresh) and only persists a
+        new timestamp when the existing last_accessed is absent or older than
+        throttle_seconds.  Non-fatal: all exceptions are caught and logged at
+        WARNING so a storage error never aborts the caller (typically the search
+        path).
+
+        Args:
+            username: Username
+            user_alias: User's alias for the repository
+            throttle_seconds: Minimum seconds between writes (default 3600 = 1h)
+        """
+        try:
+            metadata = self._load_metadata(username, user_alias)
+            if metadata is None:
+                return
+
+            existing_ts = metadata.get("last_accessed")
+            if existing_ts is not None:
+                try:
+                    last_dt = datetime.fromisoformat(existing_ts)
+                    age_seconds = (
+                        datetime.now(timezone.utc) - last_dt
+                    ).total_seconds()
+                    if age_seconds < throttle_seconds:
+                        return
+                except (ValueError, TypeError):
+                    # Unparseable timestamp — treat as absent and refresh
+                    pass
+
+            metadata["last_accessed"] = datetime.now(timezone.utc).isoformat()
+            self._save_metadata(username, user_alias, metadata)
+        except Exception as exc:
+            self.logger.warning(
+                "touch_last_accessed: failed for %s/%s: %s",
+                username,
+                user_alias,
+                exc,
+            )
 
     def set_wiki_enabled(self, username: str, user_alias: str, enabled: bool) -> None:
         """Set wiki_enabled flag on activated repo metadata.
