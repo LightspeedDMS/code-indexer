@@ -1092,7 +1092,22 @@ def make_lifespan(
             server_config = config_service.get_config()
             db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")  # type: ignore[assignment]
 
-            # Create scheduler instance
+            # Bug #1100: select tracking_backend BEFORE constructing the scheduler so
+            # both the scheduler AND the hook use the SAME backend instance.
+            # In cluster/postgres mode: backend_registry.description_refresh_tracking (PG).
+            # In solo mode (backend_registry is None): node-local SQLite fallback.
+            # The scheduler's constructor SQLite fallback must NOT be relied upon in
+            # server mode — that caused the split-brain (hook -> PG, scheduler -> SQLite).
+            if backend_registry is not None:
+                tracking_backend = backend_registry.description_refresh_tracking
+            else:
+                from code_indexer.server.storage.sqlite_backends import (
+                    DescriptionRefreshTrackingBackend,
+                )
+
+                tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+
+            # Create scheduler instance — receives the registry-selected tracking_backend
             meta_dir = Path(golden_repos_dir) / "cidx-meta"
             description_refresh_scheduler = DescriptionRefreshScheduler(
                 db_path=db_path,
@@ -1106,6 +1121,7 @@ def make_lifespan(
                 ),
                 job_tracker=job_tracker,
                 mcp_registration_service=mcp_registration_service,
+                tracking_backend=tracking_backend,
                 golden_backend=(
                     backend_registry.golden_repo_metadata
                     if backend_registry is not None
@@ -1114,14 +1130,7 @@ def make_lifespan(
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove
-            if backend_registry is not None:
-                tracking_backend = backend_registry.description_refresh_tracking
-            else:
-                from code_indexer.server.storage.sqlite_backends import (
-                    DescriptionRefreshTrackingBackend,
-                )
-
-                tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+            # tracking_backend already selected above — same instance as scheduler uses.
             meta_description_hook.set_tracking_backend(tracking_backend)
             meta_description_hook.set_scheduler(description_refresh_scheduler)
 
