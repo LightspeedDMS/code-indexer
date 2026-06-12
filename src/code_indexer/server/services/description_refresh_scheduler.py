@@ -14,20 +14,14 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
+from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
-from code_indexer.server.services.dep_map_dispatcher_factory import (
-    build_dep_map_dispatcher,
-)
 from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
 )
-
-if TYPE_CHECKING:
-    from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -203,17 +197,11 @@ class DescriptionRefreshScheduler:
             self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # Bug #953: per-repo consecutive prompt-failure counter.
-        # Incremented each time _get_refresh_prompt() returns None.
+        # Bug #953: per-repo consecutive refresh-failure counter.
         # Reset to 0 by on_refresh_complete(success=True).
         # When the count reaches PROMPT_FAILURE_QUARANTINE_THRESHOLD the repo is
         # quarantined (not rescheduled) and one ERROR log is emitted.
         self._prompt_failure_counts: Dict[str, int] = defaultdict(int)
-        # Bug #984: track which repos have already had "missing description or
-        # last_analyzed" WARNING emitted in the current scheduler instance lifetime.
-        # Subsequent passes for the same repo downgrade the log to DEBUG so the
-        # warning fires at most once per repo (re-armed after a successful refresh).
-        self._warned_missing_desc: set = set()
         # Story #1062: two separate events replacing the old single _backfill_in_progress.
         # Each async path sets/clears its OWN event so one finishing does not clear the other.
         self._lifecycle_backfill_running = threading.Event()
@@ -1110,8 +1098,6 @@ class DescriptionRefreshScheduler:
         if success:
             # Bug #953: reset circuit-breaker counter on any successful refresh.
             self._prompt_failure_counts[repo_alias] = 0
-            # Bug #984: re-arm warning so future legitimate failures warn again.
-            self._warned_missing_desc.discard(repo_alias)
             self._tracking_backend.upsert_tracking(
                 repo_alias=repo_alias,
                 status="completed",
@@ -1226,11 +1212,10 @@ class DescriptionRefreshScheduler:
                     )
                     continue
 
-                # Bug #1093 Fix C: lightweight existence check replaces the expensive
-                # _get_refresh_prompt() call that was only used to detect missing .md.
-                # _get_refresh_prompt() staged a temp file and invoked RepoAnalyzer
-                # but the returned prompt was never consumed here — only its None-ness
-                # was checked.  Use _has_existing_description() instead.
+                # Lightweight existence gate: skip repos that have never been
+                # analyzed (no .md yet) without spending a Claude invocation.
+                # The refresh itself (refine-existing vs create-from-scratch) is
+                # decided downstream by LifecycleBatchRunner._process_one_repo.
                 if not self._has_existing_description(alias):
                     # No description yet — repo hasn't been analyzed.  Skip without
                     # incrementing the failure counter (not a prompt-generation failure).
@@ -1383,63 +1368,12 @@ class DescriptionRefreshScheduler:
 
         return ClaudeIntegrationConfig().max_concurrent_claude_cli  # type: ignore[no-any-return]
 
-    def _read_existing_description(
-        self, repo_alias: str
-    ) -> Optional[Dict[str, Optional[str]]]:
-        """
-        Read existing .md file from cidx-meta and extract description and last_analyzed.
-
-        Args:
-            repo_alias: Repository alias
-
-        Returns:
-            Dict with 'description' and 'last_analyzed' keys, or None if file not found
-        """
-        if not self._meta_dir:
-            logger.warning("Meta directory not set, cannot read existing description")
-            return None
-
-        # INVARIANT: cidx-meta filenames use SHORT alias ({repo_alias}.md), NOT -global.md
-        md_file = self._meta_dir / f"{repo_alias}.md"
-        if not md_file.exists():
-            logger.debug(f"No .md file found for {repo_alias}, cannot refresh")
-            return None
-
-        try:
-            content = md_file.read_text()
-
-            # Parse YAML frontmatter to extract last_analyzed
-            # Format: ---\nfield: value\n---\n<body>
-            frontmatter_match = re.match(r"^---\n(.*?)\n---\n(.*)$", content, re.DOTALL)
-            if not frontmatter_match:
-                logger.warning(f"No YAML frontmatter found in {md_file}")
-                return {"description": content, "last_analyzed": None}
-
-            frontmatter_text = frontmatter_match.group(1)
-            _body = frontmatter_match.group(2)
-
-            # Extract last_analyzed from frontmatter
-            last_analyzed = None
-            for line in frontmatter_text.split("\n"):
-                if line.startswith("last_analyzed:"):
-                    last_analyzed = line.split(":", 1)[1].strip()
-                    break
-
-            return {"description": content, "last_analyzed": last_analyzed}
-
-        except Exception as e:
-            logger.error(
-                f"Failed to read existing description for {repo_alias}: {e}",
-                exc_info=True,
-            )
-            return None
-
     def _has_existing_description(self, alias: str) -> bool:
         """
         Lightweight check: does a non-empty .md file exist for *alias* in _meta_dir?
 
-        Used by _run_loop_single_pass to avoid the expensive _get_refresh_prompt()
-        call when no description has been generated yet (Bug #1093 Fix C).
+        Used by _run_loop_single_pass to skip repos that have not been analyzed
+        yet (no description generated), without any Claude invocation.
 
         Returns:
             True if _meta_dir is set and {alias}.md exists and is non-empty.
@@ -1451,219 +1385,6 @@ class DescriptionRefreshScheduler:
         if not md_file.exists():
             return False
         return bool(md_file.read_text(encoding="utf-8", errors="replace").strip())
-
-    def _validate_refresh_inputs(
-        self, repo_alias: str, repo_path: str
-    ) -> Optional[Path]:
-        """Validate refresh inputs; return resolved repo Path or None on failure."""
-        if not repo_alias or not isinstance(repo_alias, str):
-            logger.warning("_get_refresh_prompt: repo_alias must be a non-empty string")
-            return None
-        if not repo_path or not isinstance(repo_path, str):
-            logger.warning("_get_refresh_prompt: repo_path must be a non-empty string")
-            return None
-        resolved = Path(repo_path).resolve()
-        if not resolved.exists() or not resolved.is_dir():
-            logger.warning(
-                "_get_refresh_prompt: repo_path does not resolve to a directory: %s",
-                repo_path,
-            )
-            return None
-        return resolved
-
-    def _stage_and_build_prompt(
-        self, description: str, last_analyzed: str, repo_path_obj: Path
-    ) -> "tuple[Optional[str], Optional[str]]":
-        """
-        Stage *description* to a temp file and build a file-reference refresh prompt.
-
-        Creates a unique temp dir under *repo_path_obj*, writes ``existing_desc.md``,
-        calls RepoAnalyzer.get_prompt with ``temp_file_path``, and returns a tuple of
-        (prompt, tmp_dir_path).  Caller is responsible for cleaning up tmp_dir_path.
-        On error, cleans up internally and returns (None, None).
-
-        Bug #1093 Fix D: previously returned only the prompt string on the success
-        path, leaking the temp dir after every refresh cycle.  Now returns the tuple
-        so the caller (_get_refresh_prompt) can call shutil.rmtree when done.
-        """
-        import shutil
-        import tempfile
-        from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
-
-        tmp_dir_str = tempfile.mkdtemp(dir=repo_path_obj)
-        try:
-            temp_file = Path(tmp_dir_str) / "existing_desc.md"
-            temp_file.write_text(description, encoding="utf-8")
-            analyzer = RepoAnalyzer(str(repo_path_obj))
-            prompt = cast(
-                Optional[str],
-                analyzer.get_prompt(
-                    mode="refresh",
-                    last_analyzed=last_analyzed,
-                    temp_file_path=temp_file,
-                ),
-            )
-            return (prompt, tmp_dir_str)
-        except Exception as e:
-            shutil.rmtree(tmp_dir_str, ignore_errors=True)
-            logger.error("_stage_and_build_prompt failed: %s", e, exc_info=True)
-            return (None, None)
-
-    def _get_refresh_prompt(self, repo_alias: str, repo_path: str) -> Optional[str]:
-        """Get refresh prompt staging the existing description to a temp file."""
-        import shutil
-
-        repo_path_obj = self._validate_refresh_inputs(repo_alias, repo_path)
-        if repo_path_obj is None:
-            return None
-        desc_data = self._read_existing_description(repo_alias)
-        if not desc_data:
-            if repo_alias not in self._warned_missing_desc:
-                logger.warning(
-                    "Cannot generate refresh prompt for %s: missing description or last_analyzed",
-                    repo_alias,
-                )
-                self._warned_missing_desc.add(repo_alias)
-            else:
-                logger.debug(
-                    "Cannot generate refresh prompt for %s: missing description or last_analyzed (suppressed repeat)",
-                    repo_alias,
-                )
-            return None
-        # Bug #1093 Fix D: unpack (prompt, tmp_dir) tuple and clean up tmp_dir.
-        prompt, tmp_dir = self._stage_and_build_prompt(
-            desc_data.get("description") or "",
-            desc_data["last_analyzed"] or "",
-            repo_path_obj,
-        )
-        if tmp_dir is not None:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        return prompt
-
-    def _build_cli_dispatcher(self, config) -> "CliDispatcher":  # noqa: F821
-        """
-        Build a CliDispatcher from *config* (Story #847).
-
-        Delegates to build_dep_map_dispatcher (the single source of truth for
-        CliDispatcher construction — Bug #936 consolidation), forwarding
-        analysis_model and the per-scheduler soft-timeout constant.
-
-        Args:
-            config: ServerConfig returned by config_manager.load_config().
-
-        Returns:
-            A fully initialised CliDispatcher.
-        """
-        return build_dep_map_dispatcher(
-            config,
-            analysis_model=self._analysis_model,
-            claude_soft_timeout_seconds=_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS,
-        )
-
-    def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
-        """
-        Invoke the CLI dispatcher with the given prompt (Story #847).
-
-        Uses the injected CliDispatcher when available; otherwise builds one
-        from the current ServerConfig on each call.  Logs an INFO record when
-        failover fired so operators can see which CLI handled the job.
-
-        Args:
-            repo_path: Path to repository (used as subprocess cwd).
-            prompt: Prompt to send to the CLI.
-
-        Returns:
-            Tuple of (success: bool, result: str) where result is the output
-            or error message — identical shape to the pre-wiring behaviour.
-        """
-        if self._cli_dispatcher is not None:
-            dispatcher = self._cli_dispatcher
-        else:
-            config = (
-                self._config_manager.load_config() if self._config_manager else None
-            )
-            dispatcher = self._build_cli_dispatcher(config)
-
-        result = dispatcher.dispatch(
-            flow="description_refresh",
-            cwd=repo_path,
-            prompt=prompt,
-            timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS,
-        )
-
-        if result.was_failover:
-            logger.info(
-                "CLI failover fired: cli_used=%s was_failover=True",
-                result.cli_used,
-            )
-
-        if not result.success:
-            return False, result.error
-
-        # Validate output quality (detect error messages masquerading as content)
-        if not self._validate_cli_output(result.output):
-            error_msg = (
-                f"CLI output appears to be an error message"
-                f" (length={len(result.output)}): {result.output[:200]}"
-            )
-            logger.warning(error_msg)
-            return False, error_msg
-
-        return True, result.output
-
-    def _validate_cli_output(self, output: str) -> bool:
-        """
-        Validate that Claude CLI output is a real description, not an error message.
-
-        Args:
-            output: Cleaned output from Claude CLI
-
-        Returns:
-            True if output looks like a valid description, False if it appears to be an error
-        """
-        # Empty or very short output is invalid
-        if not output or len(output) < 100:
-            output_len = len(output) if output else 0
-            logger.warning(
-                f"CLI output too short ({output_len} chars), likely an error"
-            )
-            return False
-
-        # Infrastructure error patterns — always checked.
-        # These strings can never appear in valid YAML description content.
-        infrastructure_errors = [
-            "Invalid API key",
-            "Fix external API key",
-            "cannot be launched inside another",
-            "Nested sessions share runtime",
-            "CLAUDECODE environment variable",
-            "Authentication failed",
-        ]
-
-        output_lower = output.lower()
-        for pattern in infrastructure_errors:
-            if pattern.lower() in output_lower:
-                logger.warning(f"CLI output contains error pattern: '{pattern}'")
-                return False
-
-        # Content-ambiguous patterns — only checked when output lacks YAML frontmatter.
-        # Valid descriptions always start with "---" (YAML frontmatter).
-        # Real API errors (rate limit, quota exceeded, Error:) arrive as plain text
-        # without frontmatter.  When frontmatter IS present the output is a real
-        # description even if it mentions these terms as domain concepts (Bug #382).
-        has_frontmatter = output.startswith("---")
-        if not has_frontmatter:
-            content_ambiguous_errors = [
-                "rate limit",
-                "quota exceeded",
-                "Error:",
-            ]
-            for pattern in content_ambiguous_errors:
-                if pattern.lower() in output_lower:
-                    logger.warning(f"CLI output contains error pattern: '{pattern}'")
-                    return False
-
-        return True
 
     def _update_description_file(self, repo_alias: str, content: str) -> None:
         """DEPRECATED: Use atomic_write_description() or write_meta_md() instead."""

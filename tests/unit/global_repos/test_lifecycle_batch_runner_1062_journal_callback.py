@@ -117,7 +117,9 @@ class TestJournalCallbackWiring:
 
         calls: List[Tuple[str, str]] = []
 
-        def failing_invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
+        def failing_invoker(
+            alias: str, repo_path: Path, **_kwargs: object
+        ) -> UnifiedResult:
             raise RuntimeError("network timeout")
 
         def callback(alias: str, outcome: str) -> None:

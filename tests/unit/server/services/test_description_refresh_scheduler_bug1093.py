@@ -1,18 +1,17 @@
 """
-Unit tests for Bug #1093 four-defect fix in DescriptionRefreshScheduler.
+Unit tests for Bug #1093 fixes in DescriptionRefreshScheduler.
 
-Bug A: has_changes_since_last_run — None last_known_commit with existing .md
-       file must return False (not True), preventing re-analysis of good descs.
+Bug A (#1094 revert): has_changes_since_last_run — None last_known_commit must
+       return True (refresh fires to establish the marker).  The #1093 Fix A
+       suppression-on-existing-.md was reverted; the refresh now refines the
+       existing description rather than skipping it.
 
 Bug B: on_refresh_complete — only reads metadata.json; golden repos use
        metadata-{provider}.json, so last_known_commit never written => Bug A
        fires every cycle permanently.
 
-Bug C: _run_loop_single_pass — calls expensive _get_refresh_prompt() only to
-       check if .md file exists; replace with lightweight _has_existing_description().
-
-Bug D: _stage_and_build_prompt — tempfile.mkdtemp() on success path never cleaned
-       up; fix by returning (prompt, tmp_dir) tuple so caller can rmtree.
+Bug C: _run_loop_single_pass — uses the lightweight _has_existing_description()
+       gate instead of an expensive prompt build to detect a missing .md.
 
 Test strategy:
 - Use object.__new__(DescriptionRefreshScheduler) + manual attribute injection
@@ -23,12 +22,10 @@ Test strategy:
 from __future__ import annotations
 
 import json
-import shutil
-import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 SCHEDULER_MODULE = "code_indexer.server.services.description_refresh_scheduler"
@@ -59,10 +56,9 @@ def _make_scheduler_bare() -> Any:
     sched._description_backfill_running = threading.Event()
     sched._golden_backend = MagicMock()
 
-    # Attributes needed by the four methods under test
+    # Attributes needed by the methods under test
     sched._meta_dir = None
     sched._prompt_failure_counts = defaultdict(int)
-    sched._warned_missing_desc = set()
     sched._claude_cli_manager = None
 
     return sched
@@ -298,8 +294,8 @@ class TestBugBProviderMetadataFallback:
 
 class TestBugCLightweightGate:
     """
-    Bug C: _run_loop_single_pass called expensive _get_refresh_prompt() just to
-    check existence. Fix: add lightweight _has_existing_description() method.
+    Bug C: _run_loop_single_pass uses the lightweight _has_existing_description()
+    method to detect a missing/empty .md without any prompt build.
     """
 
     def test_has_existing_description_returns_true_when_md_exists(
@@ -375,95 +371,3 @@ class TestBugCLightweightGate:
             sched, "any-repo"
         )
         assert result is False
-
-
-# ---------------------------------------------------------------------------
-# Bug D — _stage_and_build_prompt temp dir cleanup
-# ---------------------------------------------------------------------------
-
-
-class TestBugDTempDirCleanup:
-    """
-    Bug D: _stage_and_build_prompt never cleaned up the temp dir on the success
-    path. Fix: return (prompt, tmp_dir) tuple; caller cleans up.
-    """
-
-    def test_stage_and_build_prompt_returns_tuple(self, tmp_path: Path) -> None:
-        """
-        _stage_and_build_prompt must return a (str, str) tuple on success:
-        (prompt_text, tmp_dir_path).
-        """
-        from code_indexer.server.services.description_refresh_scheduler import (
-            DescriptionRefreshScheduler,
-        )
-
-        sched = _make_scheduler_bare()
-
-        with patch(
-            "code_indexer.global_repos.repo_analyzer.RepoAnalyzer.get_prompt",
-            return_value="mock prompt text",
-        ):
-            result = DescriptionRefreshScheduler._stage_and_build_prompt(
-                sched, "Some description", "2024-01-01", tmp_path
-            )
-
-        assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
-        assert len(result) == 2, f"Expected 2-element tuple, got {len(result)} elements"
-        prompt, tmp_dir = result
-        assert isinstance(prompt, str), f"Expected str prompt, got {type(prompt)}"
-        assert isinstance(tmp_dir, str), f"Expected str tmp_dir, got {type(tmp_dir)}"
-
-        # Clean up the returned tmp_dir (if it still exists)
-        if tmp_dir and Path(tmp_dir).exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    def test_stage_and_build_prompt_tmp_dir_cleaned_by_get_refresh_prompt(
-        self, tmp_path: Path
-    ) -> None:
-        """
-        _get_refresh_prompt must clean up the tmp_dir returned by
-        _stage_and_build_prompt after the call completes.
-        """
-        from code_indexer.server.services.description_refresh_scheduler import (
-            DescriptionRefreshScheduler,
-        )
-
-        # Create a real tmp dir to simulate what _stage_and_build_prompt would return
-        real_tmp_dir = tempfile.mkdtemp(dir=tmp_path)
-        assert Path(real_tmp_dir).exists(), "tmp_dir must exist before the call"
-
-        sched = _make_scheduler_bare()
-
-        # Mock the chain: _validate_refresh_inputs -> returns resolved path
-        # _read_existing_description -> returns valid desc_data
-        # _stage_and_build_prompt -> returns ("prompt", real_tmp_dir)
-        with (
-            patch.object(
-                DescriptionRefreshScheduler,
-                "_validate_refresh_inputs",
-                return_value=tmp_path,
-            ),
-            patch.object(
-                DescriptionRefreshScheduler,
-                "_read_existing_description",
-                return_value={
-                    "description": "Some existing desc",
-                    "last_analyzed": "2024-01-01",
-                },
-            ),
-            patch.object(
-                DescriptionRefreshScheduler,
-                "_stage_and_build_prompt",
-                return_value=("the prompt", real_tmp_dir),
-            ),
-        ):
-            returned_prompt = DescriptionRefreshScheduler._get_refresh_prompt(
-                sched, "my-repo", str(tmp_path)
-            )
-
-        assert returned_prompt == "the prompt", (
-            f"Expected 'the prompt', got {returned_prompt!r}"
-        )
-        assert not Path(real_tmp_dir).exists(), (
-            f"tmp_dir {real_tmp_dir!r} should have been cleaned up by _get_refresh_prompt"
-        )

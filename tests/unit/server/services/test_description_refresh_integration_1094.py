@@ -130,7 +130,6 @@ def _build_scheduler(
     sched._description_backfill_running = threading.Event()
     sched._shutdown_event = threading.Event()
     sched._prompt_failure_counts = defaultdict(int)
-    sched._warned_missing_desc = set()
 
     # Config manager: only used for concurrency + next_run lookups.
     class _Cfg:

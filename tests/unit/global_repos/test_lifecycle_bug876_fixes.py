@@ -444,7 +444,9 @@ def test_lifecycle_schema_version_not_updated_on_invoker_failure(tmp_path):
     job_tracker = _StubJobTracker()
     debouncer = _StubDebouncer()
 
-    def failing_invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
+    def failing_invoker(
+        alias: str, repo_path: Path, **_kwargs: object
+    ) -> UnifiedResult:
         raise RuntimeError("Claude CLI failed")
 
     runner = LifecycleBatchRunner(

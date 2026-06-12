@@ -74,7 +74,7 @@ def _capture_dispatched_prompt(
     repo_path: Path,
 ) -> str:
     """Invoke the adapter and return the prompt string handed to dispatch()."""
-    captured: dict = {}
+    captured: dict[str, str] = {}
 
     def fake_dispatch(*, flow, cwd, prompt, timeout):
         captured["prompt"] = prompt
