@@ -35,6 +35,14 @@ than the existing one.
    paragraphs; a large multi-domain system warrants several well-organized
    sections.
 
+6. **REMOVE FABRICATIONS SILENTLY.** If the existing description contains a
+   claim that the current code does NOT support — a hallucination or an
+   unverifiable assertion — remove it silently. Do NOT replace it with a
+   negation that names the false feature (e.g. never write "this repo does not
+   contain a Kubernetes operator"). Writing such negations injects the false
+   term into the RAG corpus and pollutes semantic search with noise. Simply
+   omit the fabricated claim as if it had never appeared.
+
 **Change-scoping (focus your verification budget):**
 
 Run `git log --since="{{LAST_ANALYZED}}" --stat` to see what changed since the

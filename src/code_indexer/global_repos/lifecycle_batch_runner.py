@@ -37,6 +37,83 @@ from code_indexer.global_repos.unified_response_parser import (
 _ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def _merge_lifecycle_dict(
+    existing: Dict[str, Any], new_lifecycle: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Preserve-by-default merge for the lifecycle sub-dict (Bug #1101).
+
+    Contract:
+      - All keys from existing are preserved in the result.
+      - A key from new_lifecycle overwrites an existing key ONLY when the new
+        value is present (not None) AND non-empty (not "" and not empty list/dict).
+      - Keys present only in new_lifecycle with a present, non-empty value are
+        added to the result (new analysis findings are never suppressed).
+      - For sub-dict values (e.g. ci, branching): applied recursively so that
+        nested keys follow the same preserve-by-default contract.
+      - For list values (e.g. ci.required_checks): the existing list is preserved
+        unless the new list is strictly a superset or a genuinely different list.
+        Specifically: if the new list would LOSE items that exist in the current
+        list (subset degradation), the existing list is preserved.
+
+    Args:
+        existing: The pre-existing lifecycle dict from cidx-meta/<alias>.md.
+        new_lifecycle: The lifecycle dict returned by the model on this refresh.
+
+    Returns:
+        Merged dict that is a superset of both inputs with preserve-by-default
+        semantics: existing values survive unless new analysis positively
+        contradicts them with a present, non-empty, non-degrading value.
+    """
+    result: Dict[str, Any] = dict(existing)
+
+    for key, new_val in new_lifecycle.items():
+        existing_val = existing.get(key)
+
+        # Rule 1: If new value is None or empty scalar — preserve existing.
+        if new_val is None:
+            continue
+        if isinstance(new_val, str) and not new_val.strip():
+            continue
+
+        # Rule 2: Both are dicts — recurse for nested keys.
+        if isinstance(new_val, dict) and isinstance(existing_val, dict):
+            result[key] = _merge_lifecycle_dict(existing_val, new_val)
+            continue
+
+        # Rule 3: Both are lists — preserve existing when new is a strict subset
+        # (model degradation: new list contains fewer items than existing).
+        if isinstance(new_val, list) and isinstance(existing_val, list):
+            # Convert to sets for subset check (order-independent).
+            existing_set = set(str(x) for x in existing_val)
+            new_set = set(str(x) for x in new_val)
+            if new_set < existing_set:
+                # New list is a strict subset — model dropped items; preserve existing.
+                continue
+            # New list adds items or is equal/different — new wins.
+            result[key] = new_val
+            continue
+
+        # Rule 4: Scalar — check for substring-subset degradation before accepting.
+        # If both values are non-empty strings and the new value is a strict
+        # substring of the existing value (e.g. "hatchling" ⊂ "uv/hatchling"),
+        # the model has DEGRADED the existing richer value; preserve existing.
+        # When neither is a substring of the other (e.g. "setuptools" vs
+        # "hatchling"), the new value is genuinely contradicting — new wins.
+        if (
+            isinstance(new_val, str)
+            and isinstance(existing_val, str)
+            and existing_val  # existing is non-empty
+            and new_val in existing_val  # new is a substring of existing
+            and new_val != existing_val  # strictly shorter (not identical)
+        ):
+            continue  # degradation — preserve the richer existing value
+
+        result[key] = new_val
+
+    return result
+
+
 def _merge_frontmatter(
     existing: Dict[str, Any], new_lifecycle: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -46,7 +123,9 @@ def _merge_frontmatter(
     Contract:
       - All keys from existing are preserved in the result.
       - All keys from new_lifecycle are present in the result.
-      - On key collision, new_lifecycle wins (lifecycle data is the source of truth).
+      - On key collision, new_lifecycle wins (lifecycle data is the source of truth)
+        EXCEPT for the 'lifecycle' sub-dict which uses preserve-by-default deep
+        merge via _merge_lifecycle_dict (Bug #1101).
       - Result is a superset of both input dicts — no key is silently dropped.
 
     Args:
@@ -58,7 +137,17 @@ def _merge_frontmatter(
         Merged dict with existing keys preserved and new_lifecycle keys overwriting
         on collision.
     """
-    return {**existing, **new_lifecycle}
+    merged = {**existing, **new_lifecycle}
+
+    # Bug #1101: the lifecycle sub-dict must use preserve-by-default deep merge
+    # so existing sub-keys are not silently dropped when the model omits or
+    # degrades them.  Apply only when both sides have a dict-shaped lifecycle.
+    existing_lc = existing.get("lifecycle")
+    new_lc = new_lifecycle.get("lifecycle")
+    if isinstance(existing_lc, dict) and isinstance(new_lc, dict):
+        merged["lifecycle"] = _merge_lifecycle_dict(existing_lc, new_lc)
+
+    return merged
 
 
 # ---------------------------------------------------------------------------

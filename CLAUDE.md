@@ -405,6 +405,22 @@ Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step
 
 **Regression guard**: `tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py` (15 tests, real SQLite via `DatabaseSchema.initialize_database()`). Includes mandatory cases: quarantine BINDS for persistent failure with NULL `last_known_commit` and stable on-disk commit; auto-clear fires ONLY on real on-disk commit change.
 
+### Description-Refresh Tracking Backend Wiring (Bug #1100)
+
+**Invariant**: The `DescriptionRefreshScheduler` MUST use the SAME `tracking_backend` instance as `meta_description_hook`. In cluster/postgres mode this is `backend_registry.description_refresh_tracking` (PG-backed). In solo mode (no registry) it is the node-local `DescriptionRefreshTrackingBackend(db_path)` SQLite fallback.
+
+**How it is wired** (`src/code_indexer/server/startup/lifespan.py`):
+- `tracking_backend` is selected via `if backend_registry is not None: ... else: ...` BEFORE the `DescriptionRefreshScheduler(...)` constructor call.
+- The constructor receives `tracking_backend=tracking_backend` as an explicit argument.
+- `meta_description_hook.set_tracking_backend(tracking_backend)` is called with the same variable immediately after construction.
+- The scheduler's internal SQLite fallback (constructor default when `tracking_backend=None`) MUST NOT be relied upon in server mode.
+
+**Why it matters**: Before the fix (Bug #1100), the constructor was called without `tracking_backend=`, so it always fell back to node-local SQLite even in postgres cluster mode. The hook injected PG. This split-brain meant repos seeded via the hook (repo add/remove) were invisible to the scheduler — they existed only in the dead PG table, never refreshed.
+
+**Money-burn guard on cutover**: Stale PG rows with `next_run` far in the past are neutralized by `_reconcile_stale_next_run_rows()`, called from `start()` BEFORE the daemon thread starts. It spreads all overdue `next_run` values across the full refresh interval (uniform random). After reconciliation, no row has `next_run` in the past, so the first loop pass dispatches zero repos — no mass-Claude storm.
+
+**Regression guard**: `tests/unit/server/startup/test_lifespan_tracking_backend_wiring_1100.py` (7 tests). Source-text guards verify ordering and argument presence; functional tests use real SQLite to prove overdue rows are spread to the future by reconciliation and that `get_stale_repos()` returns 0 immediately after.
+
 ### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
 
 **Key invariants** (see `docs/server-memory-invariants.md` for full detail):
