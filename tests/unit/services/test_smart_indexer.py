@@ -322,6 +322,48 @@ class TestResumePathReanchoring:
 
         assert reanchored == Path(stored_path)
 
+    def test_reanchors_first_existing_occurrence_when_leaf_appears_multiple_times(
+        self, tmp_path: Path
+    ) -> None:
+        """Bug #1087: when the repo leaf name appears more than once in a stored
+        path, the forward scan must return the FIRST occurrence that yields an
+        existing path on disk -- not the LAST occurrence (which lands one level
+        deeper and does not exist).
+
+        Concrete scenario (fastapi repo):
+          codebase_dir = <tmp>/golden-repos/fastapi   (leaf = "fastapi")
+          stored path  = /mnt/cow-storage/golden-repos/fastapi/tests/fastapi/conftest.py
+                                                      ^idx=2           ^idx=4
+
+        Backward scan (old/wrong): picks idx=4 -> tail=("conftest.py",)
+          -> codebase_dir/conftest.py   (DOES NOT EXIST)
+
+        Forward scan (new/correct): picks idx=2 -> tail=("tests","fastapi","conftest.py")
+          -> codebase_dir/tests/fastapi/conftest.py   (EXISTS)
+        """
+        # Build real on-disk structure that the forward scan can probe via .exists().
+        codebase_dir = tmp_path / "golden-repos" / "fastapi"
+        target_file = codebase_dir / "tests" / "fastapi" / "conftest.py"
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_text("# conftest")
+
+        # Stored path carries a stale /mnt prefix; leaf "fastapi" appears at
+        # index 2 (golden-repos/fastapi) AND at index 4 (tests/fastapi).
+        stored_path = "/mnt/cow-storage/golden-repos/fastapi/tests/fastapi/conftest.py"
+
+        reanchored = SmartIndexer._reanchor_resume_path(stored_path, codebase_dir)
+
+        # The correct re-anchored path must exist on disk.
+        assert reanchored.exists(), f"Re-anchored path does not exist: {reanchored}"
+        assert reanchored == codebase_dir / "tests" / "fastapi" / "conftest.py"
+
+        # Prove the wrong (last-occurrence) path does NOT exist, confirming
+        # this test would have caught the old backward-scan bug.
+        wrong_path = codebase_dir / "conftest.py"
+        assert not wrong_path.exists(), (
+            f"Wrong path unexpectedly exists (test setup error): {wrong_path}"
+        )
+
 
 class TestResumeReanchorWiring:
     """End-to-end proof that _do_resume_interrupted re-anchors stored paths.
