@@ -326,11 +326,16 @@ class SemanticSearchService:
 
         if exclude_path:
             from code_indexer.services.path_filter_builder import PathFilterBuilder
+            from code_indexer.services.path_pattern_matcher import (
+                parse_exclude_patterns,
+            )
 
             builder = PathFilterBuilder()
-            exclusion = builder.build_exclusion_filter([exclude_path])
-            if exclusion.get("must_not"):
-                must_not.extend(exclusion["must_not"])
+            patterns = parse_exclude_patterns(exclude_path)
+            if patterns:
+                exclusion = builder.build_exclusion_filter(patterns)
+                if exclusion.get("must_not"):
+                    must_not.extend(exclusion["must_not"])
 
         result: dict = {}
         if must:
