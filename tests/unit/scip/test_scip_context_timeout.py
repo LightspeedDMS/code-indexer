@@ -141,10 +141,15 @@ class TestSCIPQueryServiceContextTimeout:
             avg_relevance=0.0,
         )
 
-        with patch(
-            "code_indexer.scip.query.composites.get_smart_context",
-            return_value=mock_result,
-        ) as mock_ctx:
+        with (
+            patch.object(
+                service, "find_scip_files", return_value=["/fake/index.scip.db"]
+            ),
+            patch(
+                "code_indexer.scip.query.composites.get_smart_context",
+                return_value=mock_result,
+            ) as mock_ctx,
+        ):
             service.get_context("Symbol", timeout_seconds=45)
 
         call_kwargs = mock_ctx.call_args[1]
@@ -177,9 +182,14 @@ class TestSCIPQueryServiceContextTimeout:
 
         service = SCIPQueryService(str(golden_repos), None)
 
-        with patch(
-            "code_indexer.scip.query.composites.get_smart_context",
-            side_effect=QueryTimeoutError("Query exceeded timeout limit"),
+        with (
+            patch.object(
+                service, "find_scip_files", return_value=["/fake/index.scip.db"]
+            ),
+            patch(
+                "code_indexer.scip.query.composites.get_smart_context",
+                side_effect=QueryTimeoutError("Query exceeded timeout limit"),
+            ),
         ):
             with pytest.raises(QueryTimeoutError):
                 service.get_context("Symbol", timeout_seconds=1)
