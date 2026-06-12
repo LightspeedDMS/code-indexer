@@ -392,6 +392,18 @@ Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step
 
 **Two injection points**: `ClaudeInvoker.invoke()` and `ResearchAssistantService._run_claude_background()`. NOT CodexInvoker (Codex uses OpenAI credits). Guard is non-fatal -- all failures logged, never raised.
 
+### Description-Refresh Circuit-Breaker (Bug #1096)
+
+`PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3` consecutive failures quarantine a repo so it is not rescheduled.
+
+**Key invariants** (`src/code_indexer/server/services/description_refresh_scheduler.py`):
+- `on_refresh_complete(success=False)` increments `_prompt_failure_counts[repo_alias] += 1` then emits exactly ONE structured ERROR log when the count crosses `== PROMPT_FAILURE_QUARANTINE_THRESHOLD`; subsequent skips log only at DEBUG.
+- `on_refresh_complete(success=True)` resets the counter to 0 (already existed, Bug #953).
+- `_run_loop_single_pass` quarantine gate (Bug #984): when quarantined AND `has_changes_since_last_run` returns True (new commit), auto-clears the counter to 0 and falls through to dispatch — prevents permanent freeze on repos that improve. When commit is unchanged, logs DEBUG and `continue`s.
+- No Web-UI config knob, no admin un-quarantine tool, no exponential back-off (deferred, out of scope for #1096).
+
+**Regression guard**: `tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py` (11 tests, real SQLite via `DatabaseSchema.initialize_database()`).
+
 ### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
 
 **Key invariants** (see `docs/server-memory-invariants.md` for full detail):

@@ -1119,6 +1119,18 @@ class DescriptionRefreshScheduler:
                 updated_at=now,
             )
             logger.warning(f"Description refresh failed for {repo_alias}: {error_msg}")
+            # Bug #1096: increment circuit-breaker counter on each prompt failure.
+            self._prompt_failure_counts[repo_alias] += 1
+            if (
+                self._prompt_failure_counts[repo_alias]
+                == PROMPT_FAILURE_QUARANTINE_THRESHOLD
+            ):
+                logger.error(
+                    "Repo %s has reached prompt failure quarantine threshold (%d consecutive "
+                    "failures). Quarantining until a new commit is detected or a success occurs.",
+                    repo_alias,
+                    PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                )
 
         # Update unified job tracker if configured (Story #313, AC2, AC7, AC8)
         if job_id is not None and self._job_tracker is not None:
@@ -1196,13 +1208,27 @@ class DescriptionRefreshScheduler:
                     self._prompt_failure_counts[alias]
                     >= PROMPT_FAILURE_QUARANTINE_THRESHOLD
                 ):
-                    logger.debug(
-                        "Repo %s is quarantined (failure count %d >= %d), skipping",
-                        alias,
-                        self._prompt_failure_counts[alias],
-                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
-                    )
-                    continue
+                    # Bug #1096: auto-clear quarantine when the underlying commit
+                    # has changed since the last tracked run — the previous failures
+                    # may have been caused by the old code; a new commit warrants
+                    # a fresh attempt.  Reuses has_changes_since_last_run which
+                    # already implements commit comparison without duplication.
+                    if self.has_changes_since_last_run(clone_path, repo):
+                        logger.info(
+                            "Repo %s was quarantined but commit has changed — "
+                            "resetting failure counter and retrying",
+                            alias,
+                        )
+                        self._prompt_failure_counts[alias] = 0
+                        # Fall through to normal dispatch below
+                    else:
+                        logger.debug(
+                            "Repo %s is quarantined (failure count %d >= %d), skipping",
+                            alias,
+                            self._prompt_failure_counts[alias],
+                            PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                        )
+                        continue
 
                 if not self.has_changes_since_last_run(clone_path, repo):
                     now = datetime.now(timezone.utc).isoformat()
