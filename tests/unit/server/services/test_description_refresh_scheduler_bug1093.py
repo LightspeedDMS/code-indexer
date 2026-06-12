@@ -59,6 +59,7 @@ def _make_scheduler_bare() -> Any:
     # Attributes needed by the methods under test
     sched._meta_dir = None
     sched._prompt_failure_counts = defaultdict(int)
+    sched._failure_commit = {}  # injected: on_refresh_complete references this
     sched._claude_cli_manager = None
 
     return sched

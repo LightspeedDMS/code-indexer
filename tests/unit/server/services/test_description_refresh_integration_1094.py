@@ -130,6 +130,7 @@ def _build_scheduler(
     sched._description_backfill_running = threading.Event()
     sched._shutdown_event = threading.Event()
     sched._prompt_failure_counts = defaultdict(int)
+    sched._failure_commit = {}  # injected: quarantine gate in _run_loop_single_pass references this
 
     # Config manager: only used for concurrency + next_run lookups.
     class _Cfg:
