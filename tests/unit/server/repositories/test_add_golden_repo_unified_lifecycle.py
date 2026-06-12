@@ -130,7 +130,7 @@ def wired_manager(
     mgr = GoldenRepoManager(data_dir=str(data_dir))
     mgr.job_tracker = real_job_tracker
     # lifecycle_invoker is passed as claude_cli_invoker= to LifecycleBatchRunner
-    mgr.lifecycle_invoker = lambda alias, repo_path: UnifiedResult(
+    mgr.lifecycle_invoker = lambda alias, repo_path, **kwargs: UnifiedResult(
         description=f"Description for {alias}",
         lifecycle=dict(_FIXED_LIFECYCLE),
     )
