@@ -40,6 +40,7 @@ Failure contract:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -54,6 +55,8 @@ from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
 )
 
+_logger = logging.getLogger(__name__)
+
 # Absolute path to the packaged unified prompt.  Resolved once at import
 # time.
 _PROMPT_PATH: Path = (
@@ -61,6 +64,31 @@ _PROMPT_PATH: Path = (
     / "server"
     / "prompts"
     / "lifecycle_unified.md"
+)
+
+# Absolute path to the packaged refresh-mode addendum (#1094).  Resolved once at
+# import time alongside the unified prompt so a missing file fails fast at
+# startup, not on the first refresh from a worker thread.
+_REFRESH_ADDENDUM_PATH: Path = (
+    Path(__file__).resolve().parent.parent
+    / "server"
+    / "prompts"
+    / "lifecycle_refresh_addendum.md"
+)
+
+# Placeholder token in lifecycle_unified.md.  In CREATE mode the entire
+# placeholder line + its trailing blank line is stripped so the rendered prompt
+# is byte-identical to the pre-#1094 file.  In REFRESH mode the bare token is
+# replaced with the rendered addendum.
+_REFRESH_SECTION_PLACEHOLDER: str = "{{REFRESH_SECTION}}"
+_CREATE_PLACEHOLDER_BLOCK: str = _REFRESH_SECTION_PLACEHOLDER + "\n\n"
+
+# Defensive upper bound on the embedded existing description (#1094).  Normal
+# READMEs are far smaller; this only guards against a pathological multi-MB body
+# blowing up the prompt.  Truncation is explicit (marker + WARNING), never silent.
+_MAX_DESCRIPTION_BYTES: int = 64 * 1024
+_DESCRIPTION_TRUNCATION_MARKER: str = (
+    "\n\n[... existing description truncated at 64 KB for prompt-size safety ...]"
 )
 
 # Optional sections that the parser silently skips when absent.
@@ -155,9 +183,79 @@ def _load_prompt_eager() -> str:
     return _PROMPT_PATH.read_text(encoding="utf-8")
 
 
+def _load_refresh_addendum_eager() -> str:
+    """
+    Read lifecycle_refresh_addendum.md at import time (#1094).
+
+    Mirrors _load_prompt_eager: a missing addendum is a deployment error that
+    must surface at startup, not on the first refresh from a worker thread.
+    """
+    if not _REFRESH_ADDENDUM_PATH.exists():
+        raise FileNotFoundError(
+            f"lifecycle_refresh_addendum.md prompt not found at {_REFRESH_ADDENDUM_PATH}"
+        )
+    return _REFRESH_ADDENDUM_PATH.read_text(encoding="utf-8")
+
+
 # Frozen prompt text: computed once at import, never mutated afterwards.
 # Thread-safe by construction — no lock needed on the hot path.
 _PROMPT_TEXT: str = _load_prompt_eager()
+
+# Frozen refresh addendum (#1094): computed once at import, never mutated.
+_REFRESH_ADDENDUM_TEXT: str = _load_refresh_addendum_eager()
+
+
+def _cap_description(alias: str, existing_description: str) -> str:
+    """Defensively cap *existing_description* at _MAX_DESCRIPTION_BYTES (#1094).
+
+    Normal descriptions are far below the cap.  When the cap is exceeded the
+    body is truncated at a UTF-8 char boundary, a clear truncation marker is
+    appended, and a structured WARNING naming the alias and the original length
+    is logged (Messi Rule #13 — never truncate silently).
+    """
+    encoded = existing_description.encode("utf-8")
+    if len(encoded) <= _MAX_DESCRIPTION_BYTES:
+        return existing_description
+
+    # Truncate on the byte budget, then decode back ignoring a possibly-split
+    # final multibyte char.
+    truncated = encoded[:_MAX_DESCRIPTION_BYTES].decode("utf-8", errors="ignore")
+    _logger.warning(
+        "lifecycle-refresh: existing description for alias %r exceeds the 64KB "
+        "prompt cap (original_length=%d bytes); truncating to %d bytes",
+        alias,
+        len(encoded),
+        _MAX_DESCRIPTION_BYTES,
+    )
+    return truncated + _DESCRIPTION_TRUNCATION_MARKER
+
+
+def _render_prompt(
+    alias: str,
+    existing_description: str | None,
+    last_analyzed: str | None,
+) -> str:
+    """Render the dispatch prompt for *alias* (#1094).
+
+    CREATE mode (existing_description empty/whitespace/None): strip the
+    {{REFRESH_SECTION}} placeholder block so the result is byte-identical to the
+    pre-#1094 lifecycle_unified.md.
+
+    REFRESH mode (non-empty existing_description): substitute the placeholder
+    with the rendered refinement addendum — the existing body embedded between
+    the DATA markers and the last_analyzed stamp filled in.
+    """
+    if existing_description is None or not existing_description.strip():
+        # CREATE mode — byte-identical to the original unified prompt.
+        return _PROMPT_TEXT.replace(_CREATE_PLACEHOLDER_BLOCK, "", 1)
+
+    capped = _cap_description(alias, existing_description)
+    addendum = _REFRESH_ADDENDUM_TEXT.replace(
+        "{{LAST_ANALYZED}}", last_analyzed or "unknown"
+    ).replace("{{EXISTING_DESCRIPTION}}", capped)
+    # The placeholder line is followed by a blank line in the source file; replace
+    # only the bare token so the addendum slots in with surrounding separation.
+    return _PROMPT_TEXT.replace(_REFRESH_SECTION_PLACEHOLDER, addendum, 1)
 
 
 class LifecycleClaudeCliInvoker:
@@ -203,12 +301,27 @@ class LifecycleClaudeCliInvoker:
             )
         return path_obj
 
-    def __call__(self, alias: str, repo_path: Path) -> UnifiedResult:
+    def __call__(
+        self,
+        alias: str,
+        repo_path: Path,
+        *,
+        existing_description: str | None = None,
+        last_analyzed: str | None = None,
+    ) -> UnifiedResult:
         """Run lifecycle + description prompt and return parsed UnifiedResult.
 
         Routes through CliDispatcher (Claude or Codex) via flow='repo_lifecycle'.
         Reads timeouts from ConfigService at call time so Web UI changes take
         effect on the next invocation without a server restart (AC-V4-7, #885).
+
+        #1094 refresh-awareness: when *existing_description* is a non-empty
+        string the prompt is rendered in REFRESH mode (the existing body is
+        embedded for refinement and *last_analyzed* is stamped into the
+        change-scoping instruction).  When it is None/empty/whitespace the prompt
+        is byte-identical to the create-mode unified prompt.  Both new params are
+        keyword-only with defaults so existing positional (alias, repo_path) call
+        sites — including MagicMock-based tests — keep working unchanged.
 
         Raises:
             ValueError: invalid alias or repo_path.
@@ -218,10 +331,11 @@ class LifecycleClaudeCliInvoker:
         """
         path_obj = self._validate_repo_inputs(alias, repo_path)
         _lifecycle_cfg = get_config_service().get_config().lifecycle_analysis_config
+        prompt = _render_prompt(alias, existing_description, last_analyzed)
         result = self._build_dispatcher().dispatch(
             flow="repo_lifecycle",
             cwd=str(path_obj),
-            prompt=_PROMPT_TEXT,
+            prompt=prompt,
             timeout=_lifecycle_cfg.outer_timeout_seconds,
         )
         if not result.success:

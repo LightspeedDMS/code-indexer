@@ -620,7 +620,33 @@ class LifecycleBatchRunner:
         from code_indexer.global_repos.repo_analyzer import split_frontmatter_and_body
 
         repo_path = self._golden_repos_dir / alias
-        result = self._claude_cli_invoker(alias, repo_path)
+        meta_md_path = Path(self._golden_repos_dir) / "cidx-meta" / f"{alias}.md"
+
+        # #1094 refresh-awareness: read the existing description (if any) BEFORE
+        # invoking the CLI so the LLM can REFINE it instead of replacing it from
+        # scratch.  A corrupt frontmatter is detected here so we raise WITHOUT
+        # burning a Claude invocation (Messi Rule #13 — fail-closed, fail-fast).
+        existing_description: Optional[str] = None
+        existing_last_analyzed: Optional[str] = None
+        if meta_md_path.exists():
+            pre_raw = meta_md_path.read_text(encoding="utf-8")
+            pre_fm, pre_body = split_frontmatter_and_body(pre_raw)
+            if not pre_fm and pre_raw.startswith("---"):
+                raise ValueError(
+                    f"Corrupt frontmatter in {meta_md_path}: file starts with "
+                    "'---' but YAML could not be parsed. Manual inspection required."
+                )
+            if pre_body and pre_body.strip():
+                existing_description = pre_body
+            la = pre_fm.get("last_analyzed") if pre_fm else None
+            existing_last_analyzed = str(la) if la is not None else None
+
+        result = self._claude_cli_invoker(
+            alias,
+            repo_path,
+            existing_description=existing_description,
+            last_analyzed=existing_last_analyzed,
+        )
 
         # Bug #940: acquire the per-alias write lock BEFORE reading the existing
         # frontmatter so the entire read-merge-write sequence is atomic.
@@ -634,11 +660,15 @@ class LifecycleBatchRunner:
                 "lifecycle write aborted"
             )
         try:
+            # #1094: stamp a FRESH last_analyzed on every successful write so the
+            # next refresh has an accurate `git log --since` change-scoping anchor.
+            # Placed in new_lifecycle_fm so it WINS over any stale existing value
+            # during _merge_frontmatter (new_lifecycle_fm overrides on collision).
             new_lifecycle_fm: Dict[str, Any] = {
                 "lifecycle": result.lifecycle,
                 "lifecycle_schema_version": CURRENT_LIFECYCLE_SCHEMA_VERSION,
+                "last_analyzed": datetime.now(timezone.utc).isoformat(),
             }
-            meta_md_path = Path(self._golden_repos_dir) / "cidx-meta" / f"{alias}.md"
             if meta_md_path.exists():
                 raw_content = meta_md_path.read_text(encoding="utf-8")
                 existing_fm, _ = split_frontmatter_and_body(raw_content)
