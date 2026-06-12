@@ -405,31 +405,15 @@ class DescriptionRefreshScheduler:
                 last_known_commit = tracking_record.get("last_known_commit")
                 current_commit = metadata["current_commit"]
 
-                # Bug #1093 Fix A: last_known_commit=None (DB reset / lifecycle backfill)
-                # means we have no commit marker yet.  If the .md file already exists
-                # and is non-empty, the description is already good — skip re-analysis.
-                # Only trigger re-analysis when there is genuinely no description yet.
+                # #1094 (reverts #1093 Fix A): a NULL last_known_commit means we
+                # have no commit marker yet, so a refresh MUST fire — it is the
+                # signal the marker still needs establishing.  When an existing
+                # .md is present the refresh REFINES it (and stamps last_analyzed)
+                # rather than skipping; either way we must not suppress it here.
                 if last_known_commit is None:
-                    alias = tracking_record.get("alias") or tracking_record.get(
-                        "repo_alias"
-                    )
-                    if self._meta_dir and alias:
-                        md_file = self._meta_dir / f"{alias}.md"
-                        if (
-                            md_file.exists()
-                            and md_file.read_text(
-                                encoding="utf-8", errors="replace"
-                            ).strip()
-                        ):
-                            logger.debug(
-                                f"Skipping {repo_path}: last_known_commit is None "
-                                f"but .md file exists — description already good"
-                            )
-                            return False
-                    # No .md file or no meta_dir: fall through to return True below
                     logger.debug(
-                        f"Changes detected in {repo_path}: no last_known_commit and "
-                        f"no existing .md file — needs first analysis"
+                        f"Changes detected in {repo_path}: no last_known_commit "
+                        f"marker — refresh needed to establish it"
                     )
                     return True
 

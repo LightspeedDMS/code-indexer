@@ -75,16 +75,19 @@ def _make_scheduler_bare() -> Any:
 
 class TestBugANullLastKnownCommitWithExistingMd:
     """
-    Bug A: last_known_commit=None + existing non-empty .md => return False.
-    Without the fix, None == current_commit is always False => returns True
-    => full re-analysis every cycle.
+    #1094 reverts #1093 Fix A: last_known_commit=None must ALWAYS return True
+    (refresh fires) — it is the signal that the commit marker still needs
+    establishing.  The presence of an existing .md no longer suppresses the
+    refresh; instead the refresh now REFINES that existing description and
+    stamps last_analyzed so the next cycle has an accurate anchor.
     """
 
-    def test_returns_false_when_last_known_commit_none_and_md_exists(
+    def test_returns_true_when_last_known_commit_none_and_md_exists(
         self, tmp_path: Path
     ) -> None:
         """
-        Existing good .md file: skip re-analysis even with None last_known_commit.
+        #1094: NULL last_known_commit + existing .md => True (refresh fires to
+        refine the description and establish the commit marker).
         """
         from code_indexer.server.services.description_refresh_scheduler import (
             DescriptionRefreshScheduler,
@@ -113,9 +116,10 @@ class TestBugANullLastKnownCommitWithExistingMd:
             sched, str(tmp_path), {"alias": alias, "last_known_commit": None}
         )
 
-        assert result is False, (
-            "Expected False: .md exists and is non-empty, so no re-analysis needed "
-            "even when last_known_commit is None."
+        assert result is True, (
+            "Expected True (#1094): NULL last_known_commit must always fire a "
+            "refresh to establish the commit marker, even when an existing .md "
+            "is present — the refresh refines it rather than skipping."
         )
 
     def test_returns_true_when_last_known_commit_none_and_no_md_file(
