@@ -579,11 +579,21 @@ class SCIPQueryService:
         """
         from code_indexer.scip.query.composites import get_smart_context
 
+        scip_files = self.find_scip_files(
+            repository_alias=repository_alias, username=username
+        )
+        if not scip_files:
+            return {
+                "target_symbol": symbol,
+                "summary": "",
+                "files": [],
+                "total_files": 0,
+                "total_symbols": 0,
+                "avg_relevance": 0.0,
+            }
+
         # Get the scip directory from golden_repos_dir
         scip_dir = self.get_golden_repos_dir()
-
-        # Note: repository_alias and username reserved for future filtering
-        _ = repository_alias, username
 
         result = get_smart_context(
             symbol,

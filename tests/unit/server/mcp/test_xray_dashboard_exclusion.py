@@ -255,7 +255,10 @@ def test_dashboard_passes_exclusion_to_job_tracker():
     assert set(exclude) == {
         "xray_search",
         "xray_explore",
-    }, f"Expected xray_search and xray_explore in exclusion list, got: {exclude}"
+        "xray_search_batch",
+    }, (
+        f"Expected xray_search, xray_explore, and xray_search_batch in exclusion list, got: {exclude}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -496,3 +499,38 @@ def test_null_operation_type_sql_guard_sqlite(temp_dir: str):
         "is required; plain `NULL NOT IN (...)` evaluates to UNKNOWN and drops the row"
     )
     assert "normal-job-002" in job_ids, "Normal job must also be present"
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — Active xray_search_batch job is excluded, non-xray kept
+# ---------------------------------------------------------------------------
+
+
+def test_exclude_active_xray_search_batch_job_keeps_non_xray(tracker: JobTracker):
+    """Active xray_search_batch job excluded from get_recent_jobs when filtered;
+    non-xray job still appears."""
+    # Register one xray_search_batch and one non-xray job
+    tracker.register_job(
+        job_id="xray-batch-job-001",
+        operation_type="xray_search_batch",
+        username="alice",
+        repo_alias=None,
+    )
+    tracker.register_job(
+        job_id="index-job-010",
+        operation_type="index_repo",
+        username="alice",
+        repo_alias="myrepo",
+    )
+
+    result = tracker.get_recent_jobs(
+        limit=20,
+        time_filter="all",
+        exclude_operation_types=["xray_search_batch"],
+    )
+
+    job_ids = [j["job_id"] for j in result]
+    assert "xray-batch-job-001" not in job_ids, (
+        "xray_search_batch job should be excluded"
+    )
+    assert "index-job-010" in job_ids, "non-xray job should remain"

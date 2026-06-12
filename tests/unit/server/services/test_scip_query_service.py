@@ -1289,6 +1289,79 @@ class TestTraceCallchainMethod:
             )
 
 
+class TestGetContextMethodFastFail:
+    """Tests for SCIPQueryService.get_context() fast-fail when no SCIP index exists (Bug #1088)."""
+
+    def test_get_context_returns_empty_dict_when_no_scip_files(self):
+        """Bug #1088: get_context() returns empty structured dict when no SCIP index exists."""
+        import tempfile
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            golden_repos.mkdir()
+            # No .scip.db files created — directory exists but has no indexes
+
+            service = SCIPQueryService(
+                golden_repos_dir=str(golden_repos),
+                access_filtering_service=None,
+            )
+
+            result = service.get_context("some_symbol")
+
+            assert result == {
+                "target_symbol": "some_symbol",
+                "summary": "",
+                "files": [],
+                "total_files": 0,
+                "total_symbols": 0,
+                "avg_relevance": 0.0,
+            }
+
+    def test_get_context_does_not_call_get_smart_context_when_no_scip_files(self):
+        """Bug #1088: get_context() must NOT call get_smart_context when no SCIP index exists."""
+        import tempfile
+        from unittest.mock import patch
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            golden_repos.mkdir()
+            # No .scip.db files — empty golden_repos_dir
+
+            service = SCIPQueryService(
+                golden_repos_dir=str(golden_repos),
+                access_filtering_service=None,
+            )
+
+            with patch(
+                "code_indexer.scip.query.composites.get_smart_context"
+            ) as mock_get_smart_context:
+                service.get_context("some_symbol")
+
+            mock_get_smart_context.assert_not_called()
+
+    def test_get_context_returns_empty_dict_when_golden_repos_dir_nonexistent(self):
+        """Bug #1088: get_context() returns empty dict when golden_repos_dir does not exist."""
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        service = SCIPQueryService(
+            golden_repos_dir="/nonexistent/path/golden-repos",
+            access_filtering_service=None,
+        )
+
+        result = service.get_context("my_symbol")
+
+        assert result == {
+            "target_symbol": "my_symbol",
+            "summary": "",
+            "files": [],
+            "total_files": 0,
+            "total_symbols": 0,
+            "avg_relevance": 0.0,
+        }
+
+
 class TestGetContextMethod:
     """Tests for SCIPQueryService.get_context() method."""
 
