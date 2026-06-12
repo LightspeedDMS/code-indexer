@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.124.0] - 2026-06-12
+
+### Fixed
+- **Bug #1098 (activated-repo reaper disabled fleet-wide by admin/dashboard reads).** `get_repository()` unconditionally stamped `last_accessed` on every call. A single load of the admin Activated Repositories page reset the TTL for every repo in the system (all users, pre-pagination), preventing the reaper from ever evicting idle repos. Added `touch: bool = True` keyword parameter to `get_repository()`; admin/dashboard paths (`web/routes.py:repo_details`, `dashboard_service.get_temporal_index_status`) now pass `touch=False`. Added throttled `touch_last_accessed()` method (1-hour window) used by the MCP search path so search-only active users are not inadvertently reaped. Tests in `test_get_repository_last_accessed_1098.py`.
+- **Bug #1096 (description-refresh quarantine bypassed for repos with stable NULL last_known_commit).** The circuit-breaker (`PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3`) auto-cleared on the `has_changes_since_last_run()` check, which returns True when `last_known_commit` is NULL — meaning perpetually-failing repos with no successful run were never quarantined. Changed the auto-clear gate to compare the current on-disk commit fingerprint against the fingerprint recorded at failure time; clears only when the fingerprint genuinely differs (real commit transition). Regression tests in `test_description_refresh_circuit_breaker_1096.py`.
+- **Bug #1095 (search `exclude_path` silently ignored when comma-separated).** `exclude_path` accepted only a single pattern; passing `"tests/,docs/"` was treated as one literal string and matched nothing. Added `parse_exclude_patterns()` helper that splits on commas and trims whitespace; applied to the semantic leg (`search_service.py`), the FTS/regex leg (`semantic_query_manager.py`), and the temporal leg (`temporal_fusion_dispatch.py`).
+
+### Added
+- **Story #1094 (description-refresh refines existing descriptions instead of replacing).** `LifecycleClaudeCliInvoker` now passes `existing_description` + `last_analyzed` when a non-empty `cidx-meta/{alias}.md` already exists. The externalized `lifecycle_refresh_addendum.md` prompt instructs Claude to preserve accurate content, correct outdated content, and add missing context — not regenerate from scratch. The `{{REFRESH_SECTION}}` placeholder in `lifecycle_unified.md` is substituted with the addendum in refresh mode and stripped entirely in create mode (byte-identical to prior behavior). A 64 KB defensive cap truncates oversized existing descriptions with a marker and WARNING.
+
 ## [10.123.0] - 2026-06-11
 
 ### Fixed
