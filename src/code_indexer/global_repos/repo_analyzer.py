@@ -306,113 +306,30 @@ class RepoAnalyzer:
         self.repo_path = Path(repo_path)
         self.claude_cli_manager = claude_cli_manager
 
-    def get_prompt(
-        self,
-        mode: str,
-        last_analyzed: Optional[str] = None,
-        existing_description: Optional[str] = None,
-        temp_file_path: Optional[Path] = None,
-    ) -> str:
+    def get_prompt(self, mode: str) -> str:
         """
-        Get universal prompt for repository description generation (Story #190 AC1, AC6).
+        Get universal prompt for repository description generation (Story #190 AC1).
 
         Single universal prompt that teaches Claude to discover repo type dynamically
         by examining folder structure (.git directory, UUID folders, JSON trace files).
 
+        #1094: refresh mode was removed — refresh-aware description refinement now
+        lives in the lifecycle-unified path (LifecycleClaudeCliInvoker +
+        lifecycle_refresh_addendum.md).  Only "create" mode remains here.
+
         Args:
-            mode: Either "create" for initial generation or "refresh" for updating
-            last_analyzed: ISO 8601 timestamp of last analysis (required for refresh mode)
-            existing_description: Existing description text (required for refresh mode
-                unless temp_file_path is provided)
-            temp_file_path: Path to a file containing the existing description (Bug #840
-                Site #5). When provided in refresh mode, the prompt instructs Claude to
-                Read the file and Edit it in place rather than embedding the description
-                inline. Mutually exclusive with existing_description for the inline path.
+            mode: Must be "create".
 
         Returns:
             Prompt string to send to Claude CLI
 
         Raises:
-            ValueError: If mode is invalid or required parameters missing
+            ValueError: If mode is not "create".
         """
-        if mode not in ("create", "refresh"):
-            raise ValueError(f"Invalid mode: {mode}. Must be 'create' or 'refresh'")
+        if mode != "create":
+            raise ValueError(f"Invalid mode: {mode}. Must be 'create'")
 
-        if mode == "refresh":
-            if last_analyzed is None:
-                raise ValueError("last_analyzed is required for refresh mode")
-            if temp_file_path is None and existing_description is None:
-                raise ValueError(
-                    "Either existing_description or temp_file_path is required for refresh mode"
-                )
-
-        if mode == "create":
-            return self._get_create_prompt()
-
-        if temp_file_path is not None:
-            return self._get_refresh_prompt_via_file(
-                last_analyzed or "", temp_file_path
-            )
-
-        return self._get_refresh_prompt(last_analyzed or "", existing_description or "")
-
-    def _get_refresh_prompt_via_file(
-        self, last_analyzed: str, temp_file_path: Path
-    ) -> str:
-        """
-        Get refresh prompt that references an existing description via file path (Bug #840 Site #5).
-
-        Instead of embedding the existing description inline (which bloats the prompt
-        with large content), this method instructs Claude to Read the file at
-        temp_file_path and Edit it in place with the updated description.
-
-        Args:
-            last_analyzed: ISO 8601 timestamp of last analysis.
-            temp_file_path: Absolute path to the temp file containing the existing
-                description. Claude is instructed to Read this file, not receive the
-                content inline.
-
-        Returns:
-            Prompt string that references the file path for Read+Edit workflow.
-        """
-        return f"""Update the repository description based on changes since last analysis.
-
-**Last Analyzed:** {last_analyzed}
-
-**Existing Description File:** {temp_file_path}
-Read the existing description at {temp_file_path} and apply a focused refresh edit.
-
-**Instructions:**
-1. Read the file at {temp_file_path} to get the current description.
-2. Edit the file in place at {temp_file_path} with the updated description.
-3. Do NOT output the full document to stdout — only edit the file directly.
-
-**Repository Type Discovery:**
-Examine the folder structure to determine the repository type:
-- Git repository: Contains a .git directory
-- Langfuse trace repository: Contains UUID-named folders with JSON trace files
-
-**For Git Repositories:**
-1. Run: git log --since="{last_analyzed}" --oneline
-2. If material changes detected (not just cosmetic commits), update the description
-3. If no material changes, return the existing description unchanged
-
-**For Langfuse Trace Repositories:**
-1. Find files modified after {last_analyzed} using file modification timestamps
-2. IMPORTANT: Langfuse traces are immutable once established
-3. Focus on NEW trace files only (files with modification time > last_analyzed)
-4. Extract new findings from new traces and MERGE with existing (do not replace)
-
-**Update Strategy:**
-- Update description only if material changes detected
-- Preserve existing YAML frontmatter structure
-- Update last_analyzed timestamp to current time
-
-**IMPORTANT:**
-- Do NOT output the full document to stdout — edit the file at {temp_file_path} directly
-- Output ONLY a brief status line to stdout (e.g. "Updated" or "No changes")
-- Preserve all existing fields in YAML frontmatter
-"""
+        return self._get_create_prompt()
 
     def _get_create_prompt(self) -> str:
         """
@@ -480,57 +397,6 @@ projects_detected: (Langfuse only - list of project names)
 - Set repo_type field in YAML frontmatter to "git" or "langfuse"
 - For Langfuse repos, include user_identity, projects_detected, and activity_summary sections
 - Output ONLY the YAML + markdown (no explanations, no code blocks)
-"""
-
-    def _get_refresh_prompt(self, last_analyzed: str, existing_description: str) -> str:
-        """
-        Get universal refresh prompt for updating existing descriptions.
-
-        Teaches Claude to detect changes and update accordingly.
-        """
-        return f"""Update the repository description based on changes since last analysis.
-
-**Last Analyzed:** {last_analyzed}
-
-**Existing Description:**
-{existing_description}
-
-**Repository Type Discovery:**
-Examine the folder structure to determine the repository type:
-- Git repository: Contains a .git directory
-- Langfuse trace repository: Contains UUID-named folders with JSON trace files
-
-**For Git Repositories:**
-1. Run: git log --since="{last_analyzed}" --oneline
-2. If material changes detected (not just cosmetic commits), update the description
-3. If no material changes, return the existing description unchanged
-
-**For Langfuse Trace Repositories:**
-1. Find files modified after {last_analyzed} using file modification timestamps
-2. IMPORTANT: Langfuse traces are immutable once established
-3. Focus on NEW trace files only (files with modification time > last_analyzed)
-4. Extract new findings from new traces:
-   - New user IDs from trace.userId
-   - New projects from metadata.project_name
-   - New activities from trace.input and metadata.intel_task_type
-5. MERGE new findings with existing description (preserve existing user_identity and projects_detected)
-6. DO NOT replace existing data - only ADD new discoveries
-
-**Update Strategy:**
-- Update description only if material changes detected
-- Preserve existing YAML frontmatter structure
-- For Langfuse: merge new findings, don't replace
-- Update last_analyzed timestamp to current time
-
-**Output Format:**
-Return updated YAML frontmatter + markdown body with same structure as original.
-Include repo_type field in YAML.
-If no material changes: return existing description with updated last_analyzed timestamp only.
-
-**IMPORTANT:**
-- Output ONLY the YAML + markdown (no explanations, no code blocks)
-- Preserve all existing fields in YAML frontmatter
-- For Langfuse: keep existing user_identity and projects_detected, only add new entries
 """
 
     def extract_info(self) -> RepoInfo:

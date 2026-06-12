@@ -98,7 +98,7 @@ class TestJournalCallbackWiring:
         """journal_callback(alias, outcome) called with 'succeeded' on success."""
         calls: List[Tuple[str, str]] = []
 
-        def invoker(alias: str, repo_path: Path) -> UnifiedResult:
+        def invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
             return _VALID_RESULT
 
         def callback(alias: str, outcome: str) -> None:
@@ -117,7 +117,9 @@ class TestJournalCallbackWiring:
 
         calls: List[Tuple[str, str]] = []
 
-        def failing_invoker(alias: str, repo_path: Path) -> UnifiedResult:
+        def failing_invoker(
+            alias: str, repo_path: Path, **_kwargs: object
+        ) -> UnifiedResult:
             raise RuntimeError("network timeout")
 
         def callback(alias: str, outcome: str) -> None:
@@ -137,7 +139,7 @@ class TestJournalCallbackWiring:
     def test_no_callback_no_error(self, tmp_path: Path) -> None:
         """journal_callback=None is the default — no AttributeError or TypeError."""
 
-        def invoker(alias: str, repo_path: Path) -> UnifiedResult:
+        def invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
             return _VALID_RESULT
 
         runner = _make_runner(tmp_path, invoker, callback=None)
@@ -148,7 +150,7 @@ class TestJournalCallbackWiring:
         """No callbacks when alias list is empty."""
         calls: List[Tuple[str, str]] = []
 
-        def invoker(alias: str, repo_path: Path) -> UnifiedResult:
+        def invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
             return _VALID_RESULT
 
         def callback(alias: str, outcome: str) -> None:
@@ -163,7 +165,7 @@ class TestJournalCallbackWiring:
         """Callback fires once per alias in a multi-repo run."""
         calls: List[Tuple[str, str]] = []
 
-        def invoker(alias: str, repo_path: Path) -> UnifiedResult:
+        def invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
             return _VALID_RESULT
 
         def callback(alias: str, outcome: str) -> None:
@@ -182,7 +184,7 @@ class TestJournalCallbackWiring:
         """Callback fires with correct outcome for each alias."""
         calls: List[Tuple[str, str]] = []
 
-        def invoker(alias: str, repo_path: Path) -> UnifiedResult:
+        def invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
             if alias == "fail-me":
                 raise ValueError("bad data")
             return _VALID_RESULT

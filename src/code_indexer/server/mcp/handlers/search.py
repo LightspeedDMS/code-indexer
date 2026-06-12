@@ -889,6 +889,24 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
     kwargs["precomputed_query_vector"] = shared_query_vector
     result = _utils.app_module.semantic_query_manager.query_user_repositories(**kwargs)
 
+    # Touch last_accessed for the activated repo (throttled, non-fatal).
+    # Fixes Bug #1098 defect 2: search path never stamped last_accessed,
+    # so search-only users were reaped while actively using their repos.
+    # Global repos (ending with -global) have no user last_accessed TTL.
+    _arm = getattr(_utils.app_module, "activated_repo_manager", None)
+    if _arm is not None:
+        _repo_alias = params.get("repository_alias")
+        if _repo_alias and not str(_repo_alias).endswith("-global"):
+            try:
+                _arm.touch_last_accessed(user.username, str(_repo_alias))
+            except Exception as _exc:
+                logger.debug(
+                    "touch_last_accessed failed for user=%s repo=%s (non-fatal): %s",
+                    user.username,
+                    _repo_alias,
+                    _exc,
+                )
+
     _enrich_activated_results(result, params)
 
     if "results" in result and isinstance(result["results"], list):

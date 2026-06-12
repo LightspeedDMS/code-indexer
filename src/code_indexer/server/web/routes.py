@@ -4075,7 +4075,7 @@ def repo_details(
 
     try:
         manager = _get_activated_repo_manager()
-        repo = manager.get_repository(username, user_alias)
+        repo = manager.get_repository(username, user_alias, touch=False)
 
         if not repo:
             raise HTTPException(

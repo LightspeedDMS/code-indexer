@@ -14,20 +14,14 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
+from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
-from code_indexer.server.services.dep_map_dispatcher_factory import (
-    build_dep_map_dispatcher,
-)
 from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
 )
-
-if TYPE_CHECKING:
-    from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -203,17 +197,17 @@ class DescriptionRefreshScheduler:
             self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # Bug #953: per-repo consecutive prompt-failure counter.
-        # Incremented each time _get_refresh_prompt() returns None.
+        # Bug #953: per-repo consecutive refresh-failure counter.
         # Reset to 0 by on_refresh_complete(success=True).
         # When the count reaches PROMPT_FAILURE_QUARANTINE_THRESHOLD the repo is
         # quarantined (not rescheduled) and one ERROR log is emitted.
         self._prompt_failure_counts: Dict[str, int] = defaultdict(int)
-        # Bug #984: track which repos have already had "missing description or
-        # last_analyzed" WARNING emitted in the current scheduler instance lifetime.
-        # Subsequent passes for the same repo downgrade the log to DEBUG so the
-        # warning fires at most once per repo (re-armed after a successful refresh).
-        self._warned_missing_desc: set = set()
+        # Bug #1096 review fix: on-disk commit fingerprint recorded at failure time.
+        # Quarantine auto-clear compares the CURRENT on-disk fingerprint to this value.
+        # Using has_changes_since_last_run for the clear decision is wrong because
+        # last_known_commit stays NULL for repos that never succeeded, making
+        # has_changes always return True — defeating quarantine for the worst case.
+        self._failure_commit: Dict[str, Optional[str]] = {}
         # Story #1062: two separate events replacing the old single _backfill_in_progress.
         # Each async path sets/clears its OWN event so one finishing does not clear the other.
         self._lifecycle_backfill_running = threading.Event()
@@ -371,6 +365,56 @@ class DescriptionRefreshScheduler:
         )
         return recomputed
 
+    def _read_current_fingerprint(self, repo_path: str) -> Optional[str]:
+        """
+        Read the on-disk commit (or files_processed) fingerprint from the repo's
+        metadata file — the SAME source has_changes_since_last_run reads.
+
+        Returns the fingerprint string, or None when no metadata file exists or
+        the metadata cannot be parsed.  The returned value is suitable for stable
+        equality comparison: same string → same code state; different string →
+        code has changed.
+
+        Used by:
+        - on_refresh_complete failure branch (record fingerprint at failure time)
+        - _run_loop_single_pass quarantine gate (compare current vs failure fingerprint)
+
+        Extracting this helper removes the triple-read of metadata that previously
+        existed across these three call sites (Messi Rule #4 anti-duplication).
+        """
+        metadata_dir = Path(repo_path) / ".code-indexer"
+        metadata_path = metadata_dir / "metadata.json"
+
+        if not metadata_path.exists():
+            provider_files = sorted(metadata_dir.glob("metadata-*.json"))
+            if provider_files:
+                metadata_path = provider_files[0]
+            else:
+                return None
+
+        try:
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+
+            if "current_commit" in metadata:
+                return str(metadata["current_commit"])
+
+            if "files_processed" in metadata:
+                # Use files_processed + indexed_at as a combined fingerprint for
+                # non-git repos so that any re-index is detectable.
+                files = metadata["files_processed"]
+                indexed_at = metadata.get("indexed_at", "")
+                return f"{files}:{indexed_at}"
+
+            return None
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to read metadata fingerprint from {repo_path}: {e}",
+                exc_info=True,
+            )
+            return None
+
     def has_changes_since_last_run(
         self, repo_path: str, tracking_record: Dict[str, Any]
     ) -> bool:
@@ -405,31 +449,15 @@ class DescriptionRefreshScheduler:
                 last_known_commit = tracking_record.get("last_known_commit")
                 current_commit = metadata["current_commit"]
 
-                # Bug #1093 Fix A: last_known_commit=None (DB reset / lifecycle backfill)
-                # means we have no commit marker yet.  If the .md file already exists
-                # and is non-empty, the description is already good — skip re-analysis.
-                # Only trigger re-analysis when there is genuinely no description yet.
+                # #1094 (reverts #1093 Fix A): a NULL last_known_commit means we
+                # have no commit marker yet, so a refresh MUST fire — it is the
+                # signal the marker still needs establishing.  When an existing
+                # .md is present the refresh REFINES it (and stamps last_analyzed)
+                # rather than skipping; either way we must not suppress it here.
                 if last_known_commit is None:
-                    alias = tracking_record.get("alias") or tracking_record.get(
-                        "repo_alias"
-                    )
-                    if self._meta_dir and alias:
-                        md_file = self._meta_dir / f"{alias}.md"
-                        if (
-                            md_file.exists()
-                            and md_file.read_text(
-                                encoding="utf-8", errors="replace"
-                            ).strip()
-                        ):
-                            logger.debug(
-                                f"Skipping {repo_path}: last_known_commit is None "
-                                f"but .md file exists — description already good"
-                            )
-                            return False
-                    # No .md file or no meta_dir: fall through to return True below
                     logger.debug(
-                        f"Changes detected in {repo_path}: no last_known_commit and "
-                        f"no existing .md file — needs first analysis"
+                        f"Changes detected in {repo_path}: no last_known_commit "
+                        f"marker — refresh needed to establish it"
                     )
                     return True
 
@@ -1126,8 +1154,8 @@ class DescriptionRefreshScheduler:
         if success:
             # Bug #953: reset circuit-breaker counter on any successful refresh.
             self._prompt_failure_counts[repo_alias] = 0
-            # Bug #984: re-arm warning so future legitimate failures warn again.
-            self._warned_missing_desc.discard(repo_alias)
+            # Keep failure-commit dict in sync: clear stale fingerprint on success.
+            self._failure_commit.pop(repo_alias, None)
             self._tracking_backend.upsert_tracking(
                 repo_alias=repo_alias,
                 status="completed",
@@ -1149,6 +1177,23 @@ class DescriptionRefreshScheduler:
                 updated_at=now,
             )
             logger.warning(f"Description refresh failed for {repo_alias}: {error_msg}")
+            # Bug #1096 review fix: record the on-disk commit fingerprint at failure
+            # time so the quarantine gate can detect a GENUINE commit transition,
+            # independent of last_known_commit being NULL (which stays NULL forever
+            # for repos that never succeed).
+            self._failure_commit[repo_alias] = self._read_current_fingerprint(repo_path)
+            # Bug #1096: increment circuit-breaker counter on each prompt failure.
+            self._prompt_failure_counts[repo_alias] += 1
+            if (
+                self._prompt_failure_counts[repo_alias]
+                == PROMPT_FAILURE_QUARANTINE_THRESHOLD
+            ):
+                logger.error(
+                    "Repo %s has reached prompt failure quarantine threshold (%d consecutive "
+                    "failures). Quarantining until a new commit is detected or a success occurs.",
+                    repo_alias,
+                    PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                )
 
         # Update unified job tracker if configured (Story #313, AC2, AC7, AC8)
         if job_id is not None and self._job_tracker is not None:
@@ -1219,19 +1264,53 @@ class DescriptionRefreshScheduler:
             if self._claude_cli_manager:
                 logger.info(f"Submitting description refresh for {alias}")
 
-                # Bug #984: check quarantine state BEFORE calling _get_refresh_prompt()
-                # so that already-quarantined repos never trigger the warning inside it.
+                # Bug #984: check quarantine state FIRST, before dispatching any
+                # refresh work through the LifecycleBatchRunner path, so that
+                # already-quarantined repos are skipped without further processing.
                 if (
                     self._prompt_failure_counts[alias]
                     >= PROMPT_FAILURE_QUARANTINE_THRESHOLD
                 ):
-                    logger.debug(
-                        "Repo %s is quarantined (failure count %d >= %d), skipping",
-                        alias,
-                        self._prompt_failure_counts[alias],
-                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
-                    )
-                    continue
+                    # Bug #1096 review fix: auto-clear ONLY on a genuine commit
+                    # TRANSITION — compare the CURRENT on-disk fingerprint against
+                    # the fingerprint recorded at failure time (_failure_commit).
+                    #
+                    # Using has_changes_since_last_run here is wrong: it returns True
+                    # when last_known_commit is None (the #1094 revert), but
+                    # last_known_commit stays NULL forever for repos that never
+                    # succeed.  That causes the auto-clear to fire every cycle,
+                    # defeating quarantine for the worst case (persistently broken
+                    # repos — the exact money-burn #1096 exists to stop).
+                    #
+                    # Invariant: quarantine HOLDS while the on-disk commit is
+                    # unchanged; clears ONLY when the fingerprint genuinely changes.
+                    current_fp = self._read_current_fingerprint(clone_path)
+                    # Auto-clear ONLY when a failure fingerprint was actually
+                    # recorded AND the on-disk commit has genuinely changed.
+                    # If no failure fingerprint was recorded (key absent from
+                    # _failure_commit), quarantine holds — conservative default.
+                    failure_fp = self._failure_commit.get(alias)
+                    if alias in self._failure_commit and current_fp != failure_fp:
+                        logger.info(
+                            "Repo %s was quarantined but commit has changed "
+                            "(%r -> %r) — resetting failure counter and retrying",
+                            alias,
+                            failure_fp,
+                            current_fp,
+                        )
+                        self._prompt_failure_counts[alias] = 0
+                        self._failure_commit.pop(alias, None)
+                        # Fall through to normal dispatch below
+                    else:
+                        logger.debug(
+                            "Repo %s is quarantined (failure count %d >= %d, "
+                            "commit unchanged: %r), skipping",
+                            alias,
+                            self._prompt_failure_counts[alias],
+                            PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                            current_fp,
+                        )
+                        continue
 
                 if not self.has_changes_since_last_run(clone_path, repo):
                     now = datetime.now(timezone.utc).isoformat()
@@ -1242,11 +1321,10 @@ class DescriptionRefreshScheduler:
                     )
                     continue
 
-                # Bug #1093 Fix C: lightweight existence check replaces the expensive
-                # _get_refresh_prompt() call that was only used to detect missing .md.
-                # _get_refresh_prompt() staged a temp file and invoked RepoAnalyzer
-                # but the returned prompt was never consumed here — only its None-ness
-                # was checked.  Use _has_existing_description() instead.
+                # Lightweight existence gate: skip repos that have never been
+                # analyzed (no .md yet) without spending a Claude invocation.
+                # The refresh itself (refine-existing vs create-from-scratch) is
+                # decided downstream by LifecycleBatchRunner._process_one_repo.
                 if not self._has_existing_description(alias):
                     # No description yet — repo hasn't been analyzed.  Skip without
                     # incrementing the failure counter (not a prompt-generation failure).
@@ -1399,63 +1477,12 @@ class DescriptionRefreshScheduler:
 
         return ClaudeIntegrationConfig().max_concurrent_claude_cli  # type: ignore[no-any-return]
 
-    def _read_existing_description(
-        self, repo_alias: str
-    ) -> Optional[Dict[str, Optional[str]]]:
-        """
-        Read existing .md file from cidx-meta and extract description and last_analyzed.
-
-        Args:
-            repo_alias: Repository alias
-
-        Returns:
-            Dict with 'description' and 'last_analyzed' keys, or None if file not found
-        """
-        if not self._meta_dir:
-            logger.warning("Meta directory not set, cannot read existing description")
-            return None
-
-        # INVARIANT: cidx-meta filenames use SHORT alias ({repo_alias}.md), NOT -global.md
-        md_file = self._meta_dir / f"{repo_alias}.md"
-        if not md_file.exists():
-            logger.debug(f"No .md file found for {repo_alias}, cannot refresh")
-            return None
-
-        try:
-            content = md_file.read_text()
-
-            # Parse YAML frontmatter to extract last_analyzed
-            # Format: ---\nfield: value\n---\n<body>
-            frontmatter_match = re.match(r"^---\n(.*?)\n---\n(.*)$", content, re.DOTALL)
-            if not frontmatter_match:
-                logger.warning(f"No YAML frontmatter found in {md_file}")
-                return {"description": content, "last_analyzed": None}
-
-            frontmatter_text = frontmatter_match.group(1)
-            _body = frontmatter_match.group(2)
-
-            # Extract last_analyzed from frontmatter
-            last_analyzed = None
-            for line in frontmatter_text.split("\n"):
-                if line.startswith("last_analyzed:"):
-                    last_analyzed = line.split(":", 1)[1].strip()
-                    break
-
-            return {"description": content, "last_analyzed": last_analyzed}
-
-        except Exception as e:
-            logger.error(
-                f"Failed to read existing description for {repo_alias}: {e}",
-                exc_info=True,
-            )
-            return None
-
     def _has_existing_description(self, alias: str) -> bool:
         """
         Lightweight check: does a non-empty .md file exist for *alias* in _meta_dir?
 
-        Used by _run_loop_single_pass to avoid the expensive _get_refresh_prompt()
-        call when no description has been generated yet (Bug #1093 Fix C).
+        Used by _run_loop_single_pass to skip repos that have not been analyzed
+        yet (no description generated), without any Claude invocation.
 
         Returns:
             True if _meta_dir is set and {alias}.md exists and is non-empty.
@@ -1467,219 +1494,6 @@ class DescriptionRefreshScheduler:
         if not md_file.exists():
             return False
         return bool(md_file.read_text(encoding="utf-8", errors="replace").strip())
-
-    def _validate_refresh_inputs(
-        self, repo_alias: str, repo_path: str
-    ) -> Optional[Path]:
-        """Validate refresh inputs; return resolved repo Path or None on failure."""
-        if not repo_alias or not isinstance(repo_alias, str):
-            logger.warning("_get_refresh_prompt: repo_alias must be a non-empty string")
-            return None
-        if not repo_path or not isinstance(repo_path, str):
-            logger.warning("_get_refresh_prompt: repo_path must be a non-empty string")
-            return None
-        resolved = Path(repo_path).resolve()
-        if not resolved.exists() or not resolved.is_dir():
-            logger.warning(
-                "_get_refresh_prompt: repo_path does not resolve to a directory: %s",
-                repo_path,
-            )
-            return None
-        return resolved
-
-    def _stage_and_build_prompt(
-        self, description: str, last_analyzed: str, repo_path_obj: Path
-    ) -> "tuple[Optional[str], Optional[str]]":
-        """
-        Stage *description* to a temp file and build a file-reference refresh prompt.
-
-        Creates a unique temp dir under *repo_path_obj*, writes ``existing_desc.md``,
-        calls RepoAnalyzer.get_prompt with ``temp_file_path``, and returns a tuple of
-        (prompt, tmp_dir_path).  Caller is responsible for cleaning up tmp_dir_path.
-        On error, cleans up internally and returns (None, None).
-
-        Bug #1093 Fix D: previously returned only the prompt string on the success
-        path, leaking the temp dir after every refresh cycle.  Now returns the tuple
-        so the caller (_get_refresh_prompt) can call shutil.rmtree when done.
-        """
-        import shutil
-        import tempfile
-        from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
-
-        tmp_dir_str = tempfile.mkdtemp(dir=repo_path_obj)
-        try:
-            temp_file = Path(tmp_dir_str) / "existing_desc.md"
-            temp_file.write_text(description, encoding="utf-8")
-            analyzer = RepoAnalyzer(str(repo_path_obj))
-            prompt = cast(
-                Optional[str],
-                analyzer.get_prompt(
-                    mode="refresh",
-                    last_analyzed=last_analyzed,
-                    temp_file_path=temp_file,
-                ),
-            )
-            return (prompt, tmp_dir_str)
-        except Exception as e:
-            shutil.rmtree(tmp_dir_str, ignore_errors=True)
-            logger.error("_stage_and_build_prompt failed: %s", e, exc_info=True)
-            return (None, None)
-
-    def _get_refresh_prompt(self, repo_alias: str, repo_path: str) -> Optional[str]:
-        """Get refresh prompt staging the existing description to a temp file."""
-        import shutil
-
-        repo_path_obj = self._validate_refresh_inputs(repo_alias, repo_path)
-        if repo_path_obj is None:
-            return None
-        desc_data = self._read_existing_description(repo_alias)
-        if not desc_data:
-            if repo_alias not in self._warned_missing_desc:
-                logger.warning(
-                    "Cannot generate refresh prompt for %s: missing description or last_analyzed",
-                    repo_alias,
-                )
-                self._warned_missing_desc.add(repo_alias)
-            else:
-                logger.debug(
-                    "Cannot generate refresh prompt for %s: missing description or last_analyzed (suppressed repeat)",
-                    repo_alias,
-                )
-            return None
-        # Bug #1093 Fix D: unpack (prompt, tmp_dir) tuple and clean up tmp_dir.
-        prompt, tmp_dir = self._stage_and_build_prompt(
-            desc_data.get("description") or "",
-            desc_data["last_analyzed"] or "",
-            repo_path_obj,
-        )
-        if tmp_dir is not None:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        return prompt
-
-    def _build_cli_dispatcher(self, config) -> "CliDispatcher":  # noqa: F821
-        """
-        Build a CliDispatcher from *config* (Story #847).
-
-        Delegates to build_dep_map_dispatcher (the single source of truth for
-        CliDispatcher construction — Bug #936 consolidation), forwarding
-        analysis_model and the per-scheduler soft-timeout constant.
-
-        Args:
-            config: ServerConfig returned by config_manager.load_config().
-
-        Returns:
-            A fully initialised CliDispatcher.
-        """
-        return build_dep_map_dispatcher(
-            config,
-            analysis_model=self._analysis_model,
-            claude_soft_timeout_seconds=_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS,
-        )
-
-    def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
-        """
-        Invoke the CLI dispatcher with the given prompt (Story #847).
-
-        Uses the injected CliDispatcher when available; otherwise builds one
-        from the current ServerConfig on each call.  Logs an INFO record when
-        failover fired so operators can see which CLI handled the job.
-
-        Args:
-            repo_path: Path to repository (used as subprocess cwd).
-            prompt: Prompt to send to the CLI.
-
-        Returns:
-            Tuple of (success: bool, result: str) where result is the output
-            or error message — identical shape to the pre-wiring behaviour.
-        """
-        if self._cli_dispatcher is not None:
-            dispatcher = self._cli_dispatcher
-        else:
-            config = (
-                self._config_manager.load_config() if self._config_manager else None
-            )
-            dispatcher = self._build_cli_dispatcher(config)
-
-        result = dispatcher.dispatch(
-            flow="description_refresh",
-            cwd=repo_path,
-            prompt=prompt,
-            timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS,
-        )
-
-        if result.was_failover:
-            logger.info(
-                "CLI failover fired: cli_used=%s was_failover=True",
-                result.cli_used,
-            )
-
-        if not result.success:
-            return False, result.error
-
-        # Validate output quality (detect error messages masquerading as content)
-        if not self._validate_cli_output(result.output):
-            error_msg = (
-                f"CLI output appears to be an error message"
-                f" (length={len(result.output)}): {result.output[:200]}"
-            )
-            logger.warning(error_msg)
-            return False, error_msg
-
-        return True, result.output
-
-    def _validate_cli_output(self, output: str) -> bool:
-        """
-        Validate that Claude CLI output is a real description, not an error message.
-
-        Args:
-            output: Cleaned output from Claude CLI
-
-        Returns:
-            True if output looks like a valid description, False if it appears to be an error
-        """
-        # Empty or very short output is invalid
-        if not output or len(output) < 100:
-            output_len = len(output) if output else 0
-            logger.warning(
-                f"CLI output too short ({output_len} chars), likely an error"
-            )
-            return False
-
-        # Infrastructure error patterns — always checked.
-        # These strings can never appear in valid YAML description content.
-        infrastructure_errors = [
-            "Invalid API key",
-            "Fix external API key",
-            "cannot be launched inside another",
-            "Nested sessions share runtime",
-            "CLAUDECODE environment variable",
-            "Authentication failed",
-        ]
-
-        output_lower = output.lower()
-        for pattern in infrastructure_errors:
-            if pattern.lower() in output_lower:
-                logger.warning(f"CLI output contains error pattern: '{pattern}'")
-                return False
-
-        # Content-ambiguous patterns — only checked when output lacks YAML frontmatter.
-        # Valid descriptions always start with "---" (YAML frontmatter).
-        # Real API errors (rate limit, quota exceeded, Error:) arrive as plain text
-        # without frontmatter.  When frontmatter IS present the output is a real
-        # description even if it mentions these terms as domain concepts (Bug #382).
-        has_frontmatter = output.startswith("---")
-        if not has_frontmatter:
-            content_ambiguous_errors = [
-                "rate limit",
-                "quota exceeded",
-                "Error:",
-            ]
-            for pattern in content_ambiguous_errors:
-                if pattern.lower() in output_lower:
-                    logger.warning(f"CLI output contains error pattern: '{pattern}'")
-                    return False
-
-        return True
 
     def _update_description_file(self, repo_alias: str, content: str) -> None:
         """DEPRECATED: Use atomic_write_description() or write_meta_md() instead."""
