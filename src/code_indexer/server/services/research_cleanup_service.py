@@ -330,11 +330,22 @@ class ResearchCleanupService:
             # rmtree'd -- this bounds the blast radius to real session folders.
             if not _is_session_dir_name(path.name):
                 result.dirs_preserved += 1
-                logger.warning(
-                    "Research cleanup: skipping non-session dir %s "
-                    "(name is not a session-id / 'default'); preserving",
-                    path,
-                )
+                if path.name == DEFAULT_SESSION_DIR_NAME:
+                    # Well-known non-reapable dir: expected on every sweep.
+                    # Log at DEBUG only — WARNING here would fire every hour
+                    # and mask genuine unexpected-directory warnings (Bug #1099).
+                    logger.debug(
+                        "Research cleanup: skipping well-known default dir %s; preserving",
+                        path,
+                    )
+                else:
+                    # Genuinely unexpected non-session directory: keep WARNING
+                    # so operators notice stray dirs inside the research root.
+                    logger.warning(
+                        "Research cleanup: skipping non-session dir %s "
+                        "(name is not a session-id / 'default'); preserving",
+                        path,
+                    )
                 continue
 
             # Safety 1: never delete a dir mapping to a live registry row.
