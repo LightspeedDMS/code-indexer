@@ -418,3 +418,127 @@ class TestResearchCleanupScheduler:
 
         provider = make_db_live_folder_provider(db_path)
         assert provider() == {"/x/research/s1"}
+
+
+class TestDefaultDirLogLevel:
+    """Bug #1099 — 'default' dir must log at DEBUG, not WARNING, every hourly sweep.
+
+    The well-known ``DEFAULT_SESSION_DIR_NAME`` ('default') is expected and
+    preserved on every sweep.  Logging it at WARNING pollutes logs and masks
+    genuine unexpected-directory warnings.  Only truly unexpected non-session
+    directory names should emit WARNING.
+    """
+
+    def test_default_dir_emits_debug_not_warning(self, tmp_path, caplog):
+        """Sweeping a research root with a 'default' dir must produce NO WARNING.
+
+        The 'default' dir is preserved (dirs_preserved incremented) and a DEBUG
+        message is emitted instead of WARNING.
+        """
+        import logging
+
+        base = tmp_path / "research"
+        default_dir = base / "default"
+        default_dir.mkdir(parents=True)
+
+        svc = ResearchCleanupService(
+            research_base_dir=base,
+            retention_days=3,
+            live_folder_provider=lambda: set(),
+        )
+
+        with caplog.at_level(
+            logging.DEBUG,
+            logger="code_indexer.server.services.research_cleanup_service",
+        ):
+            result = svc.cleanup()
+
+        # The 'default' dir must be preserved
+        assert default_dir.exists(), "'default' dir must never be deleted"
+        assert result.dirs_preserved >= 1, (
+            "dirs_preserved must be incremented for 'default'"
+        )
+
+        # No WARNING must be emitted for the known 'default' directory
+        warning_records = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and "default" in r.getMessage()
+        ]
+        assert warning_records == [], (
+            f"Expected no WARNING for 'default' dir, got: {[r.getMessage() for r in warning_records]}"
+        )
+
+        # A DEBUG record must be emitted for 'default'
+        debug_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.DEBUG and "default" in r.getMessage()
+        ]
+        assert debug_records, "Expected a DEBUG log record mentioning 'default'"
+
+    def test_unexpected_dir_emits_warning(self, tmp_path, caplog):
+        """A genuinely unexpected non-session dir name still emits WARNING.
+
+        Only the 'default' special case is downgraded to DEBUG; any other
+        non-UUID directory name remains at WARNING level so operators notice it.
+        """
+        import logging
+
+        base = tmp_path / "research"
+        unexpected_dir = base / "garbage-not-a-uuid"
+        unexpected_dir.mkdir(parents=True)
+
+        svc = ResearchCleanupService(
+            research_base_dir=base,
+            retention_days=3,
+            live_folder_provider=lambda: set(),
+        )
+
+        with caplog.at_level(
+            logging.WARNING,
+            logger="code_indexer.server.services.research_cleanup_service",
+        ):
+            result = svc.cleanup()
+
+        # The unexpected dir must be preserved
+        assert unexpected_dir.exists(), "Unexpected dir must never be deleted"
+        assert result.dirs_preserved >= 1
+
+        # A WARNING must be emitted for the unexpected dir
+        warning_records = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and "garbage-not-a-uuid" in r.getMessage()
+        ]
+        assert warning_records, (
+            "Expected a WARNING log record for unexpected dir 'garbage-not-a-uuid'"
+        )
+
+    def test_uuid_session_dir_reapable_unchanged(self, tmp_path):
+        """A valid UUID session dir that is an aged orphan is still deleted (unchanged behavior)."""
+        import os
+        import time
+
+        base = tmp_path / "research"
+        session_id = "aaaaaaaa-1099-4000-8000-000000001099"
+        session_dir = base / session_id
+        (session_dir / "uploads").mkdir(parents=True)
+        (session_dir / "uploads" / "file.txt").write_text("x")
+
+        # Age the entire tree so it passes the TTL + recent-modification guards
+        old = time.time() - 10 * 24 * 3600
+        os.utime(session_dir / "uploads" / "file.txt", (old, old))
+        os.utime(session_dir / "uploads", (old, old))
+        os.utime(session_dir, (old, old))
+
+        svc = ResearchCleanupService(
+            research_base_dir=base,
+            retention_days=3,
+            live_folder_provider=lambda: set(),  # orphan — no live row
+        )
+        result = svc.cleanup()
+
+        assert not session_dir.exists(), "Aged orphan UUID session dir must be deleted"
+        assert result.dirs_deleted == 1
+        assert result.dirs_scanned == 1
