@@ -376,7 +376,6 @@ class DescriptionRefreshScheduler:
         code has changed.
 
         Used by:
-        - has_changes_since_last_run (change detection at schedule time)
         - on_refresh_complete failure branch (record fingerprint at failure time)
         - _run_loop_single_pass quarantine gate (compare current vs failure fingerprint)
 
@@ -1155,6 +1154,8 @@ class DescriptionRefreshScheduler:
         if success:
             # Bug #953: reset circuit-breaker counter on any successful refresh.
             self._prompt_failure_counts[repo_alias] = 0
+            # Keep failure-commit dict in sync: clear stale fingerprint on success.
+            self._failure_commit.pop(repo_alias, None)
             self._tracking_backend.upsert_tracking(
                 repo_alias=repo_alias,
                 status="completed",
