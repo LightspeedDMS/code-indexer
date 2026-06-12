@@ -397,12 +397,13 @@ Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step
 `PROMPT_FAILURE_QUARANTINE_THRESHOLD = 3` consecutive failures quarantine a repo so it is not rescheduled.
 
 **Key invariants** (`src/code_indexer/server/services/description_refresh_scheduler.py`):
-- `on_refresh_complete(success=False)` increments `_prompt_failure_counts[repo_alias] += 1` then emits exactly ONE structured ERROR log when the count crosses `== PROMPT_FAILURE_QUARANTINE_THRESHOLD`; subsequent skips log only at DEBUG.
-- `on_refresh_complete(success=True)` resets the counter to 0 (already existed, Bug #953).
-- `_run_loop_single_pass` quarantine gate (Bug #984): when quarantined AND `has_changes_since_last_run` returns True (new commit), auto-clears the counter to 0 and falls through to dispatch — prevents permanent freeze on repos that improve. When commit is unchanged, logs DEBUG and `continue`s.
+- `on_refresh_complete(success=False)` increments `_prompt_failure_counts[repo_alias] += 1`, records `_failure_commit[repo_alias] = _read_current_fingerprint(repo_path)` (the on-disk commit at failure time), then emits exactly ONE structured ERROR log when the count crosses `== PROMPT_FAILURE_QUARANTINE_THRESHOLD`; subsequent skips log only at DEBUG.
+- `on_refresh_complete(success=True)` resets the counter to 0 (Bug #953).
+- `_run_loop_single_pass` quarantine gate (#1096 review fix): when quarantined, compares the CURRENT on-disk fingerprint from `_read_current_fingerprint(clone_path)` against `_failure_commit[alias]` (the fingerprint at failure time). Auto-clears counter to 0 and falls through to dispatch ONLY when the fingerprints differ (genuine commit transition). When same (or no failure fingerprint recorded), logs DEBUG and `continue`s. NEVER uses `has_changes_since_last_run` for the auto-clear decision — that function returns True on NULL `last_known_commit`, which stays NULL forever for repos that never succeed, defeating quarantine for the worst case.
+- `_read_current_fingerprint(repo_path)` is the shared helper used by both `has_changes_since_last_run` and the quarantine gate — no duplicate metadata-reading logic.
 - No Web-UI config knob, no admin un-quarantine tool, no exponential back-off (deferred, out of scope for #1096).
 
-**Regression guard**: `tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py` (11 tests, real SQLite via `DatabaseSchema.initialize_database()`).
+**Regression guard**: `tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py` (15 tests, real SQLite via `DatabaseSchema.initialize_database()`). Includes mandatory cases: quarantine BINDS for persistent failure with NULL `last_known_commit` and stable on-disk commit; auto-clear fires ONLY on real on-disk commit change.
 
 ### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
 

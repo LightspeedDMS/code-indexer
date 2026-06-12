@@ -202,6 +202,12 @@ class DescriptionRefreshScheduler:
         # When the count reaches PROMPT_FAILURE_QUARANTINE_THRESHOLD the repo is
         # quarantined (not rescheduled) and one ERROR log is emitted.
         self._prompt_failure_counts: Dict[str, int] = defaultdict(int)
+        # Bug #1096 review fix: on-disk commit fingerprint recorded at failure time.
+        # Quarantine auto-clear compares the CURRENT on-disk fingerprint to this value.
+        # Using has_changes_since_last_run for the clear decision is wrong because
+        # last_known_commit stays NULL for repos that never succeeded, making
+        # has_changes always return True — defeating quarantine for the worst case.
+        self._failure_commit: Dict[str, Optional[str]] = {}
         # Story #1062: two separate events replacing the old single _backfill_in_progress.
         # Each async path sets/clears its OWN event so one finishing does not clear the other.
         self._lifecycle_backfill_running = threading.Event()
@@ -358,6 +364,57 @@ class DescriptionRefreshScheduler:
             recomputed,
         )
         return recomputed
+
+    def _read_current_fingerprint(self, repo_path: str) -> Optional[str]:
+        """
+        Read the on-disk commit (or files_processed) fingerprint from the repo's
+        metadata file — the SAME source has_changes_since_last_run reads.
+
+        Returns the fingerprint string, or None when no metadata file exists or
+        the metadata cannot be parsed.  The returned value is suitable for stable
+        equality comparison: same string → same code state; different string →
+        code has changed.
+
+        Used by:
+        - has_changes_since_last_run (change detection at schedule time)
+        - on_refresh_complete failure branch (record fingerprint at failure time)
+        - _run_loop_single_pass quarantine gate (compare current vs failure fingerprint)
+
+        Extracting this helper removes the triple-read of metadata that previously
+        existed across these three call sites (Messi Rule #4 anti-duplication).
+        """
+        metadata_dir = Path(repo_path) / ".code-indexer"
+        metadata_path = metadata_dir / "metadata.json"
+
+        if not metadata_path.exists():
+            provider_files = sorted(metadata_dir.glob("metadata-*.json"))
+            if provider_files:
+                metadata_path = provider_files[0]
+            else:
+                return None
+
+        try:
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+
+            if "current_commit" in metadata:
+                return str(metadata["current_commit"])
+
+            if "files_processed" in metadata:
+                # Use files_processed + indexed_at as a combined fingerprint for
+                # non-git repos so that any re-index is detectable.
+                files = metadata["files_processed"]
+                indexed_at = metadata.get("indexed_at", "")
+                return f"{files}:{indexed_at}"
+
+            return None
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to read metadata fingerprint from {repo_path}: {e}",
+                exc_info=True,
+            )
+            return None
 
     def has_changes_since_last_run(
         self, repo_path: str, tracking_record: Dict[str, Any]
@@ -1119,6 +1176,11 @@ class DescriptionRefreshScheduler:
                 updated_at=now,
             )
             logger.warning(f"Description refresh failed for {repo_alias}: {error_msg}")
+            # Bug #1096 review fix: record the on-disk commit fingerprint at failure
+            # time so the quarantine gate can detect a GENUINE commit transition,
+            # independent of last_known_commit being NULL (which stays NULL forever
+            # for repos that never succeed).
+            self._failure_commit[repo_alias] = self._read_current_fingerprint(repo_path)
             # Bug #1096: increment circuit-breaker counter on each prompt failure.
             self._prompt_failure_counts[repo_alias] += 1
             if (
@@ -1208,25 +1270,44 @@ class DescriptionRefreshScheduler:
                     self._prompt_failure_counts[alias]
                     >= PROMPT_FAILURE_QUARANTINE_THRESHOLD
                 ):
-                    # Bug #1096: auto-clear quarantine when the underlying commit
-                    # has changed since the last tracked run — the previous failures
-                    # may have been caused by the old code; a new commit warrants
-                    # a fresh attempt.  Reuses has_changes_since_last_run which
-                    # already implements commit comparison without duplication.
-                    if self.has_changes_since_last_run(clone_path, repo):
+                    # Bug #1096 review fix: auto-clear ONLY on a genuine commit
+                    # TRANSITION — compare the CURRENT on-disk fingerprint against
+                    # the fingerprint recorded at failure time (_failure_commit).
+                    #
+                    # Using has_changes_since_last_run here is wrong: it returns True
+                    # when last_known_commit is None (the #1094 revert), but
+                    # last_known_commit stays NULL forever for repos that never
+                    # succeed.  That causes the auto-clear to fire every cycle,
+                    # defeating quarantine for the worst case (persistently broken
+                    # repos — the exact money-burn #1096 exists to stop).
+                    #
+                    # Invariant: quarantine HOLDS while the on-disk commit is
+                    # unchanged; clears ONLY when the fingerprint genuinely changes.
+                    current_fp = self._read_current_fingerprint(clone_path)
+                    # Auto-clear ONLY when a failure fingerprint was actually
+                    # recorded AND the on-disk commit has genuinely changed.
+                    # If no failure fingerprint was recorded (key absent from
+                    # _failure_commit), quarantine holds — conservative default.
+                    failure_fp = self._failure_commit.get(alias)
+                    if alias in self._failure_commit and current_fp != failure_fp:
                         logger.info(
-                            "Repo %s was quarantined but commit has changed — "
-                            "resetting failure counter and retrying",
+                            "Repo %s was quarantined but commit has changed "
+                            "(%r -> %r) — resetting failure counter and retrying",
                             alias,
+                            failure_fp,
+                            current_fp,
                         )
                         self._prompt_failure_counts[alias] = 0
+                        self._failure_commit.pop(alias, None)
                         # Fall through to normal dispatch below
                     else:
                         logger.debug(
-                            "Repo %s is quarantined (failure count %d >= %d), skipping",
+                            "Repo %s is quarantined (failure count %d >= %d, "
+                            "commit unchanged: %r), skipping",
                             alias,
                             self._prompt_failure_counts[alias],
                             PROMPT_FAILURE_QUARANTINE_THRESHOLD,
+                            current_fp,
                         )
                         continue
 

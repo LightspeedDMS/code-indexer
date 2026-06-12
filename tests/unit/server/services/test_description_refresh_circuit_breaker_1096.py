@@ -190,6 +190,7 @@ def _build_scheduler(
     sched._prompt_failure_counts = defaultdict(int)
     sched._executor = _SyncExecutor()
     sched._claude_cli_manager = object()  # truthy: enables refresh branch
+    sched._failure_commit = {}  # type: ignore[attr-defined]
     sched._lifecycle_invoker = None
     sched._lifecycle_debouncer = _StubDebouncer()
     sched._refresh_scheduler = _StubScheduler()
@@ -460,10 +461,17 @@ class TestAutoClearOnCommitChange:
 
         sched = _build_scheduler(tmp_path, alias, _runner_factory)
 
-        # Quarantine the repo
+        # Quarantine the repo — set both the counter AND the failure fingerprint
+        # (what on_refresh_complete would have recorded at the time of failure).
+        # The auto-clear gate compares _failure_commit[alias] against the CURRENT
+        # on-disk fingerprint; last_known_commit in the tracking record is no longer
+        # the decision criterion.
         sched._prompt_failure_counts[alias] = PROMPT_FAILURE_QUARANTINE_THRESHOLD
+        sched._failure_commit[alias] = (
+            "old-broken-commit"  # fingerprint at failure time
+        )
 
-        # Tracking says last_known_commit is the OLD commit (different from disk)
+        # Disk has a NEW commit ("new-commit-after-fix"), so auto-clear should fire
         _set_stale(sched, alias, str(repo_path), last_known_commit="old-broken-commit")
 
         sched._run_loop_single_pass()
@@ -499,8 +507,10 @@ class TestAutoClearOnCommitChange:
 
         sched = _build_scheduler(tmp_path, alias, _runner_factory)
 
-        # Quarantine with same commit
+        # Quarantine with same commit — set both counter AND failure fingerprint so
+        # the gate sees no transition (current on-disk == failure_commit) and holds.
         sched._prompt_failure_counts[alias] = PROMPT_FAILURE_QUARANTINE_THRESHOLD
+        sched._failure_commit[alias] = same_commit  # fingerprint at failure time = same
 
         _set_stale(sched, alias, str(repo_path), last_known_commit=same_commit)
 
@@ -511,6 +521,215 @@ class TestAutoClearOnCommitChange:
         )
         assert (
             sched._prompt_failure_counts[alias] == PROMPT_FAILURE_QUARANTINE_THRESHOLD
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests 7-8: NULL last_known_commit must NOT bypass quarantine (Bug #1096 review fix)
+#
+# The original bug: has_changes_since_last_run returns True when last_known_commit
+# is None (the #1094 revert). But the failure branch never writes last_known_commit.
+# So a repo that NEVER succeeds keeps last_known_commit=NULL forever, which means
+# has_changes returns True every cycle, auto-clear fires, and quarantine NEVER binds.
+#
+# The fix: track the on-disk commit fingerprint at failure time in _failure_commit,
+# and compare the CURRENT on-disk fingerprint against it — not against last_known_commit.
+# ---------------------------------------------------------------------------
+
+
+class TestQuarantineBindsForNullLastKnownCommit:
+    def test_quarantine_holds_with_null_marker_stable_commit(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        CRITICAL: quarantine must HOLD when last_known_commit=NULL and the
+        on-disk commit has been STABLE since failures started.
+
+        This is the exact case the code-reviewer's repro broke:
+        - repo never succeeded -> last_known_commit stays NULL
+        - has_changes_since_last_run(NULL) == True
+        - old code: auto-clear gate fires, counter resets, dispatches EVERY cycle
+        - correct behavior: compare current on-disk commit to _failure_commit[alias],
+          they are the same, so quarantine HOLDS.
+        """
+        alias = "repo-null-stable"
+        repo_path = tmp_path / "repos" / alias
+        repo_path.mkdir(parents=True)
+        _write_metadata(repo_path, "stable-sha-never-changes")
+        _write_existing_md(tmp_path / "cidx-meta", alias)
+
+        dispatch_count = 0
+
+        def _runner_factory():
+            nonlocal dispatch_count
+            dispatch_count += 1
+            return _FailingBatchRunner()
+
+        sched = _build_scheduler(tmp_path, alias, _runner_factory)
+
+        # Drive threshold failures end-to-end (last_known_commit=None — never succeeded)
+        for _ in range(PROMPT_FAILURE_QUARANTINE_THRESHOLD):
+            _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+            sched._run_loop_single_pass()
+
+        assert (
+            sched._prompt_failure_counts[alias] == PROMPT_FAILURE_QUARANTINE_THRESHOLD
+        )
+        assert dispatch_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD
+
+        # Now: subsequent cycles with NULL marker + SAME on-disk commit — must NOT dispatch
+        for extra_cycle in range(5):
+            _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+            sched._run_loop_single_pass()
+            assert dispatch_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD, (
+                f"Quarantined repo dispatched on extra cycle {extra_cycle + 1} "
+                f"with NULL last_known_commit and stable on-disk commit — "
+                f"quarantine MUST hold"
+            )
+
+    def test_quarantine_holds_across_many_cycles_null_marker(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Quarantine must HOLD for at least 10 subsequent cycles when
+        last_known_commit=NULL and on-disk commit does not change.
+        """
+        alias = "repo-null-hold"
+        repo_path = tmp_path / "repos" / alias
+        repo_path.mkdir(parents=True)
+        _write_metadata(repo_path, "sha-frozen")
+        _write_existing_md(tmp_path / "cidx-meta", alias)
+
+        dispatch_count = 0
+
+        def _runner_factory():
+            nonlocal dispatch_count
+            dispatch_count += 1
+            return _FailingBatchRunner()
+
+        sched = _build_scheduler(tmp_path, alias, _runner_factory)
+
+        # Reach quarantine
+        for _ in range(PROMPT_FAILURE_QUARANTINE_THRESHOLD):
+            _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+            sched._run_loop_single_pass()
+
+        pre_count = dispatch_count
+        # 10 more cycles — none should dispatch
+        for _ in range(10):
+            _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+            sched._run_loop_single_pass()
+
+        assert dispatch_count == pre_count, (
+            f"Dispatch count grew from {pre_count} to {dispatch_count} — "
+            f"quarantine did not hold with NULL marker"
+        )
+
+
+class TestAutoClearOnRealCommitChange:
+    def test_quarantine_clears_when_on_disk_commit_changes(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        Auto-clear must fire when the on-disk commit GENUINELY changes after
+        quarantine — independent of whether last_known_commit is NULL or not.
+        """
+        alias = "repo-real-change"
+        repo_path = tmp_path / "repos" / alias
+        repo_path.mkdir(parents=True)
+        _write_metadata(repo_path, "sha-broken-code")
+        _write_existing_md(tmp_path / "cidx-meta", alias)
+
+        dispatch_count = 0
+
+        def _runner_factory():
+            nonlocal dispatch_count
+            dispatch_count += 1
+            return _FailingBatchRunner()
+
+        sched = _build_scheduler(tmp_path, alias, _runner_factory)
+
+        # Reach quarantine with NULL last_known_commit (never succeeded)
+        for _ in range(PROMPT_FAILURE_QUARANTINE_THRESHOLD):
+            _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+            sched._run_loop_single_pass()
+
+        assert dispatch_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD
+
+        # Confirm quarantined (same commit on disk, NULL in tracking)
+        _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+        sched._run_loop_single_pass()
+        assert dispatch_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD, (
+            "Must still be quarantined before commit change"
+        )
+
+        # NOW: developer pushed a fix — on-disk commit changes
+        _write_metadata(repo_path, "sha-fixed-code")
+
+        # Next cycle should auto-clear and dispatch
+        _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+        sched._run_loop_single_pass()
+
+        assert dispatch_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD + 1, (
+            "After real on-disk commit change, quarantined repo must be "
+            "auto-cleared and dispatched"
+        )
+        # The auto-clear resets the counter to 0, then the new dispatch (which also
+        # fails because we still use _FailingBatchRunner) increments it back to 1.
+        # Counter == 1 proves: (a) reset happened (auto-clear fired), and (b) the new
+        # failure was properly recorded. Counter > threshold would mean quarantine was
+        # NOT reset and the old count persisted — that would be the bug.
+        assert sched._prompt_failure_counts[alias] == 1, (
+            "Failure counter must be reset to 0 on auto-clear, then re-incremented "
+            "to 1 by the new (also-failing) dispatch"
+        )
+
+    def test_quarantine_auto_clear_uses_disk_commit_not_tracking_marker(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        The auto-clear decision must use the CURRENT on-disk commit fingerprint,
+        NOT the last_known_commit from the tracking record (which is NULL for
+        repos that never succeeded).
+        """
+        alias = "repo-disk-vs-tracking"
+        repo_path = tmp_path / "repos" / alias
+        repo_path.mkdir(parents=True)
+        _write_metadata(repo_path, "sha-v1")
+        _write_existing_md(tmp_path / "cidx-meta", alias)
+
+        dispatch_count = 0
+        success_runner_used = [False]
+
+        def _runner_factory():
+            nonlocal dispatch_count
+            dispatch_count += 1
+            if success_runner_used[0]:
+                return _SucceedingBatchRunner()
+            return _FailingBatchRunner()
+
+        sched = _build_scheduler(tmp_path, alias, _runner_factory)
+
+        # Quarantine via NULL-marker failures
+        for _ in range(PROMPT_FAILURE_QUARANTINE_THRESHOLD):
+            _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+            sched._run_loop_single_pass()
+
+        # Verify quarantine holds with stable commit
+        _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+        sched._run_loop_single_pass()
+        assert dispatch_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD
+
+        # Change on-disk commit -> should auto-clear
+        _write_metadata(repo_path, "sha-v2")
+        success_runner_used[0] = True  # next dispatch will succeed
+
+        _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+        sched._run_loop_single_pass()
+
+        assert dispatch_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD + 1, (
+            "Auto-clear must fire based on on-disk commit change, "
+            "not on NULL last_known_commit"
         )
 
 
