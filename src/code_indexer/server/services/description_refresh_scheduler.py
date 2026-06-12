@@ -20,6 +20,7 @@ from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunne
 from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
 )
+from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
@@ -404,6 +405,34 @@ class DescriptionRefreshScheduler:
                 last_known_commit = tracking_record.get("last_known_commit")
                 current_commit = metadata["current_commit"]
 
+                # Bug #1093 Fix A: last_known_commit=None (DB reset / lifecycle backfill)
+                # means we have no commit marker yet.  If the .md file already exists
+                # and is non-empty, the description is already good — skip re-analysis.
+                # Only trigger re-analysis when there is genuinely no description yet.
+                if last_known_commit is None:
+                    alias = tracking_record.get("alias") or tracking_record.get(
+                        "repo_alias"
+                    )
+                    if self._meta_dir and alias:
+                        md_file = self._meta_dir / f"{alias}.md"
+                        if (
+                            md_file.exists()
+                            and md_file.read_text(
+                                encoding="utf-8", errors="replace"
+                            ).strip()
+                        ):
+                            logger.debug(
+                                f"Skipping {repo_path}: last_known_commit is None "
+                                f"but .md file exists — description already good"
+                            )
+                            return False
+                    # No .md file or no meta_dir: fall through to return True below
+                    logger.debug(
+                        f"Changes detected in {repo_path}: no last_known_commit and "
+                        f"no existing .md file — needs first analysis"
+                    )
+                    return True
+
                 if last_known_commit == current_commit:
                     logger.debug(
                         f"Skipping {repo_path}: no changes since last run (commit: {current_commit})"
@@ -757,7 +786,7 @@ class DescriptionRefreshScheduler:
             import uuid
 
             job_id = str(uuid.uuid4())
-            self._job_tracker.register_job(
+            self._job_tracker.register_job_if_no_conflict(
                 job_id=job_id,
                 operation_type="description_backfill",
                 username="system",
@@ -798,6 +827,13 @@ class DescriptionRefreshScheduler:
                 "Description backfill async: completed regeneration for %d aliases",
                 len(aliases),
             )
+        except DuplicateJobError as dup:
+            logger.info(
+                "Description backfill: duplicate job already active — skipping "
+                "(existing_job_id=%s)",
+                dup.existing_job_id,
+            )
+            return
         except Exception:
             logger.error(
                 "Description backfill async: regeneration thread failed",
@@ -970,7 +1006,7 @@ class DescriptionRefreshScheduler:
             import uuid
 
             job_id = str(uuid.uuid4())
-            self._job_tracker.register_job(
+            self._job_tracker.register_job_if_no_conflict(
                 job_id=job_id,
                 operation_type="lifecycle_backfill",
                 username="system",
@@ -1007,6 +1043,13 @@ class DescriptionRefreshScheduler:
                 "Lifecycle backfill async: completed repair for %d aliases",
                 len(aliases),
             )
+        except DuplicateJobError as dup:
+            logger.info(
+                "Lifecycle backfill: duplicate job already active — skipping "
+                "(existing_job_id=%s)",
+                dup.existing_job_id,
+            )
+            return
         except Exception:
             logger.error(
                 "Lifecycle backfill async: repair thread failed",
@@ -1048,6 +1091,15 @@ class DescriptionRefreshScheduler:
         # Read current metadata to save change markers
         metadata_path = Path(repo_path) / ".code-indexer" / "metadata.json"
         change_markers = {}
+
+        if not metadata_path.exists():
+            # Bug #1093 Fix B: golden repos use metadata-{provider}.json, not metadata.json.
+            # Mirror the same fallback already used in has_changes_since_last_run (lines ~390-394).
+            provider_files = sorted(
+                (Path(repo_path) / ".code-indexer").glob("metadata-*.json")
+            )
+            if provider_files:
+                metadata_path = provider_files[0]
 
         if metadata_path.exists():
             try:
@@ -1190,46 +1242,14 @@ class DescriptionRefreshScheduler:
                     )
                     continue
 
-                # Get refresh prompt using RepoAnalyzer
-                prompt = self._get_refresh_prompt(alias, clone_path)
-                if prompt is None:
-                    # If the .md file doesn't exist, this is NOT a prompt-generation
-                    # failure — the repo simply hasn't been analyzed yet.  Skip it
-                    # without incrementing the failure counter so it doesn't get
-                    # quarantined for a missing file.
-                    if self._meta_dir and not (self._meta_dir / f"{alias}.md").exists():
-                        now = datetime.now(timezone.utc).isoformat()
-                        self._tracking_backend.upsert_tracking(
-                            repo_alias=alias,
-                            next_run=self.calculate_next_run(alias),
-                            updated_at=now,
-                        )
-                        continue
-                    # Bug #953: circuit-breaker — count consecutive prompt failures.
-                    self._prompt_failure_counts[alias] += 1
-                    failure_count = self._prompt_failure_counts[alias]
-                    if failure_count >= PROMPT_FAILURE_QUARANTINE_THRESHOLD:
-                        # Log exactly once at the quarantine boundary; subsequent
-                        # passes are silently skipped to avoid log spam.
-                        if failure_count == PROMPT_FAILURE_QUARANTINE_THRESHOLD:
-                            logger.error(
-                                "Repo %s entered quarantine after %d consecutive "
-                                "prompt-generation failures — will not reschedule until "
-                                "a successful refresh resets the counter.",
-                                alias,
-                                failure_count,
-                            )
-                        # Do NOT call upsert_tracking — leave next_run stale so the
-                        # repo stays quarantined until the counter is reset externally.
-                        continue
-                    logger.warning(
-                        "Cannot refresh %s: failed to generate prompt, rescheduling"
-                        " (failure %d/%d)",
-                        alias,
-                        failure_count,
-                        PROMPT_FAILURE_QUARANTINE_THRESHOLD,
-                    )
-                    # Reschedule to next cycle to avoid infinite retry loop (Finding N3)
+                # Bug #1093 Fix C: lightweight existence check replaces the expensive
+                # _get_refresh_prompt() call that was only used to detect missing .md.
+                # _get_refresh_prompt() staged a temp file and invoked RepoAnalyzer
+                # but the returned prompt was never consumed here — only its None-ness
+                # was checked.  Use _has_existing_description() instead.
+                if not self._has_existing_description(alias):
+                    # No description yet — repo hasn't been analyzed.  Skip without
+                    # incrementing the failure counter (not a prompt-generation failure).
                     now = datetime.now(timezone.utc).isoformat()
                     self._tracking_backend.upsert_tracking(
                         repo_alias=alias,
@@ -1430,6 +1450,24 @@ class DescriptionRefreshScheduler:
             )
             return None
 
+    def _has_existing_description(self, alias: str) -> bool:
+        """
+        Lightweight check: does a non-empty .md file exist for *alias* in _meta_dir?
+
+        Used by _run_loop_single_pass to avoid the expensive _get_refresh_prompt()
+        call when no description has been generated yet (Bug #1093 Fix C).
+
+        Returns:
+            True if _meta_dir is set and {alias}.md exists and is non-empty.
+            False in all other cases (no meta_dir, file absent, file empty/whitespace).
+        """
+        if not self._meta_dir:
+            return False
+        md_file = self._meta_dir / f"{alias}.md"
+        if not md_file.exists():
+            return False
+        return bool(md_file.read_text(encoding="utf-8", errors="replace").strip())
+
     def _validate_refresh_inputs(
         self, repo_alias: str, repo_path: str
     ) -> Optional[Path]:
@@ -1451,14 +1489,18 @@ class DescriptionRefreshScheduler:
 
     def _stage_and_build_prompt(
         self, description: str, last_analyzed: str, repo_path_obj: Path
-    ) -> Optional[str]:
+    ) -> "tuple[Optional[str], Optional[str]]":
         """
         Stage *description* to a temp file and build a file-reference refresh prompt.
 
         Creates a unique temp dir under *repo_path_obj*, writes ``existing_desc.md``,
-        calls RepoAnalyzer.get_prompt with ``temp_file_path``, and returns the prompt.
-        Cleans up the temp dir on any error; on success the dir persists for the CLI
-        subprocess (caller is responsible for cleanup after the CLI call).
+        calls RepoAnalyzer.get_prompt with ``temp_file_path``, and returns a tuple of
+        (prompt, tmp_dir_path).  Caller is responsible for cleaning up tmp_dir_path.
+        On error, cleans up internally and returns (None, None).
+
+        Bug #1093 Fix D: previously returned only the prompt string on the success
+        path, leaking the temp dir after every refresh cycle.  Now returns the tuple
+        so the caller (_get_refresh_prompt) can call shutil.rmtree when done.
         """
         import shutil
         import tempfile
@@ -1469,7 +1511,7 @@ class DescriptionRefreshScheduler:
             temp_file = Path(tmp_dir_str) / "existing_desc.md"
             temp_file.write_text(description, encoding="utf-8")
             analyzer = RepoAnalyzer(str(repo_path_obj))
-            return cast(
+            prompt = cast(
                 Optional[str],
                 analyzer.get_prompt(
                     mode="refresh",
@@ -1477,13 +1519,16 @@ class DescriptionRefreshScheduler:
                     temp_file_path=temp_file,
                 ),
             )
+            return (prompt, tmp_dir_str)
         except Exception as e:
             shutil.rmtree(tmp_dir_str, ignore_errors=True)
             logger.error("_stage_and_build_prompt failed: %s", e, exc_info=True)
-            return None
+            return (None, None)
 
     def _get_refresh_prompt(self, repo_alias: str, repo_path: str) -> Optional[str]:
         """Get refresh prompt staging the existing description to a temp file."""
+        import shutil
+
         repo_path_obj = self._validate_refresh_inputs(repo_alias, repo_path)
         if repo_path_obj is None:
             return None
@@ -1501,11 +1546,15 @@ class DescriptionRefreshScheduler:
                     repo_alias,
                 )
             return None
-        return self._stage_and_build_prompt(
+        # Bug #1093 Fix D: unpack (prompt, tmp_dir) tuple and clean up tmp_dir.
+        prompt, tmp_dir = self._stage_and_build_prompt(
             desc_data.get("description") or "",
             desc_data["last_analyzed"] or "",
             repo_path_obj,
         )
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        return prompt
 
     def _build_cli_dispatcher(self, config) -> "CliDispatcher":  # noqa: F821
         """
