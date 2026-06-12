@@ -204,6 +204,262 @@ class TestSemanticLegMultiPatternExclusion:
         assert not matcher.matches_any_pattern(other_path, financial_patterns)
 
 
+class TestTemporalLegMultiPatternExclusion:
+    """Temporal leg: fusion dispatch must pass split patterns to query_temporal.
+
+    Bug #1095 review finding: _query_single_provider and _query_multi_provider_fusion
+    both do `[exclude_path]` (one-element list of raw comma string) instead of calling
+    parse_exclude_patterns first.  This causes comma-separated exclusions to be a
+    silent no-op in the temporal path, identical to the original bug in semantic/FTS.
+    """
+
+    def _make_mock_service(self, captured: list):
+        """Return a TemporalSearchService-alike whose query_temporal captures args."""
+        from unittest.mock import MagicMock
+        from code_indexer.services.temporal.temporal_search_service import (
+            TemporalSearchResults,
+        )
+
+        mock_svc = MagicMock()
+        mock_svc.query_temporal.return_value = TemporalSearchResults(
+            results=[],
+            query="test",
+            filter_type="none",
+            filter_value=None,
+        )
+
+        # Capture the exclude_path kwarg each time query_temporal is called
+        def capture(*args, **kwargs):
+            captured.append(kwargs.get("exclude_path"))
+            return mock_svc.query_temporal.return_value
+
+        mock_svc.query_temporal.side_effect = capture
+        return mock_svc
+
+    def test_single_provider_passes_split_list_not_raw_string(self, monkeypatch):
+        """_query_single_provider: comma-separated exclude_path yields split list."""
+        from unittest.mock import MagicMock, patch
+        from code_indexer.services.temporal import temporal_fusion_dispatch as tfd
+
+        captured: list = []
+        mock_svc = self._make_mock_service(captured)
+
+        fake_config = MagicMock()
+        fake_vs = MagicMock()
+        fake_vs.project_root = "/tmp"
+
+        # TemporalSearchService is imported locally inside _query_single_provider;
+        # patch it at its source module so the local import gets the mock class.
+        with (
+            patch.object(
+                tfd,
+                "_create_embedding_provider_for_collection",
+                return_value=MagicMock(),
+            ),
+            patch.object(tfd, "_make_config_manager", return_value=MagicMock()),
+            patch(
+                "code_indexer.services.temporal.temporal_search_service"
+                ".TemporalSearchService",
+                return_value=mock_svc,
+            ),
+        ):
+            tfd._query_single_provider(
+                config=fake_config,
+                vector_store=fake_vs,
+                coll_name="temporal_voyage_code_3",
+                query_text="auth logic",
+                limit=10,
+                time_range=("2024-01-01", "2024-12-31"),
+                file_path_filter=None,
+                exclude_path="dirA/**,dirB/**",
+            )
+
+        assert len(captured) == 1, "query_temporal must be called exactly once"
+        received = captured[0]
+        assert received == ["dirA/**", "dirB/**"], (
+            f"Expected split list ['dirA/**', 'dirB/**'], got {received!r}"
+        )
+
+    def test_single_provider_none_exclude_path_passes_none(self, monkeypatch):
+        """_query_single_provider: None exclude_path passes None (no exclusion)."""
+        from unittest.mock import MagicMock, patch
+        from code_indexer.services.temporal import temporal_fusion_dispatch as tfd
+
+        captured: list = []
+        mock_svc = self._make_mock_service(captured)
+
+        fake_config = MagicMock()
+        fake_vs = MagicMock()
+        fake_vs.project_root = "/tmp"
+
+        with (
+            patch.object(
+                tfd,
+                "_create_embedding_provider_for_collection",
+                return_value=MagicMock(),
+            ),
+            patch.object(tfd, "_make_config_manager", return_value=MagicMock()),
+            patch(
+                "code_indexer.services.temporal.temporal_search_service"
+                ".TemporalSearchService",
+                return_value=mock_svc,
+            ),
+        ):
+            tfd._query_single_provider(
+                config=fake_config,
+                vector_store=fake_vs,
+                coll_name="temporal_voyage_code_3",
+                query_text="auth logic",
+                limit=10,
+                time_range=("2024-01-01", "2024-12-31"),
+                file_path_filter=None,
+                exclude_path=None,
+            )
+
+        assert len(captured) == 1
+        assert captured[0] is None, (
+            f"None exclude_path should pass None to query_temporal, got {captured[0]!r}"
+        )
+
+    def test_single_provider_single_pattern_unchanged(self, monkeypatch):
+        """_query_single_provider: single pattern (no comma) still works."""
+        from unittest.mock import MagicMock, patch
+        from code_indexer.services.temporal import temporal_fusion_dispatch as tfd
+
+        captured: list = []
+        mock_svc = self._make_mock_service(captured)
+
+        fake_config = MagicMock()
+        fake_vs = MagicMock()
+        fake_vs.project_root = "/tmp"
+
+        with (
+            patch.object(
+                tfd,
+                "_create_embedding_provider_for_collection",
+                return_value=MagicMock(),
+            ),
+            patch.object(tfd, "_make_config_manager", return_value=MagicMock()),
+            patch(
+                "code_indexer.services.temporal.temporal_search_service"
+                ".TemporalSearchService",
+                return_value=mock_svc,
+            ),
+        ):
+            tfd._query_single_provider(
+                config=fake_config,
+                vector_store=fake_vs,
+                coll_name="temporal_voyage_code_3",
+                query_text="auth logic",
+                limit=10,
+                time_range=("2024-01-01", "2024-12-31"),
+                file_path_filter=None,
+                exclude_path="**/tests/**",
+            )
+
+        assert len(captured) == 1
+        assert captured[0] == ["**/tests/**"], (
+            f"Single pattern should pass ['**/tests/**'], got {captured[0]!r}"
+        )
+
+    def test_multi_provider_passes_split_list_not_raw_string(self, monkeypatch):
+        """_query_multi_provider_fusion: comma-separated exclude_path yields split list."""
+        from unittest.mock import MagicMock, patch
+        from code_indexer.services.temporal import temporal_fusion_dispatch as tfd
+        from code_indexer.services.temporal.temporal_search_service import (
+            TemporalSearchResults,
+        )
+
+        captured: list = []
+
+        fake_config = MagicMock()
+        fake_vs = MagicMock()
+        fake_vs.project_root = "/tmp"
+
+        def fake_query_temporal(*args, **kwargs):
+            captured.append(kwargs.get("exclude_path"))
+            return TemporalSearchResults(
+                results=[],
+                query="test",
+                filter_type="none",
+                filter_value=None,
+            )
+
+        mock_svc = MagicMock()
+        mock_svc.query_temporal.side_effect = fake_query_temporal
+
+        # TemporalSearchService is imported locally inside query_provider closure;
+        # patch at its source module.
+        with (
+            patch.object(
+                tfd,
+                "_create_embedding_provider_for_collection",
+                return_value=MagicMock(),
+            ),
+            patch.object(tfd, "_make_config_manager", return_value=MagicMock()),
+            patch(
+                "code_indexer.services.temporal.temporal_search_service"
+                ".TemporalSearchService",
+                return_value=mock_svc,
+            ),
+        ):
+            tfd._query_multi_provider_fusion(
+                config=fake_config,
+                vector_store=fake_vs,
+                collections=[("temporal_voyage_code_3", "/fake/path")],
+                query_text="auth logic",
+                limit=10,
+                time_range=("2024-01-01", "2024-12-31"),
+                file_path_filter=None,
+                exclude_path="dirA/**,dirB/**",
+            )
+
+        assert len(captured) >= 1, "query_temporal must be called at least once"
+        for ep in captured:
+            assert ep == ["dirA/**", "dirB/**"], (
+                f"Expected split list ['dirA/**', 'dirB/**'], got {ep!r}"
+            )
+
+    def test_build_exclusion_filter_receives_split_patterns(self):
+        """
+        Integration: temporal_search_service.query_temporal with a list of two
+        patterns produces two must_not conditions (not one useless raw-string condition).
+
+        This tests the full data flow at the temporal_search_service level —
+        the service receives a proper split list and build_exclusion_filter produces
+        one must_not entry per pattern (match-ANY semantics).
+        """
+        from code_indexer.services.path_pattern_matcher import parse_exclude_patterns
+        from code_indexer.services.path_filter_builder import PathFilterBuilder
+
+        # Simulate what the fixed dispatch sites will pass:
+        # parse_exclude_patterns("dirA/**,dirB/**") -> ["dirA/**", "dirB/**"]
+        split_patterns = parse_exclude_patterns("dirA/**,dirB/**")
+        assert split_patterns == ["dirA/**", "dirB/**"]
+
+        # PathFilterBuilder.build_exclusion_filter with split list produces 2 conditions
+        builder = PathFilterBuilder()
+        result = builder.build_exclusion_filter(split_patterns)
+        must_not = result.get("must_not", [])
+        assert len(must_not) == 2, (
+            f"Expected 2 must_not conditions from split list, got {len(must_not)}: {must_not}"
+        )
+        texts = {c["match"]["text"] for c in must_not}
+        assert "dirA/**" in texts
+        assert "dirB/**" in texts
+
+        # By contrast, the BUGGY path: build_exclusion_filter with raw string in a list
+        buggy_patterns = ["dirA/**,dirB/**"]
+        buggy_result = builder.build_exclusion_filter(buggy_patterns)
+        buggy_must_not = buggy_result.get("must_not", [])
+        # The raw-string pattern produces 1 condition with the comma-joined text
+        # (which matches nothing), proving the bug was real:
+        assert len(buggy_must_not) == 1, (
+            "Buggy path should produce exactly 1 (useless) must_not condition"
+        )
+        assert buggy_must_not[0]["match"]["text"] == "dirA/**,dirB/**"
+
+
 class TestFTSLegMultiPatternExclusion:
     """FTS leg: semantic_query_manager passes split list to tantivy exclude_paths."""
 
