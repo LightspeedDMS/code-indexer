@@ -1680,9 +1680,7 @@ class ActivatedRepoManager:
             if existing_ts is not None:
                 try:
                     last_dt = datetime.fromisoformat(existing_ts)
-                    age_seconds = (
-                        datetime.now(timezone.utc) - last_dt
-                    ).total_seconds()
+                    age_seconds = (datetime.now(timezone.utc) - last_dt).total_seconds()
                     if age_seconds < throttle_seconds:
                         return
                 except (ValueError, TypeError):

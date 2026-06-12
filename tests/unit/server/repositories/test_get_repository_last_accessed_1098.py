@@ -79,7 +79,9 @@ class TestGetRepositoryTouchParameter:
 
         assert result is not None
         assert "last_accessed" in result
-        assert len(save_calls) == 1, "Expected exactly one _save_metadata call with touch=True"
+        assert len(save_calls) == 1, (
+            "Expected exactly one _save_metadata call with touch=True"
+        )
         saved_meta = save_calls[0][2]
         assert "last_accessed" in saved_meta
 
@@ -125,7 +127,9 @@ class TestGetRepositoryTouchParameter:
         result = manager.get_repository(username, user_alias, touch=False)
 
         assert result is not None
-        assert len(save_calls) == 0, "Expected zero _save_metadata calls with touch=False"
+        assert len(save_calls) == 0, (
+            "Expected zero _save_metadata calls with touch=False"
+        )
         # last_accessed must not have been updated
         assert result.get("last_accessed") == old_ts
 
@@ -181,7 +185,9 @@ class TestTouchLastAccessed:
 
         manager.touch_last_accessed(username, user_alias)
 
-        assert len(save_calls) == 1, "Expected _save_metadata called once for fresh stamp"
+        assert len(save_calls) == 1, (
+            "Expected _save_metadata called once for fresh stamp"
+        )
         saved_meta = save_calls[0][2]
         assert "last_accessed" in saved_meta
 

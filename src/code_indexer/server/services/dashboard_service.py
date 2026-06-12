@@ -853,7 +853,9 @@ class DashboardService:
             if not activated_manager:
                 raise FileNotFoundError(f"Repository not found: {repo_alias}")
 
-            repo_info = activated_manager.get_repository(username, repo_alias, touch=False)
+            repo_info = activated_manager.get_repository(
+                username, repo_alias, touch=False
+            )
             if not repo_info:
                 raise FileNotFoundError(f"Repository not found: {repo_alias}")
 
