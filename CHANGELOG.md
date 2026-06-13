@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.126.0] - 2026-06-12
+
+### Fixed
+- **Bug #1102 (description refresh wrote change-relative language — descriptions must be timeless snapshots for RAG).** Staging fault-injection on v10.125.0 showed a refreshed description containing "Recent code also enforces form parser field and part-size limits..." — changelog voice leaking into the RAG corpus, caused by the `git log --since` change-scoping priming the model to narrate findings as recent changes. Added refinement rule 7 "TIMELESS SNAPSHOT VOICE" to `lifecycle_refresh_addendum.md` (bans temporal/change-relative phrasing — "recent", "newly", "previously", "no longer", "was added" — and mandates plain present-tense facts), reinforced the change-scoping paragraph (the window is a verification-budget tool only and must never surface in the output voice), and added the same timeless-snapshot instruction to the create-mode description guidance in `lifecycle_unified.md`. Prompt-content guard tests in `test_lifecycle_timeless_snapshot_1102.py` (mutation-verified: they fail when the rules are removed). The pre-#1094 historical pin test (`test_create_mode_matches_pre_1094_head_content`) was re-scoped to a pure git-history comparison so intentional prompt edits remain possible; the live create-mode no-drift invariant stays guarded by `test_create_mode_prompt_is_byte_identical_to_current_file`.
+
 ## [10.125.0] - 2026-06-12
 
 ### Fixed
