@@ -498,7 +498,11 @@ class DashboardService:
                 recent_jobs_data = job_tracker.get_recent_jobs(
                     limit=20,
                     time_filter=time_filter,
-                    exclude_operation_types=["xray_search", "xray_explore"],
+                    exclude_operation_types=[
+                        "xray_search",
+                        "xray_explore",
+                        "xray_search_batch",
+                    ],
                 )
             else:
                 # Story #541 AC5/AC6: Use time-filtered recent jobs with limit of 20
@@ -849,7 +853,9 @@ class DashboardService:
             if not activated_manager:
                 raise FileNotFoundError(f"Repository not found: {repo_alias}")
 
-            repo_info = activated_manager.get_repository(username, repo_alias)
+            repo_info = activated_manager.get_repository(
+                username, repo_alias, touch=False
+            )
             if not repo_info:
                 raise FileNotFoundError(f"Repository not found: {repo_alias}")
 

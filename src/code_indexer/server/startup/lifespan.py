@@ -351,6 +351,41 @@ def make_lifespan(
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Global xray cell concurrency limiter — shared by xray_search, xray_explore,
+        # and xray_search_batch cells. Sized from runtime xray_worker_threads config (default 4).
+        from code_indexer.server.services.resizable_limiter import (
+            ResizableLimiter as _ResizableLimiter,
+        )
+
+        try:
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_cfg,
+            )
+
+            _xray_cell_limit: int = (
+                _get_cfg().get_config().xray_config.xray_worker_threads
+            )  # type: ignore[union-attr]
+        except Exception as _exc:
+            _xray_cell_limit = 4  # safe default if config not yet available
+            logger.warning(
+                "xray_worker_threads config unavailable, defaulting cell limiter to %d: %s",
+                _xray_cell_limit,
+                _exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        _xray_cell_limiter = _ResizableLimiter(
+            initial=_xray_cell_limit, k_min=1, k_max=50
+        )
+        app.state.xray_cell_limiter = _xray_cell_limiter
+        from code_indexer.server.mcp.handlers.xray import set_xray_cell_limiter
+
+        set_xray_cell_limiter(_xray_cell_limiter)
+        logger.info(
+            "xray cell limiter started (limit=%d) — shared gate for all xray scan executions",
+            _xray_cell_limit,
+            extra={"correlation_id": get_correlation_id()},
+        )
+
         # Startup: Initialize SQLite database schema and run migrations (Story #702)
         logger.info(
             "Server startup: Initializing SQLite database schema",
@@ -1057,7 +1092,22 @@ def make_lifespan(
             server_config = config_service.get_config()
             db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")  # type: ignore[assignment]
 
-            # Create scheduler instance
+            # Bug #1100: select tracking_backend BEFORE constructing the scheduler so
+            # both the scheduler AND the hook use the SAME backend instance.
+            # In cluster/postgres mode: backend_registry.description_refresh_tracking (PG).
+            # In solo mode (backend_registry is None): node-local SQLite fallback.
+            # The scheduler's constructor SQLite fallback must NOT be relied upon in
+            # server mode — that caused the split-brain (hook -> PG, scheduler -> SQLite).
+            if backend_registry is not None:
+                tracking_backend = backend_registry.description_refresh_tracking
+            else:
+                from code_indexer.server.storage.sqlite_backends import (
+                    DescriptionRefreshTrackingBackend,
+                )
+
+                tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+
+            # Create scheduler instance — receives the registry-selected tracking_backend
             meta_dir = Path(golden_repos_dir) / "cidx-meta"
             description_refresh_scheduler = DescriptionRefreshScheduler(
                 db_path=db_path,
@@ -1071,6 +1121,7 @@ def make_lifespan(
                 ),
                 job_tracker=job_tracker,
                 mcp_registration_service=mcp_registration_service,
+                tracking_backend=tracking_backend,
                 golden_backend=(
                     backend_registry.golden_repo_metadata
                     if backend_registry is not None
@@ -1079,14 +1130,7 @@ def make_lifespan(
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove
-            if backend_registry is not None:
-                tracking_backend = backend_registry.description_refresh_tracking
-            else:
-                from code_indexer.server.storage.sqlite_backends import (
-                    DescriptionRefreshTrackingBackend,
-                )
-
-                tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+            # tracking_backend already selected above — same instance as scheduler uses.
             meta_description_hook.set_tracking_backend(tracking_backend)
             meta_description_hook.set_scheduler(description_refresh_scheduler)
 

@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union, cast
 from urllib.parse import quote, urlparse
 
 if TYPE_CHECKING:
@@ -2407,7 +2407,12 @@ def _get_golden_repo_branch_service():
         return None
 
 
-def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
+def generate_unique_alias(
+    repo_name: str,
+    golden_repo_manager,
+    *,
+    existing_aliases: Optional[Set[str]] = None,
+) -> str:
     """
     Generate unique alias from repository name.
 
@@ -2420,6 +2425,10 @@ def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
     Args:
         repo_name: Repository name (may include path components like org/project)
         golden_repo_manager: GoldenRepoManager instance to check for conflicts
+        existing_aliases: Optional pre-built set of existing aliases. When
+            provided, list_golden_repos() is NOT called — callers that process
+            many repos in a loop should hoist that call once and pass the result
+            here (Story #1092: batch-create fast path).
 
     Returns:
         Unique alias string (lowercase, special chars replaced with dashes)
@@ -2442,16 +2451,20 @@ def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
     if not base_alias:
         base_alias = "repo"
 
-    # Check for conflicts with existing golden repos
-    existing_repos = golden_repo_manager.list_golden_repos()
-    existing_aliases = {r["alias"] for r in existing_repos}
+    # Use pre-built set when provided (Story #1092: avoid N × list_golden_repos
+    # calls in batch operations), otherwise fall back to the live query.
+    if existing_aliases is None:
+        existing_repos = golden_repo_manager.list_golden_repos()
+        alias_set: Set[str] = {r["alias"] for r in existing_repos}
+    else:
+        alias_set = existing_aliases
 
-    if base_alias not in existing_aliases:
+    if base_alias not in alias_set:
         return base_alias
 
     # Add numeric suffix
     suffix = 2
-    while f"{base_alias}-{suffix}" in existing_aliases:
+    while f"{base_alias}-{suffix}" in alias_set:
         suffix += 1
 
     return f"{base_alias}-{suffix}"
@@ -2489,17 +2502,32 @@ def _batch_create_repos(
     """
     results = []
 
+    # Story #1092: Hoist the alias-conflict check to a single call before the
+    # loop so that a batch of N repos pays O(1) DB reads instead of O(N).
+    existing_repos = golden_repo_manager.list_golden_repos()
+    existing_aliases_set: Set[str] = {r["alias"] for r in existing_repos}
+
     for repo_data in repos:
         try:
-            # Generate unique alias from repo name
-            alias = generate_unique_alias(repo_data["alias"], golden_repo_manager)
+            # Generate unique alias from repo name using the pre-built set so
+            # we don't call list_golden_repos() once per repo (Story #1092).
+            alias = generate_unique_alias(
+                repo_data["alias"],
+                golden_repo_manager,
+                existing_aliases=existing_aliases_set,
+            )
+            # Register the newly chosen alias so later iterations in this batch
+            # don't collide with it.
+            existing_aliases_set.add(alias)
 
-            # Create golden repo
+            # Create golden repo — skip per-repo git network validation so
+            # the endpoint returns immediately with all job IDs (Story #1092).
             job_id = golden_repo_manager.add_golden_repo(
                 repo_url=repo_data["clone_url"],
                 alias=alias,
                 default_branch=repo_data.get("branch") or None,
                 submitter_username=submitter_username,
+                skip_pre_flight_git_validation=True,
             )
 
             results.append(
@@ -4047,7 +4075,7 @@ def repo_details(
 
     try:
         manager = _get_activated_repo_manager()
-        repo = manager.get_repository(username, user_alias)
+        repo = manager.get_repository(username, user_alias, touch=False)
 
         if not repo:
             raise HTTPException(

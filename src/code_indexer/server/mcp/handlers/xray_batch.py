@@ -212,6 +212,14 @@ def _resolve_repo_path(alias: str) -> Optional[str]:
     return cast(Optional[str], _resolve_golden_repo_path(alias))
 
 
+def _get_xray_cell_limiter() -> Any:
+    """Return the xray cell concurrency limiter from app.state, or None if not wired."""
+    app = getattr(_utils.app_module, "app", None)
+    if app is None:
+        return None
+    return getattr(getattr(app, "state", None), "xray_cell_limiter", None)
+
+
 def _await_job_result(
     bjm: Any, job_id: str, username: str, await_seconds: float
 ) -> Optional[Dict[str, Any]]:
@@ -313,7 +321,20 @@ def _run_xray_batch_job(
                 partial = True
                 continue
 
-            # Execute cell.
+            # Acquire global xray cell limiter slot before executing.
+            _limiter = _get_xray_cell_limiter()
+            _slot = False
+            if _limiter is not None:
+                remaining = deadline - time.monotonic()
+                _slot = _limiter.acquire(timeout=max(0.0, remaining))
+                if not _slot:
+                    timed_out = True
+                    partial = True
+                    outer_break = True
+                    break
+
+            # Execute cell — limiter slot held (if wired); release in finally.
+            _cell_exec_error = False
             try:
                 # Wire on_process_spawned so any Rust child process is
                 # tracked in bjm — mirrors the xray.py single-repo pattern.
@@ -347,6 +368,11 @@ def _run_xray_batch_job(
                     }
                 )
                 partial = True
+                _cell_exec_error = True
+            finally:
+                if _slot and _limiter is not None:
+                    _limiter.release()
+            if _cell_exec_error:
                 continue
 
             # Capture phase1_failed.

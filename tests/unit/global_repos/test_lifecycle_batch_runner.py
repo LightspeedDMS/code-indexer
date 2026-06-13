@@ -163,7 +163,7 @@ def _make_runner(
     job_tracker = _StubJobTracker(log=log)
     debouncer = _StubDebouncer(log=log)
 
-    def _noop_invoker(alias: str, repo_path: Path) -> UnifiedResult:
+    def _noop_invoker(alias: str, repo_path: Path, **_kwargs: object) -> UnifiedResult:
         return _VALID_RESULT
 
     runner = LifecycleBatchRunner(

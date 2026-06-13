@@ -209,11 +209,16 @@ class TestGoldenRepoAsyncOperations:
             # Verify it's callable
             assert callable(func)
 
-            # Verify it takes no arguments (wrapper pattern)
+            # Verify it can be called with no arguments (all params have defaults)
             import inspect
 
             sig = inspect.signature(func)
-            assert len(sig.parameters) == 0
+            assert all(
+                p.default is not inspect.Parameter.empty
+                for p in sig.parameters.values()
+            ), (
+                "background worker must be callable with zero arguments (all params optional)"
+            )
 
     def test_remove_golden_repo_background_worker_callable(
         self, manager_with_existing_repo
@@ -230,11 +235,15 @@ class TestGoldenRepoAsyncOperations:
         # Verify it's callable
         assert callable(func)
 
-        # Verify it takes no arguments (wrapper pattern)
+        # Verify it can be called with no arguments (all params have defaults)
         import inspect
 
         sig = inspect.signature(func)
-        assert len(sig.parameters) == 0
+        assert all(
+            p.default is not inspect.Parameter.empty for p in sig.parameters.values()
+        ), (
+            "background worker must be callable with zero arguments (all params optional)"
+        )
 
     # Test Anti-Fallback Rule compliance (MESSI Rule 2)
     def test_remove_golden_repo_cleanup_failure_raises_exception(
@@ -360,3 +369,166 @@ class TestGoldenRepoAsyncOperations:
             manager_with_existing_repo.background_job_manager.submit_job.call_args[1]
         )
         assert call_kwargs["submitter_username"] == "admin"
+
+    # Bug #1086 regression: cascade must delete global_repos and activated_repos rows
+    def test_remove_golden_repo_cascade_deletes_global_and_activated_rows(
+        self, temp_data_dir
+    ):
+        """Regression test for Bug #1086.
+
+        After remove_golden_repo background worker completes:
+        - global_repos table must have zero rows for <alias>-global
+        - activated_repos metadata file must be deleted
+
+        Verifies the cascade logic in background_worker actually reaches the
+        GlobalActivator.deactivate_golden_repo() call and the
+        ActivatedRepoManager._do_deactivate_repository() call.
+        """
+        import json
+        import sqlite3
+
+        from src.code_indexer.server.repositories.golden_repo_manager import (
+            GoldenRepo,
+            GoldenRepoManager,
+        )
+        from src.code_indexer.server.repositories.activated_repo_manager import (
+            ActivatedRepoManager,
+        )
+        from src.code_indexer.server.storage.sqlite_backends import (
+            GlobalReposSqliteBackend,
+        )
+
+        alias = "click"
+        global_alias = f"{alias}-global"
+        username = "testuser"
+
+        # --- Set up GoldenRepoManager with real (non-mocked) submit_job ---
+        grm = GoldenRepoManager(data_dir=temp_data_dir)
+
+        # BackgroundJobManager.submit_job runs the func synchronously in a
+        # captured call so we can control execution from the test.
+        captured_funcs: list = []
+
+        from unittest.mock import MagicMock
+
+        mock_bjm = MagicMock()
+
+        def _capture_func(**kwargs: object) -> str:
+            captured_funcs.append(kwargs["func"])
+            return "test-job-id"
+
+        mock_bjm.submit_job.side_effect = _capture_func
+        grm.background_job_manager = mock_bjm
+
+        # --- Register golden repo in golden_repos_metadata (SQLite) ---
+        from datetime import datetime, timezone
+
+        clone_path = os.path.join(grm.golden_repos_dir, alias)
+        os.makedirs(clone_path, exist_ok=True)
+        golden_repo = GoldenRepo(
+            alias=alias,
+            repo_url="https://github.com/pallets/click.git",
+            default_branch="main",
+            clone_path=clone_path,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            enable_temporal=False,
+            temporal_options=None,
+        )
+        grm.golden_repos[alias] = golden_repo
+        grm._sqlite_backend.add_repo(
+            alias=golden_repo.alias,
+            repo_url=golden_repo.repo_url,
+            default_branch=golden_repo.default_branch,
+            clone_path=golden_repo.clone_path,
+            created_at=golden_repo.created_at,
+            enable_temporal=golden_repo.enable_temporal,
+            temporal_options=golden_repo.temporal_options,
+        )
+
+        # --- Register in global_repos table (same db_path) ---
+        db_path = os.path.join(temp_data_dir, "cidx_server.db")
+        # Initialize the full DB schema so global_repos table exists
+        from src.code_indexer.server.storage.database_manager import DatabaseSchema
+
+        DatabaseSchema(db_path).initialize_database()
+        global_backend = GlobalReposSqliteBackend(db_path)
+        global_backend.register_repo(
+            alias_name=global_alias,
+            repo_name=alias,
+            repo_url="https://github.com/pallets/click.git",
+            index_path=clone_path,
+        )
+
+        # Verify global_repos row exists before removal
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT alias_name FROM global_repos WHERE alias_name = ?",
+                (global_alias,),
+            ).fetchall()
+        assert len(rows) == 1, "Pre-condition: global_repos row must exist before test"
+
+        # --- Create activated_repos metadata file for a user ---
+        arm = ActivatedRepoManager(
+            data_dir=temp_data_dir,
+            golden_repo_manager=grm,
+        )
+        grm.activated_repo_manager = arm
+
+        user_dir = os.path.join(arm.activated_repos_dir, username)
+        os.makedirs(user_dir, exist_ok=True)
+        # Create the actual repo directory; _list_user_repos_fs checks os.path.exists(repo_dir)
+        # to decide whether to include the entry, so without this the cascade never fires.
+        actual_repo_dir = os.path.join(user_dir, alias)
+        os.makedirs(actual_repo_dir, exist_ok=True)
+        metadata_path = os.path.join(user_dir, f"{alias}_metadata.json")
+        metadata = {
+            "user_alias": alias,
+            "username": username,
+            "golden_repo_alias": alias,
+            "path": os.path.join(arm.activated_repos_dir, username, alias),
+            "current_branch": "main",
+            "activated_at": datetime.now(timezone.utc).isoformat(),
+            "last_accessed": datetime.now(timezone.utc).isoformat(),
+            "is_composite": False,
+        }
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f)
+
+        # Verify metadata file exists before removal
+        assert os.path.exists(metadata_path), (
+            "Pre-condition: activated_repos metadata file must exist before test"
+        )
+
+        # Also create the aliases dir entry that GlobalActivator.deactivate_golden_repo
+        # expects (AliasManager.delete_alias is tolerant of missing files, but create
+        # it to mirror a fully-activated state)
+        aliases_dir = os.path.join(grm.golden_repos_dir, "aliases")
+        os.makedirs(aliases_dir, exist_ok=True)
+        alias_file = os.path.join(aliases_dir, f"{global_alias}.json")
+        with open(alias_file, "w") as f:
+            json.dump({"alias_name": global_alias, "target_path": clone_path}, f)
+
+        # --- Call remove_golden_repo (captures background worker) ---
+        grm.remove_golden_repo(alias)
+        assert len(captured_funcs) == 1, "Expected exactly one background worker"
+
+        # --- Execute the background worker synchronously ---
+        result = captured_funcs[0]()
+
+        # --- Assertions ---
+        assert result["success"] is True, f"Worker returned failure: {result}"
+
+        # Bug #1086: global_repos row must be gone
+        with sqlite3.connect(db_path) as conn:
+            rows_after = conn.execute(
+                "SELECT alias_name FROM global_repos WHERE alias_name = ?",
+                (global_alias,),
+            ).fetchall()
+        assert len(rows_after) == 0, (
+            f"Bug #1086: global_repos still has row for '{global_alias}' after removal"
+        )
+
+        # Bug #1086: activated_repos metadata file must be gone
+        assert not os.path.exists(metadata_path), (
+            f"Bug #1086: activated_repos metadata file still exists at {metadata_path}"
+        )

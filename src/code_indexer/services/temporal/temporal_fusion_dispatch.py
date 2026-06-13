@@ -31,6 +31,7 @@ from .temporal_health import (
     record_temporal_success,
     record_temporal_failure,
 )
+from ..path_pattern_matcher import parse_exclude_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,7 @@ def _query_single_provider(
             path_filter=path_filter,
             language=[language] if language else None,
             exclude_language=[exclude_language] if exclude_language else None,
-            exclude_path=[exclude_path] if exclude_path else None,
+            exclude_path=parse_exclude_patterns(exclude_path) or None,
             diff_types=diff_types,
             author=author,
             chunk_type=chunk_type,
@@ -333,7 +334,7 @@ def _query_multi_provider_fusion(
             path_filter=path_filter,
             language=[language] if language else None,
             exclude_language=[exclude_language] if exclude_language else None,
-            exclude_path=[exclude_path] if exclude_path else None,
+            exclude_path=parse_exclude_patterns(exclude_path) or None,
             diff_types=diff_types,
             author=author,
             chunk_type=chunk_type,

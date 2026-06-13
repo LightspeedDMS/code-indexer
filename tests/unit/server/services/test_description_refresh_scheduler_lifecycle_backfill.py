@@ -439,7 +439,7 @@ class TestRunLifecycleBackfillAsync:
         def capture_register(**kwargs):
             captured_job_id.append(kwargs.get("job_id"))
 
-        mock_job_tracker.register_job.side_effect = capture_register
+        mock_job_tracker.register_job_if_no_conflict.side_effect = capture_register
 
         with patch(f"{SCHEDULER_MODULE}.LifecycleBatchRunner") as mock_runner_cls:
             mock_runner = MagicMock()
@@ -447,9 +447,9 @@ class TestRunLifecycleBackfillAsync:
 
             sched._run_lifecycle_backfill_async(["x", "y"])
 
-        # 1. register_job called once
-        mock_job_tracker.register_job.assert_called_once()
-        call_kwargs = mock_job_tracker.register_job.call_args[1]
+        # 1. register_job_if_no_conflict called once (atomic duplicate-safe registration)
+        mock_job_tracker.register_job_if_no_conflict.assert_called_once()
+        call_kwargs = mock_job_tracker.register_job_if_no_conflict.call_args[1]
 
         assert call_kwargs.get("operation_type") == "lifecycle_backfill"
         assert call_kwargs.get("username") == "system"
@@ -487,7 +487,9 @@ class TestRunLifecycleBackfillAsync:
         _wire_all(sched)
 
         mock_job_tracker = MagicMock()
-        mock_job_tracker.register_job.side_effect = RuntimeError("simulated")
+        mock_job_tracker.register_job_if_no_conflict.side_effect = RuntimeError(
+            "simulated"
+        )
         sched._job_tracker = mock_job_tracker
         sched._tracking_backend = MagicMock()
 
@@ -498,7 +500,7 @@ class TestRunLifecycleBackfillAsync:
             with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
                 sched._run_lifecycle_backfill_async(["a", "b"])
 
-        mock_job_tracker.register_job.assert_called_once()
+        mock_job_tracker.register_job_if_no_conflict.assert_called_once()
         mock_runner_cls.assert_not_called()
         mock_runner.run.assert_not_called()
         error_messages = [

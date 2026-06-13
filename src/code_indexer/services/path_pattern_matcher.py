@@ -11,7 +11,38 @@ Provides glob-style pattern matching with cross-platform support:
 
 import pathspec
 from pathlib import PurePosixPath
-from typing import List
+from typing import List, Optional
+
+
+def parse_exclude_patterns(exclude_path: Optional[str]) -> List[str]:
+    """
+    Split a comma-separated exclude_path string into independent glob patterns.
+
+    This is the single source of truth for parsing the exclude_path parameter.
+    Both the semantic leg and the FTS leg must call this before applying exclusions.
+
+    Args:
+        exclude_path: Raw exclude_path string (may be None, empty, single pattern,
+            or comma-separated patterns).  Whitespace around each pattern is stripped.
+            Empty fragments (from leading/trailing/double commas) are dropped.
+
+    Returns:
+        List of non-empty, trimmed pattern strings.  Returns [] for None, empty,
+        or whitespace-only input.
+
+    Examples:
+        >>> parse_exclude_patterns(None)
+        []
+        >>> parse_exclude_patterns("**/node_modules/**")
+        ['**/node_modules/**']
+        >>> parse_exclude_patterns("code/dir-a/**,code/dir-b/**")
+        ['code/dir-a/**', 'code/dir-b/**']
+        >>> parse_exclude_patterns("  *.min.js , **/vendor/**  ")
+        ['*.min.js', '**/vendor/**']
+    """
+    if not exclude_path or not exclude_path.strip():
+        return []
+    return [p.strip() for p in exclude_path.split(",") if p.strip()]
 
 
 class PathPatternMatcher:

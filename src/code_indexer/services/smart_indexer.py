@@ -1832,15 +1832,27 @@ class SmartIndexer(HighThroughputProcessor):
             pass
 
         # Stale-prefix case: re-anchor by matching the codebase leaf name.
+        # Scan FORWARD so that when the leaf appears more than once (bug #1087,
+        # e.g. golden-repos/fastapi/tests/fastapi/conftest.py) we try each
+        # candidate in order and return the first one that exists on disk.
+        # When no candidate exists (e.g. synthetic paths in tests, or the file
+        # was genuinely deleted) we fall back to the FIRST match found, which
+        # preserves the single-occurrence behavior that callers relied on before.
         leaf = codebase_dir.name
         parts = candidate.parts
-        for index in range(len(parts) - 1, -1, -1):
+        first_match: Optional[Path] = None
+        for index in range(len(parts)):
             if parts[index] == leaf:
                 tail = parts[index + 1 :]
-                return codebase_dir.joinpath(*tail) if tail else codebase_dir
+                anchored = codebase_dir.joinpath(*tail) if tail else codebase_dir
+                if anchored.exists():
+                    return anchored
+                if first_match is None:
+                    first_match = anchored
 
-        # No leaf match -> return unchanged; let .exists()/relative_to surface.
-        return candidate
+        # Return the first (shallowest) match if any were found; otherwise
+        # return unchanged so downstream .exists()/.relative_to can surface it.
+        return first_match if first_match is not None else candidate
 
     def _do_resume_interrupted(
         self,
