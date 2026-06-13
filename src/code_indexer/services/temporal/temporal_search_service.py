@@ -438,7 +438,7 @@ class TemporalSearchService:
             query_embedding = coalesced_query_embedding(
                 self.embedding_provider,
                 query,
-                embedding_purpose=None,
+                embedding_purpose="query",
             )
             raw_results = self.vector_store_client.search(
                 query_vector=query_embedding,

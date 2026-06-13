@@ -95,7 +95,11 @@ class FakeVoyageProvider:
         return self._token_limit
 
     def get_embeddings_batch(
-        self, texts: List[str], *, retry: bool = True
+        self,
+        texts: List[str],
+        *,
+        retry: bool = True,
+        embedding_purpose: str = "document",
     ) -> List[List[float]]:
         with self._lock:
             idx = self.call_count

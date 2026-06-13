@@ -162,5 +162,10 @@ def coalesced_query_embedding(
         return _direct()
 
     # Path 3: coalesce. submit() blocks until this text's vector is ready.
+    # Pass embedding_purpose so the coalesced path carries it through do_call()
+    # -> get_embeddings_batch(embedding_purpose=...) — Story #1104 bug fix.
     logger.debug("coalesced_query_embedding: coalescing on lane=%s", lane)
-    return cast(List[float], coalescer.submit(text))
+    return cast(
+        List[float],
+        coalescer.submit(text, embedding_purpose=embedding_purpose or "query"),
+    )

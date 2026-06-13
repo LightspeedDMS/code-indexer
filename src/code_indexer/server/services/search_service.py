@@ -494,7 +494,7 @@ class SemanticSearchService:
                 query_embedding = coalesced_query_embedding(
                     embedding_service,
                     query,
-                    embedding_purpose=None,
+                    embedding_purpose="query",
                 )
                 search_results = vector_store_client.search(
                     query_vector=query_embedding,
