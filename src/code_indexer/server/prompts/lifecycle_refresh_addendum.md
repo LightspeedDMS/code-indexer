@@ -43,13 +43,26 @@ than the existing one.
    term into the RAG corpus and pollutes semantic search with noise. Simply
    omit the fabricated claim as if it had never appeared.
 
+7. **TIMELESS SNAPSHOT VOICE.** The description is a timeless snapshot of what
+   the code IS — never a changelog of how it got there. Temporal and
+   change-relative phrasing is BANNED: never write "recent", "recently",
+   "now", "newly", "previously", "no longer", "formerly", "used to", "as of",
+   "was added", or "has been added/removed/changed". When a change-scoped
+   finding is worth describing, state it as a plain present-tense fact
+   ("Starlette enforces form parser field and part-size limits"), never as a
+   change ("Recent code also enforces..."). A reader of the description must
+   not be able to tell it was produced by a refresh.
+
 **Change-scoping (focus your verification budget):**
 
 Run `git log --since="{{LAST_ANALYZED}}" --stat` to see what changed since the
 last analysis, and concentrate your re-verification on those areas. Parts of the
 codebase untouched since {{LAST_ANALYZED}} are very likely still described
 correctly — do not spend budget re-deriving them, and do not drop their existing
-description content.
+description content. This change window exists ONLY to focus your verification
+budget — it must NEVER surface in the description's output voice: do not
+reference the window, the last analysis, or describe anything as recent or
+changed (see rule 7).
 
 **Audience and depth calibration (this is RAG content):**
 

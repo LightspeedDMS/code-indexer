@@ -151,9 +151,18 @@ def test_create_mode_prompt_is_byte_identical_to_current_file(
     assert rendered == expected_create
 
 
-def test_create_mode_matches_pre_1094_head_content(invoker, repo_dir: Path) -> None:
-    """The create-mode render must be byte-identical to the lifecycle_unified.md
-    as it existed BEFORE the {{REFRESH_SECTION}} placeholder was added.
+def test_create_mode_matches_pre_1094_head_content() -> None:
+    """Historical invariant: the commit that introduced {{REFRESH_SECTION}} did
+    not alter create-mode prompt content.
+
+    Concretely: stripping the placeholder from the file AT the
+    placeholder-introducing commit must reproduce the file content from its
+    parent commit exactly.
+
+    This is a pure git-history assertion — it never touches the live file, so
+    later intentional prompt edits (e.g. #1102 timeless-snapshot rule) do not
+    break it.  The live no-drift invariant is covered separately by
+    test_create_mode_prompt_is_byte_identical_to_current_file.
     """
     repo_root = str(Path(__file__).resolve().parents[3])
     rel_prompt = "src/code_indexer/server/prompts/lifecycle_unified.md"
@@ -179,23 +188,28 @@ def test_create_mode_matches_pre_1094_head_content(invoker, repo_dir: Path) -> N
         )
         if not sha:
             pytest.skip("placeholder-introducing commit not found in history")
-        # Oldest such commit is the last line; read its parent's version.
-        parent_rev = f"{sha[-1]}~1:{rel_prompt}"
+        # Oldest such commit is the last line.
+        introducing_commit = sha[-1]
+        # Parent revision: content before the placeholder was added.
+        parent_rev = f"{introducing_commit}~1:{rel_prompt}"
         orig = subprocess.check_output(
             ["git", "show", parent_rev],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8")
+        # Content AT the introducing commit (contains the placeholder).
+        at_commit = subprocess.check_output(
+            ["git", "show", f"{introducing_commit}:{rel_prompt}"],
             cwd=repo_root,
             stderr=subprocess.DEVNULL,
         ).decode("utf-8")
     except subprocess.CalledProcessError:
         pytest.skip("pre-placeholder revision not reachable in this checkout")
 
-    rendered = _capture_dispatched_prompt(
-        lambda **kw: invoker("my-repo", repo_dir, **kw),
-        existing_description=None,
-        last_analyzed=None,
-        repo_path=repo_dir,
-    )
-    assert rendered == orig
+    # Stripping the placeholder from the introducing commit must reproduce the
+    # pre-placeholder content exactly — i.e. the #1094 commit only added the
+    # placeholder line and changed nothing else in create-mode content.
+    assert at_commit.replace("{{REFRESH_SECTION}}\n\n", "", 1) == orig
 
 
 # ---------------------------------------------------------------------------
