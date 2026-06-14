@@ -798,6 +798,201 @@ class TestValueFlowRunMemoryRetrieval:
         )
 
 
+# ---------------------------------------------------------------------------
+# ENTRY-POINT VALUE-FLOW TESTS (Story #1108 S4 gap fix)
+# These tests drive the REAL entry points (_execute_temporal_query and
+# _search_temporal_sync) with a spy on execute_temporal_query_with_fusion.
+# The prior TestValueFlowTemporalDispatch tests drove leaf functions directly
+# and missed the entry-vs-leaf drop.
+# ---------------------------------------------------------------------------
+
+
+class TestTemporalEntryPointValueFlow:
+    """Prove that no_embedding_cache_shortcut=True reaches execute_temporal_query_with_fusion
+    when called from the REAL entry points, not just the leaf dispatch functions."""
+
+    def _make_fusion_results(self):
+        """Return a minimal TemporalSearchResults stub."""
+        from code_indexer.services.temporal.temporal_search_service import (
+            TemporalSearchResults,
+        )
+
+        return TemporalSearchResults(
+            results=[],
+            query="find auth",
+            filter_type="none",
+            filter_value=None,
+        )
+
+    def test_execute_temporal_query_forwards_flag(self, monkeypatch, tmp_path):
+        """_execute_temporal_query (SemanticQueryManager) must pass
+        no_embedding_cache_shortcut=True to execute_temporal_query_with_fusion
+        when a temporal param (e.g. time_range_all=True) is present.
+
+        Entry point: _execute_temporal_query
+        Spy on: execute_temporal_query_with_fusion (the immediate callee)
+        """
+        import code_indexer.server.query.semantic_query_manager as sqm_mod
+        import code_indexer.services.temporal.temporal_fusion_dispatch as dispatch_mod
+
+        captured: list = []
+        fake_results = self._make_fusion_results()
+
+        def _spy_fusion(*, no_embedding_cache_shortcut=False, **kw):
+            captured.append(no_embedding_cache_shortcut)
+            return fake_results
+
+        # Patch where _execute_temporal_query imports it (inside the function body)
+        monkeypatch.setattr(
+            dispatch_mod, "execute_temporal_query_with_fusion", _spy_fusion
+        )
+
+        # We also need to patch the local import inside the function; the function does:
+        #   from ...services.temporal.temporal_fusion_dispatch import execute_temporal_query_with_fusion
+        # So we need to patch the module-level name there too.
+
+        # Stub ConfigManager and BackendFactory so _execute_temporal_query doesn't
+        # hit the filesystem
+        import code_indexer.proxy.config_manager as config_mod
+        import code_indexer.backends.backend_factory as backend_mod
+
+        class _FakeConfig:
+            voyage_ai = type("V", (), {"api_key": "k", "model": "voyage-code-3"})()
+            cohere = None
+
+        class _FakeCM:
+            @classmethod
+            def create_with_backtrack(cls, p):
+                return cls()
+
+            def get_config(self):
+                return _FakeConfig()
+
+        monkeypatch.setattr(config_mod, "ConfigManager", _FakeCM)
+
+        class _FakeVS:
+            project_root = str(tmp_path)
+
+        class _FakeBackend:
+            def get_vector_store_client(self):
+                return _FakeVS()
+
+        class _FakeFactory:
+            @staticmethod
+            def create(config, project_root, hnsw_cache=None):
+                return _FakeBackend()
+
+        monkeypatch.setattr(backend_mod, "BackendFactory", _FakeFactory)
+
+        # Stub _server_hnsw_cache in app module
+        import code_indexer.server.app as app_mod
+
+        monkeypatch.setattr(app_mod, "_server_hnsw_cache", None, raising=False)
+
+        # Build a SemanticQueryManager with minimal stubs
+        manager = sqm_mod.SemanticQueryManager.__new__(sqm_mod.SemanticQueryManager)
+        manager.max_results_per_query = 50
+        manager.logger = logging.getLogger("test.sqm")
+
+        # Call the entry point directly with time_range_all=True (triggers temporal path)
+        # and no_embedding_cache_shortcut=True
+        manager._execute_temporal_query(
+            repo_path=tmp_path,
+            repository_alias="myrepo",
+            query_text="find auth",
+            limit=5,
+            min_score=None,
+            time_range=None,
+            time_range_all=True,
+            no_embedding_cache_shortcut=True,
+        )
+
+        assert captured, (
+            "execute_temporal_query_with_fusion was never called from _execute_temporal_query"
+        )
+        assert captured[0] is True, (
+            f"no_embedding_cache_shortcut=True must reach execute_temporal_query_with_fusion "
+            f"via _execute_temporal_query, but captured: {captured}"
+        )
+
+    def test_search_temporal_sync_forwards_flag(self, monkeypatch, tmp_path):
+        """MultiSearchService._search_temporal_sync must pass
+        no_embedding_cache_shortcut=True from request to execute_temporal_query_with_fusion.
+
+        Entry point: _search_temporal_sync
+        Spy on: execute_temporal_query_with_fusion
+        """
+        import code_indexer.server.multi.multi_search_service as mss_mod
+        import code_indexer.services.temporal.temporal_fusion_dispatch as dispatch_mod
+
+        captured: list = []
+        fake_results = self._make_fusion_results()
+
+        def _spy_fusion(*, no_embedding_cache_shortcut=False, **kw):
+            captured.append(no_embedding_cache_shortcut)
+            return fake_results
+
+        monkeypatch.setattr(
+            dispatch_mod, "execute_temporal_query_with_fusion", _spy_fusion
+        )
+
+        # Stub ConfigManager and FilesystemVectorStore
+        import code_indexer.config as config_mod2
+        import code_indexer.storage.filesystem_vector_store as fvs_mod
+
+        class _FakeConfig:
+            pass
+
+        class _FakeCM:
+            @classmethod
+            def create_with_backtrack(cls, p):
+                return cls()
+
+            def get_config(self):
+                return _FakeConfig()
+
+        monkeypatch.setattr(config_mod2, "ConfigManager", _FakeCM)
+
+        class _FakeVS:
+            project_root = str(tmp_path)
+
+        monkeypatch.setattr(fvs_mod, "FilesystemVectorStore", lambda **kw: _FakeVS())
+
+        # Build a MultiSearchService with minimal stubs
+        service = mss_mod.MultiSearchService.__new__(mss_mod.MultiSearchService)
+
+        class _FakeMSSConfig:
+            max_results_per_repo = 50
+
+        service.config = _FakeMSSConfig()
+
+        def _fake_get_repo_path(repo_id):
+            return str(tmp_path)
+
+        service._get_repository_path = _fake_get_repo_path
+
+        # Build a MultiSearchRequest with no_embedding_cache_shortcut=True
+        from code_indexer.server.multi.models import MultiSearchRequest
+
+        request = MultiSearchRequest(
+            repositories=["myrepo"],
+            query="find auth",
+            search_type="temporal",
+            limit=5,
+            no_embedding_cache_shortcut=True,
+        )
+
+        service._search_temporal_sync("myrepo", request)
+
+        assert captured, (
+            "execute_temporal_query_with_fusion was never called from _search_temporal_sync"
+        )
+        assert captured[0] is True, (
+            f"no_embedding_cache_shortcut=True must reach execute_temporal_query_with_fusion "
+            f"via _search_temporal_sync, but captured: {captured}"
+        )
+
+
 class TestValueFlowTemporalDispatch:
     """Value-flow tests: temporal dispatch layer must forward no_embedding_cache_shortcut
     into query_temporal() for both single-provider and multi-provider paths.

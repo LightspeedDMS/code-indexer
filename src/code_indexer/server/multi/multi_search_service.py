@@ -469,6 +469,8 @@ class MultiSearchService:
                 limit=min(request.limit, self.config.max_results_per_repo),
                 language=request.language,
                 file_path_filter=request.path_filter,
+                # Story #1108 (S4): forward per-request cache bypass flag
+                no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
             )
 
             # If no temporal index found, raise to match original behavior

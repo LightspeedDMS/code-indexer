@@ -1552,6 +1552,8 @@ class SemanticQueryManager:
                     diff_type=diff_type,
                     author=author,
                     chunk_type=chunk_type,
+                    # Story #1108 (S4): forward per-request cache bypass flag
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -2079,6 +2081,8 @@ class SemanticQueryManager:
         diff_type: Optional[Union[str, List[str]]] = None,
         author: Optional[str] = None,
         chunk_type: Optional[str] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -2170,6 +2174,8 @@ class SemanticQueryManager:
                 diff_types=diff_types_list,
                 author=author,
                 chunk_type=chunk_type,
+                # Story #1108 (S4): forward per-request cache bypass flag
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
 
             # If fusion dispatch found no temporal index, fall back gracefully
