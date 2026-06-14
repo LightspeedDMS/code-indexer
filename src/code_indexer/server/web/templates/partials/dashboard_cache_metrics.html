@@ -38,3 +38,28 @@
     </div>
     <footer><small>median cos(cached, live) in shadow mode</small></footer>
 </article>
+{% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
+<article class="stat-card">
+    <header><h3>Audit Samples</h3></header>
+    <div class="stat-value">{{ cache_metrics.audit_total }}</div>
+    <footer><small>deep-fidelity audits run</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Audit Top-1 Match</h3></header>
+    <div class="stat-value">
+        {{ "%.1f"|format(cache_metrics.audit_top1_matches / cache_metrics.audit_total * 100) }}%
+    </div>
+    <footer><small>cached top-1 == live top-1 rate</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Audit Avg Top-10 Overlap</h3></header>
+    <div class="stat-value">
+        {% if cache_metrics.audit_overlap_avg is not none %}
+            {{ "%.2f"|format(cache_metrics.audit_overlap_avg) }}
+        {% else %}
+            --
+        {% endif %}
+    </div>
+    <footer><small>avg |primary ∩ second| / k across audits</small></footer>
+</article>
+{% endif %}

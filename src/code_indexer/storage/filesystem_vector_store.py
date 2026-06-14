@@ -28,6 +28,24 @@ from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
 
+# Story #1110 (S6 Chunk B): module-level lazy references so tests can patch them
+# at `code_indexer.storage.filesystem_vector_store.*`.  Both are server-only; the
+# CLI path never enters the `if parallel_executor is not None` branch with these
+# imported, so ImportError is only expected in stripped unit-test environments.
+try:
+    from code_indexer.server.services.governed_call import (
+        coalesced_query_embedding,
+    )
+except ImportError:  # pragma: no cover
+    coalesced_query_embedding = None  # type: ignore[assignment]
+
+try:
+    from code_indexer.server.services.embedding_cache_audit import (
+        _run_deep_fidelity_audit,
+    )
+except ImportError:  # pragma: no cover
+    _run_deep_fidelity_audit = None  # type: ignore[assignment]
+
 # Minimum and default timeout (seconds) for git subprocess calls.
 # GIT_TIMEOUT_SECONDS env var overrides the default; values below the minimum are clamped.
 _DEFAULT_GIT_TIMEOUT_SECONDS = 5
@@ -2502,19 +2520,21 @@ class FilesystemVectorStore:
             Bug #1078: the HTTP call is gated through the concurrency governor so
             at most K concurrent serving-path embedding requests reach VoyageAI/Cohere.
             The HNSW-load worker (load_index) runs freely — it makes no provider calls.
-            """
-            from code_indexer.server.services.governed_call import (
-                coalesced_query_embedding,
-            )
 
+            Story #1110 (S6 Chunk B): allocate _audit_ctx dict and thread it into
+            coalesced_query_embedding.  On a sampled cache hit the function populates
+            the dict in-place; the 3-tuple return carries it back to search().
+            """
+            _audit_ctx: Dict[str, Any] = {}
             t0 = time.time()
             embedding = coalesced_query_embedding(
                 embedding_provider,
                 query,
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                audit_ctx=_audit_ctx,
             )
             embedding_time_ms = (time.time() - t0) * 1000
-            return embedding, embedding_time_ms
+            return embedding, embedding_time_ms, _audit_ctx
 
         # Execute both operations in parallel.
         #
@@ -2537,7 +2557,7 @@ class FilesystemVectorStore:
             # .result() re-raises any sub-task exception in the caller's thread —
             # identical exception propagation to the `with` form below.
             hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
-            query_vector, embedding_ms = embedding_future.result()
+            query_vector, embedding_ms, audit_ctx = embedding_future.result()
         else:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 # Submit both tasks
@@ -2546,7 +2566,7 @@ class FilesystemVectorStore:
 
                 # Wait for both to complete and gather results
                 hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
-                query_vector, embedding_ms = embedding_future.result()
+                query_vector, embedding_ms, audit_ctx = embedding_future.result()
 
         # Calculate actual parallel execution time (wall clock)
         parallel_load_ms = (time.time() - parallel_start) * 1000
@@ -2597,6 +2617,25 @@ class FilesystemVectorStore:
             ef=ef,  # HNSW query parameter - passed from search method
         )
         timing["hnsw_search_ms"] = (time.time() - t0) * 1000
+
+        # Story #1110 (S6 Chunk B): deep-fidelity audit hook (fail-open).
+        # Fires only when the coalesced embedding path sampled this request.
+        # _run_deep_fidelity_audit is already fail-open internally; we also
+        # guard externally so a bug in the import or the call never breaks search.
+        if audit_ctx.get("sampled") and _run_deep_fidelity_audit is not None:
+            try:
+                _run_deep_fidelity_audit(
+                    audit_ctx=audit_ctx,
+                    hnsw_index=hnsw_index,
+                    hnsw_manager=hnsw_manager,
+                    collection_path=collection_path,
+                    ef=ef,
+                    primary_candidate_ids=candidate_ids,
+                    embedding_provider=embedding_provider,
+                    query=query,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # fail-open: audit never breaks primary search
 
         # ID index already loaded in parallel section
         # Re-acquire lock for thread-safe reference assignment

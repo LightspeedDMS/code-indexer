@@ -569,7 +569,14 @@ class TestCoalescedEmbeddingPassesMetrics:
         captured_metrics: List = []
 
         def fake_serve_with_cache(
-            cache, provider_name, cache_key, qualifier, live_fn, *, metrics=None
+            cache,
+            provider_name,
+            cache_key,
+            qualifier,
+            live_fn,
+            *,
+            metrics=None,
+            audit_ctx=None,
         ):
             captured_metrics.append(metrics)
             return [0.1, 0.2, 0.3]
@@ -608,7 +615,14 @@ class TestCoalescedEmbeddingPassesMetrics:
         captured_metrics: List = []
 
         def fake_serve_with_cache(
-            cache, provider_name, cache_key, qualifier, live_fn, *, metrics=None
+            cache,
+            provider_name,
+            cache_key,
+            qualifier,
+            live_fn,
+            *,
+            metrics=None,
+            audit_ctx=None,
         ):
             captured_metrics.append(metrics)
             return [0.5, 0.5]

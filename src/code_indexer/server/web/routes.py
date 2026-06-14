@@ -840,6 +840,9 @@ def dashboard_cache_metrics_partial(request: Request):
     on_hits = 0
     on_requests = 0
     shadow_cosine_p50 = None
+    audit_total = 0
+    audit_top1_matches = 0
+    audit_overlap_avg = None
 
     if _metrics is not None:
         try:
@@ -851,6 +854,9 @@ def dashboard_cache_metrics_partial(request: Request):
             on_hits = _on.get("hits", 0)
             on_requests = on_hits + _on.get("misses", 0)
             shadow_cosine_p50 = snap.get("shadow_cosine_p50")
+            audit_total = snap.get("audit_total", 0) or 0
+            audit_top1_matches = snap.get("audit_top1_matches", 0) or 0
+            audit_overlap_avg = snap.get("audit_overlap_avg")
         except Exception as _exc:
             logger.warning(
                 "dashboard_cache_metrics_partial: snapshot() failed: %s", _exc
@@ -863,6 +869,9 @@ def dashboard_cache_metrics_partial(request: Request):
         on_hits=on_hits,
         on_requests=on_requests,
         shadow_cosine_p50=shadow_cosine_p50,
+        audit_total=audit_total,
+        audit_top1_matches=audit_top1_matches,
+        audit_overlap_avg=audit_overlap_avg,
     )
 
     return templates.TemplateResponse(

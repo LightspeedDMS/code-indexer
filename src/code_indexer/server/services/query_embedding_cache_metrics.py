@@ -41,6 +41,10 @@ _METRIC_MISSES = "cidx.cache.embedding.misses"
 _METRIC_TOTAL_ENTRIES = "cidx.cache.embedding.total_entries"
 _METRIC_SHADOW_COSINE = "cidx.cache.embedding.shadow_cosine"
 
+# Story #1110 (S6): deep-fidelity audit metrics
+_METRIC_AUDIT_OVERLAP = "cidx.cache.embedding.audit_top10_overlap"
+_METRIC_AUDIT_TOP1 = "cidx.cache.embedding.audit_top1_match"
+
 
 def _decode_f32le(blob: bytes) -> List[float]:
     """Decode float32 little-endian bytes to a Python float list."""
@@ -93,6 +97,9 @@ class QueryEmbeddingCacheMetrics:
         self._misses_counter: Optional[Any] = None
         self._total_entries_gauge: Optional[Any] = None
         self._shadow_cosine_hist: Optional[Any] = None
+        # Story #1110 (S6): deep-fidelity audit instruments
+        self._audit_top10_overlap_hist: Optional[Any] = None
+        self._audit_top1_counter: Optional[Any] = None
 
         # In-process readable tallies (GAP 2 / Story #1109 dashboard fix).
         # These are incremented alongside every OTEL .add() call so the
@@ -104,6 +111,11 @@ class QueryEmbeddingCacheMetrics:
         )
         # Bounded ring buffer of shadow cosine values for p50 computation.
         self._cosine_buffer: List[float] = []
+
+        # Story #1110 (S6): in-process audit tallies (guarded by _lock).
+        self._audit_total: int = 0
+        self._audit_top1_matches: int = 0
+        self._audit_overlap_sum: float = 0.0
 
         self._register()
 
@@ -141,6 +153,17 @@ class QueryEmbeddingCacheMetrics:
             self._shadow_cosine_hist = self._meter.create_histogram(
                 name=_METRIC_SHADOW_COSINE,
                 description="Cosine similarity between cached and live embedding in shadow mode",
+                unit="1",
+            )
+            # Story #1110 (S6): audit instruments (fail-open; registered after S5 instruments)
+            self._audit_top10_overlap_hist = self._meter.create_histogram(
+                name=_METRIC_AUDIT_OVERLAP,
+                description="Top-10 overlap fraction between cached and live HNSW results in audit",
+                unit="1",
+            )
+            self._audit_top1_counter = self._meter.create_counter(
+                name=_METRIC_AUDIT_TOP1,
+                description="Number of audit samples where top-1 result matches cached result",
                 unit="1",
             )
         except Exception as exc:  # noqa: BLE001
@@ -228,6 +251,55 @@ class QueryEmbeddingCacheMetrics:
         except Exception as exc:  # noqa: BLE001
             logger.debug("cache metrics: record_shadow_cosine OTEL error: %s", exc)
 
+    def record_audit(
+        self,
+        *,
+        top10_overlap: float,
+        top1_match: bool,
+        provider: str,
+        mode: str,
+    ) -> None:
+        """Record a deep-fidelity audit sample (Story #1110 S6).
+
+        Called by the search layer (Chunk B) after comparing cached-vector HNSW
+        results against live-vector HNSW results.
+
+        Args:
+            top10_overlap: Fraction of top-10 results that overlap between
+                cached and live HNSW searches (0.0 to 1.0).
+            top1_match: True when the top-1 result is identical in both searches.
+            provider: Provider name — e.g. "voyage-ai" or "cohere".
+            mode: Cache mode at time of sampling — "on" or "shadow".
+
+        Fail-open: any exception is swallowed with DEBUG logging; the caller
+        must never be impacted by metrics recording failures.
+        """
+        # Increment in-process tallies under lock (always, even if OTEL fails).
+        try:
+            with self._lock:
+                self._audit_total += 1
+                self._audit_overlap_sum += top10_overlap
+                if top1_match:
+                    self._audit_top1_matches += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("cache metrics: record_audit tally error: %s", exc)
+
+        # Record OTEL Histogram (top10_overlap value).
+        if self._audit_top10_overlap_hist is not None:
+            try:
+                self._audit_top10_overlap_hist.record(
+                    top10_overlap, {"provider": provider, "mode": mode}
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("cache metrics: record_audit histogram error: %s", exc)
+
+        # Record OTEL Counter ONLY when top1_match=True.
+        if top1_match and self._audit_top1_counter is not None:
+            try:
+                self._audit_top1_counter.add(1, {"provider": provider, "mode": mode})
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("cache metrics: record_audit top1 counter error: %s", exc)
+
     # ------------------------------------------------------------------
     # Readable in-process snapshot (GAP 2)
     # ------------------------------------------------------------------
@@ -253,6 +325,10 @@ class QueryEmbeddingCacheMetrics:
                 shadow = dict(self._tallies.get("shadow", {"hits": 0, "misses": 0}))
                 on = dict(self._tallies.get("on", {"hits": 0, "misses": 0}))
                 cosines = list(self._cosine_buffer)
+                # Story #1110 (S6): snapshot audit tallies under same lock.
+                audit_total = self._audit_total
+                audit_top1_matches = self._audit_top1_matches
+                audit_overlap_sum = self._audit_overlap_sum
 
             p50: Optional[float] = None
             if cosines:
@@ -263,10 +339,18 @@ class QueryEmbeddingCacheMetrics:
                 else:
                     p50 = sorted_cosines[mid]
 
+            audit_overlap_avg: Optional[float] = (
+                audit_overlap_sum / audit_total if audit_total > 0 else None
+            )
+
             return {
                 "shadow": shadow,
                 "on": on,
                 "shadow_cosine_p50": p50,
+                # Story #1110 (S6): audit fields
+                "audit_total": audit_total,
+                "audit_top1_matches": audit_top1_matches,
+                "audit_overlap_avg": audit_overlap_avg,
             }
         except Exception as exc:  # noqa: BLE001
             logger.debug("cache metrics: snapshot error: %s", exc)
@@ -274,4 +358,7 @@ class QueryEmbeddingCacheMetrics:
                 "shadow": {"hits": 0, "misses": 0},
                 "on": {"hits": 0, "misses": 0},
                 "shadow_cosine_p50": None,
+                "audit_total": 0,
+                "audit_top1_matches": 0,
+                "audit_overlap_avg": None,
             }

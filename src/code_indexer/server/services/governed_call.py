@@ -21,8 +21,9 @@ collect shadow measurements without altering the live path (shadow-mode).
 """
 
 import logging
+import random
 import struct
-from typing import Any, Callable, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, cast
 
 from code_indexer.server.services.coalescer_registry import get_coalescer_registry
 from code_indexer.server.services.config_service import get_config_service
@@ -252,6 +253,39 @@ def _bytes_to_floats(blob: bytes) -> List[float]:
     return list(struct.unpack(f"<{n}f", blob))
 
 
+def _audit_sample_rate_for(provider_name: str) -> float:
+    """Return the per-provider audit sample rate, clamped to [0.0, 1.0].
+
+    Story #1110 (S6): live read of the QueryEmbeddingCacheConfig fields:
+      - "cohere" -> query_embedding_cache_cohere_audit_sample_rate
+      - everything else -> query_embedding_cache_voyage_audit_sample_rate
+
+    Fail-open: any config/attr error returns 0.0 (audit disabled).
+
+    Args:
+        provider_name: e.g. "voyage-ai" or "cohere".
+
+    Returns:
+        float in [0.0, 1.0].
+    """
+    try:
+        qec_cfg = get_config_service().get_config().query_embedding_cache_config
+        if qec_cfg is None:
+            return 0.0
+        if provider_name == "cohere":
+            rate = float(qec_cfg.query_embedding_cache_cohere_audit_sample_rate)
+        else:
+            rate = float(qec_cfg.query_embedding_cache_voyage_audit_sample_rate)
+        return max(0.0, min(1.0, rate))
+    except Exception as exc:  # noqa: BLE001 — telemetry must never break query path
+        logger.debug(
+            "_audit_sample_rate_for(%s): config read failed (%s) -> 0.0",
+            provider_name,
+            exc,
+        )
+        return 0.0
+
+
 def _serve_with_cache(
     cache: Any,
     provider_name: str,
@@ -260,6 +294,7 @@ def _serve_with_cache(
     live_fn: Callable[[], List[float]],
     *,
     metrics: Optional[Any] = None,
+    audit_ctx: Optional[Dict[str, Any]] = None,
 ) -> List[float]:
     """Apply the Story #1105 cache policy for one embedding request.
 
@@ -278,6 +313,17 @@ def _serve_with_cache(
       - provider error in shadow: miss metric recorded, no cosine, error re-raised.
       - metrics=None (default) preserves all existing caller behaviour unchanged.
 
+    Story #1110 (S6): accepts optional `audit_ctx` (Dict[str, Any]).
+      - On a cache HIT (on-mode or shadow-mode), if audit_ctx is not None and the
+        per-provider audit_sample_rate > 0.0 and random.random() < rate, the dict
+        is populated with audit sampling data (fail-open: errors never propagate).
+      - on-mode HIT:   {"sampled": True, "mode": "on", "provider": ...,
+                         "cached_blob": <bytes>}  (NO live_vec; Chunk B re-embeds)
+      - shadow HIT:    {"sampled": True, "mode": "shadow", "provider": ...,
+                         "cached_blob": <bytes>, "live_vec": <list>}
+      - Misses and non-sampled HITs leave audit_ctx untouched (empty dict).
+      - audit_ctx=None (default) is a documented no-op; all existing callers unaffected.
+
     Args:
         cache: QueryEmbeddingCache instance.
         provider_name: e.g. "voyage-ai".
@@ -285,6 +331,7 @@ def _serve_with_cache(
         qualifier: CacheQualifier named-tuple.
         live_fn: Zero-arg callable that produces the live embedding vector.
         metrics: Optional QueryEmbeddingCacheMetrics; no-op when None.
+        audit_ctx: Optional mutable dict; populated on sampled HITs. Default None.
 
     Returns:
         List[float] — cached vector (on-mode HIT) or live vector (all other paths).
@@ -301,6 +348,21 @@ def _serve_with_cache(
             cache.record_hit(cache_key, qualifier)
             if metrics is not None:
                 metrics.record_hit(mode=mode, provider=provider_name)
+            # Story #1110 (S6): populate audit_ctx on sampled on-mode HITs.
+            if audit_ctx is not None:
+                try:
+                    rate = _audit_sample_rate_for(provider_name)
+                    if rate > 0.0 and random.random() < rate:
+                        audit_ctx["sampled"] = True
+                        audit_ctx["mode"] = mode
+                        audit_ctx["provider"] = provider_name
+                        audit_ctx["cached_blob"] = cached_blob
+                        # No live_vec: Chunk B re-embeds from the cache
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "_serve_with_cache: audit_ctx population failed (on-mode): %s",
+                        exc,
+                    )
             return _bytes_to_floats(cached_blob)
         # MISS
         logger.debug(
@@ -333,6 +395,21 @@ def _serve_with_cache(
             metrics.record_hit(mode=mode, provider=provider_name)
             # AC2: record cosine ONLY in shadow + prior-cached
             metrics.record_shadow_cosine(cached_blob=shadow_blob, live_vec=live_vec)
+        # Story #1110 (S6): populate audit_ctx on sampled shadow HITs.
+        if audit_ctx is not None:
+            try:
+                rate = _audit_sample_rate_for(provider_name)
+                if rate > 0.0 and random.random() < rate:
+                    audit_ctx["sampled"] = True
+                    audit_ctx["mode"] = mode
+                    audit_ctx["provider"] = provider_name
+                    audit_ctx["cached_blob"] = shadow_blob
+                    audit_ctx["live_vec"] = live_vec
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "_serve_with_cache: audit_ctx population failed (shadow-mode): %s",
+                    exc,
+                )
     else:
         logger.debug(
             "coalesced_query_embedding: shadow MISS (provider=%s) -> record_miss",
@@ -351,6 +428,7 @@ def coalesced_query_embedding(
     embedding_purpose: Optional[str] = "query",
     acquire_timeout: float = _GOVERNOR_ACQUIRE_TIMEOUT_SECS,
     no_embedding_cache_shortcut: bool = False,
+    audit_ctx: Optional[Dict[str, Any]] = None,
 ) -> List[float]:
     """Server-gated entry point for a single query embedding (Story #1079 Phase E).
 
@@ -370,6 +448,12 @@ def coalesced_query_embedding(
     The write (record_miss_or_shadow) still fires so future requests can benefit.
     The mode==off / not-enabled gates fire FIRST (no_embedding_cache_shortcut cannot
     re-enable a disabled cache).
+
+    Story #1110 (S6): audit_ctx (optional mutable dict) is threaded into
+    _serve_with_cache.  On a sampled cache HIT (per-provider audit_sample_rate),
+    the dict is populated with {"sampled": True, "mode": ..., "provider": ...,
+    "cached_blob": ...} (on-mode) or additionally "live_vec" (shadow-mode).
+    Default None is a documented no-op; all existing callers unaffected.
 
     The 4 query sites call this (swapping only the function name). ALL gating
     lives here so call sites are identical on CLI and server.
@@ -418,4 +502,5 @@ def coalesced_query_embedding(
         qualifier,
         live,
         metrics=get_query_embedding_cache_metrics(),
+        audit_ctx=audit_ctx,
     )

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,11 +63,17 @@ class _FakeMetrics:
         on_hits: int = 5,
         on_misses: int = 5,
         shadow_cosine_p50: float = 0.97,
+        audit_total: int = 0,
+        audit_top1_matches: int = 0,
+        audit_overlap_avg: Optional[float] = None,
     ) -> None:
         self._snap = {
             "shadow": {"hits": shadow_hits, "misses": shadow_misses},
             "on": {"hits": on_hits, "misses": on_misses},
             "shadow_cosine_p50": shadow_cosine_p50,
+            "audit_total": audit_total,
+            "audit_top1_matches": audit_top1_matches,
+            "audit_overlap_avg": audit_overlap_avg,
         }
 
     def snapshot(self) -> dict:
@@ -254,3 +261,50 @@ class TestParentTemplateContainsCacheMetricsTrigger:
         assert "cache-metrics-section" in content, (
             "Expected a container div with id='cache-metrics-section' in dashboard_stats.html"
         )
+
+
+# ---------------------------------------------------------------------------
+# Story #1110 (S6 Chunk B): audit rows in dashboard partial
+# ---------------------------------------------------------------------------
+
+
+class TestAuditRowsRender:
+    """Audit rows appear in the cache-metrics partial when audit_total > 0."""
+
+    def test_audit_rows_render_when_audit_total_nonzero(
+        self, client, admin_session_cookie
+    ):
+        """When snapshot includes audit_total=20, the partial must render audit stats."""
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetrics(
+            audit_total=20,
+            audit_top1_matches=15,
+            audit_overlap_avg=0.85,
+        )
+        set_query_embedding_cache(_FakeCache(count=42))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            # Audit sample count must appear
+            assert "20" in html, (
+                f"Expected audit_total '20' in HTML, got:\n{html[:600]}"
+            )
+            # Top-1 match rate = 15/20 * 100 = 75.0 %
+            assert "75" in html, (
+                f"Expected top-1 match rate '75' in HTML, got:\n{html[:600]}"
+            )
+            # Avg overlap = 0.85 must appear
+            assert "0.85" in html, (
+                f"Expected overlap avg '0.85' in HTML, got:\n{html[:600]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()
