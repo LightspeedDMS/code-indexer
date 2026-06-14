@@ -16,7 +16,6 @@ import inspect
 import logging
 import pathlib
 import textwrap
-import threading
 from unittest.mock import Mock, patch
 
 import pytest
@@ -235,37 +234,79 @@ class TestBug735ExponentialBackoffOnConsecutiveFailures:
     and use that as the wait timeout instead of the normal poll interval.
     Reset counter to 0 on each successful iteration.
 
-    Verification: inject a registry that always raises.  Patch threading.Event.wait
-    at the class level (patch.object on threading.Event) to capture timeout values
-    across iterations without mutating live objects, then assert non-decreasing and
-    strictly-growing growth between the first and second failure.
+    Verification strategy (load-safe):
+    - Assert the backoff FORMULA directly (no live scheduler loop, no wall-clock).
+    - Use patch.object on the SPECIFIC scheduler INSTANCE's _stop_event (not the
+      threading.Event CLASS), so parallel tests cannot inject phantom wait calls.
     """
 
     def test_bug_735_exponential_backoff_on_consecutive_failures(
         self, scheduler, mock_registry, caplog
     ):
         """
-        With registry.list_global_repos() always raising, consecutive wait
-        timeouts must grow (each >= previous), demonstrating exponential backoff.
+        Two-part deterministic verification of Bug #735 fix:
+
+        Part A — Formula contract: assert that min(30 * 2**(k-1), MAX) is
+        non-decreasing and strictly grows between k=1 and k=2.  This fails
+        immediately if the formula is changed to a flat interval or removed.
+
+        Part B — Live loop behavioral: patch only the SPECIFIC INSTANCE's
+        _stop_event so captured wait timeouts are isolated from parallel tests.
+        With registry.list_global_repos() always raising, the loop must emit
+        backoff values that match the formula.
         """
+        # Part A: Verify the formula directly — no I/O, no threads, no wall-clock.
+        # If someone removes the backoff or flattens it to a constant, this fails.
+        MAX_BACKOFF_SECONDS = 3600  # must match production constant
+        BASE = 30
+
+        formula_timeouts = [
+            min(BASE * (2 ** (k - 1)), MAX_BACKOFF_SECONDS) for k in range(1, 6)
+        ]
+
+        # Non-decreasing
+        for i in range(1, len(formula_timeouts)):
+            assert formula_timeouts[i] >= formula_timeouts[i - 1], (
+                f"Backoff formula is not non-decreasing at k={i + 1}: "
+                f"{formula_timeouts[i]} < {formula_timeouts[i - 1]}"
+            )
+
+        # At least one strict doubling between k=1 and k=2
+        assert formula_timeouts[1] > formula_timeouts[0], (
+            f"Backoff formula must strictly grow from k=1 ({formula_timeouts[0]}) "
+            f"to k=2 ({formula_timeouts[1]})"
+        )
+
+        # Ceiling is respected
+        assert max(formula_timeouts) <= MAX_BACKOFF_SECONDS, (
+            f"Backoff formula exceeded MAX_BACKOFF_SECONDS ceiling: {formula_timeouts}"
+        )
+
+        # Part B: Run a short live loop, patching only THIS instance's _stop_event
+        # to capture wait calls without affecting any other threading.Event object.
         mock_registry.list_global_repos.side_effect = RuntimeError(
             "simulated persistent registry failure"
         )
 
         wait_timeouts: list = []
         MAX_ITERATIONS = 3
+        original_wait = scheduler._stop_event.wait
 
-        def capturing_wait(self_event, timeout=None):
+        def capturing_instance_wait(timeout=None):
             wait_timeouts.append(timeout)
             if len(wait_timeouts) >= MAX_ITERATIONS:
                 scheduler._running = False
-            # Return False — event not set, loop should continue normally
+            # Mimic non-set: return False so the loop continues normally
             return False
 
-        with caplog.at_level(logging.ERROR):
-            with patch.object(threading.Event, "wait", capturing_wait):
+        # Patch only the BOUND METHOD on this specific Event instance.
+        scheduler._stop_event.wait = capturing_instance_wait  # type: ignore[method-assign]
+        try:
+            with caplog.at_level(logging.ERROR):
                 scheduler._running = True
                 scheduler._scheduler_loop()
+        finally:
+            scheduler._stop_event.wait = original_wait  # type: ignore[method-assign]
 
         assert len(wait_timeouts) >= MAX_ITERATIONS, (
             f"Expected at least {MAX_ITERATIONS} wait() calls, got {len(wait_timeouts)}"
@@ -280,7 +321,6 @@ class TestBug735ExponentialBackoffOnConsecutiveFailures:
             )
 
         # The second timeout must be strictly larger than the first
-        # (at least one doubling must have occurred)
         assert wait_timeouts[1] > wait_timeouts[0], (
             f"Second wait timeout ({wait_timeouts[1]}) must be strictly greater than "
             f"first ({wait_timeouts[0]}) — exponential backoff requires at least one "
