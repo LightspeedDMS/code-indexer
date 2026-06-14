@@ -1285,13 +1285,13 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="qec-voyage-anchor">
                     Voyage Anchor Tokens
-                    <input type="number" id="qec-voyage-anchor" name="query_embedding_cache_voyage_anchor_tokens" value="{{ config.query_embedding_cache.query_embedding_cache_voyage_anchor_tokens }}" min="0">
+                    <input type="number" id="qec-voyage-anchor" name="query_embedding_cache_voyage_anchor_tokens" value="{{ config.query_embedding_cache.query_embedding_cache_voyage_anchor_tokens if config.query_embedding_cache.query_embedding_cache_voyage_anchor_tokens is not none else '' }}" min="0">
                     <small>Leading tokens kept in original order; the rest are sorted (0 = sort all; default 2)</small>
                 </label>
                 <label for="qec-voyage-audit">
                     Voyage Audit Sample Rate
                     <input type="number" id="qec-voyage-audit" name="query_embedding_cache_voyage_audit_sample_rate" value="{{ config.query_embedding_cache.query_embedding_cache_voyage_audit_sample_rate }}" min="0.0" max="1.0" step="0.01">
-                    <small>Fraction of shadow hits to audit for correctness [0.0–1.0] (S6 logic not yet wired)</small>
+                    <small>Fraction of shadow hits to audit for correctness [0.0–1.0] (sampled deep-fidelity audit; 0.0 = off)</small>
                 </label>
                 <label for="qec-cohere-mode">
                     Cohere Mode
@@ -1304,13 +1304,13 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="qec-cohere-anchor">
                     Cohere Anchor Tokens
-                    <input type="number" id="qec-cohere-anchor" name="query_embedding_cache_cohere_anchor_tokens" value="{{ config.query_embedding_cache.query_embedding_cache_cohere_anchor_tokens }}" min="0">
+                    <input type="number" id="qec-cohere-anchor" name="query_embedding_cache_cohere_anchor_tokens" value="{{ config.query_embedding_cache.query_embedding_cache_cohere_anchor_tokens if config.query_embedding_cache.query_embedding_cache_cohere_anchor_tokens is not none else '' }}" min="0">
                     <small>Leading tokens kept in original order; the rest are sorted (0 = sort all; default 2)</small>
                 </label>
                 <label for="qec-cohere-audit">
                     Cohere Audit Sample Rate
                     <input type="number" id="qec-cohere-audit" name="query_embedding_cache_cohere_audit_sample_rate" value="{{ config.query_embedding_cache.query_embedding_cache_cohere_audit_sample_rate }}" min="0.0" max="1.0" step="0.01">
-                    <small>Fraction of shadow hits to audit for correctness [0.0–1.0] (S6 logic not yet wired)</small>
+                    <small>Fraction of shadow hits to audit for correctness [0.0–1.0] (sampled deep-fidelity audit; 0.0 = off)</small>
                 </label>
             </div>
             <div class="form-actions">
