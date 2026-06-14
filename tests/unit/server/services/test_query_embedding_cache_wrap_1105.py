@@ -117,9 +117,15 @@ def _reset_registry():
 
 
 def _install_registry_with_coalescer(coalescer):
-    """Install a registry that returns *coalescer* for any lane."""
+    """Install a registry that returns *coalescer* for any lane.
+
+    Bug #1112: _compute_live now calls registry.get_or_create(lane, digest,
+    provider) instead of registry.get(lane), so we stub get_or_create to
+    return the fake coalescer for any arguments.
+    """
     reg = CoalescerRegistry.__new__(CoalescerRegistry)
     reg._coalescers = {"voyage:embed": coalescer}
+    reg.get_or_create = lambda lane, digest, provider: coalescer  # type: ignore[method-assign]
     set_coalescer_registry(reg)
     return reg
 

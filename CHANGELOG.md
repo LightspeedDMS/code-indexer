@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.129.0] - 2026-06-14
+
+### Fixed
+- **Coalescer ignored per-repo embedding endpoint/model (Bug #1112).** The Story #1079 embedding coalescer built its per-lane Voyage/Cohere providers from bare default config, so with coalescing enabled (the default) per-repo `api_endpoint`/`model` overrides were ignored on the coalesced path and every query used the default model/dimension (wrong query vector for heterogeneous-model repos; per-repo endpoint overrides silently dropped). The coalescer registry is now lazy and keyed by provider-config digest: coalescers are built on demand from the caller's per-repo provider, so per-repo endpoint and model are honored on the coalesced path. Homogeneous-default deployments are unchanged (one coalescer per lane); heterogeneous configs each get their own coalescer (preserving the one-batch-one-config seal), bounded with a direct-path fallback on overflow.
+- **Query-embedding cache config screen could not be re-saved after resetting a per-provider anchor_tokens to inherit (#1107).** The input rendered the inherited (None) value as the literal "None", so re-submitting the form sent "None" and int() rejected it. The Voyage/Cohere anchor inputs now render blank for an inherited value so the config screen round-trips.
+- **Flaky fast-automation tests under parallel load (Bug #1113).** Three timing/scheduler unit tests had real test-isolation bugs -- a class-level threading.Event.wait patch that captured other tests' waits, a leaked module-level semaphore, and an operator-precedence bug that counted every file open -- surfacing as non-deterministic flakes under concurrent load. Made deterministic (fake clock / formula assertion / per-test isolation) without weakening what they verify.
+
 ## [10.128.0] - 2026-06-14
 
 ### Fixed

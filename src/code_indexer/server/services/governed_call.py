@@ -25,7 +25,10 @@ import random
 import struct
 from typing import Any, Callable, Dict, List, Optional, cast
 
-from code_indexer.server.services.coalescer_registry import get_coalescer_registry
+from code_indexer.server.services.coalescer_registry import (
+    _digest_for_provider,
+    get_coalescer_registry,
+)
 from code_indexer.server.services.config_service import get_config_service
 
 logger = logging.getLogger(__name__)
@@ -228,15 +231,29 @@ def _compute_live(
         return _direct()
 
     lane = _get_embedding_budget(provider)
-    coalescer = registry.get(lane)
+
+    # Bug #1112: use digest-keyed get_or_create so each per-repo provider config
+    # gets its own coalescer (not a stale default-config one). Fail-open: any
+    # digest/registry error falls through to the direct governed call.
+    try:
+        digest = _digest_for_provider(provider)
+        coalescer = registry.get_or_create(lane, digest, provider)
+    except Exception as exc:  # noqa: BLE001 — registry errors must never break queries
+        logger.debug(
+            "coalesced_query_embedding: get_or_create error (%s) -> direct call", exc
+        )
+        return _direct()
+
     if coalescer is None:
         logger.debug(
-            "coalesced_query_embedding: no coalescer for lane=%s -> direct call",
+            "coalesced_query_embedding: no coalescer for lane=%s (cap exceeded) -> direct call",
             lane,
         )
         return _direct()
 
-    logger.debug("coalesced_query_embedding: coalescing on lane=%s", lane)
+    logger.debug(
+        "coalesced_query_embedding: coalescing on lane=%s digest=%s", lane, digest[:12]
+    )
     return cast(
         List[float],
         coalescer.submit(text, embedding_purpose=embedding_purpose or "query"),

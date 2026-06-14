@@ -3064,7 +3064,21 @@ class TestIteration14PurposeDrivenHooks:
 
     @patch("subprocess.run")
     def test_insufficient_output_retry_is_write_only(self, mock_subprocess, tmp_path):
-        """Test that insufficient-output retry uses allowed_tools='' (write-only) and includes write-focused prompt."""
+        """Test that insufficient-output retry uses allowed_tools='' (write-only) and includes write-focused prompt.
+
+        Load-safety fix: patch _get_verification_semaphore to return a fresh per-test
+        semaphore, preventing the module-level singleton from blocking this test when a
+        parallel test holds the semaphore (the singleton is never released if the holder
+        crashes, causing _sem.acquire() here to deadlock under concurrent load).
+        """
+        import threading as _threading
+
+        from code_indexer.global_repos import dependency_map_analyzer as _dma_module
+
+        # Provide a fresh, isolated semaphore so this test never contends with
+        # parallel tests that share the module-level singleton.
+        _fresh_sem = _threading.Semaphore(1)
+
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
@@ -3089,16 +3103,19 @@ class TestIteration14PurposeDrivenHooks:
             ),
         ]
 
-        analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=50
-        )
+        with patch.object(
+            _dma_module, "_get_verification_semaphore", return_value=_fresh_sem
+        ):
+            analyzer.run_pass_2_per_domain(
+                staging_dir, domain, [domain], repo_list=[], max_turns=50
+            )
 
         # Should have been called twice (primary + retry)
         assert mock_subprocess.call_count == 2
 
-        # Check retry call (second call)
+        # Check retry call (second call) — use .kwargs accessor (robust across Python versions)
         retry_call = mock_subprocess.call_args_list[1]
-        retry_cmd = retry_call[0][0]
+        retry_cmd = retry_call.args[0]
 
         # Verify allowed_tools="" (write-only mode)
         if "--allowedTools" in retry_cmd:
@@ -3108,7 +3125,7 @@ class TestIteration14PurposeDrivenHooks:
             )
 
         # Verify retry prompt includes write-focused language
-        retry_prompt = retry_call[1]["input"]
+        retry_prompt = retry_call.kwargs["input"]
         assert "Write your dependency analysis NOW" in retry_prompt
         assert (
             "NO searching" in retry_prompt

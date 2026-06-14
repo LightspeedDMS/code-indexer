@@ -126,7 +126,16 @@ class TestKillSwitchDelegates:
 
 class TestEnabledUsesCoalescer:
     def test_enabled_with_lane_uses_submit(self, monkeypatch):
-        """Registry + enabled + lane present -> coalescer.submit()."""
+        """Registry + enabled + lane present -> coalescer.submit().
+
+        Intent preserved: when coalesce_enabled=True and the registry holds a
+        coalescer for the lane, coalesced_query_embedding must call
+        coalescer.submit() (not governed_query_embedding).
+
+        Adaptation: _compute_live now calls registry.get_or_create(lane, digest,
+        provider) instead of registry.get(lane), so we stub get_or_create to
+        return the fake coalescer and capture the lane argument.
+        """
         _patch_governed(monkeypatch)  # spy present but must NOT be called
         _patch_config(monkeypatch, _FakeConfig(coalesce_enabled=True))
         coalescer = _FakeCoalescer()
@@ -134,11 +143,11 @@ class TestEnabledUsesCoalescer:
         reg = governed_call.get_coalescer_registry()
         captured: dict = {}
 
-        def _get(lane):
+        def _get_or_create(lane, digest, provider):
             captured["lane"] = lane
             return coalescer
 
-        monkeypatch.setattr(reg, "get", _get, raising=False)
+        monkeypatch.setattr(reg, "get_or_create", _get_or_create, raising=False)
 
         out = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), "abc")
         assert out == COALESCED_VEC
@@ -146,7 +155,14 @@ class TestEnabledUsesCoalescer:
         assert captured["lane"] == VOYAGE_EMBED
 
     def test_cohere_provider_maps_to_cohere_embed_lane(self, monkeypatch):
-        """A Cohere provider routes to the cohere:embed lane."""
+        """A Cohere provider routes to the cohere:embed lane.
+
+        Intent preserved: when the provider is a CohereEmbeddingProvider instance,
+        _get_embedding_budget must return "cohere:embed" and the coalescer for
+        that lane must be invoked.
+
+        Adaptation: stub get_or_create (not get) to match the new dispatch path.
+        """
         _patch_governed(monkeypatch)
         _patch_config(monkeypatch, _FakeConfig(coalesce_enabled=True))
         coalescer = _FakeCoalescer()
@@ -154,11 +170,11 @@ class TestEnabledUsesCoalescer:
         reg = governed_call.get_coalescer_registry()
         captured: dict = {}
 
-        def _get(lane):
+        def _get_or_create(lane, digest, provider):
             captured["lane"] = lane
             return coalescer
 
-        monkeypatch.setattr(reg, "get", _get, raising=False)
+        monkeypatch.setattr(reg, "get_or_create", _get_or_create, raising=False)
 
         # Patch the cohere isinstance check used by _get_embedding_budget.
         from code_indexer.services import cohere_embedding
@@ -173,14 +189,28 @@ class TestEnabledUsesCoalescer:
 
 class TestHotReload:
     def test_toggling_coalesce_enabled_takes_effect_without_restart(self, monkeypatch):
-        """Flipping coalesce_enabled live switches behavior between calls."""
+        """Flipping coalesce_enabled live switches behavior between calls.
+
+        Intent preserved: when coalesce_enabled is False, coalesced_query_embedding
+        delegates to governed_query_embedding (no coalescer used). After flipping
+        coalesce_enabled=True on the live config object (no restart, no re-registration),
+        the next call must use the coalescer.
+
+        Adaptation: stub get_or_create (not get) to match the new _compute_live
+        dispatch path. The behavioral contract is identical.
+        """
         calls = _patch_governed(monkeypatch)
         cfg = _FakeConfig(coalesce_enabled=False)
         _patch_config(monkeypatch, cfg)
         coalescer = _FakeCoalescer()
         set_coalescer_registry(CoalescerRegistry.__new__(CoalescerRegistry))
         reg = governed_call.get_coalescer_registry()
-        monkeypatch.setattr(reg, "get", lambda lane: coalescer, raising=False)
+        monkeypatch.setattr(
+            reg,
+            "get_or_create",
+            lambda lane, digest, provider: coalescer,
+            raising=False,
+        )
 
         prov = _FakeVoyageProvider()
         # First call: disabled -> delegates.
