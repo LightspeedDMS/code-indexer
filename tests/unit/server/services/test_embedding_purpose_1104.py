@@ -273,7 +273,12 @@ class TestCoalescedQueryEmbeddingPassesPurpose:
         coalescer = RecordingCoalescer()
         set_coalescer_registry(CoalescerRegistry.__new__(CoalescerRegistry))
         reg = governed_call.get_coalescer_registry()
-        monkeypatch.setattr(reg, "get", lambda lane: coalescer, raising=False)
+        monkeypatch.setattr(
+            reg,
+            "get_or_create",
+            lambda lane, digest, provider: coalescer,
+            raising=False,
+        )
 
         class _FakeProviderNotCohere:
             pass
@@ -297,7 +302,12 @@ class TestCoalescedQueryEmbeddingPassesPurpose:
         coalescer = RecordingCoalescer()
         set_coalescer_registry(CoalescerRegistry.__new__(CoalescerRegistry))
         reg = governed_call.get_coalescer_registry()
-        monkeypatch.setattr(reg, "get", lambda lane: coalescer, raising=False)
+        monkeypatch.setattr(
+            reg,
+            "get_or_create",
+            lambda lane, digest, provider: coalescer,
+            raising=False,
+        )
 
         class _FakeProvider:
             pass
