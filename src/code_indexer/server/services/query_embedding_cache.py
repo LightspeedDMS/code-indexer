@@ -19,10 +19,13 @@ Namespace-change observability (Story #1106):
   When the effective ``anchor_tokens`` for a provider changes at runtime, exactly
   ONE structured WARNING is emitted so operators understand the resulting
   hit-rate dip.  The process-local memo is per-provider so a change on one
-  provider never suppresses a log for another.  Changing anchor_tokens or model
+  provider never suppresses a log for another.  Changing ``anchor_tokens``
   INTENTIONALLY fragments the keyspace: old rows keyed under the old normalisation
   no longer match new keys and age out via LRU.  Correctness is preserved —
-  each row's key still correctly matches its own normalisation.
+  each row's key still correctly matches its own normalisation.  NOTE: a live
+  model change is NOT tracked by this log because ``anchor_tokens_for()``
+  receives only the provider-name string, not the provider object, so the model
+  is genuinely unavailable at that call site.
 """
 
 from __future__ import annotations
@@ -296,10 +299,13 @@ class QueryEmbeddingCache:
         - ``query_embedding_cache_anchor_tokens`` (global fallback field)
         - :data:`_DEFAULT_ANCHOR_TOKENS` (construction-time hard default)
 
-        Namespace-change observability: when the resolved value differs from the
-        last-seen value for this provider, ONE structured WARNING is emitted so
-        operators understand the resulting hit-rate dip.  Subsequent calls with
-        the same new value do NOT re-log.
+        Namespace-change observability: when the resolved ``anchor_tokens`` value
+        differs from the last-seen value for this provider, ONE structured WARNING
+        is emitted so operators understand the resulting hit-rate dip.  Subsequent
+        calls with the same new value do NOT re-log.  NOTE: a live model change is
+        NOT tracked here because this method receives only the provider-name string,
+        not the provider object — the model is genuinely unavailable at this call
+        site.
 
         The keyspace fragmentation is INTENTIONAL: old rows keyed under the old
         normalisation no longer match new keys and age out via LRU.  Correctness

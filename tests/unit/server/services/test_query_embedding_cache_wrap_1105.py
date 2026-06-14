@@ -148,12 +148,9 @@ def _make_cache(
     cache.enabled_for.return_value = enabled
     cache.mode_for.return_value = voyage_mode
     cache.lookup.return_value = hit_bytes
-    cache.build_key = build_key
-    # anchor_tokens_for must return a real int so build_key's max(0, n) doesn't
-    # blow up with "TypeError: '>' not supported between instances of 'MagicMock'
-    # and 'int'" (Story #1106 wiring: governed_call.py now calls
-    # cache.anchor_tokens_for(provider_name) and passes the result to build_key).
-    cache.anchor_tokens_for.return_value = 2
+    # governed_call.py routes key-building through build_key_for_provider (N2),
+    # so we wire a real callable here instead of setting build_key + anchor_tokens_for.
+    cache.build_key_for_provider = lambda text, provider_name: build_key(text, 2)
     cache.qualifier.return_value = MagicMock(
         provider=PROVIDER_NAME, model=MODEL_NAME, dimension=DIMENSION
     )

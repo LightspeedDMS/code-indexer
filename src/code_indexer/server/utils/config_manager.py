@@ -1082,6 +1082,9 @@ class QueryEmbeddingCacheConfig:
     query_embedding_cache_max_entries: int = 10000
     # S2 / S6 fields declared now; logic not yet wired
     query_embedding_cache_anchor_tokens: int = 2
+    # Per-provider anchor_tokens overrides (None = fall back to global field above)
+    query_embedding_cache_voyage_anchor_tokens: Optional[int] = None
+    query_embedding_cache_cohere_anchor_tokens: Optional[int] = None
     query_embedding_cache_audit_sample_rate: float = 0.0
 
 

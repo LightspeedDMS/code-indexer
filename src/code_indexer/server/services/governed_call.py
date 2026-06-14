@@ -334,6 +334,6 @@ def coalesced_query_embedding(
         )
         return live()
 
-    cache_key: str = cache.build_key(text, cache.anchor_tokens_for(provider_name))
+    cache_key: str = cache.build_key_for_provider(text, provider_name)
     qualifier: Any = cache.qualifier(provider)
     return _serve_with_cache(cache, provider_name, cache_key, qualifier, live)
