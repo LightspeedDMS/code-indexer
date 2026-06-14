@@ -822,16 +822,11 @@ def dashboard_cache_metrics_partial(request: Request):
     if not session:
         return HTMLResponse(content="", status_code=401)
 
-    # total_entries: DB COUNT is acceptable on a request thread.
-    cache = getattr(request.app.state, "query_embedding_cache", None)
-    total_entries = 0
-    if cache is not None:
-        try:
-            total_entries = cache.total_entries()
-        except Exception as _exc:
-            logger.warning(
-                "dashboard_cache_metrics_partial: total_entries failed: %s", _exc
-            )
+    # total_entries: reuse the same helper used by the config-page readout so the
+    # dashboard and the config page always show the same live count.  The helper
+    # calls get_query_embedding_cache() from governed_call (the process-global
+    # accessor) and is fail-open (returns 0 when the cache is not wired).
+    total_entries = _get_qec_total_entries()
 
     # Hit/ratio data from in-process snapshot (real tallies, not OTEL exporters).
     # Hit-ratio is DERIVED per mode in the template — never blended across modes.
