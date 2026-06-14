@@ -276,6 +276,66 @@ class TestPruneToMax:
         assert result == 0
 
 
+class TestPruneToMaxPurePrimitive:
+    """Verify prune_to_max is a PURE primitive with no floor inside.
+
+    The >=100 safe floor must NOT be enforced inside the backend — it lives
+    exclusively at the config-resolution layer (QueryEmbeddingCache._resolve_max_entries).
+    These tests verify the SQL is called with the EXACT cap passed by the caller,
+    even when that cap is smaller than 100.
+    """
+
+    def test_small_cap_passed_directly_as_offset(self) -> None:
+        """prune_to_max(3) must use OFFSET 3 in the DELETE, NOT OFFSET 100."""
+        pool = _make_mock_pool(rowcount=2)
+        backend = _make_backend(pool)
+        conn = _get_conn(pool)
+
+        backend.prune_to_max(3)
+
+        # The SQL must pass the exact cap (3) as the OFFSET parameter
+        all_calls = " ".join(str(c) for c in conn.execute.call_args_list)
+        assert "DELETE" in all_calls
+        # Verify OFFSET 3 is in the call args (not 100)
+        delete_call = next(c for c in conn.execute.call_args_list if "DELETE" in str(c))
+        args = list(delete_call.args) if delete_call.args else []
+        kwargs = delete_call.kwargs if delete_call.kwargs else {}
+        # The parameter tuple should contain 3 (the cap), not 100
+        params = args[1] if len(args) > 1 else kwargs.get("params", ())
+        assert 3 in params, (
+            f"Expected OFFSET 3 in DELETE params, got: {params}. "
+            "The primitive must be pure — no floor inside."
+        )
+
+    def test_zero_cap_passed_directly_as_offset(self) -> None:
+        """prune_to_max(0) must use OFFSET 0, not OFFSET 100."""
+        pool = _make_mock_pool(rowcount=5)
+        backend = _make_backend(pool)
+        conn = _get_conn(pool)
+
+        backend.prune_to_max(0)
+
+        delete_call = next(c for c in conn.execute.call_args_list if "DELETE" in str(c))
+        args = list(delete_call.args) if delete_call.args else []
+        kwargs = delete_call.kwargs if delete_call.kwargs else {}
+        params = args[1] if len(args) > 1 else kwargs.get("params", ())
+        assert 0 in params, (
+            f"Expected OFFSET 0 in DELETE params, got: {params}. "
+            "The primitive must be pure — no floor inside."
+        )
+
+    def test_no_min_cap_constant_in_module(self) -> None:
+        """The backend module must NOT contain _MIN_CAP floor logic."""
+        import inspect
+        from code_indexer.server.storage.postgres import query_embedding_cache_backend
+
+        source = inspect.getsource(query_embedding_cache_backend)
+        assert "_MIN_CAP" not in source, (
+            "_MIN_CAP found in postgres backend — floor must live at "
+            "QueryEmbeddingCache._resolve_max_entries, NOT in the primitive."
+        )
+
+
 # ---------------------------------------------------------------------------
 # total_entries()
 # ---------------------------------------------------------------------------

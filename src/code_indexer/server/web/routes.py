@@ -5839,6 +5839,28 @@ async def _reload_oidc_configuration():
     )
 
 
+def _get_qec_total_entries() -> int:
+    """Return the live total row count from the QueryEmbeddingCache, or 0.
+
+    Used by _get_current_config to surface the total-cached-entries readout in
+    the Web UI config page (Story #1107 S3 finding B3).  Fail-open: returns 0
+    when the cache is not wired (CLI / pre-lifespan) or on any backend error.
+    """
+    try:
+        from ..services.governed_call import get_query_embedding_cache
+
+        cache = get_query_embedding_cache()
+        if cache is None:
+            return 0
+        return int(cache.total_entries())
+    except Exception:
+        logger.warning(
+            "query_embedding_cache: failed to read total_entries for Web UI (fail-open)",
+            exc_info=True,
+        )
+        return 0
+
+
 def _get_current_config() -> dict:
     """Get current configuration from ConfigService (persisted to ~/.cidx-server/config.json)."""
     from ..services.config_service import get_config_service
@@ -6093,9 +6115,13 @@ def _get_current_config() -> dict:
         # Story #652: Reranking configuration
         "rerank": settings.get("rerank", asdict(RerankConfig())),
         # Story #1107 S3: Query embedding cache configuration
-        "query_embedding_cache": settings.get(
-            "query_embedding_cache", asdict(QueryEmbeddingCacheConfig())
-        ),
+        # total_cached_entries is injected as a live read-only readout (B3).
+        "query_embedding_cache": {
+            **settings.get(
+                "query_embedding_cache", asdict(QueryEmbeddingCacheConfig())
+            ),
+            "total_cached_entries": _get_qec_total_entries(),
+        },
         # Story #885: Lifecycle analysis configuration
         "lifecycle_analysis": settings.get(
             "lifecycle_analysis", asdict(LifecycleAnalysisConfig())

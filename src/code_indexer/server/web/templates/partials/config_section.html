@@ -1214,6 +1214,11 @@ function saveLlmCredsConfig() {
                         <td class="config-note"><small>Shared LRU cap (minimum 100)</small></td>
                     </tr>
                     <tr>
+                        <td class="config-label">Total Cached Entries</td>
+                        <td class="config-value">{{ config.query_embedding_cache.total_cached_entries }}</td>
+                        <td class="config-note"><small>Current row count in the cache store (read-only)</small></td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Voyage Mode</td>
                         <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_voyage_mode }}</td>
                         <td class="config-note"><small>off / shadow / on</small></td>

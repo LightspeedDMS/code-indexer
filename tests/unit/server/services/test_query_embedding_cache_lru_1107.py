@@ -4,9 +4,10 @@ Tests cover:
 - prune_to_max evicts exactly down to the cap (oldest-by-last_used first)
 - Deterministic tie-breaking via secondary sort columns
 - Cap is SHARED across both providers (one bucket, not per-provider)
-- max_entries < 100 falls back to safe default (100)
+- _resolve_max_entries() applies the >=100 floor (floor now lives at resolution layer)
 - MRU bump: recently-hit row survives eviction over older row
 - Concurrent pruners converge deterministically — no crash, store ends bounded
+- Live-path wiring: writing >max_entries rows enforces the cap via record_miss_or_shadow
 - Config section: all 8 settings round-trip via config service
 - Config validation: rejects bad mode/float/int values
 - per-provider audit_sample_rate fields in config
@@ -17,6 +18,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from typing import List, Optional
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -26,8 +28,7 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
-_MIN_ENTRIES_FLOOR = 100  # minimum cap enforced by prune_to_max
-_MIN_ENTRIES_SAFE_DEFAULT = 100  # safe default when below floor
+_MIN_ENTRIES_SAFE_DEFAULT = 100  # safe default when configured below floor
 
 
 def _make_vec(n: int = 4, seed: float = 1.0) -> List[float]:
@@ -136,54 +137,228 @@ class TestPruneToMaxSqliteExact:
         assert backend.lookup("key3", "voyage-ai", "test-model", 4) is not None
         assert backend.lookup("key4", "voyage-ai", "test-model", 4) is not None
 
+    def test_prune_small_cap_pure_primitive(self, tmp_path: Path) -> None:
+        """Pure primitive: prune_to_max(3) on 5 rows leaves exactly 3 (no floor)."""
+        backend = _make_backend(tmp_path)
+        for i in range(5):
+            _insert_row(backend, f"key{i}", "voyage-ai", 1000.0 + i, 1000.0 + i)
+        assert backend.total_entries() == 5
+
+        deleted = backend.prune_to_max(3)
+        assert deleted == 2
+        assert backend.total_entries() == 3
+
+    def test_prune_cap_1_pure_primitive(self, tmp_path: Path) -> None:
+        """Pure primitive: prune_to_max(1) on 5 rows leaves exactly 1 (no floor)."""
+        backend = _make_backend(tmp_path)
+        for i in range(5):
+            _insert_row(backend, f"key{i}", "voyage-ai", 1000.0 + i, 1000.0 + i)
+        assert backend.total_entries() == 5
+
+        deleted = backend.prune_to_max(1)
+        assert deleted == 4
+        assert backend.total_entries() == 1
+
 
 # ---------------------------------------------------------------------------
-# AC1: min_entries floor (SQLite)
+# AC1: _resolve_max_entries() floor (config resolution layer)
 # ---------------------------------------------------------------------------
 
 
-class TestPruneToMaxMinEntriesFloor:
-    """max_entries < 100 falls back to safe default (100)."""
+class TestResolveMaxEntriesFloor:
+    """_resolve_max_entries() applies the >=100 floor at the service level.
 
-    def test_max_entries_below_100_uses_safe_default(self, tmp_path: Path) -> None:
-        """Passing max_entries=5 (< 100) should behave as max_entries=100."""
+    The floor no longer lives in the primitive — it lives at config resolution.
+    Tests here verify that QueryEmbeddingCache._resolve_max_entries() returns
+    at least 100 regardless of what the config says.
+    """
+
+    def _make_cache_with_config(self, max_entries_config: int, tmp_path: Path):
+        """Build a QueryEmbeddingCache with a mocked config returning max_entries_config."""
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+
         backend = _make_backend(tmp_path)
-        # Insert 150 rows
-        for i in range(150):
-            _insert_row(backend, f"key{i}", "voyage-ai", 1000.0 + i, 1000.0 + i)
-        assert backend.total_entries() == 150
+        cache = QueryEmbeddingCache(backend, max_entries=max_entries_config)
 
-        # max_entries=5 is below the floor of 100 — should fall back to 100
-        backend.prune_to_max(5)
-        # Must end up at exactly 100 (not 5)
-        assert backend.total_entries() == 100
+        # Mock live config to return the configured value
+        mock_qec_cfg = MagicMock()
+        mock_qec_cfg.query_embedding_cache_max_entries = max_entries_config
+        with patch.object(cache, "_live_qec_cfg", return_value=mock_qec_cfg):
+            result = cache._resolve_max_entries()
+        return result
 
-    def test_max_entries_zero_uses_safe_default(self, tmp_path: Path) -> None:
-        """Passing max_entries=0 should use the safe default of 100."""
+    def test_max_entries_below_100_resolves_to_100(self, tmp_path: Path) -> None:
+        """Config max_entries=5 (< 100) must resolve to 100."""
+        result = self._make_cache_with_config(5, tmp_path)
+        assert result == 100
+
+    def test_max_entries_zero_resolves_to_100(self, tmp_path: Path) -> None:
+        """Config max_entries=0 must resolve to 100."""
+        result = self._make_cache_with_config(0, tmp_path)
+        assert result == 100
+
+    def test_max_entries_99_resolves_to_100(self, tmp_path: Path) -> None:
+        """Config max_entries=99 (one below floor) must resolve to 100."""
+        result = self._make_cache_with_config(99, tmp_path)
+        assert result == 100
+
+    def test_max_entries_100_resolves_to_100(self, tmp_path: Path) -> None:
+        """Config max_entries=100 is the minimum valid cap — preserved."""
+        result = self._make_cache_with_config(100, tmp_path)
+        assert result == 100
+
+    def test_max_entries_500_resolves_to_500(self, tmp_path: Path) -> None:
+        """Config max_entries=500 is above floor — preserved as-is."""
+        result = self._make_cache_with_config(500, tmp_path)
+        assert result == 500
+
+    def test_max_entries_10000_resolves_to_10000(self, tmp_path: Path) -> None:
+        """Config max_entries=10000 (default) is above floor — preserved."""
+        result = self._make_cache_with_config(10000, tmp_path)
+        assert result == 10000
+
+    def test_resolve_uses_construction_default_when_no_live_config(
+        self, tmp_path: Path
+    ) -> None:
+        """When config unavailable, construction-time max_entries is used (with floor)."""
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+
         backend = _make_backend(tmp_path)
-        for i in range(150):
-            _insert_row(backend, f"key{i}", "voyage-ai", 1000.0 + i, 1000.0 + i)
+        # Construction-time default is 10000
+        cache = QueryEmbeddingCache(backend, max_entries=10000)
+        with patch.object(cache, "_live_qec_cfg", return_value=None):
+            result = cache._resolve_max_entries()
+        assert result == 10000
 
-        backend.prune_to_max(0)
-        assert backend.total_entries() == 100
+    def test_resolve_uses_construction_default_below_100_floors_to_100(
+        self, tmp_path: Path
+    ) -> None:
+        """Construction-time max_entries=50 with no live config -> floor to 100."""
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
 
-    def test_max_entries_99_uses_safe_default(self, tmp_path: Path) -> None:
-        """max_entries=99 (one below floor) falls back to 100."""
         backend = _make_backend(tmp_path)
-        for i in range(150):
-            _insert_row(backend, f"key{i}", "voyage-ai", 1000.0 + i, 1000.0 + i)
+        cache = QueryEmbeddingCache(backend, max_entries=50)
+        with patch.object(cache, "_live_qec_cfg", return_value=None):
+            result = cache._resolve_max_entries()
+        assert result == 100
 
-        backend.prune_to_max(99)
-        assert backend.total_entries() == 100
 
-    def test_max_entries_100_is_valid(self, tmp_path: Path) -> None:
-        """max_entries=100 is the minimum valid cap — must be respected exactly."""
+# ---------------------------------------------------------------------------
+# B2 regression guard: live-path wiring (cap enforced on upsert)
+# ---------------------------------------------------------------------------
+
+
+class TestLivePathWiring:
+    """record_miss_or_shadow calls prune_to_max after each upsert.
+
+    This is the key regression guard for B2: the cap must NOT be orphan code.
+    Writing >max_entries entries must result in total_entries() <= max_entries.
+    """
+
+    def test_cap_enforced_on_upsert_exact(self, tmp_path: Path) -> None:
+        """Write 110 entries with max_entries=100 — total_entries() must equal 100."""
+        from code_indexer.server.services.query_embedding_cache import (
+            CacheQualifier,
+            QueryEmbeddingCache,
+        )
+
         backend = _make_backend(tmp_path)
-        for i in range(150):
-            _insert_row(backend, f"key{i}", "voyage-ai", 1000.0 + i, 1000.0 + i)
+        # max_entries=100 is the floor; writing 110 should leave exactly 100
+        cache = QueryEmbeddingCache(backend, max_entries=100)
 
-        backend.prune_to_max(100)
-        assert backend.total_entries() == 100
+        qualifier = CacheQualifier(
+            provider="voyage-ai", model="test-model", dimension=4
+        )
+        vec = _make_vec(4, 1.0)
+
+        # Mock _live_qec_cfg to return a config with max_entries=100
+        mock_qec_cfg = MagicMock()
+        mock_qec_cfg.query_embedding_cache_max_entries = 100
+        mock_qec_cfg.query_embedding_cache_enabled = True
+        mock_qec_cfg.query_embedding_cache_voyage_mode = "on"
+        mock_qec_cfg.query_embedding_cache_cohere_mode = "shadow"
+
+        with patch.object(cache, "_live_qec_cfg", return_value=mock_qec_cfg):
+            for i in range(110):
+                cache.record_miss_or_shadow(f"key{i:04d}", qualifier, vec)
+
+        # The cap must now be enforced — at most 100 rows remain
+        total = cache.total_entries()
+        assert total == 100, (
+            f"Expected exactly 100 entries after 110 writes with cap=100, got {total}"
+        )
+
+    def test_cap_enforced_oldest_evicted(self, tmp_path: Path) -> None:
+        """With cap=100, after writing 110 entries the 10 oldest are evicted."""
+        from code_indexer.server.services.query_embedding_cache import (
+            CacheQualifier,
+            QueryEmbeddingCache,
+        )
+
+        backend = _make_backend(tmp_path)
+        cache = QueryEmbeddingCache(backend, max_entries=100)
+
+        qualifier = CacheQualifier(
+            provider="voyage-ai", model="test-model", dimension=4
+        )
+        vec = _make_vec(4, 1.0)
+
+        mock_qec_cfg = MagicMock()
+        mock_qec_cfg.query_embedding_cache_max_entries = 100
+        mock_qec_cfg.query_embedding_cache_enabled = True
+        mock_qec_cfg.query_embedding_cache_voyage_mode = "on"
+        mock_qec_cfg.query_embedding_cache_cohere_mode = "shadow"
+
+        with patch.object(cache, "_live_qec_cfg", return_value=mock_qec_cfg):
+            for i in range(110):
+                cache.record_miss_or_shadow(f"key{i:04d}", qualifier, vec)
+
+        # After writing 110 entries with cap=100, last 100 survive (key0010..key0109)
+        # The first 10 (key0000..key0009) should be evicted as oldest
+        for i in range(10):
+            result = backend.lookup(f"key{i:04d}", "voyage-ai", "test-model", 4)
+            assert result is None, f"key{i:04d} should have been evicted (oldest)"
+
+        # The last 10 (key0100..key0109) should still be present as newest
+        for i in range(100, 110):
+            result = backend.lookup(f"key{i:04d}", "voyage-ai", "test-model", 4)
+            assert result is not None, f"key{i:04d} should still be present (newest)"
+
+    def test_prune_failure_is_fail_open(self, tmp_path: Path) -> None:
+        """prune_to_max failure must log WARNING but NOT roll back the upsert."""
+        from code_indexer.server.services.query_embedding_cache import (
+            CacheQualifier,
+            QueryEmbeddingCache,
+        )
+
+        backend = _make_backend(tmp_path)
+        cache = QueryEmbeddingCache(backend, max_entries=100)
+
+        qualifier = CacheQualifier(
+            provider="voyage-ai", model="test-model", dimension=4
+        )
+        vec = _make_vec(4, 1.0)
+
+        mock_qec_cfg = MagicMock()
+        mock_qec_cfg.query_embedding_cache_max_entries = 100
+
+        # Patch prune_to_max to raise an exception
+        with patch.object(cache, "_live_qec_cfg", return_value=mock_qec_cfg):
+            with patch.object(
+                backend, "prune_to_max", side_effect=RuntimeError("DB error")
+            ):
+                # Must not raise — fail-open
+                cache.record_miss_or_shadow("key0", qualifier, vec)
+
+        # The upsert must still have committed the row
+        result = backend.lookup("key0", "voyage-ai", "test-model", 4)
+        assert result is not None, "Upsert must succeed even when prune_to_max fails"
 
 
 # ---------------------------------------------------------------------------

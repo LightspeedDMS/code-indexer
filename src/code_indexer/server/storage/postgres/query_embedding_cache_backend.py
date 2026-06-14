@@ -165,25 +165,23 @@ class QueryEmbeddingCachePostgresBackend:
     def prune_to_max(self, max_entries: int) -> int:
         """Delete rows beyond max_entries ordered by last_used ASC (deterministic tie-break).
 
+        Pure primitive — prunes to exactly max_entries rows.  The >=100 safe floor
+        is enforced by the caller at config resolution
+        (QueryEmbeddingCache._resolve_max_entries).
+
         Uses a ctid-based DELETE with OFFSET so the entire eviction is a single
         atomic statement.  The secondary sort ensures deterministic eviction when
         last_used values are identical:
             ORDER BY last_used ASC, created_at ASC, cache_key ASC,
                      provider ASC, model ASC, dimension ASC
 
-        Minimum bound: ``max_entries < 100`` falls back to the safe default of 100.
-        This prevents accidental erasure of the entire cache when a misconfigured
-        or untested value is passed.
-
         Args:
-            max_entries: Maximum rows to retain.  Values < 100 are clamped to 100.
+            max_entries: Maximum rows to retain.  Caller is responsible for
+                         applying any minimum floor before passing this value.
 
         Returns:
             Number of rows actually deleted (0 when already within cap).
         """
-        _MIN_CAP = 100
-        effective_max = max_entries if max_entries >= _MIN_CAP else _MIN_CAP
-
         try:
             with self._pool.connection() as conn:
                 result = conn.execute(
@@ -200,7 +198,7 @@ class QueryEmbeddingCachePostgresBackend:
                         OFFSET %s
                     )
                     """,
-                    (effective_max,),
+                    (max_entries,),
                 )
                 deleted = int(result.rowcount) if result.rowcount else 0
                 conn.commit()

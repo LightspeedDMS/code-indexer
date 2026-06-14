@@ -417,15 +417,45 @@ class QueryEmbeddingCache:
             )
             return None
 
+    def _resolve_max_entries(self) -> int:
+        """Return the effective LRU cap, applying the >=100 safe floor.
+
+        Reads the LIVE ``query_embedding_cache_max_entries`` from the config
+        service on every call (mirror of how ``mode_for``/``anchor_tokens_for``
+        read live config via ``_live_qec_cfg()``).  Applies the safe floor:
+        ``return max(configured, 100)`` so values < 100 are raised to 100.
+
+        The >=100 floor is the SOLE location of this floor logic — it must NOT
+        be duplicated inside the backend primitives (which are pure).
+
+        Returns:
+            int >= 100.
+        """
+        qec_cfg = self._live_qec_cfg()
+        if qec_cfg is not None:
+            raw = int(
+                getattr(
+                    qec_cfg,
+                    "query_embedding_cache_max_entries",
+                    self._max_entries,
+                )
+            )
+        else:
+            raw = self._max_entries
+        return max(raw, 100)
+
     def record_miss_or_shadow(
         self,
         cache_key: str,
         qualifier: CacheQualifier,
         embedding: List[float],
     ) -> None:
-        """UPSERT the embedding bytes into the backend.  Fail-open on error.
+        """UPSERT the embedding bytes into the backend, then enforce the LRU cap.
 
         Converts the float list to float32 little-endian bytes before writing.
+        After a successful upsert, calls ``prune_to_max`` with the LIVE resolved
+        cap so the cap is NOT orphan code.  Prune failure is fail-open: logs a
+        WARNING but does NOT roll back the write and does NOT raise.
 
         Args:
             cache_key: SHA-256 hex from :meth:`build_key`.
@@ -449,6 +479,17 @@ class QueryEmbeddingCache:
         except Exception:
             logger.warning(
                 "query_embedding_cache: upsert failed (fail-open)",
+                exc_info=True,
+            )
+            return
+
+        # Enforce the LRU cap on every miss-write.  Workload is ~500 searches/day
+        # so COUNT+delete-excess is trivial.  Prune failure is fail-open.
+        try:
+            self._backend.prune_to_max(self._resolve_max_entries())
+        except Exception:
+            logger.warning(
+                "query_embedding_cache: prune_to_max failed (fail-open)",
                 exc_info=True,
             )
 
