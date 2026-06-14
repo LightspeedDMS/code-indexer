@@ -3078,6 +3078,68 @@ def make_lifespan(
                 )
             )
 
+        # Story #1105: build the query embedding cache ONCE after providers +
+        # config are available (same timing as the coalescer registry above).
+        # The cache is sourced from backend_registry.query_embedding_cache in
+        # both SQLite (solo) and PostgreSQL (cluster) modes — no fallback to an
+        # alternative backend so misconfiguration surfaces immediately.
+        # Non-fatal: failure leaves the cache unset so queries use the live path.
+        try:
+            from code_indexer.server.services.governed_call import (
+                set_query_embedding_cache,
+            )
+            from code_indexer.server.services.query_embedding_cache import (
+                QueryEmbeddingCache as _QueryEmbeddingCache,
+            )
+            from code_indexer.server.services.config_service import (
+                get_config_service as _get_cfg_svc_1105,
+            )
+
+            _qec_backend = (
+                backend_registry.query_embedding_cache
+                if backend_registry is not None
+                else None
+            )
+            if _qec_backend is not None:
+                _qec_cfg = _get_cfg_svc_1105().get_config()
+                _qec_voyage_mode = getattr(
+                    _qec_cfg, "query_embedding_cache_voyage_mode", "shadow"
+                )
+                _qec_cohere_mode = getattr(
+                    _qec_cfg, "query_embedding_cache_cohere_mode", "shadow"
+                )
+                _qec_enabled = getattr(_qec_cfg, "query_embedding_cache_enabled", True)
+                _query_embedding_cache = _QueryEmbeddingCache(
+                    backend=_qec_backend,
+                    enabled=_qec_enabled,
+                    voyage_mode=_qec_voyage_mode,
+                    cohere_mode=_qec_cohere_mode,
+                )
+                set_query_embedding_cache(_query_embedding_cache)
+                logger.info(
+                    "Query embedding cache built (Story #1105, "
+                    "voyage_mode=%s, cohere_mode=%s)",
+                    _qec_voyage_mode,
+                    _qec_cohere_mode,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Query embedding cache: no backend available (solo CLI mode) — "
+                    "cache disabled (Story #1105)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1105",
+                    f"Failed to build query embedding cache "
+                    f"(queries will use the live path): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         yield  # Server is now running
 
         # Story #1083: close the pooled production httpx client owned by the
@@ -3178,6 +3240,21 @@ def make_lifespan(
         except Exception:
             logger.debug(
                 "Coalescer registry clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Story #1105: clear the process-level query embedding cache so a
+        # subsequent lifespan cycle does not inherit a stale cache instance.
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.governed_call import (
+                clear_query_embedding_cache,
+            )
+
+            clear_query_embedding_cache()
+        except Exception:
+            logger.debug(
+                "Query embedding cache clear failed (expected during shutdown)",
                 exc_info=True,
             )
 

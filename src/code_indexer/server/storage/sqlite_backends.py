@@ -6726,3 +6726,182 @@ class HiddenDiscoveryReposSqliteBackend:
             (repo_identifier,),
         )
         return cursor.fetchone() is not None
+
+
+class QueryEmbeddingCacheSqliteBackend:
+    """SQLite backend for query-embedding cache storage (Story #1105).
+
+    Stores float32 little-endian embedding blobs keyed by
+    (cache_key, provider, model, dimension).  Uses a dedicated DB file
+    so large BLOB writes do not contend with main server state.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """Initialize backend and create table/index if absent.
+
+        Args:
+            db_path: Path to SQLite database file
+                     (e.g. ~/.cidx-server/data/query_embedding_cache.db).
+        """
+        import os
+
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        self._db_path = db_path
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+
+        # WAL mode must be set outside any transaction.
+        conn = self._conn_manager.get_connection()
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create the query_embedding_cache table and index if absent."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS query_embedding_cache (
+                    cache_key  TEXT    NOT NULL,
+                    provider   TEXT    NOT NULL,
+                    model      TEXT    NOT NULL,
+                    dimension  INTEGER NOT NULL,
+                    embedding  BLOB    NOT NULL,
+                    created_at REAL    NOT NULL,
+                    last_used  REAL    NOT NULL,
+                    PRIMARY KEY (cache_key, provider, model, dimension)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_qec_last_used
+                ON query_embedding_cache (last_used)
+                """
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def lookup(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+    ) -> Optional[bytes]:
+        """Return the stored embedding bytes (float32 LE) or None on miss."""
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            """
+            SELECT embedding FROM query_embedding_cache
+            WHERE cache_key = ? AND provider = ? AND model = ? AND dimension = ?
+            """,
+            (cache_key, provider, model, dimension),
+        ).fetchone()
+        if row is None:
+            return None
+        return bytes(row[0])
+
+    def upsert(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+        embedding: bytes,
+        created_at: float,
+        last_used: float,
+    ) -> None:
+        """Insert or update the embedding row (upserts on composite PK conflict)."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                INSERT INTO query_embedding_cache
+                    (cache_key, provider, model, dimension, embedding, created_at, last_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (cache_key, provider, model, dimension) DO UPDATE SET
+                    embedding  = excluded.embedding,
+                    last_used  = excluded.last_used
+                """,
+                (
+                    cache_key,
+                    provider,
+                    model,
+                    dimension,
+                    embedding,
+                    created_at,
+                    last_used,
+                ),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def touch_last_used(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+        last_used: float,
+    ) -> None:
+        """Update last_used for an existing row."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                UPDATE query_embedding_cache
+                SET last_used = ?
+                WHERE cache_key = ? AND provider = ? AND model = ? AND dimension = ?
+                """,
+                (last_used, cache_key, provider, model, dimension),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def prune_to_max(self, max_entries: int) -> int:
+        """Delete rows beyond max_entries ordered by last_used ASC.
+
+        Returns:
+            Number of rows actually deleted.
+        """
+        result: List[int] = [0]
+
+        def operation(conn: Any) -> None:
+            total_row = conn.execute(
+                "SELECT COUNT(*) FROM query_embedding_cache"
+            ).fetchone()
+            total = total_row[0] if total_row else 0
+            to_delete = total - max_entries
+            if to_delete <= 0:
+                return
+            cursor = conn.execute(
+                """
+                DELETE FROM query_embedding_cache
+                WHERE (cache_key, provider, model, dimension) IN (
+                    SELECT cache_key, provider, model, dimension
+                    FROM query_embedding_cache
+                    ORDER BY last_used ASC
+                    LIMIT ?
+                )
+                """,
+                (to_delete,),
+            )
+            result[0] = cursor.rowcount if cursor.rowcount is not None else 0
+
+        self._conn_manager.execute_atomic(operation)
+        return result[0]
+
+    def total_entries(self) -> int:
+        """Return the total number of rows in the cache table."""
+        conn = self._conn_manager.get_connection()
+        row = conn.execute("SELECT COUNT(*) FROM query_embedding_cache").fetchone()
+        return row[0] if row else 0
+
+    def clear(self) -> None:
+        """Delete all rows from the cache table."""
+
+        def operation(conn: Any) -> None:
+            conn.execute("DELETE FROM query_embedding_cache")
+
+        self._conn_manager.execute_atomic(operation)
