@@ -1074,13 +1074,17 @@ class QueryEmbeddingCacheConfig:
         query_embedding_cache_voyage_anchor_tokens: Anchor-token depth for voyage.
             0 = sort all tokens.  None = inherit global anchor_tokens fallback.
         query_embedding_cache_voyage_audit_sample_rate: Fraction of shadow hits to
-            audit (S6 logic not yet wired).  Range [0.0, 1.0].  Default 0.0.
+            audit via S6 deep-fidelity audit (sampled second HNSW lookup; read live
+            by ``_audit_sample_rate_for()`` in governed_call.py).  Range [0.0, 1.0].
+            Default 0.0 = audit off.
         query_embedding_cache_cohere_mode: Per-provider mode for cohere.
             One of "off", "shadow", "on".  Default "shadow".
         query_embedding_cache_cohere_anchor_tokens: Anchor-token depth for cohere.
             0 = sort all tokens.  None = inherit global anchor_tokens fallback.
         query_embedding_cache_cohere_audit_sample_rate: Fraction of shadow hits to
-            audit (S6 logic not yet wired).  Range [0.0, 1.0].  Default 0.0.
+            audit via S6 deep-fidelity audit (sampled second HNSW lookup; read live
+            by ``_audit_sample_rate_for()`` in governed_call.py).  Range [0.0, 1.0].
+            Default 0.0 = audit off.
     """
 
     query_embedding_cache_enabled: bool = True
@@ -1088,13 +1092,12 @@ class QueryEmbeddingCacheConfig:
     # Per-provider mode (off / shadow / on)
     query_embedding_cache_voyage_mode: str = "shadow"
     query_embedding_cache_cohere_mode: str = "shadow"
-    # S2 / S6 fields declared now; logic not yet wired.
     # Global fallback (kept for backwards-compat; per-provider fields take precedence)
     query_embedding_cache_anchor_tokens: int = 2
     # Per-provider anchor_tokens: None = fall back to global query_embedding_cache_anchor_tokens
     query_embedding_cache_voyage_anchor_tokens: Optional[int] = None
     query_embedding_cache_cohere_anchor_tokens: Optional[int] = None
-    # Per-provider audit sample rates (S6 audit logic not yet wired)
+    # Per-provider audit sample rates (S6 deep-fidelity audit; 0.0 = audit off)
     query_embedding_cache_voyage_audit_sample_rate: float = 0.0
     query_embedding_cache_cohere_audit_sample_rate: float = 0.0
     # Legacy global audit rate (kept for backwards-compat)

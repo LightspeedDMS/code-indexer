@@ -3,6 +3,10 @@
 -- Stores float32 little-endian embedding blobs keyed by
 -- (cache_key, provider, model, dimension).  Separate from the main server
 -- tables to isolate large BLOB writes.
+--
+-- INVARIANT: this table stores ONLY query-purpose embeddings.  NEVER write
+-- document-purpose embeddings here -- the two use different Cohere input_type
+-- semantics (search_query vs search_document) and are not interchangeable.
 
 CREATE TABLE IF NOT EXISTS query_embedding_cache (
     cache_key  TEXT             NOT NULL,

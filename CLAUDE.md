@@ -307,6 +307,23 @@ Per-query server orchestration glue is cached off the GIL-bound hot path WITHOUT
 
 **Deliberately deferred (KISS / scope):** explicit refresh-event `invalidate()` wiring through the refresh scheduler (the `invalidate()` API exists + is unit-tested, but Scenario 6 is already satisfied by new-path=new-key + bounded old-version eviction + SHORT TTL); provider-state object cache (the model-spec parse -- the real per-query cost -- is already eliminated by the load-once memo; caching a per-request client is forbidden for thread safety); the confirm-first DB-metadata `list_repos` cache and health-monitor memoization (NOT confirmed non-auth-safe at the call sites in scope, so deferred). NEVER cache auth-bearing data to "improve" any of these.
 
+### Query-Embedding Cache (Epic #1103)
+
+Server-side cache of query embeddings on the query path, both providers (voyage-code-3 1024-dim, embed-v4.0 1536-dim). Wraps `coalesced_query_embedding` (`server/services/governed_call.py`) OUTSIDE-IN: the cache intercepts BEFORE the governor/coalescer; the pre-cache body became `_compute_live()` (the EXACT post-S0 body). CLI/daemon are untouched -- the cache is installed only by `startup/lifespan.py` (`set_query_embedding_cache`), so `get_query_embedding_cache()` is None on CLI/solo and the wrap returns the live path (same registry-None gate as the coalescer).
+
+**Hard invariants** -- NEVER violate:
+- NEVER lowercase the key. `build_key()` (`server/services/query_embedding_cache.py`) keeps case at every step (CamelCase identifier signal -- empirically top-1 flips ~34% under lowercase on a code index). Anchor-token normalization: first N tokens in order + sorted tail; default anchor depth 2; N>=token count == exact-match; N=0 == sort-all.
+- Composite PK `(cache_key, provider, model, dimension)`. NO repo/collection column (embedding is repo-independent). PK is the cross-provider/model/dimension isolation.
+- Synchronous DB-direct: sync SELECT on lookup, sync UPSERT on miss (+ `prune_to_max`), sync `last_used` touch on hit. NO RAM layer, NO async/batched writer (deliberate: ~500 searches/day, 30/sec ceiling; RAM layer is a clean additive future optimization). The shared count cap `max_entries` (default 10000, >=100 floor in `_resolve_max_entries`, single LRU bucket both providers) is the SINGLE true cluster-wide cap.
+- Table stores ONLY query-purpose embeddings -- NEVER document-purpose (different Cohere `input_type` semantics). SHA-256 cache_key collision accepted as negligible (no fallback). Cache value is ONLY query->vector, NEVER auth-bearing.
+- Migration `028_query_embedding_cache.sql` is additive (`CREATE TABLE IF NOT EXISTS`). Both backends first-class: `QueryEmbeddingCacheSqliteBackend` (solo) + `QueryEmbeddingCachePostgresBackend` (cluster); float32-LE blob (BLOB/BYTEA). All cache ops are fail-open (WARNING + live path; never break a query).
+
+**Semantics**: per-provider mode off/shadow/on (default shadow). off = always live, no lookup/write. shadow = ALWAYS live (returns live), lookup + record cosine on hit / upsert on miss -- measures without changing results ("would-serve rate"). on = HIT returns cached (skips provider) / MISS computes + upserts ("serving rate"). Mode/enabled/anchor read LIVE from `QueryEmbeddingCacheConfig` each call (8 Web-UI settings; no restart).
+
+**S4 bypass**: per-request `no_embedding_cache_shortcut` (default False) on all REST/MCP search endpoints (`SemanticSearchRequest`) skips the cache READ but STILL writes; the off/not-enabled gates fire FIRST. **S5 metrics**: `query_embedding_cache_metrics.py` on `cidx.cache` meter (hit/miss tagged `{mode,provider}`, total_entries ObservableGauge from cheap memo NOT live COUNT, shadow_cosine histogram); built only when cache+telemetry present. **S6 audit**: `embedding_cache_audit.py` runs a 2nd HNSW at the FSV `search()` chokepoint on sampled hits (per-provider `audit_sample_rate`, default 0.0) -- shadow audits the already-computed live vec for free; on-mode sampled hits RE-EMBED one provider call (sampled fraction only; non-sampled on-hits skip the provider). **S0 Cohere fix (Bug #1104)**: query sites passed `embedding_purpose=None` -> Cohere embedded queries as `search_document`; fix sets `embedding_purpose="query"` at all query-embed sites + threads it through the coalescer.
+
+-> Full reference: `docs/query-embedding-cache.md`
+
 ### Canonical Versioned-Snapshot Convention + Backend-Aware Cleanup (Bug #1084 Phase A)
 
 Old versioned snapshots used to leak forever on the cow-daemon/ONTAP backends because cleanup was gated on the literal substring `".versioned" in current_target`, which only matches the LocalCloneBackend layout. Phase A replaces that with ONE canonical convention + ONE predicate + backend-aware deletion.
