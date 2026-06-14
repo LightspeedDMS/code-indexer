@@ -292,6 +292,7 @@ def coalesced_query_embedding(
     *,
     embedding_purpose: Optional[str] = "query",
     acquire_timeout: float = _GOVERNOR_ACQUIRE_TIMEOUT_SECS,
+    no_embedding_cache_shortcut: bool = False,
 ) -> List[float]:
     """Server-gated entry point for a single query embedding (Story #1079 Phase E).
 
@@ -306,6 +307,11 @@ def coalesced_query_embedding(
                            return live vec.
     - Mode "shadow" + HIT  -> _compute_live() (always); touch_last_used; return LIVE.
     - Mode "shadow" + MISS -> _compute_live(); record_miss; return live vec.
+
+    Story #1108 (S4): no_embedding_cache_shortcut bypasses the cache READ when True.
+    The write (record_miss_or_shadow) still fires so future requests can benefit.
+    The mode==off / not-enabled gates fire FIRST (no_embedding_cache_shortcut cannot
+    re-enable a disabled cache).
 
     The 4 query sites call this (swapping only the function name). ALL gating
     lives here so call sites are identical on CLI and server.
@@ -336,4 +342,15 @@ def coalesced_query_embedding(
 
     cache_key: str = cache.build_key_for_provider(text, provider_name)
     qualifier: Any = cache.qualifier(provider)
+
+    # Story #1108 (S4): bypass cache READ when requested; still write on miss.
+    if no_embedding_cache_shortcut:
+        logger.debug(
+            "coalesced_query_embedding: bypass=True for %s -> skip read, compute live",
+            provider_name,
+        )
+        live_vec: List[float] = live()
+        cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
+        return live_vec
+
     return _serve_with_cache(cache, provider_name, cache_key, qualifier, live)

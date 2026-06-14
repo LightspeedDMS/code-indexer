@@ -470,7 +470,10 @@ def _apply_rerank_and_filter(
 _MEMORY_SEMANTIC_MODES = frozenset({"semantic", "hybrid"})
 
 
-def _compute_memory_query_vector(query_text: str) -> List[float]:
+def _compute_memory_query_vector(
+    query_text: str,
+    no_embedding_cache_shortcut: bool = False,
+) -> List[float]:
     """Compute a Voyage embedding for query_text using VoyageAIClient.
 
     Uses VoyageAIClient(VoyageAIConfig()) which picks up VOYAGE_API_KEY from
@@ -484,6 +487,10 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
     Bug #899 (fault-injection factory wired here): previously VoyageAIClient was
     constructed without an http_client_factory, bypassing fault injection in Phase 5
     E2E tests. Now passes _get_http_client_factory() from search_service.
+
+    Story #1108 (S4): no_embedding_cache_shortcut is forwarded to
+    coalesced_query_embedding so the caller can bypass the cache read for this
+    request without disabling future cache benefit (write still fires).
 
     Returns:
         A non-empty list of floats on success.
@@ -516,7 +523,11 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
         # (broad protocol), but for VoyageAIClient it always yields a List[float].
         return cast(
             List[float],
-            coalesced_query_embedding(provider, query_text),
+            coalesced_query_embedding(
+                provider,
+                query_text,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            ),
         )
     except Exception as exc:
         logger.warning(

@@ -2362,6 +2362,7 @@ class FilesystemVectorStore:
         ef: int = 50,
         subdirectory: Optional[str] = None,
         parallel_executor: Optional["Executor"] = None,
+        no_embedding_cache_shortcut: bool = False,
     ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         """Search for similar vectors using parallel execution of index loading and embedding generation.
 
@@ -2507,7 +2508,11 @@ class FilesystemVectorStore:
             )
 
             t0 = time.time()
-            embedding = coalesced_query_embedding(embedding_provider, query)
+            embedding = coalesced_query_embedding(
+                embedding_provider,
+                query,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            )
             embedding_time_ms = (time.time() - t0) * 1000
             return embedding, embedding_time_ms
 
