@@ -164,6 +164,14 @@ class QueryEmbeddingCache:
         # Process-local memo of last-seen anchor_tokens per provider (Story #1106).
         # Used to detect changes and emit exactly ONE structured WARNING per change.
         self._last_anchor_tokens: Dict[str, int] = {}
+        # Story #1109 (S5): cheap in-process memoized entry count for the OTEL
+        # ObservableGauge callback.  Incremented on every successful upsert so
+        # the gauge callback can call cached_total_entries() without a DB round-trip.
+        # Clamped to the resolved cap via min(..., _resolve_max_entries()) at each
+        # record_miss_or_shadow write — pins at the cap rather than growing without
+        # bound, matching post-prune reality cheaply with no DB call on the exporter
+        # thread.
+        self._cached_total: int = 0
 
     # ------------------------------------------------------------------
     # Key / qualifier helpers
@@ -476,6 +484,12 @@ class QueryEmbeddingCache:
                 now,
                 now,
             )
+            # Story #1109 (S5): update cheap memo after the write, CLAMPED to the
+            # resolved cap so it matches post-prune reality (prune evicts down to the
+            # cap; the real count never exceeds it, so the memo must not drift past it).
+            self._cached_total = min(
+                self._cached_total + 1, self._resolve_max_entries()
+            )
         except Exception:
             logger.warning(
                 "query_embedding_cache: upsert failed (fail-open)",
@@ -492,6 +506,20 @@ class QueryEmbeddingCache:
                 "query_embedding_cache: prune_to_max failed (fail-open)",
                 exc_info=True,
             )
+
+    def cached_total_entries(self) -> int:
+        """Return the cheap memoized entry count — NO backend call.
+
+        Story #1109 (S5): used as the OTEL ObservableGauge callback so the
+        exporter thread never performs a blocking DB COUNT query.  The value is
+        updated on every successful ``record_miss_or_shadow`` upsert and CLAMPED to
+        the resolved cap, so it pins at the cap (matching post-prune reality) instead
+        of drifting upward — a best-effort cheap count for observability.
+
+        Returns:
+            int — current memoized entry count (>= 0).
+        """
+        return self._cached_total
 
     def record_hit(
         self,

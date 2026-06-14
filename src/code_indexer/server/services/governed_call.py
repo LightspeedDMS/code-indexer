@@ -66,6 +66,38 @@ def clear_query_embedding_cache() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Story #1109 (S5): process-level QueryEmbeddingCacheMetrics accessor
+# ---------------------------------------------------------------------------
+# The metrics object is wired by lifespan startup (server mode + telemetry
+# enabled only).  CLI / daemon paths never set it so the accessor returns None
+# there — same "absent = explicit documented branch" pattern as the cache
+# accessor above.
+
+_query_embedding_cache_metrics: Any = None
+
+
+def get_query_embedding_cache_metrics() -> Any:
+    """Return the process-level QueryEmbeddingCacheMetrics, or None.
+
+    None on CLI / pre-lifespan / telemetry-disabled — coalesced_query_embedding
+    passes None to _serve_with_cache which is a documented no-op branch.
+    """
+    return _query_embedding_cache_metrics
+
+
+def set_query_embedding_cache_metrics(metrics: Any) -> None:
+    """Install the process-level cache metrics (called once in lifespan startup)."""
+    global _query_embedding_cache_metrics
+    _query_embedding_cache_metrics = metrics
+
+
+def clear_query_embedding_cache_metrics() -> None:
+    """Clear the process-level cache metrics (lifespan shutdown / test isolation)."""
+    global _query_embedding_cache_metrics
+    _query_embedding_cache_metrics = None
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -226,6 +258,8 @@ def _serve_with_cache(
     cache_key: str,
     qualifier: Any,
     live_fn: Callable[[], List[float]],
+    *,
+    metrics: Optional[Any] = None,
 ) -> List[float]:
     """Apply the Story #1105 cache policy for one embedding request.
 
@@ -238,12 +272,19 @@ def _serve_with_cache(
 
     All cache operations are fail-open (the service swallows DB errors).
 
+    Story #1109 (S5): accepts optional `metrics` (QueryEmbeddingCacheMetrics).
+      - hit/miss counters are recorded with {"mode": <mode>, "provider": <provider>}.
+      - shadow_cosine is recorded ONLY in shadow mode when a prior cached blob exists.
+      - provider error in shadow: miss metric recorded, no cosine, error re-raised.
+      - metrics=None (default) preserves all existing caller behaviour unchanged.
+
     Args:
         cache: QueryEmbeddingCache instance.
         provider_name: e.g. "voyage-ai".
         cache_key: SHA-256 hex from build_key(text).
         qualifier: CacheQualifier named-tuple.
         live_fn: Zero-arg callable that produces the live embedding vector.
+        metrics: Optional QueryEmbeddingCacheMetrics; no-op when None.
 
     Returns:
         List[float] — cached vector (on-mode HIT) or live vector (all other paths).
@@ -258,6 +299,8 @@ def _serve_with_cache(
                 provider_name,
             )
             cache.record_hit(cache_key, qualifier)
+            if metrics is not None:
+                metrics.record_hit(mode=mode, provider=provider_name)
             return _bytes_to_floats(cached_blob)
         # MISS
         logger.debug(
@@ -266,10 +309,19 @@ def _serve_with_cache(
         )
         live_vec: List[float] = live_fn()
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
+        if metrics is not None:
+            metrics.record_miss(mode=mode, provider=provider_name)
         return live_vec
 
     # shadow (or any unrecognised mode treated as shadow per cache.mode_for default)
-    live_vec = live_fn()
+    # AC5: wrap live_fn() so provider errors record a miss metric then re-raise.
+    try:
+        live_vec = live_fn()
+    except Exception:
+        if metrics is not None:
+            metrics.record_miss(mode=mode, provider=provider_name)
+        raise
+
     shadow_blob: Optional[bytes] = cache.lookup(cache_key, qualifier)
     if shadow_blob is not None:
         logger.debug(
@@ -277,12 +329,18 @@ def _serve_with_cache(
             provider_name,
         )
         cache.record_hit(cache_key, qualifier)
+        if metrics is not None:
+            metrics.record_hit(mode=mode, provider=provider_name)
+            # AC2: record cosine ONLY in shadow + prior-cached
+            metrics.record_shadow_cosine(cached_blob=shadow_blob, live_vec=live_vec)
     else:
         logger.debug(
             "coalesced_query_embedding: shadow MISS (provider=%s) -> record_miss",
             provider_name,
         )
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
+        if metrics is not None:
+            metrics.record_miss(mode=mode, provider=provider_name)
     return live_vec
 
 
@@ -353,4 +411,11 @@ def coalesced_query_embedding(
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
         return live_vec
 
-    return _serve_with_cache(cache, provider_name, cache_key, qualifier, live)
+    return _serve_with_cache(
+        cache,
+        provider_name,
+        cache_key,
+        qualifier,
+        live,
+        metrics=get_query_embedding_cache_metrics(),
+    )

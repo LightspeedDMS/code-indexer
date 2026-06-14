@@ -804,6 +804,81 @@ def dashboard_api_metrics_partial(
     )
 
 
+@web_router.get("/partials/dashboard-cache-metrics", response_class=HTMLResponse)
+def dashboard_cache_metrics_partial(request: Request):
+    """Story #1109 (S5): Query-embedding cache metrics partial.
+
+    Returns an HTML fragment showing total cached entries and real hit/miss
+    ratios per mode for the query-embedding cache.  Hit/ratio stats come from
+    the in-process snapshot() on QueryEmbeddingCacheMetrics (readable tallies
+    kept alongside each OTEL counter increment, so the dashboard never needs
+    an OTEL exporter).  Mirrors the dashboard-api-metrics HTMX partial pattern.
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    import types
+
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    # total_entries: DB COUNT is acceptable on a request thread.
+    cache = getattr(request.app.state, "query_embedding_cache", None)
+    total_entries = 0
+    if cache is not None:
+        try:
+            total_entries = cache.total_entries()
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: total_entries failed: %s", _exc
+            )
+
+    # Hit/ratio data from in-process snapshot (real tallies, not OTEL exporters).
+    # Hit-ratio is DERIVED per mode in the template — never blended across modes.
+    from code_indexer.server.services.governed_call import (
+        get_query_embedding_cache_metrics,
+    )
+
+    _metrics = get_query_embedding_cache_metrics()
+    shadow_hits = 0
+    shadow_requests = 0
+    on_hits = 0
+    on_requests = 0
+    shadow_cosine_p50 = None
+
+    if _metrics is not None:
+        try:
+            snap = _metrics.snapshot()
+            _shadow = snap.get("shadow", {})
+            _on = snap.get("on", {})
+            shadow_hits = _shadow.get("hits", 0)
+            shadow_requests = shadow_hits + _shadow.get("misses", 0)
+            on_hits = _on.get("hits", 0)
+            on_requests = on_hits + _on.get("misses", 0)
+            shadow_cosine_p50 = snap.get("shadow_cosine_p50")
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: snapshot() failed: %s", _exc
+            )
+
+    cache_metrics = types.SimpleNamespace(
+        total_entries=total_entries,
+        shadow_hits=shadow_hits,
+        shadow_requests=shadow_requests,
+        on_hits=on_hits,
+        on_requests=on_requests,
+        shadow_cosine_p50=shadow_cosine_p50,
+    )
+
+    return templates.TemplateResponse(
+        "partials/dashboard_cache_metrics.html",
+        {
+            "request": request,
+            "cache_metrics": cache_metrics,
+        },
+    )
+
+
 @web_router.get("/partials/dashboard-langfuse", response_class=HTMLResponse)
 def dashboard_langfuse_partial(request: Request):
     """

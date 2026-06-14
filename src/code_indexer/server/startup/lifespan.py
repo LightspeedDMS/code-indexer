@@ -3126,6 +3126,50 @@ def make_lifespan(
                 )
             )
 
+        # Story #1109 (S5): build QueryEmbeddingCacheMetrics when BOTH the cache
+        # AND telemetry are available.  If telemetry is disabled or the cache was
+        # not built, the accessor stays None (CLI / no-backend paths are no-ops).
+        # Non-fatal: a failure must never abort startup.
+        try:
+            from code_indexer.server.services.governed_call import (
+                set_query_embedding_cache_metrics,
+                get_query_embedding_cache,
+            )
+            from code_indexer.server.services.query_embedding_cache_metrics import (
+                QueryEmbeddingCacheMetrics,
+            )
+
+            _wired_cache = get_query_embedding_cache()
+            if telemetry_manager is not None and _wired_cache is not None:
+                _cache_meter = telemetry_manager.get_meter("cidx.cache")
+                _cache_metrics = QueryEmbeddingCacheMetrics(
+                    _cache_meter,
+                    total_entries_fn=_wired_cache.cached_total_entries,
+                )
+                set_query_embedding_cache_metrics(_cache_metrics)
+                logger.info(
+                    "QueryEmbeddingCacheMetrics built and wired (Story #1109 S5)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "QueryEmbeddingCacheMetrics: skipped "
+                    "(telemetry_manager=%s, cache=%s) — accessor stays None",
+                    telemetry_manager is not None,
+                    _wired_cache is not None,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1109",
+                    f"Failed to build QueryEmbeddingCacheMetrics "
+                    f"(cache metrics will be disabled): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         yield  # Server is now running
 
         # Story #1083: close the pooled production httpx client owned by the
@@ -3241,6 +3285,21 @@ def make_lifespan(
         except Exception:
             logger.debug(
                 "Query embedding cache clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Story #1109 (S5): clear the process-level cache metrics so a subsequent
+        # lifespan cycle does not inherit a stale metrics instance.
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.governed_call import (
+                clear_query_embedding_cache_metrics,
+            )
+
+            clear_query_embedding_cache_metrics()
+        except Exception:
+            logger.debug(
+                "Query embedding cache metrics clear failed (expected during shutdown)",
                 exc_info=True,
             )
 
