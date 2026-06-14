@@ -1,13 +1,28 @@
-"""Story #1105: QueryEmbeddingCache service — exact-match embedding cache.
+"""Story #1105 / #1106: QueryEmbeddingCache service — anchor-token embedding cache.
 
 Provides:
-- build_key(text) -> SHA-256 hex (case-preserved, no normalisation)
+- build_key(text, anchor_tokens=2) -> SHA-256 hex (case-preserved, anchor-token
+  normalised).  Story #1106 generalises S1's exact-match key: the first
+  ``anchor_tokens`` tokens are kept in original order; the remaining tokens are
+  sorted alphabetically (duplicates kept as a sorted multiset).  anchor_tokens=0
+  sorts ALL tokens; anchor_tokens >= token count degenerates to exact-match.
+  CASE IS NEVER LOWERCASED at any step.
 - CacheQualifier: named-tuple PK fields (provider, model, dimension)
 - QueryEmbeddingCache: service wrapping a QueryEmbeddingCacheBackend with
   per-provider mode gating (off / shadow / on) and fail-open error handling.
-  ``enabled_for()`` and ``mode_for()`` read LIVE from the config service on
-  every call (mirror of ``coalesce_enabled`` in governed_call.py) so the
-  master kill switch and per-provider mode take effect WITHOUT a restart.
+  ``enabled_for()``, ``mode_for()``, and ``anchor_tokens_for()`` read LIVE from
+  the config service on every call (mirror of ``coalesce_enabled`` in
+  governed_call.py) so the master kill switch, per-provider mode, and
+  anchor-depth take effect WITHOUT a restart.
+
+Namespace-change observability (Story #1106):
+  When the effective ``anchor_tokens`` for a provider changes at runtime, exactly
+  ONE structured WARNING is emitted so operators understand the resulting
+  hit-rate dip.  The process-local memo is per-provider so a change on one
+  provider never suppresses a log for another.  Changing anchor_tokens or model
+  INTENTIONALLY fragments the keyspace: old rows keyed under the old normalisation
+  no longer match new keys and age out via LRU.  Correctness is preserved —
+  each row's key still correctly matches its own normalisation.
 """
 
 from __future__ import annotations
@@ -15,7 +30,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from typing import List, NamedTuple, Optional, cast
+from typing import Dict, List, NamedTuple, Optional, cast
 
 from code_indexer.server.storage.protocols import QueryEmbeddingCacheBackend
 
@@ -32,23 +47,62 @@ _MODE_ON = "on"
 _VALID_MODES = {_MODE_OFF, _MODE_SHADOW, _MODE_ON}
 
 # ---------------------------------------------------------------------------
+# Default anchor depth
+# ---------------------------------------------------------------------------
+
+_DEFAULT_ANCHOR_TOKENS = 2
+
+# ---------------------------------------------------------------------------
 # Key building
 # ---------------------------------------------------------------------------
 
 
-def build_key(text: str) -> str:
-    """Return SHA-256 hex digest of *text* encoded as UTF-8.
+def build_key(text: str, anchor_tokens: int = _DEFAULT_ANCHOR_TOKENS) -> str:
+    """Return SHA-256 hex of the anchor-token-normalised representation of *text*.
 
-    CASE PRESERVED — never lowercased.  Two queries that differ only in
-    case produce different keys (exact-match semantics).
+    Normalisation algorithm (Story #1106):
+    1. Tokenise: ``text.split()`` (no argument) — splits on any whitespace run,
+       strips leading/trailing whitespace, discards empty tokens automatically.
+       Punctuation is NOT stripped (attached to its token).
+    2. Take the first ``anchor_tokens`` tokens in ORIGINAL order (the anchor prefix).
+    3. Sort the REMAINING tokens ALPHABETICALLY (case-aware, i.e. lexicographic on
+       the raw Unicode code points — NEVER lowercased).  Duplicates are kept as a
+       sorted multiset.
+    4. Normalised string = anchor prefix + sorted tail, joined by a single space.
+    5. Return SHA-256 hex of the normalised string encoded as UTF-8.
+
+    Boundary behaviours:
+    - ``anchor_tokens == 0`` -> sort ALL tokens (no anchor prefix).
+    - ``anchor_tokens >= token_count`` -> all tokens in original order; tail is
+      empty; key equals exact-match SHA-256 of the joined tokens.
+    - Empty / whitespace-only input -> empty token list -> SHA-256 of ``""``
+      (stable, non-crashing).
+
+    CASE PRESERVED throughout — never lowercased.  Two queries that differ only
+    in case produce different keys.
 
     Args:
         text: The raw query string (any length, including empty).
+        anchor_tokens: Number of leading tokens to keep in original order.
+            Remaining tokens are sorted alphabetically.  Must be >= 0; negative
+            values are treated as 0.  Default: 2.
 
     Returns:
         64-character lowercase hex string (SHA-256 digest).
     """
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    # Clamp to >= 0 defensively (negative is not meaningful)
+    n = max(0, anchor_tokens)
+
+    tokens = text.split()  # collapses whitespace runs; case preserved
+    if n >= len(tokens):
+        # All tokens in original order — exact-match semantics
+        normalised = " ".join(tokens)
+    else:
+        anchor = tokens[:n]
+        tail = sorted(tokens[n:])  # lexicographic (case-aware); duplicates kept
+        normalised = " ".join(anchor + tail)
+
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -104,15 +158,27 @@ class QueryEmbeddingCache:
             "cohere": cohere_mode if cohere_mode in _VALID_MODES else _MODE_SHADOW,
         }
         self._max_entries = max_entries
+        # Process-local memo of last-seen anchor_tokens per provider (Story #1106).
+        # Used to detect changes and emit exactly ONE structured WARNING per change.
+        self._last_anchor_tokens: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Key / qualifier helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def build_key(text: str) -> str:
-        """Delegate to module-level :func:`build_key`."""
-        return build_key(text)
+    def build_key(text: str, anchor_tokens: int = _DEFAULT_ANCHOR_TOKENS) -> str:
+        """Delegate to module-level :func:`build_key`.
+
+        Args:
+            text: The raw query string.
+            anchor_tokens: Number of leading tokens to keep in original order.
+                Remaining tokens are sorted alphabetically.  Default: 2.
+
+        Returns:
+            64-character SHA-256 hex string.
+        """
+        return build_key(text, anchor_tokens)
 
     def qualifier(self, provider: object) -> CacheQualifier:
         """Extract a :class:`CacheQualifier` from a provider object.
@@ -213,6 +279,102 @@ class QueryEmbeddingCache:
             raw = self._modes.get(provider_name, _MODE_SHADOW)
         mode = str(raw) if raw in _VALID_MODES else _MODE_SHADOW
         return mode
+
+    # ------------------------------------------------------------------
+    # Anchor-token dial (Story #1106)
+    # ------------------------------------------------------------------
+
+    def anchor_tokens_for(self, provider_name: str) -> int:
+        """Return the effective ``anchor_tokens`` for *provider_name*.
+
+        Reads LIVE from the config service on every call — a value change takes
+        effect immediately without a restart.
+
+        Per-provider config keys (tried in order):
+        - ``query_embedding_cache_voyage_anchor_tokens`` (when provider == "voyage-ai")
+        - ``query_embedding_cache_cohere_anchor_tokens`` (when provider == "cohere")
+        - ``query_embedding_cache_anchor_tokens`` (global fallback field)
+        - :data:`_DEFAULT_ANCHOR_TOKENS` (construction-time hard default)
+
+        Namespace-change observability: when the resolved value differs from the
+        last-seen value for this provider, ONE structured WARNING is emitted so
+        operators understand the resulting hit-rate dip.  Subsequent calls with
+        the same new value do NOT re-log.
+
+        The keyspace fragmentation is INTENTIONAL: old rows keyed under the old
+        normalisation no longer match new keys and age out via LRU.  Correctness
+        is preserved — each row's key still correctly matches its own
+        normalisation.
+
+        Args:
+            provider_name: e.g. "voyage-ai" or "cohere".
+
+        Returns:
+            int >= 0.  Negative config values are clamped to 0.
+        """
+        qec_cfg = self._live_qec_cfg()
+        raw: int = _DEFAULT_ANCHOR_TOKENS
+        if qec_cfg is not None:
+            # Try per-provider key first
+            if provider_name == "voyage-ai":
+                per_provider = getattr(
+                    qec_cfg,
+                    "query_embedding_cache_voyage_anchor_tokens",
+                    None,
+                )
+            elif provider_name == "cohere":
+                per_provider = getattr(
+                    qec_cfg,
+                    "query_embedding_cache_cohere_anchor_tokens",
+                    None,
+                )
+            else:
+                per_provider = None
+
+            if per_provider is not None:
+                raw = int(per_provider)
+            else:
+                # Global fallback
+                raw = int(
+                    getattr(
+                        qec_cfg,
+                        "query_embedding_cache_anchor_tokens",
+                        _DEFAULT_ANCHOR_TOKENS,
+                    )
+                )
+
+        effective = max(0, raw)  # clamp negative to sort-all
+
+        # Namespace-change observability: emit ONE WARNING when value changes.
+        last = self._last_anchor_tokens.get(provider_name)
+        if last is not None and last != effective:
+            logger.warning(
+                "query_embedding_cache: anchor_tokens changed for provider '%s' "
+                "(%d -> %d) — cache namespace fragmented; old keys age out via LRU; "
+                "correctness preserved (each row matches its own normalisation).",
+                provider_name,
+                last,
+                effective,
+            )
+        self._last_anchor_tokens[provider_name] = effective
+
+        return effective
+
+    def build_key_for_provider(self, text: str, provider_name: str) -> str:
+        """Build a cache key using the LIVE ``anchor_tokens`` for *provider_name*.
+
+        Convenience method that combines :meth:`anchor_tokens_for` and
+        :func:`build_key` in one call.  Used by the cache-wrap layer so the
+        active anchor depth is always up-to-date.
+
+        Args:
+            text: The raw query string.
+            provider_name: e.g. "voyage-ai" or "cohere".
+
+        Returns:
+            64-character SHA-256 hex string.
+        """
+        return build_key(text, self.anchor_tokens_for(provider_name))
 
     # ------------------------------------------------------------------
     # Cache operations — all fail-open

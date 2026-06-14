@@ -149,6 +149,11 @@ def _make_cache(
     cache.mode_for.return_value = voyage_mode
     cache.lookup.return_value = hit_bytes
     cache.build_key = build_key
+    # anchor_tokens_for must return a real int so build_key's max(0, n) doesn't
+    # blow up with "TypeError: '>' not supported between instances of 'MagicMock'
+    # and 'int'" (Story #1106 wiring: governed_call.py now calls
+    # cache.anchor_tokens_for(provider_name) and passes the result to build_key).
+    cache.anchor_tokens_for.return_value = 2
     cache.qualifier.return_value = MagicMock(
         provider=PROVIDER_NAME, model=MODEL_NAME, dimension=DIMENSION
     )
@@ -518,3 +523,116 @@ class TestShadowModeMiss:
         assert coalescer.submitted == [TEST_TEXT]
         cache.record_miss_or_shadow.assert_called_once()
         cache.record_hit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Story #1106 wiring: anchor_tokens dial takes effect THROUGH the wrap
+# ---------------------------------------------------------------------------
+
+
+class TestAnchorTokenDialThroughWrap:
+    """Prove the per-provider anchor_tokens config knob is actually applied in
+    coalesced_query_embedding (Story #1106 wiring gap fix).
+
+    We use a REAL QueryEmbeddingCache backed by a real SQLite backend so the
+    lookup/record cycle is genuine (no MagicMock short-circuits).
+
+    Scenario A — anchor_tokens=0 (sort ALL tokens):
+      Two queries that are reorderings of the same token bag must produce the
+      SAME cache key so the second query is a HIT and no second live embed is
+      issued.
+
+    Scenario B — anchor_tokens=3 (exact-match for 3-token queries):
+      Two queries with the same token bag but different orderings produce
+      DISTINCT cache keys so both are MISSes and two live embeds are issued.
+    """
+
+    def _make_real_cache(
+        self, tmp_path, *, anchor_tokens: int, mode: str = "on"
+    ) -> object:
+        """Build a QueryEmbeddingCache with a real SQLite backend.
+
+        The real lookup/record cycle runs against real SQLite so hit/miss
+        behaviour is genuine.  Two instance methods are patched to isolate
+        the test from the live config service:
+
+        - ``anchor_tokens_for`` -> returns *anchor_tokens* (an int)
+        - ``mode_for`` -> returns *mode* (bypasses live-config default of
+          "shadow" which would prevent the HIT short-circuit in on-mode tests)
+        """
+        from code_indexer.server.services.query_embedding_cache import (
+            QueryEmbeddingCache,
+        )
+        from code_indexer.server.storage.sqlite_backends import (
+            QueryEmbeddingCacheSqliteBackend,
+        )
+
+        backend = QueryEmbeddingCacheSqliteBackend(str(tmp_path / "qec.db"))
+        cache = QueryEmbeddingCache(backend=backend, enabled=True, voyage_mode=mode)
+        # Patch anchor_tokens_for so it returns the desired int value live,
+        # bypassing the live config service (which may not be wired in unit tests).
+        cache.anchor_tokens_for = lambda provider_name: anchor_tokens  # type: ignore[method-assign]
+        # Patch mode_for for the same reason: the live config service defaults
+        # voyage_mode to "shadow", which overrides the constructor argument and
+        # would prevent on-mode HIT short-circuiting in test_anchor0_reorderings_are_hit.
+        cache.mode_for = lambda provider_name: mode  # type: ignore[method-assign]
+        return cache
+
+    def test_anchor0_reorderings_are_hit(self, monkeypatch, tmp_path):
+        """anchor_tokens=0 -> sort ALL tokens -> same-bag reorderings share key.
+
+        First call: MISS -> live embed called, result cached.
+        Second call (tail-reordered): same cache key -> HIT, no live embed.
+        """
+        cache = self._make_real_cache(tmp_path, anchor_tokens=0)
+        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+
+        live_call_count: List[int] = [0]
+
+        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+            live_call_count[0] += 1
+            return LIVE_VEC
+
+        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+
+        q1 = "find authentication middleware"
+        q2 = "authentication find middleware"  # same tokens, different order
+
+        result1 = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), q1)
+        assert result1 == LIVE_VEC
+        assert live_call_count[0] == 1, "First call must go live (MISS)"
+
+        result2 = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), q2)
+        # anchor=0 collapses both to the same key -> HIT -> cached vec returned
+        assert result2 == pytest.approx(LIVE_VEC, abs=1e-4)
+        assert live_call_count[0] == 1, (
+            "Second call must be a cache HIT (anchor_tokens=0 sorts all tokens)"
+        )
+
+    def test_anchor3_distinct_orderings_are_both_miss(self, monkeypatch, tmp_path):
+        """anchor_tokens=3 with 3-token queries -> exact-match semantics.
+
+        Different orderings produce different keys, so both calls are MISSes
+        and two live embeds are issued.
+        """
+        cache = self._make_real_cache(tmp_path, anchor_tokens=3)
+        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+
+        live_call_count: List[int] = [0]
+
+        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+            live_call_count[0] += 1
+            return LIVE_VEC
+
+        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+
+        q1 = "find authentication middleware"
+        q2 = "authentication find middleware"  # same 3 tokens, different order
+
+        governed_call.coalesced_query_embedding(_FakeVoyageProvider(), q1)
+        assert live_call_count[0] == 1, "First call must go live (MISS)"
+
+        governed_call.coalesced_query_embedding(_FakeVoyageProvider(), q2)
+        assert live_call_count[0] == 2, (
+            "Second call must also be a MISS (anchor_tokens=3 -> exact-match for 3-token query)"
+        )
