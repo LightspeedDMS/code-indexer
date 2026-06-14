@@ -9,7 +9,7 @@ originSessionId: 04fcbccb-cd14-4e4f-94da-218d94a53f94
 ## What It Is
 Lightweight REST daemon replacing ONTAP/FSx for dev/non-prod clusters. Runs on any Linux with XFS reflink=1 or btrfs.
 
-Repo: `/home/jsbattig/Dev/cow-storage-daemon`
+Repo: `cow-storage-daemon` (separate repo, sibling checkout)
 
 ## Integration Model (SAME as ONTAP pattern)
 
@@ -34,9 +34,9 @@ Repo: `/home/jsbattig/Dev/cow-storage-daemon`
 2. Poll `GET /api/v1/jobs/{job_id}` until `completed` or `failed`
 3. Prepend NFS mount to `clone_path` for absolute filesystem path
 
-## This Machine Setup
-- Filesystem: XFS on `/home` with `reflink=1` — confirmed compatible
-- Install: `./scripts/install-cow-daemon.sh --storage-path /home/jsbattig/cow-storage`
+## Host Setup Prerequisites
+- Filesystem: XFS (or btrfs) with `reflink=1` on the storage root — required for CoW clones
+- Install: `./scripts/install-cow-daemon.sh --storage-path <storage-root>` (a reflink-capable XFS/btrfs path)
 - Credentials stored in `.local-testing`
 
 ## CIDX Integration Status — WIRED (Story #510, as of 2026-04-14)
