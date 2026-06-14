@@ -5,8 +5,9 @@ Provides:
 - CacheQualifier: named-tuple PK fields (provider, model, dimension)
 - QueryEmbeddingCache: service wrapping a QueryEmbeddingCacheBackend with
   per-provider mode gating (off / shadow / on) and fail-open error handling.
-
-Chunk C wires this into governed_call and lifespan.
+  ``enabled_for()`` and ``mode_for()`` read LIVE from the config service on
+  every call (mirror of ``coalesce_enabled`` in governed_call.py) so the
+  master kill switch and per-provider mode take effect WITHOUT a restart.
 """
 
 from __future__ import annotations
@@ -134,11 +135,36 @@ class QueryEmbeddingCache:
         return CacheQualifier(provider=pname, model=model, dimension=dimension)
 
     # ------------------------------------------------------------------
+    # Live config read helper
+    # ------------------------------------------------------------------
+
+    def _live_qec_cfg(self) -> Optional[object]:
+        """Return QueryEmbeddingCacheConfig from live config service, or None.
+
+        Fail-open: any exception returns None so callers fall back to the
+        construction-time defaults stored in ``self._enabled`` / ``self._modes``.
+        """
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            cfg = get_config_service().get_config()
+            return getattr(cfg, "query_embedding_cache_config", None)
+        except Exception:  # noqa: BLE001 — config read is best-effort
+            logger.debug(
+                "query_embedding_cache: could not read live config; using construction defaults",
+            )
+            return None
+
+    # ------------------------------------------------------------------
     # Mode gating
     # ------------------------------------------------------------------
 
     def enabled_for(self, provider_name: str) -> bool:
         """Return True iff master switch is ON and provider mode is not 'off'.
+
+        Reads LIVE from ``get_config_service().get_config().query_embedding_cache_config``
+        on every call (mirror of ``coalesce_enabled`` in governed_call.py).
+        Falls back to the construction-time ``enabled`` arg when config unavailable.
 
         Args:
             provider_name: e.g. "voyage-ai" or "cohere".
@@ -146,17 +172,47 @@ class QueryEmbeddingCache:
         Returns:
             bool — False means caller should skip all cache interaction.
         """
-        if not self._enabled:
+        qec_cfg = self._live_qec_cfg()
+        if qec_cfg is not None:
+            enabled = bool(
+                getattr(qec_cfg, "query_embedding_cache_enabled", self._enabled)
+            )
+        else:
+            enabled = self._enabled
+        if not enabled:
             return False
-        return self._modes.get(provider_name, _MODE_SHADOW) != _MODE_OFF
+        return self._live_mode_for(provider_name, qec_cfg) != _MODE_OFF
 
     def mode_for(self, provider_name: str) -> str:
         """Return the effective mode string for *provider_name*.
 
+        Reads LIVE from the config service on every call.
+
         Returns:
             One of "off", "shadow", "on".  Unknown providers default to "shadow".
         """
-        return self._modes.get(provider_name, _MODE_SHADOW)
+        return self._live_mode_for(provider_name, self._live_qec_cfg())
+
+    def _live_mode_for(self, provider_name: str, qec_cfg: Optional[object]) -> str:
+        """Extract mode for *provider_name* from *qec_cfg* (live) or fallback."""
+        if qec_cfg is None:
+            return self._modes.get(provider_name, _MODE_SHADOW)
+        if provider_name == "voyage-ai":
+            raw = getattr(
+                qec_cfg,
+                "query_embedding_cache_voyage_mode",
+                self._modes.get("voyage-ai", _MODE_SHADOW),
+            )
+        elif provider_name == "cohere":
+            raw = getattr(
+                qec_cfg,
+                "query_embedding_cache_cohere_mode",
+                self._modes.get("cohere", _MODE_SHADOW),
+            )
+        else:
+            raw = self._modes.get(provider_name, _MODE_SHADOW)
+        mode = str(raw) if raw in _VALID_MODES else _MODE_SHADOW
+        return mode
 
     # ------------------------------------------------------------------
     # Cache operations — all fail-open

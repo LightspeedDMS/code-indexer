@@ -3091,9 +3091,6 @@ def make_lifespan(
             from code_indexer.server.services.query_embedding_cache import (
                 QueryEmbeddingCache as _QueryEmbeddingCache,
             )
-            from code_indexer.server.services.config_service import (
-                get_config_service as _get_cfg_svc_1105,
-            )
 
             _qec_backend = (
                 backend_registry.query_embedding_cache
@@ -3101,26 +3098,15 @@ def make_lifespan(
                 else None
             )
             if _qec_backend is not None:
-                _qec_cfg = _get_cfg_svc_1105().get_config()
-                _qec_voyage_mode = getattr(
-                    _qec_cfg, "query_embedding_cache_voyage_mode", "shadow"
-                )
-                _qec_cohere_mode = getattr(
-                    _qec_cfg, "query_embedding_cache_cohere_mode", "shadow"
-                )
-                _qec_enabled = getattr(_qec_cfg, "query_embedding_cache_enabled", True)
+                # enabled / mode are read LIVE on every call via the config service
+                # (AC3 "read LIVE each call") — no frozen snapshot at construction.
                 _query_embedding_cache = _QueryEmbeddingCache(
                     backend=_qec_backend,
-                    enabled=_qec_enabled,
-                    voyage_mode=_qec_voyage_mode,
-                    cohere_mode=_qec_cohere_mode,
                 )
                 set_query_embedding_cache(_query_embedding_cache)
                 logger.info(
                     "Query embedding cache built (Story #1105, "
-                    "voyage_mode=%s, cohere_mode=%s)",
-                    _qec_voyage_mode,
-                    _qec_cohere_mode,
+                    "live config reads via QueryEmbeddingCacheConfig)",
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:

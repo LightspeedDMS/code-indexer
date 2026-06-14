@@ -18,7 +18,7 @@ import hashlib
 import time
 from pathlib import Path
 from typing import List
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -39,7 +39,7 @@ def _encode_vec(vec: List[float]) -> bytes:
 
 
 def _decode_vec(blob: bytes) -> List[float]:
-    return np.frombuffer(blob, dtype="<f4").tolist()
+    return [float(x) for x in np.frombuffer(blob, dtype="<f4")]
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ class TestBuildKey:
     def _build_key(self, text: str) -> str:
         from code_indexer.server.services.query_embedding_cache import build_key
 
-        return build_key(text)
+        return str(build_key(text))
 
     def test_case_preserved_not_lowercased(self) -> None:
         key_upper = self._build_key("CamelCase")
@@ -259,20 +259,31 @@ class TestQueryEmbeddingCacheService:
         assert cache.enabled_for("voyage-ai") is True
 
     def test_not_enabled_when_master_switch_off(self, tmp_path: Path) -> None:
+        # Patch _live_qec_cfg to return None so construction-time enabled=False is used.
+        # This tests the fail-open fallback path; live-config path is in
+        # test_query_embedding_cache_config_1105.py.
         cache = self._make_cache(tmp_path, enabled=False)
-        assert cache.enabled_for("voyage-ai") is False
+        _target = "code_indexer.server.services.query_embedding_cache.QueryEmbeddingCache._live_qec_cfg"
+        with patch(_target, return_value=None):
+            assert cache.enabled_for("voyage-ai") is False
 
     def test_mode_off_returns_inert_mode(self, tmp_path: Path) -> None:
         cache = self._make_cache(tmp_path, enabled=True, voyage_mode="off")
-        assert cache.mode_for("voyage-ai") == "off"
+        _target = "code_indexer.server.services.query_embedding_cache.QueryEmbeddingCache._live_qec_cfg"
+        with patch(_target, return_value=None):
+            assert cache.mode_for("voyage-ai") == "off"
 
     def test_mode_shadow_default(self, tmp_path: Path) -> None:
         cache = self._make_cache(tmp_path, enabled=True, voyage_mode="shadow")
-        assert cache.mode_for("voyage-ai") == "shadow"
+        _target = "code_indexer.server.services.query_embedding_cache.QueryEmbeddingCache._live_qec_cfg"
+        with patch(_target, return_value=None):
+            assert cache.mode_for("voyage-ai") == "shadow"
 
     def test_mode_on(self, tmp_path: Path) -> None:
         cache = self._make_cache(tmp_path, enabled=True, voyage_mode="on")
-        assert cache.mode_for("voyage-ai") == "on"
+        _target = "code_indexer.server.services.query_embedding_cache.QueryEmbeddingCache._live_qec_cfg"
+        with patch(_target, return_value=None):
+            assert cache.mode_for("voyage-ai") == "on"
 
     def test_lookup_returns_none_when_miss(self, tmp_path: Path) -> None:
         cache = self._make_cache(tmp_path)

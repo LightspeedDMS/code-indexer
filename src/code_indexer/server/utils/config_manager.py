@@ -1057,6 +1057,35 @@ class MemoryRetrievalConfig:
 
 
 @dataclass
+class QueryEmbeddingCacheConfig:
+    """Query embedding cache configuration (Story #1105).
+
+    All fields are RUNTIME (DB-backed, Web-UI tunable) — NOT in BOOTSTRAP_KEYS
+    and NOT read from config.json.  A server restart is NOT required when these
+    change; ``enabled_for()`` / ``mode_for()`` read them LIVE on every call via
+    ``get_config_service().get_config().query_embedding_cache_config``.
+
+    Fields:
+        query_embedding_cache_enabled: Master kill switch.  False = cache inert.
+        query_embedding_cache_voyage_mode: Per-provider mode for voyage-ai.
+            One of "off", "shadow", "on".  Default "shadow".
+        query_embedding_cache_cohere_mode: Per-provider mode for cohere.
+            One of "off", "shadow", "on".  Default "shadow".
+        query_embedding_cache_max_entries: Soft DB row cap (pruned on upsert).
+        query_embedding_cache_anchor_tokens: Reserved for S2 anchor generalisation.
+        query_embedding_cache_audit_sample_rate: Reserved for S6 audit sampling.
+    """
+
+    query_embedding_cache_enabled: bool = True
+    query_embedding_cache_voyage_mode: str = "shadow"
+    query_embedding_cache_cohere_mode: str = "shadow"
+    query_embedding_cache_max_entries: int = 10000
+    # S2 / S6 fields declared now; logic not yet wired
+    query_embedding_cache_anchor_tokens: int = 2
+    query_embedding_cache_audit_sample_rate: float = 0.0
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -1140,6 +1169,9 @@ class ServerConfig:
 
     # Story #883 - Memory retrieval configuration (runtime only, not bootstrap)
     memory_retrieval_config: Optional[MemoryRetrievalConfig] = None
+
+    # Story #1105 - Query embedding cache configuration (runtime only, not bootstrap)
+    query_embedding_cache_config: Optional[QueryEmbeddingCacheConfig] = None
 
     # Story #885 - Lifecycle analysis subprocess timeout configuration
     lifecycle_analysis_config: Optional[LifecycleAnalysisConfig] = None
@@ -1392,6 +1424,9 @@ class ServerConfig:
         # Story #883 - Initialize memory retrieval config
         if self.memory_retrieval_config is None:
             self.memory_retrieval_config = MemoryRetrievalConfig()
+        # Story #1105 - Initialize query embedding cache config
+        if self.query_embedding_cache_config is None:
+            self.query_embedding_cache_config = QueryEmbeddingCacheConfig()
         # Story #885 - Initialize lifecycle analysis config
         if self.lifecycle_analysis_config is None:
             self.lifecycle_analysis_config = LifecycleAnalysisConfig()
@@ -1914,6 +1949,18 @@ class ServerConfigManager:
             _mem_allowed = {f.name for f in fields(MemoryRetrievalConfig)}
             config_dict["memory_retrieval_config"] = MemoryRetrievalConfig(
                 **{k: v for k, v in _mem_dict.items() if k in _mem_allowed}
+            )
+
+        # Story #1105: Convert query_embedding_cache_config dict to
+        # QueryEmbeddingCacheConfig.  Unknown keys are filtered for rolling-upgrade
+        # safety — same fields() pattern as memory_retrieval_config conversion.
+        if "query_embedding_cache_config" in config_dict and isinstance(
+            config_dict["query_embedding_cache_config"], dict
+        ):
+            _qec_dict = config_dict["query_embedding_cache_config"]
+            _qec_allowed = {f.name for f in fields(QueryEmbeddingCacheConfig)}
+            config_dict["query_embedding_cache_config"] = QueryEmbeddingCacheConfig(
+                **{k: v for k, v in _qec_dict.items() if k in _qec_allowed}
             )
 
         # Story #885 Phase 5b (A7d): Convert lifecycle_analysis_config dict to
