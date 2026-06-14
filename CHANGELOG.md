@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.128.0] - 2026-06-14
+
+### Fixed
+- **Query-embedding cache (Epic #1103) dashboard metrics now populate without telemetry.** The cache-metrics dashboard cards (hit ratio, shadow cosine, deep-fidelity audit) were blank whenever telemetry was disabled (the default config on staging/production), because the metrics object was only constructed in the telemetry-enabled startup branch and the accessor stayed None. The object is now built whenever the cache is wired (with the OTEL meter when telemetry is on, else a no-op meter), so its in-process snapshot tallies -- which the dashboard reads independently of OTEL export -- always record. Also: per-provider `query_embedding_cache_{voyage,cohere}_anchor_tokens` can now be reset to inherit-global (None) via the Web UI instead of being coerced to 0. Found via staging-cluster E2E.
+
 ## [10.127.0] - 2026-06-14
 
 ### Added
