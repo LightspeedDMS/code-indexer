@@ -1132,3 +1132,145 @@ class TestValueFlowTemporalDispatch:
             f"no_embedding_cache_shortcut=True must reach query_temporal for ALL providers "
             f"in _query_multi_provider_fusion, but captured: {captured}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Story #1108 S4 gap fix — SemanticQueryRequest field + /api/query threading
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticQueryRequestField:
+    """SemanticQueryRequest (models/query.py) must expose
+    no_embedding_cache_shortcut: bool = False so the /api/query client
+    can set the flag (Pydantic silently drops unknown extra keys).
+    """
+
+    def test_default_is_false(self):
+        from code_indexer.server.models.query import SemanticQueryRequest
+
+        req = SemanticQueryRequest(query_text="find auth")
+        assert req.no_embedding_cache_shortcut is False
+
+    def test_set_true(self):
+        from code_indexer.server.models.query import SemanticQueryRequest
+
+        req = SemanticQueryRequest(
+            query_text="find auth", no_embedding_cache_shortcut=True
+        )
+        assert req.no_embedding_cache_shortcut is True
+
+    def test_parses_from_json_true(self):
+        from code_indexer.server.models.query import SemanticQueryRequest
+
+        req = SemanticQueryRequest.model_validate(
+            {"query_text": "find auth", "no_embedding_cache_shortcut": True}
+        )
+        assert req.no_embedding_cache_shortcut is True
+
+    def test_absent_from_json_defaults_false(self):
+        from code_indexer.server.models.query import SemanticQueryRequest
+
+        req = SemanticQueryRequest.model_validate({"query_text": "find auth"})
+        assert req.no_embedding_cache_shortcut is False
+
+
+class TestValueFlowApiQueryRoute:
+    """The /api/query route handler (routers/inline_query.py) must thread
+    no_embedding_cache_shortcut from SemanticQueryRequest into
+    query_user_repositories on BOTH code paths:
+      - the default semantic mode path (bottom of handler)
+      - the hybrid/semantic branch of the fts+hybrid mode (lines 300-326)
+
+    Strategy: monkeypatch semantic_query_manager.query_user_repositories on
+    the module-local reference that the route closure captures, spy on the kwarg.
+    """
+
+    def _make_spy_manager(self, captured: list):
+        """Return a fake SemanticQueryManager whose query_user_repositories
+        records the no_embedding_cache_shortcut kwarg value it receives."""
+        from unittest.mock import MagicMock
+
+        mgr = MagicMock()
+        mgr.query_user_repositories.return_value = {
+            "results": [],
+            "total_results": 0,
+            "query_metadata": {
+                "query_text": "find auth",
+                "execution_time_ms": 1,
+                "repositories_searched": 0,
+                "timeout_occurred": False,
+            },
+            "warning": None,
+        }
+
+        def _spy(**kw):
+            captured.append(kw.get("no_embedding_cache_shortcut"))
+            return mgr.query_user_repositories.return_value
+
+        mgr.query_user_repositories.side_effect = _spy
+        return mgr
+
+    def _make_app(self, spy_manager):
+        """Build a minimal FastAPI test app with the /api/query route registered."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from unittest.mock import MagicMock
+        from code_indexer.server.routers.inline_query import register_query_routes
+
+        test_app = FastAPI()
+
+        # Minimal activated_repo_manager stub
+        arm = MagicMock()
+        arm.list_activated_repositories.return_value = []
+
+        register_query_routes(
+            test_app,
+            semantic_query_manager=spy_manager,
+            activated_repo_manager=arm,
+        )
+
+        # Override auth dependency so tests don't need a real token
+        from code_indexer.server.auth import dependencies
+
+        class _FakeUser:
+            username = "alice"
+
+        test_app.dependency_overrides[dependencies.get_current_user] = (
+            lambda: _FakeUser()
+        )
+        return TestClient(test_app, raise_server_exceptions=True)
+
+    def test_semantic_mode_threads_flag_true(self):
+        """Default semantic mode: no_embedding_cache_shortcut=True must reach
+        query_user_repositories."""
+        captured: list = []
+        spy_mgr = self._make_spy_manager(captured)
+        client = self._make_app(spy_mgr)
+
+        resp = client.post(
+            "/api/query",
+            json={
+                "query_text": "find auth",
+                "search_mode": "semantic",
+                "no_embedding_cache_shortcut": True,
+            },
+        )
+        assert resp.status_code in (200, 202), resp.text
+        assert captured, "query_user_repositories was never called"
+        assert captured[0] is True, (
+            f"no_embedding_cache_shortcut=True must reach query_user_repositories "
+            f"via /api/query semantic path, but captured: {captured}"
+        )
+
+    def test_semantic_mode_default_false_propagates(self):
+        """When no_embedding_cache_shortcut is absent, False reaches the manager."""
+        captured: list = []
+        spy_mgr = self._make_spy_manager(captured)
+        client = self._make_app(spy_mgr)
+
+        resp = client.post("/api/query", json={"query_text": "find auth"})
+        assert resp.status_code in (200, 202), resp.text
+        assert captured, "query_user_repositories was never called"
+        assert captured[0] is False, (
+            f"no_embedding_cache_shortcut must default to False, but captured: {captured}"
+        )
