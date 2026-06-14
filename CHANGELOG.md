@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.127.0] - 2026-06-14
+
+### Added
+- **Epic #1103 (server-side query-embedding cache).** Caches the QUERY-path embedding for both providers (VoyageAI, Cohere) so repeated or anchor-equivalent query texts skip the embedding round-trip. Synchronous DB-direct, backend-dual (SQLite solo / PostgreSQL cluster) -- no RAM layer, no TTL. Tristate per-provider mode (`off`/`shadow`/`on`, default `shadow`) plus a master kill switch (`query_embedding_cache_enabled`). Anchor-token normalization dial (per-provider `query_embedding_cache_{voyage,cohere}_anchor_tokens`, inheriting the global default of 2): keeps the first N tokens in order and sorts the remaining tail, so reordered queries share one key; the key is CASE-PRESERVED (never lowercased) and SHA-256-hashed; composite PK `(cache_key, provider, model, dimension)`. Shared count-based LRU cap (`query_embedding_cache_max_entries`, default 10000) -- one bucket across both providers, oldest evicted, enforced on every write. Per-request `no_embedding_cache_shortcut` (default false) on all REST and MCP search endpoints (skips the cache READ but still writes). Observability: hits/misses counters + total-entries gauge + per-mode hit ratio on the dashboard and via OTEL, plus shadow-mode `cos(cached, live)` fidelity. Sampled deep-fidelity audit (per-provider `query_embedding_cache_{voyage,cohere}_audit_sample_rate`, default 0.0): on a sampled fraction of cache hits, runs a second HNSW search and records top-10 overlap + top-1 match (on-mode sampled hits re-embed once on the sampled fraction only). Includes the Cohere `embedding_purpose` fix (Bug #1104): all server query-path embed calls pass `embedding_purpose="query"` so Cohere maps to `input_type="search_query"` (previously queries were mis-embedded as `search_document`). New reference docs: `docs/query-embedding-cache.md` and `docs/query-embedding-cache-empirical-study.md`.
+
 ## [10.126.0] - 2026-06-12
 
 ### Fixed
