@@ -86,6 +86,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "snapshot_retention_keep_last",  # Bug #1084 Phase A6 — runtime keep-last-N knob
             "nfs_visibility_timeout_seconds",  # Bug #1084 staging follow-up — runtime NFS visibility deadline
             "research_session_retention_days",  # Bug #1085 — runtime research GC retention
+            "query_embedding_cache_config",  # Story #1105 — runtime Web UI cache config
         }
     )
 

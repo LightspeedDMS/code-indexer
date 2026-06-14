@@ -212,6 +212,7 @@ def _build_multi_search_request(
         exclude_language=params.get("exclude_language"),
         exclude_path=params.get("exclude_path"),
         accuracy=params.get("accuracy", "balanced"),
+        no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
     )
 
 
@@ -470,7 +471,10 @@ def _apply_rerank_and_filter(
 _MEMORY_SEMANTIC_MODES = frozenset({"semantic", "hybrid"})
 
 
-def _compute_memory_query_vector(query_text: str) -> List[float]:
+def _compute_memory_query_vector(
+    query_text: str,
+    no_embedding_cache_shortcut: bool = False,
+) -> List[float]:
     """Compute a Voyage embedding for query_text using VoyageAIClient.
 
     Uses VoyageAIClient(VoyageAIConfig()) which picks up VOYAGE_API_KEY from
@@ -484,6 +488,10 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
     Bug #899 (fault-injection factory wired here): previously VoyageAIClient was
     constructed without an http_client_factory, bypassing fault injection in Phase 5
     E2E tests. Now passes _get_http_client_factory() from search_service.
+
+    Story #1108 (S4): no_embedding_cache_shortcut is forwarded to
+    coalesced_query_embedding so the caller can bypass the cache read for this
+    request without disabling future cache benefit (write still fires).
 
     Returns:
         A non-empty list of floats on success.
@@ -516,7 +524,11 @@ def _compute_memory_query_vector(query_text: str) -> List[float]:
         # (broad protocol), but for VoyageAIClient it always yields a List[float].
         return cast(
             List[float],
-            coalesced_query_embedding(provider, query_text),
+            coalesced_query_embedding(
+                provider,
+                query_text,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            ),
         )
     except Exception as exc:
         logger.warning(
@@ -580,7 +592,14 @@ def _run_memory_retrieval(
     # supplied non-empty vector is always used; only compute internally when the
     # caller did not supply a vector at all.
     if query_vector is None:
-        query_vector = _compute_memory_query_vector(query_text)
+        # Story #1108 (S4): thread per-request cache bypass so the fallback
+        # embedding call also honours the flag.
+        query_vector = _compute_memory_query_vector(
+            query_text,
+            no_embedding_cache_shortcut=params.get(
+                "no_embedding_cache_shortcut", False
+            ),
+        )
     if not query_vector:
         # Empty list: either compute returned [] (WARNING logged there) or caller
         # passed an empty list (treated as "no vector available").
@@ -733,6 +752,9 @@ def _build_search_kwargs(
         query_strategy=params.get("query_strategy"),
         score_fusion=params.get("score_fusion"),
         preferred_provider=params.get("preferred_provider"),
+        # Story #1108 (S4): per-request cache bypass; web UI search never sets
+        # this — it has no such control, so False is correct for that path.
+        no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
     )
 
 
@@ -880,7 +902,15 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
         mem_cfg = config_service.get_config().memory_retrieval_config
         if mem_cfg.memory_retrieval_enabled:
             query_text = params.get("query_text", "") or ""
-            shared_query_vector = _compute_shared_query_vector(str(query_text))
+            # Story #1108 (S4): thread per-request cache bypass into the
+            # shared embedding call so both code search and memory retrieval
+            # honour the bypass flag without a second Voyage API call.
+            shared_query_vector = _compute_shared_query_vector(
+                str(query_text),
+                no_embedding_cache_shortcut=params.get(
+                    "no_embedding_cache_shortcut", False
+                ),
+            )
 
     kwargs = _build_search_kwargs(params, user, [], effective_limit)
     # query_user_repositories uses repository_alias, not user_repos

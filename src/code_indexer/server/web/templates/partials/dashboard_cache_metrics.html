@@ -1,0 +1,65 @@
+<!-- Story #1109 (S5): Query-embedding cache metrics partial -->
+<!-- Mirrors dashboard_api_metrics.html card layout -->
+<article class="stat-card">
+    <header><h3>Cache Entries</h3></header>
+    <div class="stat-value">{{ cache_metrics.total_entries if cache_metrics else 0 }}</div>
+    <footer><small>Query-embedding cache (total rows)</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Shadow Hit Rate</h3></header>
+    <div class="stat-value">
+        {% if cache_metrics and cache_metrics.shadow_requests > 0 %}
+            {{ "%.1f"|format(cache_metrics.shadow_hits / cache_metrics.shadow_requests * 100) }}%
+        {% else %}
+            --
+        {% endif %}
+    </div>
+    <footer><small>shadow mode (would-serve rate)</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>On-Mode Hit Rate</h3></header>
+    <div class="stat-value">
+        {% if cache_metrics and cache_metrics.on_requests > 0 %}
+            {{ "%.1f"|format(cache_metrics.on_hits / cache_metrics.on_requests * 100) }}%
+        {% else %}
+            --
+        {% endif %}
+    </div>
+    <footer><small>on mode (serving rate)</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Shadow Cosine P50</h3></header>
+    <div class="stat-value">
+        {% if cache_metrics and cache_metrics.shadow_cosine_p50 is not none %}
+            {{ "%.4f"|format(cache_metrics.shadow_cosine_p50) }}
+        {% else %}
+            --
+        {% endif %}
+    </div>
+    <footer><small>median cos(cached, live) in shadow mode</small></footer>
+</article>
+{% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
+<article class="stat-card">
+    <header><h3>Audit Samples</h3></header>
+    <div class="stat-value">{{ cache_metrics.audit_total }}</div>
+    <footer><small>deep-fidelity audits run</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Audit Top-1 Match</h3></header>
+    <div class="stat-value">
+        {{ "%.1f"|format(cache_metrics.audit_top1_matches / cache_metrics.audit_total * 100) }}%
+    </div>
+    <footer><small>cached top-1 == live top-1 rate</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Audit Avg Top-10 Overlap</h3></header>
+    <div class="stat-value">
+        {% if cache_metrics.audit_overlap_avg is not none %}
+            {{ "%.2f"|format(cache_metrics.audit_overlap_avg) }}
+        {% else %}
+            --
+        {% endif %}
+    </div>
+    <footer><small>avg |primary ∩ second| / k across audits</small></footer>
+</article>
+{% endif %}

@@ -426,8 +426,13 @@ class SemanticQueryManager:
         score_fusion: Optional[str] = None,
         # Multi-provider routing (Story #593)
         preferred_provider: Optional[str] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read.
+        # When True the cache lookup is skipped for this request; the live embedding
+        # is computed and the cache write still fires (shadow/miss path).
+        no_embedding_cache_shortcut: bool = False,
         # Story #883 Phase C: reuse a pre-computed Voyage vector so the handler
         # makes exactly ONE embedding API call per request (shared with memory retrieval).
+        # MUST remain the LAST parameter to preserve positional-arg compatibility.
         precomputed_query_vector: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
@@ -560,6 +565,8 @@ class SemanticQueryManager:
                 preferred_provider=preferred_provider,
                 # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
                 precomputed_query_vector=precomputed_query_vector,
+                # Story #1108 (S4): per-request cache bypass
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
@@ -762,6 +769,8 @@ class SemanticQueryManager:
         preferred_provider: Optional[str] = None,
         # Story #883 Phase C: reuse pre-computed Voyage vector (no duplicate API call)
         precomputed_query_vector: Optional[List[float]] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
     ) -> List[QueryResult]:
         """
         Perform the actual search across user repositories.
@@ -889,6 +898,8 @@ class SemanticQueryManager:
                     preferred_provider=preferred_provider,
                     # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
                     precomputed_query_vector=precomputed_query_vector,
+                    # Story #1108 (S4): per-request cache bypass
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
                 all_results.extend(results)
 
@@ -1002,6 +1013,8 @@ class SemanticQueryManager:
         preferred_provider: Optional[str] = None,
         # Story #883 Phase C: reuse pre-computed Voyage vector (no duplicate API call)
         precomputed_query_vector: Optional[List[float]] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1073,6 +1086,7 @@ class SemanticQueryManager:
                 exclude_path=exclude_path,
                 accuracy=accuracy,
                 provider_name=preferred_provider,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
             for r in results:
                 r.source_provider = preferred_provider
@@ -1131,6 +1145,7 @@ class SemanticQueryManager:
                     exclude_path=exclude_path,
                     accuracy=accuracy,
                     provider_name="voyage-ai",
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
 
             def _secondary() -> List[QueryResult]:
@@ -1147,6 +1162,7 @@ class SemanticQueryManager:
                     exclude_path=exclude_path,
                     accuracy=accuracy,
                     provider_name="cohere",
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
 
             def _to_strategy_failover(r: QueryResult) -> StrategyQueryResult:
@@ -1225,6 +1241,8 @@ class SemanticQueryManager:
                         exclude_path=exclude_path,
                         accuracy=accuracy,
                         provider_name="voyage-ai",
+                        # Story #1108 (S4): per-request cache bypass
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                     ),
                 ),
                 (
@@ -1242,6 +1260,8 @@ class SemanticQueryManager:
                         exclude_path=exclude_path,
                         accuracy=accuracy,
                         provider_name="cohere",
+                        # Story #1108 (S4): per-request cache bypass
+                        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                     ),
                 ),
             ]
@@ -1532,6 +1552,8 @@ class SemanticQueryManager:
                     diff_type=diff_type,
                     author=author,
                     chunk_type=chunk_type,
+                    # Story #1108 (S4): forward per-request cache bypass flag
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -1586,6 +1608,8 @@ class SemanticQueryManager:
                 exclude_language=exclude_language,
                 exclude_path=exclude_path,
                 accuracy=accuracy,
+                # Story #1108 (S4): per-request cache bypass
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
 
             # Perform search on the repository using direct path
@@ -1658,6 +1682,8 @@ class SemanticQueryManager:
         exclude_path: Optional[str] = None,
         accuracy: Optional[str] = None,
         provider_name: Optional[str] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
     ) -> List[QueryResult]:
         """
         Search a single repository using an explicitly named embedding provider.
@@ -1696,6 +1722,8 @@ class SemanticQueryManager:
             exclude_language=exclude_language,
             exclude_path=exclude_path,
             accuracy=accuracy,
+            # Story #1108 (S4): per-request cache bypass
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         )
         search_response = search_service.search_repository_path_with_provider(
             repo_path=repo_path,
@@ -2053,6 +2081,8 @@ class SemanticQueryManager:
         diff_type: Optional[Union[str, List[str]]] = None,
         author: Optional[str] = None,
         chunk_type: Optional[str] = None,
+        # Story #1108 (S4): per-request bypass of the query-embedding cache read
+        no_embedding_cache_shortcut: bool = False,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -2144,6 +2174,8 @@ class SemanticQueryManager:
                 diff_types=diff_types_list,
                 author=author,
                 chunk_type=chunk_type,
+                # Story #1108 (S4): forward per-request cache bypass flag
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
 
             # If fusion dispatch found no temporal index, fall back gracefully

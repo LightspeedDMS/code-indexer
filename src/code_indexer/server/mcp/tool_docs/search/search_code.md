@@ -187,6 +187,10 @@ inputSchema:
     rerank_instruction:
       type: string
       description: 'Optional instruction prefix for the reranker (e.g. ''Find implementation, not tests''). Has no effect without rerank_query. Steers ranking only; does not widen recall.'
+    no_embedding_cache_shortcut:
+      type: boolean
+      default: false
+      description: 'When true, skip the query-embedding cache read for this request (the write still occurs so future requests benefit). Use for freshness-critical searches where a cached embedding might not reflect the current query intent.'
   required:
   - query_text
 outputSchema:

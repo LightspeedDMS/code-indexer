@@ -191,6 +191,17 @@
     </div>
 </div>
 
+<!-- Query-Embedding Cache Metrics Section (Story #1109 S5) -->
+<!-- Mirrors the langfuse-section polling pattern: 30s auto-refresh, HTMX only. -->
+<div id="cache-metrics-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-cache-metrics"
+    hx-trigger="load, every 30s"
+    hx-swap="innerHTML">
+    <div class="loading-indicator">
+        <p>Loading cache metrics...</p>
+    </div>
+</div>
+
 <!-- Recent Activity Section (Story #201: Fixed to 24h, dropdown removed) -->
 <h2>Recent Activity</h2>
 

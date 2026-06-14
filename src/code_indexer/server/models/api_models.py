@@ -229,6 +229,15 @@ class SemanticSearchRequest(BaseModel):
         default=None,
         description="Search accuracy profile ('fast', 'balanced', 'high')",
     )
+    no_embedding_cache_shortcut: bool = Field(
+        default=False,
+        description=(
+            "When True, skip the query-embedding cache read for this request "
+            "(cache write still occurs so future requests benefit). "
+            "Useful for freshness-critical searches where a cached embedding "
+            "might not reflect the current query intent. Default: false."
+        ),
+    )
 
 
 class SearchResultItem(BaseModel):

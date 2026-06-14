@@ -47,7 +47,7 @@ class _FakeCoalescer:
     def __init__(self) -> None:
         self.submitted: List[str] = []
 
-    def submit(self, text: str) -> List[float]:
+    def submit(self, text: str, embedding_purpose: str = "query") -> List[float]:
         self.submitted.append(text)
         return COALESCED_VEC
 

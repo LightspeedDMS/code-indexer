@@ -61,6 +61,8 @@ def execute_temporal_query_with_fusion(
     diff_types: Optional[List[str]] = None,
     author: Optional[str] = None,
     chunk_type: Optional[str] = None,
+    # Story #1108: per-request cache bypass flag
+    no_embedding_cache_shortcut: bool = False,
 ) -> Any:
     """Execute temporal query with multi-provider fusion.
 
@@ -126,6 +128,7 @@ def execute_temporal_query_with_fusion(
             diff_types=diff_types,
             author=author,
             chunk_type=chunk_type,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         )
 
     return _query_multi_provider_fusion(
@@ -142,6 +145,7 @@ def execute_temporal_query_with_fusion(
         diff_types=diff_types,
         author=author,
         chunk_type=chunk_type,
+        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
     )
 
 
@@ -179,6 +183,8 @@ def _query_single_provider(
     diff_types: Optional[List[str]] = None,
     author: Optional[str] = None,
     chunk_type: Optional[str] = None,
+    # Story #1108: per-request cache bypass flag
+    no_embedding_cache_shortcut: bool = False,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
     import time as _time
@@ -211,6 +217,7 @@ def _query_single_provider(
             diff_types=diff_types,
             author=author,
             chunk_type=chunk_type,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         )
         record_temporal_success(coll_name, (_time.time() - _t0) * 1000)
     except Exception:
@@ -300,6 +307,8 @@ def _query_multi_provider_fusion(
     diff_types: Optional[List[str]] = None,
     author: Optional[str] = None,
     chunk_type: Optional[str] = None,
+    # Story #1108: per-request cache bypass flag
+    no_embedding_cache_shortcut: bool = False,
 ) -> Any:
     """Query multiple providers in parallel and fuse results.
 
@@ -338,6 +347,7 @@ def _query_multi_provider_fusion(
             diff_types=diff_types,
             author=author,
             chunk_type=chunk_type,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         )
 
     # Use explicit lifecycle instead of context manager so shutdown(wait=False)

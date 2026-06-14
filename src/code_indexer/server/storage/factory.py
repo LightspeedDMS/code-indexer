@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         NodeMetricsBackend,
         OAuthBackend,
         PayloadCacheBackend,
+        QueryEmbeddingCacheBackend,
         RefreshTokenBackend,
         RepoCategoryBackend,
         ResearchSessionsBackend,
@@ -97,6 +98,7 @@ class BackendRegistry:
     self_monitoring: "SelfMonitoringBackend"
     diagnostics: "DiagnosticsBackend"
     maintenance: "MaintenanceBackend"
+    query_embedding_cache: "QueryEmbeddingCacheBackend"
     # Optional: the shared ConnectionPool instance (PostgreSQL mode only).
     # None in SQLite mode. Exposed here so lifespan.py cluster services can
     # reuse the factory pool instead of creating a second one.
@@ -172,6 +174,7 @@ class StorageFactory:
             NodeMetricsSqliteBackend,
             OAuthSqliteBackend,
             PayloadCacheSqliteBackend,
+            QueryEmbeddingCacheSqliteBackend,
             RefreshTokenSqliteBackend,
             ResearchSessionsSqliteBackend,
             SCIPAuditSqliteBackend,
@@ -229,6 +232,9 @@ class StorageFactory:
             self_monitoring=SelfMonitoringSqliteBackend(db_path),
             diagnostics=DiagnosticsSqliteBackend(db_path),
             maintenance=MaintenanceSqliteBackend(db_path),
+            query_embedding_cache=QueryEmbeddingCacheSqliteBackend(
+                db_path=str(Path(data_dir) / "query_embedding_cache.db")
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -330,6 +336,9 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.maintenance_backend import (
             MaintenancePostgresBackend,
         )
+        from code_indexer.server.storage.postgres.query_embedding_cache_backend import (
+            QueryEmbeddingCachePostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
@@ -380,6 +389,7 @@ class StorageFactory:
             self_monitoring=SelfMonitoringPostgresBackend(pool),
             diagnostics=DiagnosticsPostgresBackend(pool),
             maintenance=MaintenancePostgresBackend(pool),
+            query_embedding_cache=QueryEmbeddingCachePostgresBackend(pool),
             connection_pool=pool,
             critical_connection_pool=critical_pool,
         )

@@ -269,6 +269,9 @@ class TestQueryParameterParity:
         normalized_expected = API_EXPECTED_PARAMETERS.copy()
         normalized_expected.discard("query")
         normalized_expected.add("query_text")
+        # Story #1108: per-request server query-embedding-cache shortcut.
+        # REST/MCP-only control (no CLI equivalent — the CLI has no server cache).
+        normalized_expected.add("no_embedding_cache_shortcut")
 
         extra = rest_params - normalized_expected
 
@@ -293,6 +296,8 @@ class TestQueryParameterParity:
         normalized_expected.add("preferred_provider")
         normalized_expected.add("query_strategy")
         normalized_expected.add("score_fusion")
+        # Story #1108: per-request server query-embedding-cache shortcut (REST + MCP).
+        normalized_expected.add("no_embedding_cache_shortcut")
 
         extra = mcp_params - normalized_expected
 

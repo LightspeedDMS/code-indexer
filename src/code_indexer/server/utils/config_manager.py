@@ -1057,6 +1057,54 @@ class MemoryRetrievalConfig:
 
 
 @dataclass
+class QueryEmbeddingCacheConfig:
+    """Query embedding cache configuration (Story #1105).
+
+    All fields are RUNTIME (DB-backed, Web-UI tunable) — NOT in BOOTSTRAP_KEYS
+    and NOT read from config.json.  A server restart is NOT required when these
+    change; ``enabled_for()`` / ``mode_for()`` read them LIVE on every call via
+    ``get_config_service().get_config().query_embedding_cache_config``.
+
+    The 8 Web-UI-exposed settings (Story #1107 S3):
+        query_embedding_cache_enabled: Master kill switch.  False = cache inert.
+        query_embedding_cache_max_entries: Soft DB row cap (pruned on upsert).
+            Minimum accepted value at the config-validation layer: 100.
+        query_embedding_cache_voyage_mode: Per-provider mode for voyage-ai.
+            One of "off", "shadow", "on".  Default "shadow".
+        query_embedding_cache_voyage_anchor_tokens: Anchor-token depth for voyage.
+            0 = sort all tokens.  None = inherit global anchor_tokens fallback.
+        query_embedding_cache_voyage_audit_sample_rate: Fraction of shadow hits to
+            audit via S6 deep-fidelity audit (sampled second HNSW lookup; read live
+            by ``_audit_sample_rate_for()`` in governed_call.py).  Range [0.0, 1.0].
+            Default 0.0 = audit off.
+        query_embedding_cache_cohere_mode: Per-provider mode for cohere.
+            One of "off", "shadow", "on".  Default "shadow".
+        query_embedding_cache_cohere_anchor_tokens: Anchor-token depth for cohere.
+            0 = sort all tokens.  None = inherit global anchor_tokens fallback.
+        query_embedding_cache_cohere_audit_sample_rate: Fraction of shadow hits to
+            audit via S6 deep-fidelity audit (sampled second HNSW lookup; read live
+            by ``_audit_sample_rate_for()`` in governed_call.py).  Range [0.0, 1.0].
+            Default 0.0 = audit off.
+    """
+
+    query_embedding_cache_enabled: bool = True
+    query_embedding_cache_max_entries: int = 10000
+    # Per-provider mode (off / shadow / on)
+    query_embedding_cache_voyage_mode: str = "shadow"
+    query_embedding_cache_cohere_mode: str = "shadow"
+    # Global fallback (kept for backwards-compat; per-provider fields take precedence)
+    query_embedding_cache_anchor_tokens: int = 2
+    # Per-provider anchor_tokens: None = fall back to global query_embedding_cache_anchor_tokens
+    query_embedding_cache_voyage_anchor_tokens: Optional[int] = None
+    query_embedding_cache_cohere_anchor_tokens: Optional[int] = None
+    # Per-provider audit sample rates (S6 deep-fidelity audit; 0.0 = audit off)
+    query_embedding_cache_voyage_audit_sample_rate: float = 0.0
+    query_embedding_cache_cohere_audit_sample_rate: float = 0.0
+    # Legacy global audit rate (kept for backwards-compat)
+    query_embedding_cache_audit_sample_rate: float = 0.0
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -1140,6 +1188,9 @@ class ServerConfig:
 
     # Story #883 - Memory retrieval configuration (runtime only, not bootstrap)
     memory_retrieval_config: Optional[MemoryRetrievalConfig] = None
+
+    # Story #1105 - Query embedding cache configuration (runtime only, not bootstrap)
+    query_embedding_cache_config: Optional[QueryEmbeddingCacheConfig] = None
 
     # Story #885 - Lifecycle analysis subprocess timeout configuration
     lifecycle_analysis_config: Optional[LifecycleAnalysisConfig] = None
@@ -1392,6 +1443,9 @@ class ServerConfig:
         # Story #883 - Initialize memory retrieval config
         if self.memory_retrieval_config is None:
             self.memory_retrieval_config = MemoryRetrievalConfig()
+        # Story #1105 - Initialize query embedding cache config
+        if self.query_embedding_cache_config is None:
+            self.query_embedding_cache_config = QueryEmbeddingCacheConfig()
         # Story #885 - Initialize lifecycle analysis config
         if self.lifecycle_analysis_config is None:
             self.lifecycle_analysis_config = LifecycleAnalysisConfig()
@@ -1914,6 +1968,18 @@ class ServerConfigManager:
             _mem_allowed = {f.name for f in fields(MemoryRetrievalConfig)}
             config_dict["memory_retrieval_config"] = MemoryRetrievalConfig(
                 **{k: v for k, v in _mem_dict.items() if k in _mem_allowed}
+            )
+
+        # Story #1105: Convert query_embedding_cache_config dict to
+        # QueryEmbeddingCacheConfig.  Unknown keys are filtered for rolling-upgrade
+        # safety — same fields() pattern as memory_retrieval_config conversion.
+        if "query_embedding_cache_config" in config_dict and isinstance(
+            config_dict["query_embedding_cache_config"], dict
+        ):
+            _qec_dict = config_dict["query_embedding_cache_config"]
+            _qec_allowed = {f.name for f in fields(QueryEmbeddingCacheConfig)}
+            config_dict["query_embedding_cache_config"] = QueryEmbeddingCacheConfig(
+                **{k: v for k, v in _qec_dict.items() if k in _qec_allowed}
             )
 
         # Story #885 Phase 5b (A7d): Convert lifecycle_analysis_config dict to

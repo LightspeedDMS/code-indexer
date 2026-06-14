@@ -1673,6 +1673,115 @@ class WikiCacheBackend(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# QueryEmbeddingCacheBackend (Story #1105)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class QueryEmbeddingCacheBackend(Protocol):
+    """Protocol for query-embedding cache storage (Story #1105).
+
+    Stores float32 little-endian embedding blobs keyed by
+    (cache_key, provider, model, dimension).  Supports both SQLite (solo)
+    and PostgreSQL (cluster) backends.
+
+    The composite PK prevents cross-provider / cross-model collisions: a
+    voyage-code-3 (1024 dims) vector and a cohere embed-v4.0 (1536 dims)
+    vector for the *same* query text occupy separate rows.
+
+    Store access is SYNCHRONOUS DB-direct — no RAM layer, no async writer.
+    """
+
+    def lookup(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+    ) -> "Optional[bytes]":
+        """Return the stored embedding bytes (float32 LE) or None on miss.
+
+        Args:
+            cache_key: SHA-256 hex string of the (normalized) query text.
+            provider: Provider name, e.g. 'voyage-ai' or 'cohere'.
+            model: Model name, e.g. 'voyage-code-3'.
+            dimension: Embedding dimension, e.g. 1024.
+
+        Returns:
+            Raw bytes blob (float32 LE) or None if not present.
+        """
+        ...
+
+    def upsert(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+        embedding: bytes,
+        created_at: float,
+        last_used: float,
+    ) -> None:
+        """Insert or update the embedding row.
+
+        On conflict (cache_key, provider, model, dimension) the existing row
+        is updated (embedding + last_used).
+
+        Args:
+            cache_key: SHA-256 hex string of the (normalized) query text.
+            provider: Provider name.
+            model: Model name.
+            dimension: Embedding dimension.
+            embedding: Float32 LE bytes blob.
+            created_at: Epoch seconds (first write).
+            last_used: Epoch seconds (most recent use).
+        """
+        ...
+
+    def touch_last_used(
+        self,
+        cache_key: str,
+        provider: str,
+        model: str,
+        dimension: int,
+        last_used: float,
+    ) -> None:
+        """Update last_used for an existing row (synchronous on hit).
+
+        Args:
+            cache_key: SHA-256 hex string.
+            provider: Provider name.
+            model: Model name.
+            dimension: Embedding dimension.
+            last_used: New last_used epoch seconds.
+        """
+        ...
+
+    def prune_to_max(self, max_entries: int) -> int:
+        """Delete rows beyond max_entries, ordered by last_used ASC.
+
+        Args:
+            max_entries: Desired maximum number of rows after pruning.
+
+        Returns:
+            Number of rows actually deleted.
+        """
+        ...
+
+    def total_entries(self) -> int:
+        """Return the total number of rows in the cache table.
+
+        Returns:
+            Integer row count.
+        """
+        ...
+
+    def clear(self) -> None:
+        """Delete all rows from the cache table (used for testing / resets)."""
+        ...
+
+
+# ---------------------------------------------------------------------------
 # MaintenanceBackend (Story #529)
 # ---------------------------------------------------------------------------
 

@@ -140,6 +140,18 @@ class SemanticQueryRequest(BaseModel):
         description="Regex patterns to exclude repositories from omni-search",
     )
 
+    # Story #1108 (S4): per-request bypass of the query-embedding cache read.
+    # When True the cache lookup is skipped for this request; the live embedding
+    # is computed and the cache write still fires (shadow/miss path).
+    no_embedding_cache_shortcut: bool = Field(
+        default=False,
+        description=(
+            "When true, skip the query-embedding cache lookup for this request. "
+            "The live embedding is computed fresh and the cache write (shadow/miss) "
+            "still fires. Use for cache-busting or debugging stale results."
+        ),
+    )
+
     @field_validator("query_text")
     @classmethod
     def validate_query_text(cls, v: str) -> str:

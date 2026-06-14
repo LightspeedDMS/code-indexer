@@ -39,7 +39,11 @@ class _FakeVoyageProvider:
         return self._token_limit
 
     def get_embeddings_batch(
-        self, texts: List[str], *, retry: bool = True
+        self,
+        texts: List[str],
+        *,
+        embedding_purpose: str = "document",
+        retry: bool = True,
     ) -> List[List[float]]:
         return [[float(len(t)), 0.0] for t in texts]
 
