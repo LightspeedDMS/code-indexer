@@ -234,6 +234,8 @@ class TestSemanticQueryManagerImplementation:
                     exclude_language=None,
                     exclude_path=None,
                     accuracy=None,
+                    # Story #1108 (S4): per-request cache bypass field added to SemanticSearchRequest
+                    no_embedding_cache_shortcut=False,
                 )
 
                 # Verify search_repository_path was called with correct parameters

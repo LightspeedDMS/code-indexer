@@ -49,6 +49,11 @@ class MultiSearchRequest(BaseModel):
     accuracy: Optional[str] = Field(
         None, description="Search accuracy profile ('fast', 'balanced', 'high')"
     )
+    # Story #1108: per-request cache bypass flag — threads through to SemanticSearchRequest
+    no_embedding_cache_shortcut: bool = Field(
+        False,
+        description="Bypass the query-embedding cache for this request (Story #1108)",
+    )
 
     @field_validator("repositories")
     @classmethod

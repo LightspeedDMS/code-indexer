@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import logging
 import struct
 from pathlib import Path
 from typing import List, Optional
@@ -440,3 +441,499 @@ class TestBypassWrapSemantics:
         assert live_calls == [TEST_TEXT]
         cache.lookup.assert_not_called()
         cache.record_miss_or_shadow.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# VALUE-FLOW TESTS — prove the boolean VALUE reaches coalesced_query_embedding
+# on each primary path (not just that the kwarg exists in source text).
+# ---------------------------------------------------------------------------
+
+
+class TestValueFlowBuildSearchKwargs:
+    """_build_search_kwargs must include no_embedding_cache_shortcut from params
+    so that callers forwarding kwargs to query_user_repositories can thread the flag.
+
+    _build_search_kwargs is a pure dict-building function — no external deps needed.
+    """
+
+    def test_flag_true_present_in_returned_dict(self):
+        """When params has no_embedding_cache_shortcut=True it must appear in kwargs."""
+        from code_indexer.server.mcp.handlers import search as search_handler
+
+        class _User:
+            username = "alice"
+
+        params = {"query_text": "find auth", "no_embedding_cache_shortcut": True}
+        kwargs = search_handler._build_search_kwargs(params, _User(), [], 10)
+
+        assert "no_embedding_cache_shortcut" in kwargs, (
+            "_build_search_kwargs must include no_embedding_cache_shortcut in returned dict"
+        )
+        assert kwargs["no_embedding_cache_shortcut"] is True
+
+    def test_flag_absent_defaults_to_false(self):
+        """When params omits no_embedding_cache_shortcut, returned dict must default to False."""
+        from code_indexer.server.mcp.handlers import search as search_handler
+
+        class _User:
+            username = "alice"
+
+        params = {"query_text": "find auth"}
+        kwargs = search_handler._build_search_kwargs(params, _User(), [], 10)
+
+        assert "no_embedding_cache_shortcut" in kwargs, (
+            "_build_search_kwargs must include no_embedding_cache_shortcut key even when absent from params"
+        )
+        assert kwargs["no_embedding_cache_shortcut"] is False
+
+
+class TestValueFlowQueryUserRepositories:
+    """query_user_repositories must accept no_embedding_cache_shortcut and thread it
+    through _perform_search -> _search_single_repository -> SemanticSearchRequest.
+
+    Strategy: spy at search_service.SemanticSearchService.search_repository_path,
+    capturing the search_request argument. The real SemanticSearchRequest and all
+    intermediate functions run unmodified; only filesystem I/O is bypassed.
+    """
+
+    def test_flag_reaches_semantic_search_request(self, monkeypatch, tmp_path):
+        """no_embedding_cache_shortcut=True in query_user_repositories must appear
+        as search_request.no_embedding_cache_shortcut=True when search_repository_path
+        is called on the semantic search path."""
+        from code_indexer.server.query.semantic_query_manager import (
+            SemanticQueryManager,
+        )
+        from code_indexer.server.services import search_service as ss_mod
+        from code_indexer.server.models.api_models import SemanticSearchResponse
+
+        captured_requests: list = []
+
+        class _SpySearchService(ss_mod.SemanticSearchService):
+            def search_repository_path(self, repo_path, search_request, **kw):
+                captured_requests.append(search_request.no_embedding_cache_shortcut)
+                return SemanticSearchResponse(
+                    query=search_request.query, results=[], total=0
+                )
+
+        monkeypatch.setattr(ss_mod, "SemanticSearchService", _SpySearchService)
+
+        # Build a real manager with minimal stubbed ARM
+        manager = SemanticQueryManager.__new__(SemanticQueryManager)
+        manager.max_results_per_query = 50
+        manager.logger = logging.getLogger("test.semantic_query_manager")
+
+        class _FakeARM:
+            activated_repos_dir = str(tmp_path / "activated-repos")
+
+            def list_activated_repositories(self, _u):
+                return [{"user_alias": "myrepo", "repo_path": str(tmp_path)}]
+
+            def get_activated_repo_path(self, _u, _a):
+                return str(tmp_path)
+
+        manager.activated_repo_manager = _FakeARM()
+
+        # Stub backend_registry so no global-repo lookup fires;
+        # http_client_factory must be None-able (search_service reads it via app.state)
+        import code_indexer.server.app as _app_mod
+
+        class _FakeState:
+            backend_registry = None
+            http_client_factory = None
+
+        class _FakeApp:
+            state = _FakeState()
+
+        monkeypatch.setattr(_app_mod, "app", _FakeApp(), raising=False)
+
+        manager.query_user_repositories(
+            username="alice",
+            query_text="find auth",
+            repository_alias="myrepo",
+            # Force primary_only to avoid auto-parallel dispatch which routes
+            # through _search_with_provider dicts, bypassing the spy.
+            query_strategy="primary_only",
+            no_embedding_cache_shortcut=True,
+        )
+
+        assert captured_requests, (
+            "search_repository_path was never called — semantic search path not entered"
+        )
+        assert all(v is True for v in captured_requests), (
+            f"no_embedding_cache_shortcut=True must reach SemanticSearchRequest "
+            f"(and thus search_repository_path), but captured: {captured_requests}"
+        )
+
+
+class TestValueFlowComputeSharedQueryVector:
+    """_search_activated_repo must pass no_embedding_cache_shortcut from params
+    into coalesced_query_embedding via _compute_shared_query_vector when the
+    memory-retrieval shared-vector path is active.
+
+    Stubbed external deps (not system-under-test):
+    - VoyageAIClient: external network call
+    - _get_http_client_factory: reads app.state (not available in unit test)
+    - get_config_service: reads DB / runtime config
+    - app_module.semantic_query_manager: full backend search infrastructure
+    - app_module.activated_repo_manager: database access
+
+    _compute_shared_query_vector and _compute_memory_query_vector run unmodified.
+    """
+
+    def test_flag_reaches_coalesced_query_embedding_via_shared_vector(
+        self, monkeypatch
+    ):
+        """When params has no_embedding_cache_shortcut=True and memory retrieval is
+        enabled, _search_activated_repo must call coalesced_query_embedding with
+        no_embedding_cache_shortcut=True (via _compute_shared_query_vector)."""
+        from code_indexer.server.mcp.handlers import search as search_handler
+        from code_indexer.server.services import governed_call as gc
+
+        coalesce_calls: list = []
+
+        def spy_coalesce(provider, text, *, no_embedding_cache_shortcut=False, **kw):
+            coalesce_calls.append(no_embedding_cache_shortcut)
+            return LIVE_VEC
+
+        monkeypatch.setattr(gc, "coalesced_query_embedding", spy_coalesce)
+
+        # External dep: VoyageAIClient makes network calls — stub it
+        import code_indexer.services.voyage_ai as voyage_mod
+
+        class _FakeVoyageClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def get_provider_name(self):
+                return "voyage-ai"
+
+            def get_current_model(self):
+                return "voyage-code-3"
+
+            def get_model_info(self):
+                return {"dimensions": 1024}
+
+        monkeypatch.setattr(voyage_mod, "VoyageAIClient", _FakeVoyageClient)
+
+        # External dep: _get_http_client_factory reads app.state — not available here
+        import code_indexer.server.services.search_service as ss_mod
+
+        monkeypatch.setattr(
+            ss_mod, "_get_http_client_factory", lambda: None, raising=False
+        )
+
+        # External dep: get_config_service reads DB/runtime config — stub with
+        # memory_retrieval_enabled=True to trigger the shared-vector path.
+        # Additional fields read by _run_memory_retrieval's MemoryRetrievalPipelineConfig.
+        class _FakeMemCfg:
+            memory_retrieval_enabled = True
+            memory_voyage_min_score = 0.7
+            memory_cohere_min_score = 0.7
+            memory_retrieval_k_multiplier = 2
+            memory_retrieval_max_body_chars = 5000
+
+        class _FakeCfg:
+            memory_retrieval_config = _FakeMemCfg()
+
+        class _FakeConfigService:
+            def get_config(self):
+                return _FakeCfg()
+
+        monkeypatch.setattr(
+            search_handler, "get_config_service", lambda: _FakeConfigService()
+        )
+
+        # External dep: app_module.semantic_query_manager is full backend infra;
+        # app_module.app.state is accessed for payload_cache (getattr guarded).
+        import code_indexer.server.mcp.handlers._utils as _utils_mod
+
+        class _FakeSQM:
+            def query_user_repositories(self_, **kw):
+                return {"results": [], "total_results": 0, "query_metadata": {}}
+
+        class _FakeAppState:
+            payload_cache = None
+            http_client_factory = None
+
+        class _FakeApp:
+            state = _FakeAppState()
+
+        class _FakeAppModule:
+            semantic_query_manager = _FakeSQM()
+            activated_repo_manager = None
+            app = _FakeApp()
+
+        monkeypatch.setattr(_utils_mod, "app_module", _FakeAppModule(), raising=False)
+
+        params = {
+            "query_text": "find auth",
+            "search_mode": "semantic",
+            "no_embedding_cache_shortcut": True,
+            "repository_alias": "myrepo",
+            "limit": 5,
+        }
+
+        class _FakeUser:
+            username = "alice"
+
+        # _search_activated_repo may raise RuntimeError from golden_repos_dir
+        # access in the memory-retrieval pipeline — that fires AFTER coalesced_query_embedding
+        # is called and the spy captures the flag. Catch only RuntimeError here; any
+        # other exception type re-raises so unexpected failures are not hidden.
+        try:
+            search_handler._search_activated_repo(params, _FakeUser())
+        except RuntimeError:
+            pass  # golden_repos_dir not set in unit-test env — expected infra gap
+
+        assert coalesce_calls, (
+            "coalesced_query_embedding was never called. "
+            "Check that search_mode=semantic + memory_retrieval_enabled=True "
+            "enters the shared-vector path in _search_activated_repo."
+        )
+        assert coalesce_calls[0] is True, (
+            f"no_embedding_cache_shortcut=True must be forwarded to coalesced_query_embedding "
+            f"via _compute_shared_query_vector, but captured: {coalesce_calls}"
+        )
+
+
+class TestValueFlowRunMemoryRetrieval:
+    """Value-flow test: _run_memory_retrieval fallback (query_vector=None) must forward
+    no_embedding_cache_shortcut from params into coalesced_query_embedding.
+
+    This tests the code path at search.py ~line 593-599:
+        if query_vector is None:
+            query_vector = _compute_memory_query_vector(
+                query_text,
+                no_embedding_cache_shortcut=params.get("no_embedding_cache_shortcut", False),
+            )
+    """
+
+    def test_run_memory_retrieval_fallback_forwards_flag(self, monkeypatch):
+        """When _run_memory_retrieval is called with query_vector=None,
+        the no_embedding_cache_shortcut flag from params reaches coalesced_query_embedding.
+        """
+        import code_indexer.server.mcp.handlers.search as search_handler
+        import code_indexer.server.services.governed_call as governed_mod
+
+        coalesce_calls: list = []
+
+        def _spy_coalesce(provider, text, *, no_embedding_cache_shortcut=False, **kw):
+            coalesce_calls.append(no_embedding_cache_shortcut)
+            # Return a real-looking vector so the pipeline doesn't short-circuit.
+            return [0.1] * 8
+
+        monkeypatch.setattr(governed_mod, "coalesced_query_embedding", _spy_coalesce)
+
+        # Stub VoyageAIClient so no network call is made.
+        import code_indexer.services.voyage_ai as voyage_mod
+
+        class _FakeVoyageClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def get_provider_name(self):
+                return "voyage-ai"
+
+            def get_current_model(self):
+                return "voyage-code-3"
+
+            def get_model_info(self):
+                return {"dimensions": 1024}
+
+        monkeypatch.setattr(voyage_mod, "VoyageAIClient", _FakeVoyageClient)
+
+        # Stub _get_http_client_factory — reads app.state, not available in unit tests.
+        import code_indexer.server.services.search_service as ss_mod
+
+        monkeypatch.setattr(
+            ss_mod, "_get_http_client_factory", lambda: None, raising=False
+        )
+
+        # Build the config stub that _run_memory_retrieval reads.
+        class _FakeMemCfg:
+            memory_retrieval_enabled = True
+            memory_voyage_min_score = 0.7
+            memory_cohere_min_score = 0.7
+            memory_retrieval_k_multiplier = 2
+            memory_retrieval_max_body_chars = 5000
+
+        class _FakeCfg:
+            memory_retrieval_config = _FakeMemCfg()
+
+        class _FakeConfigService:
+            def get_config(self):
+                return _FakeCfg()
+
+        params = {
+            "query_text": "find auth",
+            "search_mode": "semantic",
+            "no_embedding_cache_shortcut": True,
+            "limit": 5,
+        }
+
+        class _FakeUser:
+            username = "alice"
+
+        # Call the fallback path directly: query_vector=None forces _compute_memory_query_vector.
+        # _get_golden_repos_dir() fires after the vector is computed — RuntimeError expected.
+        try:
+            search_handler._run_memory_retrieval(
+                params=params,
+                user=_FakeUser(),
+                config_service=_FakeConfigService(),
+                reranker_status="disabled",
+                query_vector=None,
+            )
+        except RuntimeError:
+            pass  # golden_repos_dir not set in unit-test env — expected infra gap
+
+        assert coalesce_calls, (
+            "coalesced_query_embedding was never called via the _run_memory_retrieval "
+            "fallback path. Ensure query_vector=None triggers _compute_memory_query_vector."
+        )
+        assert coalesce_calls[0] is True, (
+            f"no_embedding_cache_shortcut=True must be forwarded through "
+            f"_run_memory_retrieval -> _compute_memory_query_vector -> coalesced_query_embedding, "
+            f"but captured: {coalesce_calls}"
+        )
+
+
+class TestValueFlowTemporalDispatch:
+    """Value-flow tests: temporal dispatch layer must forward no_embedding_cache_shortcut
+    into query_temporal() for both single-provider and multi-provider paths.
+
+    Tests DEFECT 2: _query_single_provider and query_provider closure inside
+    _query_multi_provider_fusion must accept and pass the flag down to query_temporal().
+    """
+
+    def _make_fake_results(self):
+        """Return a minimal TemporalSearchResults stub."""
+        from code_indexer.services.temporal.temporal_search_service import (
+            TemporalSearchResults,
+        )
+
+        return TemporalSearchResults(
+            results=[],
+            query="find auth",
+            filter_type="none",
+            filter_value=None,
+        )
+
+    def test_single_provider_forwards_flag(self, monkeypatch):
+        """_query_single_provider must pass no_embedding_cache_shortcut=True to query_temporal."""
+        import code_indexer.services.temporal.temporal_fusion_dispatch as dispatch_mod
+        from code_indexer.services.temporal.temporal_search_service import (
+            TemporalSearchService,
+        )
+
+        captured: list = []
+        fake_results = self._make_fake_results()
+
+        def _spy_query_temporal(self_, *, no_embedding_cache_shortcut=False, **kw):
+            captured.append(no_embedding_cache_shortcut)
+            return fake_results
+
+        monkeypatch.setattr(
+            TemporalSearchService, "query_temporal", _spy_query_temporal
+        )
+
+        # Stub infra helpers — external deps (filesystem + provider instantiation).
+        class _FakeProvider:
+            pass
+
+        class _FakeConfigManager:
+            pass
+
+        monkeypatch.setattr(
+            dispatch_mod,
+            "_create_embedding_provider_for_collection",
+            lambda config, coll_name: _FakeProvider(),
+        )
+        monkeypatch.setattr(
+            dispatch_mod,
+            "_make_config_manager",
+            lambda config: _FakeConfigManager(),
+        )
+
+        class _FakeVectorStore:
+            project_root = "/fake/root"
+
+        dispatch_mod._query_single_provider(
+            config=object(),
+            vector_store=_FakeVectorStore(),
+            coll_name="temporal-voyage-code-3",
+            query_text="find auth",
+            limit=5,
+            time_range=None,
+            file_path_filter=None,
+            no_embedding_cache_shortcut=True,
+        )
+
+        assert captured, "_spy_query_temporal was never called."
+        assert captured[0] is True, (
+            f"no_embedding_cache_shortcut=True must reach query_temporal via "
+            f"_query_single_provider, but captured: {captured}"
+        )
+
+    def test_multi_provider_forwards_flag(self, monkeypatch):
+        """query_provider closure in _query_multi_provider_fusion must pass
+        no_embedding_cache_shortcut=True to query_temporal.
+        """
+        import code_indexer.services.temporal.temporal_fusion_dispatch as dispatch_mod
+        from code_indexer.services.temporal.temporal_search_service import (
+            TemporalSearchService,
+        )
+
+        captured: list = []
+        fake_results = self._make_fake_results()
+
+        def _spy_query_temporal(self_, *, no_embedding_cache_shortcut=False, **kw):
+            captured.append(no_embedding_cache_shortcut)
+            return fake_results
+
+        monkeypatch.setattr(
+            TemporalSearchService, "query_temporal", _spy_query_temporal
+        )
+
+        class _FakeProvider:
+            pass
+
+        class _FakeConfigManager:
+            pass
+
+        monkeypatch.setattr(
+            dispatch_mod,
+            "_create_embedding_provider_for_collection",
+            lambda config, coll_name: _FakeProvider(),
+        )
+        monkeypatch.setattr(
+            dispatch_mod,
+            "_make_config_manager",
+            lambda config: _FakeConfigManager(),
+        )
+
+        class _FakeVectorStore:
+            project_root = "/fake/root"
+
+        # Two collections to trigger the multi-provider path.
+        collections = [
+            ("temporal-voyage-code-3", "/fake/path/voyage"),
+            ("temporal-cohere-embed-v4.0", "/fake/path/cohere"),
+        ]
+
+        dispatch_mod._query_multi_provider_fusion(
+            config=object(),
+            vector_store=_FakeVectorStore(),
+            collections=collections,
+            query_text="find auth",
+            limit=5,
+            time_range=None,
+            file_path_filter=None,
+            no_embedding_cache_shortcut=True,
+        )
+
+        assert captured, "_spy_query_temporal was never called in multi-provider path."
+        assert all(v is True for v in captured), (
+            f"no_embedding_cache_shortcut=True must reach query_temporal for ALL providers "
+            f"in _query_multi_provider_fusion, but captured: {captured}"
+        )

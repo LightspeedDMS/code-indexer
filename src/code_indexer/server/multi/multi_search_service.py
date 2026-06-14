@@ -310,6 +310,7 @@ class MultiSearchService:
             exclude_language=request.exclude_language,
             exclude_path=request.exclude_path,
             accuracy=request.accuracy,
+            no_embedding_cache_shortcut=request.no_embedding_cache_shortcut,
         )
 
         # Execute search using path resolved via GlobalRegistry (Story #43)
