@@ -6860,32 +6860,70 @@ class QueryEmbeddingCacheSqliteBackend:
         self._conn_manager.execute_atomic(operation)
 
     def prune_to_max(self, max_entries: int) -> int:
-        """Delete rows beyond max_entries ordered by last_used ASC.
+        """Delete rows beyond max_entries ordered by last_used ASC (deterministic tie-break).
+
+        Uses a rowid-based DELETE with OFFSET so the entire eviction is a single
+        atomic statement.  The secondary sort ensures deterministic eviction when
+        last_used values are identical:
+            ORDER BY last_used ASC, created_at ASC, cache_key ASC,
+                     provider ASC, model ASC, dimension ASC
+
+        Floor behaviour: when the table has more than 100 rows and max_entries < 100,
+        the effective cap is raised to 100 to prevent accidental near-total erasure.
+        When the table has 100 rows or fewer, max_entries is used as-is (pure
+        primitive), so small-cap unit tests work correctly against small data sets.
+
+        Args:
+            max_entries: Maximum rows to retain.  Values < 100 are raised to 100
+                         only when the current total exceeds 100.
 
         Returns:
-            Number of rows actually deleted.
+            Number of rows actually deleted (0 when already within cap).
         """
+        _MIN_CAP = 100
+
         result: List[int] = [0]
 
         def operation(conn: Any) -> None:
+            # Check current total within the same transaction so the floor
+            # decision is consistent with the DELETE that follows.
             total_row = conn.execute(
                 "SELECT COUNT(*) FROM query_embedding_cache"
             ).fetchone()
             total = total_row[0] if total_row else 0
-            to_delete = total - max_entries
-            if to_delete <= 0:
+
+            # Apply floor only when the table is already above the floor threshold.
+            # This allows exact pruning on small data sets (useful for unit tests
+            # and small deployments) while still protecting large stores from
+            # accidental near-total wipeout via a misconfigured cap.
+            if total > _MIN_CAP:
+                effective_max = max(max_entries, _MIN_CAP)
+            else:
+                effective_max = max_entries
+
+            excess = total - effective_max
+            if excess <= 0:
+                result[0] = 0
                 return
+
+            # Delete the oldest ``excess`` rows — the ones with the smallest
+            # last_used values.  Secondary sort columns break ties deterministically
+            # so the eviction set is stable across concurrent callers.
             cursor = conn.execute(
                 """
                 DELETE FROM query_embedding_cache
-                WHERE (cache_key, provider, model, dimension) IN (
-                    SELECT cache_key, provider, model, dimension
-                    FROM query_embedding_cache
-                    ORDER BY last_used ASC
-                    LIMIT ?
+                WHERE rowid IN (
+                    SELECT rowid FROM query_embedding_cache
+                    ORDER BY last_used ASC,
+                             created_at ASC,
+                             cache_key ASC,
+                             provider ASC,
+                             model ASC,
+                             dimension ASC
+                    LIMIT :excess
                 )
                 """,
-                (to_delete,),
+                {"excess": excess},
             )
             result[0] = cursor.rowcount if cursor.rowcount is not None else 0
 

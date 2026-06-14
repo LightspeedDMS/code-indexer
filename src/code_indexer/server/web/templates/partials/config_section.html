@@ -1190,6 +1190,132 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Query Embedding Cache Settings Section (Story #1107 S3) -->
+<details class="config-section" id="section-query_embedding_cache">
+    <summary>
+        <h2>Query Embedding Cache</h2>
+    </summary>
+    <p class="section-description">
+        Configure the per-provider query embedding cache. Each provider can be set to <strong>off</strong> (disabled), <strong>shadow</strong> (cache in background for measurement only), or <strong>on</strong> (serve from cache). The max entries cap controls the shared LRU store size; the minimum accepted value is 100.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-query_embedding_cache">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.query_embedding_cache.query_embedding_cache_enabled else 'No' }}</td>
+                        <td class="config-note"><small>Master kill switch</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Max Entries</td>
+                        <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_max_entries }}</td>
+                        <td class="config-note"><small>Shared LRU cap (minimum 100)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Voyage Mode</td>
+                        <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_voyage_mode }}</td>
+                        <td class="config-note"><small>off / shadow / on</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Voyage Anchor Tokens</td>
+                        <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_voyage_anchor_tokens }}</td>
+                        <td class="config-note"><small>Leading tokens kept in order (0 = sort all)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Voyage Audit Sample Rate</td>
+                        <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_voyage_audit_sample_rate }}</td>
+                        <td class="config-note"><small>Fraction of shadow hits to audit [0.0–1.0]</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cohere Mode</td>
+                        <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_cohere_mode }}</td>
+                        <td class="config-note"><small>off / shadow / on</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cohere Anchor Tokens</td>
+                        <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_cohere_anchor_tokens }}</td>
+                        <td class="config-note"><small>Leading tokens kept in order (0 = sort all)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cohere Audit Sample Rate</td>
+                        <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_cohere_audit_sample_rate }}</td>
+                        <td class="config-note"><small>Fraction of shadow hits to audit [0.0–1.0]</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('query_embedding_cache')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-query_embedding_cache" method="post" action="/admin/config/query_embedding_cache" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.query_embedding_cache %}
+            <div class="validation-error">{{ validation_errors.query_embedding_cache }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="qec-enabled">
+                    Enabled
+                    <select id="qec-enabled" name="query_embedding_cache_enabled">
+                        <option value="true" {% if config.query_embedding_cache.query_embedding_cache_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.query_embedding_cache.query_embedding_cache_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Master kill switch — false makes the cache completely inert</small>
+                </label>
+                <label for="qec-max-entries">
+                    Max Entries
+                    <input type="number" id="qec-max-entries" name="query_embedding_cache_max_entries" value="{{ config.query_embedding_cache.query_embedding_cache_max_entries }}" min="100">
+                    <small>Shared LRU row cap across both providers (minimum 100)</small>
+                </label>
+                <label for="qec-voyage-mode">
+                    Voyage Mode
+                    <select id="qec-voyage-mode" name="query_embedding_cache_voyage_mode">
+                        <option value="off" {% if config.query_embedding_cache.query_embedding_cache_voyage_mode == 'off' %}selected{% endif %}>off</option>
+                        <option value="shadow" {% if config.query_embedding_cache.query_embedding_cache_voyage_mode == 'shadow' %}selected{% endif %}>shadow</option>
+                        <option value="on" {% if config.query_embedding_cache.query_embedding_cache_voyage_mode == 'on' %}selected{% endif %}>on</option>
+                    </select>
+                    <small>off = disabled; shadow = cache silently; on = serve from cache</small>
+                </label>
+                <label for="qec-voyage-anchor">
+                    Voyage Anchor Tokens
+                    <input type="number" id="qec-voyage-anchor" name="query_embedding_cache_voyage_anchor_tokens" value="{{ config.query_embedding_cache.query_embedding_cache_voyage_anchor_tokens }}" min="0">
+                    <small>Leading tokens kept in original order; the rest are sorted (0 = sort all; default 2)</small>
+                </label>
+                <label for="qec-voyage-audit">
+                    Voyage Audit Sample Rate
+                    <input type="number" id="qec-voyage-audit" name="query_embedding_cache_voyage_audit_sample_rate" value="{{ config.query_embedding_cache.query_embedding_cache_voyage_audit_sample_rate }}" min="0.0" max="1.0" step="0.01">
+                    <small>Fraction of shadow hits to audit for correctness [0.0–1.0] (S6 logic not yet wired)</small>
+                </label>
+                <label for="qec-cohere-mode">
+                    Cohere Mode
+                    <select id="qec-cohere-mode" name="query_embedding_cache_cohere_mode">
+                        <option value="off" {% if config.query_embedding_cache.query_embedding_cache_cohere_mode == 'off' %}selected{% endif %}>off</option>
+                        <option value="shadow" {% if config.query_embedding_cache.query_embedding_cache_cohere_mode == 'shadow' %}selected{% endif %}>shadow</option>
+                        <option value="on" {% if config.query_embedding_cache.query_embedding_cache_cohere_mode == 'on' %}selected{% endif %}>on</option>
+                    </select>
+                    <small>off = disabled; shadow = cache silently; on = serve from cache</small>
+                </label>
+                <label for="qec-cohere-anchor">
+                    Cohere Anchor Tokens
+                    <input type="number" id="qec-cohere-anchor" name="query_embedding_cache_cohere_anchor_tokens" value="{{ config.query_embedding_cache.query_embedding_cache_cohere_anchor_tokens }}" min="0">
+                    <small>Leading tokens kept in original order; the rest are sorted (0 = sort all; default 2)</small>
+                </label>
+                <label for="qec-cohere-audit">
+                    Cohere Audit Sample Rate
+                    <input type="number" id="qec-cohere-audit" name="query_embedding_cache_cohere_audit_sample_rate" value="{{ config.query_embedding_cache.query_embedding_cache_cohere_audit_sample_rate }}" min="0.0" max="1.0" step="0.01">
+                    <small>Fraction of shadow hits to audit for correctness [0.0–1.0] (S6 logic not yet wired)</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('query_embedding_cache')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->

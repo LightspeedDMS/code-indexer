@@ -1065,26 +1065,39 @@ class QueryEmbeddingCacheConfig:
     change; ``enabled_for()`` / ``mode_for()`` read them LIVE on every call via
     ``get_config_service().get_config().query_embedding_cache_config``.
 
-    Fields:
+    The 8 Web-UI-exposed settings (Story #1107 S3):
         query_embedding_cache_enabled: Master kill switch.  False = cache inert.
+        query_embedding_cache_max_entries: Soft DB row cap (pruned on upsert).
+            Minimum accepted value at the config-validation layer: 100.
         query_embedding_cache_voyage_mode: Per-provider mode for voyage-ai.
             One of "off", "shadow", "on".  Default "shadow".
+        query_embedding_cache_voyage_anchor_tokens: Anchor-token depth for voyage.
+            0 = sort all tokens.  None = inherit global anchor_tokens fallback.
+        query_embedding_cache_voyage_audit_sample_rate: Fraction of shadow hits to
+            audit (S6 logic not yet wired).  Range [0.0, 1.0].  Default 0.0.
         query_embedding_cache_cohere_mode: Per-provider mode for cohere.
             One of "off", "shadow", "on".  Default "shadow".
-        query_embedding_cache_max_entries: Soft DB row cap (pruned on upsert).
-        query_embedding_cache_anchor_tokens: Reserved for S2 anchor generalisation.
-        query_embedding_cache_audit_sample_rate: Reserved for S6 audit sampling.
+        query_embedding_cache_cohere_anchor_tokens: Anchor-token depth for cohere.
+            0 = sort all tokens.  None = inherit global anchor_tokens fallback.
+        query_embedding_cache_cohere_audit_sample_rate: Fraction of shadow hits to
+            audit (S6 logic not yet wired).  Range [0.0, 1.0].  Default 0.0.
     """
 
     query_embedding_cache_enabled: bool = True
+    query_embedding_cache_max_entries: int = 10000
+    # Per-provider mode (off / shadow / on)
     query_embedding_cache_voyage_mode: str = "shadow"
     query_embedding_cache_cohere_mode: str = "shadow"
-    query_embedding_cache_max_entries: int = 10000
-    # S2 / S6 fields declared now; logic not yet wired
+    # S2 / S6 fields declared now; logic not yet wired.
+    # Global fallback (kept for backwards-compat; per-provider fields take precedence)
     query_embedding_cache_anchor_tokens: int = 2
-    # Per-provider anchor_tokens overrides (None = fall back to global field above)
+    # Per-provider anchor_tokens: None = fall back to global query_embedding_cache_anchor_tokens
     query_embedding_cache_voyage_anchor_tokens: Optional[int] = None
     query_embedding_cache_cohere_anchor_tokens: Optional[int] = None
+    # Per-provider audit sample rates (S6 audit logic not yet wired)
+    query_embedding_cache_voyage_audit_sample_rate: float = 0.0
+    query_embedding_cache_cohere_audit_sample_rate: float = 0.0
+    # Legacy global audit rate (kept for backwards-compat)
     query_embedding_cache_audit_sample_rate: float = 0.0
 
 

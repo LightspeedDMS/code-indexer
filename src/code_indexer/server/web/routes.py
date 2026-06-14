@@ -218,6 +218,8 @@ _VALID_CONFIG_SECTIONS = (
     "cidx_meta_backup",
     # Story #997 - Pace-maker pacing-only enforcement
     "pace_maker",
+    # Story #1107 S3 - Query embedding cache LRU cap + Web UI config section
+    "query_embedding_cache",
 )
 
 
@@ -5872,6 +5874,8 @@ def _get_current_config() -> dict:
         LifecycleAnalysisConfig,
         # Story #844 - Codex CLI integration configuration
         CodexIntegrationConfig,
+        # Story #1107 S3 - Query embedding cache configuration
+        QueryEmbeddingCacheConfig,
     )
     from dataclasses import asdict
 
@@ -6088,6 +6092,10 @@ def _get_current_config() -> dict:
         "xray": settings.get("xray", asdict(XRayConfig())),
         # Story #652: Reranking configuration
         "rerank": settings.get("rerank", asdict(RerankConfig())),
+        # Story #1107 S3: Query embedding cache configuration
+        "query_embedding_cache": settings.get(
+            "query_embedding_cache", asdict(QueryEmbeddingCacheConfig())
+        ),
         # Story #885: Lifecycle analysis configuration
         "lifecycle_analysis": settings.get(
             "lifecycle_analysis", asdict(LifecycleAnalysisConfig())
@@ -7056,6 +7064,60 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     f"shell timeout + {LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS}s "
                     f"({min_outer}s)"
                 )
+
+    elif section == "query_embedding_cache":
+        # Story #1107 S3: Query embedding cache runtime config validation.
+        _QEC_VALID_MODES = {"off", "shadow", "on"}
+
+        for mode_field in (
+            "query_embedding_cache_voyage_mode",
+            "query_embedding_cache_cohere_mode",
+        ):
+            mode_val = data.get(mode_field)
+            if mode_val is not None:
+                if str(mode_val) not in _QEC_VALID_MODES:
+                    return (
+                        f"{mode_field} must be one of: "
+                        f"{', '.join(sorted(_QEC_VALID_MODES))}"
+                    )
+
+        for rate_field in (
+            "query_embedding_cache_voyage_audit_sample_rate",
+            "query_embedding_cache_cohere_audit_sample_rate",
+        ):
+            rate_val = data.get(rate_field)
+            if rate_val is not None:
+                try:
+                    rate_float = float(rate_val)
+                except (ValueError, TypeError):
+                    return f"{rate_field} must be a valid float"
+                if rate_float < 0.0 or rate_float > 1.0:
+                    return f"{rate_field} must be between 0.0 and 1.0"
+
+        max_entries_val = data.get("query_embedding_cache_max_entries")
+        if max_entries_val is not None:
+            try:
+                max_entries_int = int(max_entries_val)
+            except (ValueError, TypeError):
+                return "query_embedding_cache_max_entries must be a valid integer"
+            if max_entries_int < 100:
+                return (
+                    "query_embedding_cache_max_entries must be at least 100 "
+                    "(the minimum safe cap)"
+                )
+
+        for anchor_field in (
+            "query_embedding_cache_voyage_anchor_tokens",
+            "query_embedding_cache_cohere_anchor_tokens",
+        ):
+            anchor_val = data.get(anchor_field)
+            if anchor_val is not None:
+                try:
+                    anchor_int = int(anchor_val)
+                except (ValueError, TypeError):
+                    return f"{anchor_field} must be a valid integer"
+                if anchor_int < 0:
+                    return f"{anchor_field} must be >= 0"
 
     return None
 

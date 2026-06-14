@@ -163,31 +163,44 @@ class QueryEmbeddingCachePostgresBackend:
             )
 
     def prune_to_max(self, max_entries: int) -> int:
-        """Delete rows beyond max_entries ordered by last_used ASC.
+        """Delete rows beyond max_entries ordered by last_used ASC (deterministic tie-break).
+
+        Uses a ctid-based DELETE with OFFSET so the entire eviction is a single
+        atomic statement.  The secondary sort ensures deterministic eviction when
+        last_used values are identical:
+            ORDER BY last_used ASC, created_at ASC, cache_key ASC,
+                     provider ASC, model ASC, dimension ASC
+
+        Minimum bound: ``max_entries < 100`` falls back to the safe default of 100.
+        This prevents accidental erasure of the entire cache when a misconfigured
+        or untested value is passed.
+
+        Args:
+            max_entries: Maximum rows to retain.  Values < 100 are clamped to 100.
 
         Returns:
-            Number of rows actually deleted.
+            Number of rows actually deleted (0 when already within cap).
         """
+        _MIN_CAP = 100
+        effective_max = max_entries if max_entries >= _MIN_CAP else _MIN_CAP
+
         try:
             with self._pool.connection() as conn:
-                total_row = conn.execute(
-                    "SELECT COUNT(*) FROM query_embedding_cache"
-                ).fetchone()
-                total = total_row[0] if total_row else 0
-                to_delete = total - max_entries
-                if to_delete <= 0:
-                    return 0
                 result = conn.execute(
                     """
                     DELETE FROM query_embedding_cache
-                    WHERE (cache_key, provider, model, dimension) IN (
-                        SELECT cache_key, provider, model, dimension
-                        FROM query_embedding_cache
-                        ORDER BY last_used ASC
-                        LIMIT %s
+                    WHERE ctid IN (
+                        SELECT ctid FROM query_embedding_cache
+                        ORDER BY last_used ASC,
+                                 created_at ASC,
+                                 cache_key ASC,
+                                 provider ASC,
+                                 model ASC,
+                                 dimension ASC
+                        OFFSET %s
                     )
                     """,
-                    (to_delete,),
+                    (effective_max,),
                 )
                 deleted = int(result.rowcount) if result.rowcount else 0
                 conn.commit()
