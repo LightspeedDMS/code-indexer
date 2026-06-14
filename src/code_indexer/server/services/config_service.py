@@ -1520,7 +1520,11 @@ class ConfigService:
                 )
             qec.query_embedding_cache_voyage_mode = str_val
         elif key == "query_embedding_cache_voyage_anchor_tokens":
-            qec.query_embedding_cache_voyage_anchor_tokens = int(value)
+            # Empty string or None means "inherit global" (reset per-provider override).
+            if value is None or value == "":
+                qec.query_embedding_cache_voyage_anchor_tokens = None
+            else:
+                qec.query_embedding_cache_voyage_anchor_tokens = int(value)
         elif key == "query_embedding_cache_voyage_audit_sample_rate":
             qec.query_embedding_cache_voyage_audit_sample_rate = float(value)
         elif key == "query_embedding_cache_cohere_mode":
@@ -1532,7 +1536,11 @@ class ConfigService:
                 )
             qec.query_embedding_cache_cohere_mode = str_val
         elif key == "query_embedding_cache_cohere_anchor_tokens":
-            qec.query_embedding_cache_cohere_anchor_tokens = int(value)
+            # Empty string or None means "inherit global" (reset per-provider override).
+            if value is None or value == "":
+                qec.query_embedding_cache_cohere_anchor_tokens = None
+            else:
+                qec.query_embedding_cache_cohere_anchor_tokens = int(value)
         elif key == "query_embedding_cache_cohere_audit_sample_rate":
             qec.query_embedding_cache_cohere_audit_sample_rate = float(value)
         else:

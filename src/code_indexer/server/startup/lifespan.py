@@ -3140,23 +3140,31 @@ def make_lifespan(
             )
 
             _wired_cache = get_query_embedding_cache()
-            if telemetry_manager is not None and _wired_cache is not None:
-                _cache_meter = telemetry_manager.get_meter("cidx.cache")
+            if _wired_cache is not None:
+                # Pass a real OTEL meter when telemetry is enabled; None otherwise.
+                # The in-process tallies (snapshot()) work regardless — only the OTEL
+                # export instruments require a meter.  This ensures the dashboard
+                # cache-metrics cards show real data even when telemetry is disabled
+                # (the production/staging default).
+                _cache_meter = (
+                    telemetry_manager.get_meter("cidx.cache")
+                    if telemetry_manager is not None
+                    else None
+                )
                 _cache_metrics = QueryEmbeddingCacheMetrics(
                     _cache_meter,
                     total_entries_fn=_wired_cache.cached_total_entries,
                 )
                 set_query_embedding_cache_metrics(_cache_metrics)
                 logger.info(
-                    "QueryEmbeddingCacheMetrics built and wired (Story #1109 S5)",
+                    "QueryEmbeddingCacheMetrics built and wired "
+                    "(telemetry=%s) (Story #1109 S5 / Bug fix)",
+                    telemetry_manager is not None,
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:
                 logger.info(
-                    "QueryEmbeddingCacheMetrics: skipped "
-                    "(telemetry_manager=%s, cache=%s) — accessor stays None",
-                    telemetry_manager is not None,
-                    _wired_cache is not None,
+                    "QueryEmbeddingCacheMetrics: skipped (cache not wired) — accessor stays None",
                     extra={"correlation_id": get_correlation_id()},
                 )
         except Exception as e:

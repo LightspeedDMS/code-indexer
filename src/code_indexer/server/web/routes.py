@@ -7216,13 +7216,15 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             "query_embedding_cache_cohere_anchor_tokens",
         ):
             anchor_val = data.get(anchor_field)
-            if anchor_val is not None:
-                try:
-                    anchor_int = int(anchor_val)
-                except (ValueError, TypeError):
-                    return f"{anchor_field} must be a valid integer"
-                if anchor_int < 0:
-                    return f"{anchor_field} must be >= 0"
+            # Empty string or None means "inherit global" — accepted as a valid reset.
+            if anchor_val is None or anchor_val == "":
+                continue
+            try:
+                anchor_int = int(anchor_val)
+            except (ValueError, TypeError):
+                return f"{anchor_field} must be a valid integer"
+            if anchor_int < 0:
+                return f"{anchor_field} must be >= 0"
 
     return None
 
