@@ -45,6 +45,7 @@ from ..models.jobs import (
 
 from ..auth import dependencies
 from ..repositories.golden_repo_manager import GoldenRepoError, GitOperationError
+from ..repositories.activated_repo_manager import ActivatedRepoError
 from ..repositories.background_jobs import DuplicateJobError
 from ..logging_utils import format_error_log
 from ..middleware.correlation import get_correlation_id
@@ -190,6 +191,43 @@ def register_admin_ops_routes(
             "golden_repositories": repos,
             "total": len(repos),
         }
+
+    @app.get("/api/admin/activated-repos")
+    def admin_list_all_activated_repos(
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ):
+        repos = (
+            golden_repo_manager.activated_repo_manager.list_all_activated_repositories()
+        )
+        return {"activated_repositories": repos, "total": len(repos)}
+
+    @app.delete(
+        "/api/admin/activated-repos/{username}/{user_alias}",
+        response_model=JobResponse,
+        status_code=202,
+    )
+    def admin_deactivate_activated_repo(
+        username: str,
+        user_alias: str,
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ):
+        try:
+            job_id = golden_repo_manager.activated_repo_manager.deactivate_repository(
+                username=username,
+                user_alias=user_alias,
+                actor_username=current_user.username,
+            )
+            return JobResponse(
+                job_id=job_id,
+                message=f"Repository '{user_alias}' (user '{username}') deactivation started by admin '{current_user.username}'",
+            )
+        except ActivatedRepoError as e:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to deactivate repository: {str(e)}",
+            )
 
     @app.post("/api/admin/golden-repos", response_model=JobResponse, status_code=202)
     def add_golden_repo(
