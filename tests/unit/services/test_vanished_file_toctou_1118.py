@@ -193,9 +193,11 @@ class TestVanishedFileToctou1118:
             )
 
         assert stats is not None, "process_files_high_throughput must return stats"
-        assert stats.failed_files <= 1, (
-            f"Only the vanished file should fail (at most 1), "
-            f"but {stats.failed_files} files failed"
+        # Hash-phase skip (FileNotFoundError -> continue) never submits to FileChunkingManager,
+        # so the vanished ghost must not count as failed at all.
+        assert stats.failed_files == 0, (
+            f"Vanished file in hash phase must not count as failure; "
+            f"got {stats.failed_files} failed"
         )
         assert stats.files_processed == 3, (
             f"All 3 good files should be processed, "
@@ -248,7 +250,243 @@ class TestVanishedFileToctou1118:
             future = manager.submit_file_for_processing(ghost, metadata, None)
             result: FileProcessingResult = future.result(timeout=10)
 
-        # Must return a failure result — not raise or crash
+        # Must return a vanished skip result — not raise or crash
         assert result is not None
         assert result.success is False
+        assert result.vanished is True, (
+            "A vanished file must set vanished=True so the collector skips it"
+        )
         assert result.error is not None and len(result.error) > 0
+
+    # -------------------------------------------------------------------------
+    # New tests for Bug #1118 refinement: vanished = SKIP, not failure
+    # -------------------------------------------------------------------------
+
+    def test_vanished_file_result_has_vanished_flag(self, tmp_path):
+        """
+        GIVEN  a file path that does not exist (vanished before chunking stat)
+        WHEN   FileChunkingManager processes it via _process_file_clean_lifecycle
+        THEN   the returned FileProcessingResult has vanished=True
+        AND    success=False
+        This is the RED test: FileProcessingResult has no 'vanished' field yet.
+        """
+        from src.code_indexer.services.file_chunking_manager import (
+            FileChunkingManager,
+            FileProcessingResult,
+        )
+        from src.code_indexer.services.clean_slot_tracker import CleanSlotTracker
+        from src.code_indexer.indexing.fixed_size_chunker import FixedSizeChunker
+
+        config = Config(codebase_dir=tmp_path)
+        chunker = FixedSizeChunker(config)
+        mock_vm = MagicMock()
+        mock_vm.embedding_provider = MagicMock()
+        mock_vm.embedding_provider.get_current_model.return_value = "voyage-code-3"
+        mock_vm.embedding_provider._get_model_token_limit.return_value = 120_000
+        mock_vm.cancellation_event = threading.Event()
+        mock_store = _make_mock_vector_store()
+        slot_tracker = CleanSlotTracker(max_slots=4)
+
+        ghost = tmp_path / "vanished_flag_test.tmp"
+        # ghost never existed on disk
+
+        with FileChunkingManager(
+            vector_manager=mock_vm,
+            chunker=chunker,
+            vector_store_client=mock_store,
+            thread_count=2,
+            slot_tracker=slot_tracker,
+            codebase_dir=tmp_path,
+        ) as manager:
+            metadata = {
+                "project_id": "test",
+                "file_hash": "abc123",
+                "git_available": False,
+                "file_size": 0,
+                "file_mtime": 0.0,
+                "collection_name": "test-col",
+            }
+            future = manager.submit_file_for_processing(ghost, metadata, None)
+            result: FileProcessingResult = future.result(timeout=10)
+
+        assert result.success is False
+        # This assertion FAILS before the fix (no 'vanished' attribute on FileProcessingResult)
+        assert result.vanished is True, (
+            "FileProcessingResult for a vanished file must have vanished=True"
+        )
+
+    @patch(
+        "src.code_indexer.services.high_throughput_processor.VectorCalculationManager"
+    )
+    @patch("src.code_indexer.services.high_throughput_processor.FileChunkingManager")
+    def test_vanished_chunking_result_not_counted_as_failure(
+        self,
+        mock_file_chunking_manager,
+        mock_vector_manager,
+        tmp_path,
+        caplog,
+    ):
+        """
+        GIVEN  one good file and one vanished file that returns a vanished result
+               from FileChunkingManager (success=False, vanished=True)
+        WHEN   the collector loop processes the results
+        THEN   failed_files == 0 (vanished is a SKIP, not a failure)
+        AND    files_processed == 1 (only the good file counts)
+        AND    a WARNING log is emitted for the vanished file
+
+        This is the RED test for the collector-side fix in high_throughput_processor.py.
+        Currently the collector increments failed_files for any non-success result,
+        so failed_files would be 1 before the fix.
+        """
+        good = tmp_path / "good.py"
+        good.write_text("x = 1\n")
+
+        # Ghost path — will be represented by a vanished future result
+        ghost = tmp_path / "ghost.tmp"
+
+        # --- Mock VectorCalculationManager ---
+        mock_vm_instance = MagicMock()
+        mock_vector_manager.return_value.__enter__.return_value = mock_vm_instance
+        mock_vm_instance.embedding_provider = MagicMock()
+        mock_vm_instance.embedding_provider.get_current_model.return_value = (
+            "voyage-code-3"
+        )
+        mock_vm_instance.embedding_provider._get_model_token_limit.return_value = (
+            120_000
+        )
+        mock_vm_instance.cancellation_event = threading.Event()
+
+        # --- Mock FileChunkingManager ---
+        mock_fcm_instance = MagicMock()
+        mock_file_chunking_manager.return_value.__enter__.return_value = (
+            mock_fcm_instance
+        )
+
+        def _submit(file_path, metadata, cb):
+            f: Future[FileProcessingResult] = Future()
+            if file_path == good:
+                f.set_result(
+                    FileProcessingResult(
+                        success=True,
+                        file_path=file_path,
+                        chunks_processed=1,
+                        processing_time=0.01,
+                    )
+                )
+            else:
+                # Simulate the vanished result that FileChunkingManager will return
+                # after the fix adds the vanished flag
+                f.set_result(
+                    FileProcessingResult(
+                        success=False,
+                        vanished=True,
+                        file_path=file_path,
+                        chunks_processed=0,
+                        processing_time=0.001,
+                        error="File vanished before processing",
+                    )
+                )
+            return f
+
+        mock_fcm_instance.submit_file_for_processing.side_effect = _submit
+
+        processor = _make_processor(tmp_path)
+
+        with caplog.at_level(logging.WARNING):
+            stats = processor.process_files_high_throughput(
+                files=[good, ghost],
+                vector_thread_count=2,
+                batch_size=10,
+            )
+
+        assert stats is not None
+        # Vanished file must NOT inflate failed_files (RED: currently it does)
+        assert stats.failed_files == 0, (
+            f"Vanished file must not be counted as failed; got failed_files={stats.failed_files}"
+        )
+        assert stats.files_processed == 1, (
+            f"Only the good file must be counted; got files_processed={stats.files_processed}"
+        )
+        # A WARNING must still be emitted so the skip is visible
+        warning_texts = [
+            r.message for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any("ghost.tmp" in t or "vanish" in t.lower() for t in warning_texts), (
+            f"Expected WARNING about vanished/ghost file; got: {warning_texts}"
+        )
+
+    @patch(
+        "src.code_indexer.services.high_throughput_processor.VectorCalculationManager"
+    )
+    @patch("src.code_indexer.services.high_throughput_processor.FileChunkingManager")
+    def test_genuine_error_still_counted_as_failure(
+        self,
+        mock_file_chunking_manager,
+        mock_vector_manager,
+        tmp_path,
+    ):
+        """
+        Regression guard: a genuine failure (success=False, vanished=False/absent)
+        must still increment failed_files exactly as before.
+        """
+        good = tmp_path / "good.py"
+        good.write_text("x = 1\n")
+        bad = tmp_path / "bad.py"
+        bad.write_text("y = 2\n")
+
+        mock_vm_instance = MagicMock()
+        mock_vector_manager.return_value.__enter__.return_value = mock_vm_instance
+        mock_vm_instance.embedding_provider = MagicMock()
+        mock_vm_instance.embedding_provider.get_current_model.return_value = (
+            "voyage-code-3"
+        )
+        mock_vm_instance.embedding_provider._get_model_token_limit.return_value = (
+            120_000
+        )
+        mock_vm_instance.cancellation_event = threading.Event()
+
+        mock_fcm_instance = MagicMock()
+        mock_file_chunking_manager.return_value.__enter__.return_value = (
+            mock_fcm_instance
+        )
+
+        def _submit(file_path, metadata, cb):
+            f: Future[FileProcessingResult] = Future()
+            if file_path == good:
+                f.set_result(
+                    FileProcessingResult(
+                        success=True,
+                        file_path=file_path,
+                        chunks_processed=1,
+                        processing_time=0.01,
+                    )
+                )
+            else:
+                # Genuine error — not a vanished file
+                f.set_result(
+                    FileProcessingResult(
+                        success=False,
+                        vanished=False,
+                        file_path=file_path,
+                        chunks_processed=0,
+                        processing_time=0.001,
+                        error="Embedding provider timeout",
+                    )
+                )
+            return f
+
+        mock_fcm_instance.submit_file_for_processing.side_effect = _submit
+
+        processor = _make_processor(tmp_path)
+        stats = processor.process_files_high_throughput(
+            files=[good, bad],
+            vector_thread_count=2,
+            batch_size=10,
+        )
+
+        assert stats is not None
+        assert stats.files_processed == 1
+        # Genuine failure MUST still count as failed
+        assert stats.failed_files == 1, (
+            f"A genuine error must increment failed_files; got {stats.failed_files}"
+        )

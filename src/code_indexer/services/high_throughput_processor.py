@@ -737,6 +737,14 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                                     self.cancelled = True
                                     stats.cancelled = True
                                     break
+                        elif file_result.vanished:
+                            # Bug #1118 refinement — vanished file is a SKIP, not a failure.
+                            # The FileChunkingManager already emitted a WARNING; just log
+                            # at DEBUG here to avoid double-noise.  Neither files_processed
+                            # nor failed_files is incremented so the run stats stay clean.
+                            logger.warning(
+                                f"Skipped vanished file (TOCTOU): {file_result.file_path}"
+                            )
                         else:
                             stats.failed_files += 1
                             logger.error(f"File processing failed: {file_result.error}")
