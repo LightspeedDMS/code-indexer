@@ -304,8 +304,7 @@ class QueryEmbeddingCache:
         Per-provider config keys (tried in order):
         - ``query_embedding_cache_voyage_anchor_tokens`` (when provider == "voyage-ai")
         - ``query_embedding_cache_cohere_anchor_tokens`` (when provider == "cohere")
-        - ``query_embedding_cache_anchor_tokens`` (global fallback field)
-        - :data:`_DEFAULT_ANCHOR_TOKENS` (construction-time hard default)
+        - :data:`_DEFAULT_ANCHOR_TOKENS` (module-level constant, value 2)
 
         Namespace-change observability: when the resolved ``anchor_tokens`` value
         differs from the last-seen value for this provider, ONE structured WARNING
@@ -348,14 +347,7 @@ class QueryEmbeddingCache:
             if per_provider is not None:
                 raw = int(per_provider)
             else:
-                # Global fallback
-                raw = int(
-                    getattr(
-                        qec_cfg,
-                        "query_embedding_cache_anchor_tokens",
-                        _DEFAULT_ANCHOR_TOKENS,
-                    )
-                )
+                raw = _DEFAULT_ANCHOR_TOKENS
 
         effective = max(0, raw)  # clamp negative to sort-all
 

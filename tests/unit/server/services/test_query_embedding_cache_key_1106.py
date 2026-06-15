@@ -328,11 +328,9 @@ class TestPerProviderAnchorTokensLiveRead:
         cfg.query_embedding_cache_voyage_mode = "on"
         cfg.query_embedding_cache_cohere_mode = "on"
         cfg.query_embedding_cache_max_entries = 10000
-        cfg.query_embedding_cache_anchor_tokens = voyage_anchor  # global fallback
         # per-provider fields (S2 convention)
         cfg.query_embedding_cache_voyage_anchor_tokens = voyage_anchor
         cfg.query_embedding_cache_cohere_anchor_tokens = cohere_anchor
-        cfg.query_embedding_cache_audit_sample_rate = 0.0
         return cfg
 
     def _make_cache(self, tmp_path: Path):
@@ -443,10 +441,8 @@ class TestNamespaceChangeLog:
         cfg.query_embedding_cache_voyage_mode = "on"
         cfg.query_embedding_cache_cohere_mode = "shadow"
         cfg.query_embedding_cache_max_entries = 10000
-        cfg.query_embedding_cache_anchor_tokens = anchor
         cfg.query_embedding_cache_voyage_anchor_tokens = anchor
         cfg.query_embedding_cache_cohere_anchor_tokens = anchor
-        cfg.query_embedding_cache_audit_sample_rate = 0.0
         return cfg
 
     def test_namespace_change_log_fires_on_anchor_change(

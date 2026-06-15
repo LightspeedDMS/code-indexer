@@ -27,8 +27,6 @@ Guards:
 
 from __future__ import annotations
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -142,21 +140,6 @@ class TestCohereAnchorTokensReset:
             "query_embedding_cache", "query_embedding_cache_cohere_anchor_tokens", "512"
         )
         assert _qec(svc).query_embedding_cache_cohere_anchor_tokens == 512
-
-
-# ---------------------------------------------------------------------------
-# A7 — global anchor_tokens still requires int (no None reset)
-# ---------------------------------------------------------------------------
-
-
-class TestGlobalAnchorTokensStillRequiresInt:
-    def test_global_anchor_tokens_empty_string_raises(self, tmp_path):
-        """The global query_embedding_cache_anchor_tokens must still require a valid int."""
-        svc = _make_service(tmp_path)
-        with pytest.raises((ValueError, TypeError)):
-            svc.update_setting(
-                "query_embedding_cache", "query_embedding_cache_anchor_tokens", ""
-            )
 
 
 # ---------------------------------------------------------------------------
