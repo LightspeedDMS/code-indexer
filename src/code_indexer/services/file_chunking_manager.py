@@ -407,7 +407,19 @@ class FileChunkingManager:
         6. Call progress_callback to trigger display updates
         """
         start_time = time.time()
-        file_size = file_path.stat().st_size
+        try:
+            file_size = file_path.stat().st_size
+        except FileNotFoundError as e:
+            # Bug #1118 — TOCTOU: file vanished between enumeration and chunking.
+            # Return a failure result (not raise) so the caller can skip gracefully.
+            logger.warning(f"Skipping file that vanished during chunking: {file_path}")
+            return FileProcessingResult(
+                success=False,
+                file_path=file_path,
+                chunks_processed=0,
+                processing_time=time.time() - start_time,
+                error=f"File vanished before processing: {e}",
+            )
         filename = file_path.name
 
         # Single acquire at start - create clean FileData

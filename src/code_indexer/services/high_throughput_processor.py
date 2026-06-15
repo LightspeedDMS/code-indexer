@@ -403,6 +403,8 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                                     slot_id, FileStatus.COMPLETE
                                 )
 
+                            except FileNotFoundError:
+                                raise  # TOCTOU: file removed after enumeration — handled by the outer vanished-file guard
                             except Exception as hash_error:
                                 # Hash calculation failed - this IS a critical error
                                 logger.error(
@@ -456,6 +458,14 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                                 )
                                 # Continue processing - don't break!
 
+                        except FileNotFoundError:
+                            # Bug #1118 — TOCTOU: file vanished between directory enumeration and hashing
+                            # (benign on a live filesystem, e.g. a transient *.tmp). Skip this one file with a
+                            # warning; do NOT abort the whole index. Other (real) errors still abort as before.
+                            logger.warning(
+                                f"Skipping file that vanished during indexing: {file_path}"
+                            )
+                            continue
                         except Exception as e:
                             # CRITICAL FAILURE: Store error and signal all threads to stop
                             logger.error(
