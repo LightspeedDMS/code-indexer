@@ -152,7 +152,11 @@ Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_A
 
 ### Post-E2E Log Audit (MANDATORY)
 
-After every E2E test, query the server log store for ERROR/WARNING entries. Use `sqlite3 ~/.cidx-server/logs.db` (solo) or `psql "$POSTGRES_DSN"` (cluster) to check `logs` table for `level IN ('ERROR','WARNING')`. Zero new entries attributable to your changes before declaring done.
+Story #1122 automated the log-audit gate for Phase 3 (server in-process) and Phase 4 (CLI remote / live server) as session-scoped autouse pytest fixtures. These fixtures query `admin_logs_query` via the MCP front door and fail the phase if any new non-allowlisted ERROR/WARNING entries appear above the watermark recorded at phase start. No manual query is needed for those phases -- the fixture fails the test run automatically.
+
+For Phases 1, 2, and 5 (which do not yet have automated gate fixtures), manually query the server log store: `sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 50"`. Zero new entries attributable to your changes before declaring done.
+
+Gate implementation: `tests/e2e/log_audit_gate.py` (core module), `tests/e2e/server/conftest.py` (Phase 3 fixtures), `tests/e2e/cli_remote/conftest.py` (Phase 4 fixtures). Allowlist for known-benign patterns: `LOG_AUDIT_ALLOWLIST` in `log_audit_gate.py`.
 
 ### Server E2E Testing -- Front Door Only (MANDATORY)
 
