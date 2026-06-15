@@ -308,3 +308,169 @@ class TestAuditRowsRender:
         finally:
             clear_query_embedding_cache()
             clear_query_embedding_cache_metrics()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for node-id tests
+# ---------------------------------------------------------------------------
+
+# Sentinel distinguishes "attribute not present" from None in app.state manipulation.
+_SENTINEL = object()
+
+
+def _extract_article_cards(html: str) -> list:
+    """Split rendered HTML into per-article-card text chunks.
+
+    Returns a list where index 0 is pre-article preamble, index 1 is the
+    first card, index 2 is the second card, etc.
+    """
+    return html.split("<article")
+
+
+# ---------------------------------------------------------------------------
+# Cluster-UX: node name on volatile cards
+# ---------------------------------------------------------------------------
+
+
+class TestNodeIdOnVolatileCards:
+    """Node id appears on the three volatile cards but NOT on Cache Entries.
+
+    The three volatile cards are Shadow Hit Rate, On-Mode Hit Rate, and
+    Shadow Cosine P50.  Cache Entries is DB-backed and cluster-wide so it
+    must not carry a per-node label.
+    """
+
+    def test_node_id_in_template_context_and_volatile_cards(
+        self, client, admin_session_cookie, app
+    ):
+        """node_id is passed to the template and 'Node <id>' appears on each volatile card.
+
+        Verifies template-context presence by injecting a known node id via
+        app.state.node_id and asserting it is reflected in the rendered HTML
+        on all three volatile cards (Shadow Hit Rate, On-Mode Hit Rate,
+        Shadow Cosine P50).
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        test_node_name = "cidx-worker-77"
+        original = getattr(app.state, "node_id", _SENTINEL)
+        app.state.node_id = test_node_name
+
+        set_query_embedding_cache(_FakeCache(count=5))
+        set_query_embedding_cache_metrics(
+            _FakeMetrics(
+                shadow_hits=4,
+                shadow_misses=1,
+                on_hits=3,
+                on_misses=2,
+                shadow_cosine_p50=0.99,
+            )
+        )
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            node_label = f"Node {test_node_name}"
+
+            # Split HTML into per-card chunks; skip index-0 (preamble).
+            cards = _extract_article_cards(html)
+            # cards[1] = Cache Entries, cards[2] = Shadow Hit Rate,
+            # cards[3] = On-Mode Hit Rate, cards[4] = Shadow Cosine P50
+            assert len(cards) >= 5, (
+                f"Expected at least 4 article cards in HTML, got {len(cards) - 1}"
+            )
+            shadow_hit_card = cards[2]
+            on_mode_card = cards[3]
+            cosine_card = cards[4]
+
+            assert node_label in shadow_hit_card, (
+                f"'Node {test_node_name}' missing from Shadow Hit Rate card:\n{shadow_hit_card[:400]}"
+            )
+            assert node_label in on_mode_card, (
+                f"'Node {test_node_name}' missing from On-Mode Hit Rate card:\n{on_mode_card[:400]}"
+            )
+            assert node_label in cosine_card, (
+                f"'Node {test_node_name}' missing from Shadow Cosine P50 card:\n{cosine_card[:400]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()
+            if original is _SENTINEL:
+                try:
+                    del app.state.node_id
+                except AttributeError:
+                    pass
+            else:
+                app.state.node_id = original
+
+    def test_node_id_absent_on_cache_entries_card(
+        self, client, admin_session_cookie, app
+    ):
+        """Cache Entries card (first article) must NOT contain the 'Node ' label."""
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+        )
+
+        test_node_name = "cidx-worker-99"
+        original = getattr(app.state, "node_id", _SENTINEL)
+        app.state.node_id = test_node_name
+
+        set_query_embedding_cache(_FakeCache(count=7))
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+
+            cards = _extract_article_cards(html)
+            assert len(cards) >= 2, "Expected at least one <article> in the HTML"
+            first_card = cards[1]  # Cache Entries
+
+            assert f"Node {test_node_name}" not in first_card, (
+                f"'Node {test_node_name}' must NOT appear in Cache Entries card:\n{first_card[:400]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            if original is _SENTINEL:
+                try:
+                    del app.state.node_id
+                except AttributeError:
+                    pass
+            else:
+                app.state.node_id = original
+
+    def test_hostname_fallback_when_node_id_not_in_app_state(
+        self, client, admin_session_cookie, app
+    ):
+        """When app.state.node_id is absent, node_id falls back to socket.gethostname()."""
+        import socket
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+        )
+
+        original = getattr(app.state, "node_id", _SENTINEL)
+        if original is not _SENTINEL:
+            try:
+                del app.state.node_id
+            except AttributeError:
+                pass
+
+        set_query_embedding_cache(_FakeCache(count=3))
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            hostname = socket.gethostname()
+            assert f"Node {hostname}" in html, (
+                f"Expected 'Node {hostname}' (hostname fallback) in HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            if original is not _SENTINEL:
+                app.state.node_id = original

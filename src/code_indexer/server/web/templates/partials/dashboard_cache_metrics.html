@@ -29,7 +29,7 @@
         <footer><small>Query embeddings currently stored in the cache &mdash; durable (persisted in the cache database, survives restarts)</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>Shadow Hit Rate <span class="cache-metrics-volatile-badge" title="In-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <header><h3>Shadow Hit Rate <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
         <div class="stat-value">
             {% if cache_metrics and cache_metrics.shadow_requests > 0 %}
                 {{ "%.1f"|format(cache_metrics.shadow_hits / cache_metrics.shadow_requests * 100) }}%
@@ -37,10 +37,10 @@
                 --
             {% endif %}
         </div>
-        <footer><small><span class="cache-metrics-volatile-note">In-memory &middot; per-node &middot; resets on restart.</span> <strong>Shadow mode</strong> measures the cache without using it: share of queries that <em>would</em> have been served from cache (results are still computed live, so nothing changes for users)</small></footer>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> <strong>Shadow mode</strong> measures the cache without using it: share of queries that <em>would</em> have been served from cache (results are still computed live, so nothing changes for users)</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>On-Mode Hit Rate <span class="cache-metrics-volatile-badge" title="In-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <header><h3>On-Mode Hit Rate <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
         <div class="stat-value">
             {% if cache_metrics and cache_metrics.on_requests > 0 %}
                 {{ "%.1f"|format(cache_metrics.on_hits / cache_metrics.on_requests * 100) }}%
@@ -48,10 +48,10 @@
                 --
             {% endif %}
         </div>
-        <footer><small><span class="cache-metrics-volatile-note">In-memory &middot; per-node &middot; resets on restart.</span> <strong>On mode</strong> actively serves from the cache: share of queries answered with a cached embedding, skipping the embedding provider call</small></footer>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> <strong>On mode</strong> actively serves from the cache: share of queries answered with a cached embedding, skipping the embedding provider call</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>Shadow Cosine P50 <span class="cache-metrics-volatile-badge" title="In-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <header><h3>Shadow Cosine P50 <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
         <div class="stat-value">
             {% if cache_metrics and cache_metrics.shadow_cosine_p50 is not none %}
                 {{ "%.4f"|format(cache_metrics.shadow_cosine_p50) }}
@@ -59,7 +59,7 @@
                 --
             {% endif %}
         </div>
-        <footer><small><span class="cache-metrics-volatile-note">In-memory &middot; per-node &middot; resets on restart.</span> Median similarity between the cached and a freshly-computed embedding (1.0 = identical) &mdash; how accurate a cache hit would be</small></footer>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Median similarity between the cached and a freshly-computed embedding (1.0 = identical) &mdash; how accurate a cache hit would be</small></footer>
     </article>
     {% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
     <article class="stat-card">
