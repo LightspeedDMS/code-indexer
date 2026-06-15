@@ -46,6 +46,7 @@ from ._utils import (
     _is_temporal_query,
     _get_temporal_status,
     _expand_wildcard_patterns,
+    _has_wildcard,
     _enforce_repo_count_cap,
     _get_query_tracker,
     _get_access_filtering_service,
@@ -1036,6 +1037,18 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                         params["repository_alias"] = _promoted
                         repository_alias = _promoted
 
+        # Bug #1119: a wildcard string like "*" or "fastapi-?" must be routed to the
+        # omni/expansion path, not to _search_activated_repo. Wrap the single wildcard
+        # string as a one-element list so the routing below sends it to _omni_search_code
+        # where _expand_wildcard_patterns can expand it properly.
+        if (
+            isinstance(repository_alias, str)
+            and repository_alias
+            and _has_wildcard(repository_alias)
+        ):
+            repository_alias = [repository_alias]
+            params["repository_alias"] = repository_alias
+
         if isinstance(repository_alias, list):
             _result = _omni_search_code(params, user)
         elif repository_alias and repository_alias.endswith("-global"):
@@ -1282,6 +1295,18 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
     repository_alias, err = _validate_regex_args(args)
     if err is not None:
         return err  # type: ignore[no-any-return]  # err is dict from _mcp_response
+
+    # Bug #1119: a wildcard string like "*" or "fastapi-?" must be routed to the
+    # omni/expansion path, not to the single-repo path. Wrap the wildcard string as
+    # a one-element list so the routing below sends it to _omni_regex_search where
+    # _expand_wildcard_patterns can expand it properly.
+    if (
+        isinstance(repository_alias, str)
+        and repository_alias
+        and _has_wildcard(repository_alias)
+    ):
+        repository_alias = [repository_alias]
+        args["repository_alias"] = repository_alias
 
     if isinstance(repository_alias, list):
         return await _omni_regex_search(args, user)
