@@ -10,7 +10,7 @@ Architecture:
   `governed_query_embedding()` (the one sampled-fraction-only live call).
 
 After both searches, compute:
-  top10_overlap = |primary_top10 ∩ second_top10| / AUDIT_TOP_K
+  top10_overlap = |primary_topK ∩ second_topK| / max(len(primary_topK), len(second_topK))
   top1_match    = primary_top1 == second_top1
 
 Record via `QueryEmbeddingCacheMetrics.record_audit()`.
@@ -88,9 +88,7 @@ def _record_audit_metrics(
     primary_top = primary_candidate_ids[:AUDIT_TOP_K]
     second_top = second_ids[:AUDIT_TOP_K]
     denom = max(len(primary_top), len(second_top))
-    top10_overlap = (
-        len(set(primary_top) & set(second_top)) / denom if denom > 0 else 0.0
-    )
+    top10_overlap = (len(set(primary_top) & set(second_top)) / denom) if denom else 0.0
     top1_match = bool(
         primary_candidate_ids
         and second_ids

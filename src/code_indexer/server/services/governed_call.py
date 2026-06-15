@@ -358,30 +358,57 @@ def _serve_with_cache(
     if mode == "on":
         cached_blob: Optional[bytes] = cache.lookup(cache_key, qualifier)
         if cached_blob is not None:
-            logger.debug(
-                "coalesced_query_embedding: cache HIT (mode=on, provider=%s)",
-                provider_name,
-            )
-            cache.record_hit(cache_key, qualifier)
-            if metrics is not None:
-                metrics.record_hit(mode=mode, provider=provider_name)
-            # Story #1110 (S6): populate audit_ctx on sampled on-mode HITs.
-            if audit_ctx is not None:
+            # Validate blob dimension before decode (fail-open: corrupt row -> MISS).
+            expected_bytes = qualifier.dimension * 4
+            blob_is_valid = len(cached_blob) == expected_bytes
+            if blob_is_valid:
                 try:
-                    rate = _audit_sample_rate_for(provider_name)
-                    if rate > 0.0 and random.random() < rate:
-                        audit_ctx["sampled"] = True
-                        audit_ctx["mode"] = mode
-                        audit_ctx["provider"] = provider_name
-                        audit_ctx["cached_blob"] = cached_blob
-                        # No live_vec: Chunk B re-embeds from the cache
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(
-                        "_serve_with_cache: audit_ctx population failed (on-mode): %s",
+                    decoded_vec: List[float] = _bytes_to_floats(cached_blob)
+                except struct.error as exc:
+                    blob_is_valid = False
+                    logger.warning(
+                        "coalesced_query_embedding: corrupt cache blob (struct.error) "
+                        "provider=%s dim=%d blob_len=%d — treating as MISS: %s",
+                        provider_name,
+                        qualifier.dimension,
+                        len(cached_blob),
                         exc,
                     )
-            return _bytes_to_floats(cached_blob)
-        # MISS
+            else:
+                logger.warning(
+                    "coalesced_query_embedding: corrupt cache blob dimension mismatch "
+                    "provider=%s expected_bytes=%d actual_bytes=%d — treating as MISS",
+                    provider_name,
+                    expected_bytes,
+                    len(cached_blob),
+                )
+
+            if blob_is_valid:
+                logger.debug(
+                    "coalesced_query_embedding: cache HIT (mode=on, provider=%s)",
+                    provider_name,
+                )
+                cache.record_hit(cache_key, qualifier)
+                if metrics is not None:
+                    metrics.record_hit(mode=mode, provider=provider_name)
+                # Story #1110 (S6): populate audit_ctx on sampled on-mode HITs.
+                if audit_ctx is not None:
+                    try:
+                        rate = _audit_sample_rate_for(provider_name)
+                        if rate > 0.0 and random.random() < rate:
+                            audit_ctx["sampled"] = True
+                            audit_ctx["mode"] = mode
+                            audit_ctx["provider"] = provider_name
+                            audit_ctx["cached_blob"] = cached_blob
+                            # No live_vec: Chunk B re-embeds from the cache
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "_serve_with_cache: audit_ctx population failed (on-mode): %s",
+                            exc,
+                        )
+                return decoded_vec
+
+        # MISS (or corrupt blob treated as MISS)
         logger.debug(
             "coalesced_query_embedding: cache MISS (mode=on, provider=%s)",
             provider_name,

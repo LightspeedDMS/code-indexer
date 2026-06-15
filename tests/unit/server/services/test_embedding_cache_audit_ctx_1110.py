@@ -636,3 +636,255 @@ def test_serve_with_cache_shadow_hit_still_returns_live_vec():
 
     assert result == LIVE_VEC
     assert audit_ctx.get("sampled") is True
+
+
+# ===========================================================================
+# FIX A: corrupt cache blob on mode=on HIT must be fail-open (treat as MISS)
+# ===========================================================================
+
+
+def _make_cache_with_corrupt_blob(blob: bytes, mode: str = "on"):
+    """Return (cache, qualifier, key) with an arbitrary corrupt blob pre-seeded."""
+    from code_indexer.server.services.query_embedding_cache import (
+        CacheQualifier,
+        QueryEmbeddingCache,
+        build_key,
+    )
+
+    backend = _FakeBackend()
+    cache = QueryEmbeddingCache(
+        backend, enabled=True, voyage_mode=mode, cohere_mode=mode
+    )
+    cache.mode_for = lambda pname: mode  # type: ignore[method-assign]
+    qualifier = CacheQualifier(PROVIDER_VOYAGE, MODEL, DIM)
+    key = build_key(TEXT)
+    backend._store[(key, PROVIDER_VOYAGE, MODEL, DIM)] = blob
+    backend._count = 1
+    return cache, qualifier, key
+
+
+def test_corrupt_blob_not_multiple_of_4_fails_open_no_exception():
+    """A blob whose byte length gives wrong decoded dimension is corrupt: fail-open, return live vec."""
+    from code_indexer.server.services.governed_call import _serve_with_cache
+
+    # 5 bytes: len//4 == 1 which != DIM(3), so dimension mismatch -> treated as corrupt.
+    corrupt_blob = b"\x00\x01\x02\x03\x04"  # 5 bytes, len//4 == 1, DIM==3
+    cache, qualifier, key = _make_cache_with_corrupt_blob(corrupt_blob)
+
+    live_called = []
+
+    def live_fn() -> List[float]:
+        live_called.append(True)
+        return LIVE_VEC
+
+    result = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
+    assert result == LIVE_VEC, f"Expected live vec on corrupt blob, got {result}"
+    assert live_called, "live_fn must be called on corrupt blob (treated as MISS)"
+
+
+def test_wrong_dimension_blob_fails_open_no_exception():
+    """A blob that is a multiple of 4 but decodes to wrong dimension must fail-open."""
+    from code_indexer.server.services.governed_call import _serve_with_cache
+
+    # DIM==3 but we encode 5 floats => 20 bytes, len//4==5 != 3
+    wrong_dim_blob = struct.pack("<5f", 1.0, 2.0, 3.0, 4.0, 5.0)
+    cache, qualifier, key = _make_cache_with_corrupt_blob(wrong_dim_blob)
+
+    live_called = []
+
+    def live_fn() -> List[float]:
+        live_called.append(True)
+        return LIVE_VEC
+
+    result = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
+    assert result == LIVE_VEC, f"Expected live vec on wrong-dim blob, got {result}"
+    assert live_called, "live_fn must be called on wrong-dim blob (treated as MISS)"
+
+
+def test_wrong_dimension_blob_logs_warning(caplog):
+    """A corrupt/wrong-dim blob must emit a WARNING log."""
+    import logging
+
+    from code_indexer.server.services.governed_call import _serve_with_cache
+
+    wrong_dim_blob = struct.pack("<5f", 1.0, 2.0, 3.0, 4.0, 5.0)
+    cache, qualifier, key = _make_cache_with_corrupt_blob(wrong_dim_blob)
+
+    with caplog.at_level(logging.WARNING):
+        _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, lambda: LIVE_VEC)
+
+    assert any(
+        "corrupt" in r.message.lower() or "dimension" in r.message.lower()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+    ), (
+        f"Expected WARNING about corrupt/dimension, got: {[r.message for r in caplog.records]}"
+    )
+
+
+def test_valid_blob_correct_dimension_still_returns_cached_vec():
+    """A valid blob with the correct dimension must still return the cached vector (HIT)."""
+    from code_indexer.server.services.governed_call import _serve_with_cache
+
+    valid_blob = struct.pack(f"<{DIM}f", *CACHED_VEC)
+    cache, qualifier, key = _make_cache_with_corrupt_blob(valid_blob)
+
+    live_called = []
+
+    def live_fn() -> List[float]:
+        live_called.append(True)
+        return LIVE_VEC
+
+    result = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
+    assert result == list(CACHED_VEC), f"Expected cached vec {CACHED_VEC}, got {result}"
+    assert not live_called, "live_fn must NOT be called on a valid HIT"
+
+
+def test_corrupt_blob_row_rewritten_via_record_miss():
+    """After a corrupt-blob MISS, record_miss_or_shadow is called to rewrite the row."""
+    from code_indexer.server.services.governed_call import _serve_with_cache
+
+    wrong_dim_blob = struct.pack("<5f", 1.0, 2.0, 3.0, 4.0, 5.0)
+    cache, qualifier, key = _make_cache_with_corrupt_blob(wrong_dim_blob)
+
+    rewrite_calls: list = []
+    original_record = cache.record_miss_or_shadow
+
+    def track_rewrite(k, q, vec):
+        rewrite_calls.append((k, q, vec))
+        return original_record(k, q, vec)
+
+    cache.record_miss_or_shadow = track_rewrite
+
+    _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, lambda: LIVE_VEC)
+
+    assert rewrite_calls, "record_miss_or_shadow must be called to rewrite corrupt row"
+    assert rewrite_calls[0][2] == LIVE_VEC
+
+
+# ===========================================================================
+# FIX E (corrected): audit overlap metric uses max(len(primary_top), len(second_top))
+# as divisor — identical vectors must yield 1.0 regardless of result count.
+# ===========================================================================
+
+
+def test_record_audit_metrics_partial_overlap_divides_by_max_len():
+    """2-of-3 overlap divides by max(3,3)==3, yielding ~0.667 (NOT 2/10==0.2)."""
+    from unittest.mock import MagicMock, patch
+
+    from code_indexer.server.services.embedding_cache_audit import (
+        _record_audit_metrics,
+    )
+
+    # 3 results in each list, 2 overlap → 2/max(3,3) == 2/3 ≈ 0.667
+    primary = ["a", "b", "c"]
+    second = ["a", "b", "d"]
+
+    captured: list = []
+    fake_metrics = MagicMock()
+    fake_metrics.record_audit.side_effect = lambda **kw: captured.append(kw)
+
+    with patch(
+        "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
+        return_value=fake_metrics,
+    ):
+        _record_audit_metrics(
+            primary_candidate_ids=primary,
+            second_ids=second,
+            provider_name=PROVIDER_VOYAGE,
+            mode="on",
+        )
+
+    assert captured, "record_audit must have been called"
+    overlap = captured[0]["top10_overlap"]
+    expected = 2 / 3  # 0.6666...
+    assert abs(overlap - expected) < 1e-9, (
+        f"Expected {expected} (2/max(3,3)), got {overlap}"
+    )
+
+
+def test_record_audit_metrics_full_overlap_yields_one():
+    """With full overlap (10-of-10), max(10,10)==10 → 10/10 == 1.0."""
+    from unittest.mock import MagicMock, patch
+
+    from code_indexer.server.services.embedding_cache_audit import (
+        _record_audit_metrics,
+    )
+
+    primary = [str(i) for i in range(10)]
+    second = [str(i) for i in range(10)]  # full overlap
+
+    captured: list = []
+    fake_metrics = MagicMock()
+    fake_metrics.record_audit.side_effect = lambda **kw: captured.append(kw)
+
+    with patch(
+        "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
+        return_value=fake_metrics,
+    ):
+        _record_audit_metrics(
+            primary_candidate_ids=primary,
+            second_ids=second,
+            provider_name=PROVIDER_VOYAGE,
+            mode="shadow",
+        )
+
+    assert captured
+    assert abs(captured[0]["top10_overlap"] - 1.0) < 1e-9
+
+
+def test_record_audit_metrics_disjoint_results_yields_zero():
+    """Completely disjoint results → 0/max(3,3)==0 → 0.0."""
+    from unittest.mock import MagicMock, patch
+
+    from code_indexer.server.services.embedding_cache_audit import (
+        _record_audit_metrics,
+    )
+
+    primary = ["a", "b", "c"]
+    second = ["d", "e", "f"]
+
+    captured: list = []
+    fake_metrics = MagicMock()
+    fake_metrics.record_audit.side_effect = lambda **kw: captured.append(kw)
+
+    with patch(
+        "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
+        return_value=fake_metrics,
+    ):
+        _record_audit_metrics(
+            primary_candidate_ids=primary,
+            second_ids=second,
+            provider_name=PROVIDER_VOYAGE,
+            mode="on",
+        )
+
+    assert captured
+    assert abs(captured[0]["top10_overlap"] - 0.0) < 1e-9
+
+
+def test_record_audit_metrics_both_empty_yields_zero():
+    """Both lists empty → denom==0 → safe 0.0 (no ZeroDivisionError)."""
+    from unittest.mock import MagicMock, patch
+
+    from code_indexer.server.services.embedding_cache_audit import (
+        _record_audit_metrics,
+    )
+
+    captured: list = []
+    fake_metrics = MagicMock()
+    fake_metrics.record_audit.side_effect = lambda **kw: captured.append(kw)
+
+    with patch(
+        "code_indexer.server.services.embedding_cache_audit.get_query_embedding_cache_metrics",
+        return_value=fake_metrics,
+    ):
+        _record_audit_metrics(
+            primary_candidate_ids=[],
+            second_ids=[],
+            provider_name=PROVIDER_VOYAGE,
+            mode="shadow",
+        )
+
+    assert captured
+    assert abs(captured[0]["top10_overlap"] - 0.0) < 1e-9
