@@ -71,6 +71,11 @@ dependencies = [
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp>=1.20.0",
     "opentelemetry-instrumentation-fastapi>=0.41b0",
+    # Langfuse LLM observability (Bug #1117) — mandatory so the auto-updater's
+    # `pip install -e .` installs it on every node (previously hand-installed on
+    # one node only, so telemetry init failed cluster-wide). OTEL-based; verified
+    # conflict-free against the existing pins via `pip check` on a node.
+    "langfuse>=3.0.0",
     # Markdown rendering for Research Assistant
     "markdown>=3.4.0",
     "bleach>=6.0.0",

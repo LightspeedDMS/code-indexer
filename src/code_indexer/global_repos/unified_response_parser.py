@@ -59,15 +59,6 @@ _BRANCHING_MODEL_ENUM = (
     "release-branch",
     "unknown",
 )
-_CI_TRIGGER_EVENT_ENUM = (
-    "push",
-    "pull_request",
-    "merge_request",
-    "tag",
-    "schedule",
-    "workflow_dispatch",
-    "manual",
-)
 _CI_DEPLOY_ON_ENUM = (
     "tag",
     "merge-to-main",
@@ -115,7 +106,7 @@ _OPTIONAL_SECTION_SCHEMAS: Dict[str, Any] = {
     "ci": {
         "trigger_events": {
             "type": list,
-            "item_enum": _CI_TRIGGER_EVENT_ENUM,
+            "item_type": str,
             "required": True,
         },
         "required_checks": {"type": list, "item_type": str, "required": True},
