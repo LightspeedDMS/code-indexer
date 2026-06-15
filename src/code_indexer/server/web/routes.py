@@ -13,6 +13,7 @@ import logging
 import os
 import re as _re
 import secrets
+import socket
 import sqlite3
 import sys
 import threading
@@ -874,11 +875,18 @@ def dashboard_cache_metrics_partial(request: Request):
         audit_overlap_avg=audit_overlap_avg,
     )
 
+    # Resolve the current node identifier for the volatile-metrics footer label.
+    # In cluster (postgres) mode, lifespan.py stores the configured node_id on
+    # app.state (Story #505/#506).  In solo mode the attribute is absent; fall
+    # back to socket.gethostname().  getattr with a default is already safe.
+    node_id: str = getattr(request.app.state, "node_id", None) or socket.gethostname()
+
     return templates.TemplateResponse(
         "partials/dashboard_cache_metrics.html",
         {
             "request": request,
             "cache_metrics": cache_metrics,
+            "node_id": node_id,
         },
     )
 

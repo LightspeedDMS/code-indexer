@@ -33,7 +33,7 @@ Each node runs independently and handles requests without inter-node communicati
                        +-----------------------+
                        |     Load Balancer     |
                        |      (HAProxy)        |
-                       |   roundrobin :8000    |
+                       | roundrobin+sticky:8000|
                        +-----+-----+----------+
                              |     |
                 +------------+     +------------+
@@ -474,7 +474,7 @@ Each node maintains its own in-memory HNSW and FTS index caches. There is no cro
 For most deployments this is acceptable because:
 - Golden repository refreshes happen on a schedule (typically hourly)
 - Stale cache entries expire and are reloaded from shared storage on next access
-- The load balancer does not pin sessions to specific nodes
+- The load balancer pins each browser session to one node (HAProxy cookie-based affinity, `cookie SERVERID insert indirect nocache`), so a client reads a consistent view from a single node across requests rather than alternating between nodes' caches; any staleness on that node is bounded by the TTL above
 
 ## SQLite-to-PostgreSQL Data Migration
 
