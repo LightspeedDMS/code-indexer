@@ -1092,16 +1092,12 @@ class QueryEmbeddingCacheConfig:
     # Per-provider mode (off / shadow / on)
     query_embedding_cache_voyage_mode: str = "shadow"
     query_embedding_cache_cohere_mode: str = "shadow"
-    # Global fallback (kept for backwards-compat; per-provider fields take precedence)
-    query_embedding_cache_anchor_tokens: int = 2
-    # Per-provider anchor_tokens: None = fall back to global query_embedding_cache_anchor_tokens
+    # Per-provider anchor_tokens: None = fall back to DEFAULT_ANCHOR_TOKENS constant
     query_embedding_cache_voyage_anchor_tokens: Optional[int] = None
     query_embedding_cache_cohere_anchor_tokens: Optional[int] = None
     # Per-provider audit sample rates (S6 deep-fidelity audit; 0.0 = audit off)
     query_embedding_cache_voyage_audit_sample_rate: float = 0.0
     query_embedding_cache_cohere_audit_sample_rate: float = 0.0
-    # Legacy global audit rate (kept for backwards-compat)
-    query_embedding_cache_audit_sample_rate: float = 0.0
 
 
 @dataclass

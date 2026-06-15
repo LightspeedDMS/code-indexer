@@ -28,8 +28,6 @@ def _make_qec_cfg(
     voyage_mode: str = "shadow",
     cohere_mode: str = "shadow",
     max_entries: int = 10000,
-    anchor_tokens: int = 2,
-    audit_sample_rate: float = 0.0,
 ) -> object:
     """Return a real QueryEmbeddingCacheConfig with the given values."""
     from code_indexer.server.utils.config_manager import QueryEmbeddingCacheConfig
@@ -39,8 +37,6 @@ def _make_qec_cfg(
         query_embedding_cache_voyage_mode=voyage_mode,
         query_embedding_cache_cohere_mode=cohere_mode,
         query_embedding_cache_max_entries=max_entries,
-        query_embedding_cache_anchor_tokens=anchor_tokens,
-        query_embedding_cache_audit_sample_rate=audit_sample_rate,
     )
 
 
@@ -87,18 +83,6 @@ class TestQueryEmbeddingCacheConfigModel:
 
         cfg = QueryEmbeddingCacheConfig()
         assert cfg.query_embedding_cache_max_entries == 10000
-
-    def test_default_anchor_tokens(self) -> None:
-        from code_indexer.server.utils.config_manager import QueryEmbeddingCacheConfig
-
-        cfg = QueryEmbeddingCacheConfig()
-        assert cfg.query_embedding_cache_anchor_tokens == 2
-
-    def test_default_audit_sample_rate(self) -> None:
-        from code_indexer.server.utils.config_manager import QueryEmbeddingCacheConfig
-
-        cfg = QueryEmbeddingCacheConfig()
-        assert cfg.query_embedding_cache_audit_sample_rate == 0.0
 
     def test_server_config_has_query_embedding_cache_config_field(self) -> None:
         import dataclasses
@@ -286,14 +270,11 @@ class TestPerProviderAnchorTokensRealConfig:
         self,
         voyage_anchor: Optional[int] = None,
         cohere_anchor: Optional[int] = None,
-        global_anchor: int = 2,
     ) -> object:
         """Return a REAL QueryEmbeddingCacheConfig (not MagicMock)."""
         from code_indexer.server.utils.config_manager import QueryEmbeddingCacheConfig
 
-        kwargs = {
-            "query_embedding_cache_anchor_tokens": global_anchor,
-        }
+        kwargs: dict = {}
         if voyage_anchor is not None:
             kwargs["query_embedding_cache_voyage_anchor_tokens"] = voyage_anchor
         if cohere_anchor is not None:
@@ -368,13 +349,13 @@ class TestPerProviderAnchorTokensRealConfig:
             "Per-provider anchor_tokens must be independently configurable"
         )
 
-    def test_global_fallback_used_when_per_provider_is_none(
+    def test_constant_fallback_used_when_per_provider_is_none(
         self, tmp_path: Path
     ) -> None:
-        """When per-provider field is None, global anchor_tokens is used as fallback."""
+        """When per-provider field is None, DEFAULT_ANCHOR_TOKENS (2) is used as fallback."""
         cache = self._make_cache(tmp_path)
-        # No per-provider overrides; only global=4
-        real_cfg = self._make_real_qec_cfg(global_anchor=4)
+        # No per-provider overrides — fallback is the module-level constant (2)
+        real_cfg = self._make_real_qec_cfg()
         with patch(
             "code_indexer.server.services.query_embedding_cache.QueryEmbeddingCache._live_qec_cfg",
             return_value=real_cfg,
@@ -382,17 +363,17 @@ class TestPerProviderAnchorTokensRealConfig:
             voyage_depth = cache.anchor_tokens_for("voyage-ai")
             cohere_depth = cache.anchor_tokens_for("cohere")
 
-        assert voyage_depth == 4, (
-            f"Expected global fallback=4 for voyage, got {voyage_depth}"
+        assert voyage_depth == 2, (
+            f"Expected DEFAULT_ANCHOR_TOKENS=2 for voyage, got {voyage_depth}"
         )
-        assert cohere_depth == 4, (
-            f"Expected global fallback=4 for cohere, got {cohere_depth}"
+        assert cohere_depth == 2, (
+            f"Expected DEFAULT_ANCHOR_TOKENS=2 for cohere, got {cohere_depth}"
         )
 
     def test_per_provider_overrides_global_for_voyage(self, tmp_path: Path) -> None:
         """Voyage per-provider anchor overrides global when set."""
         cache = self._make_cache(tmp_path)
-        real_cfg = self._make_real_qec_cfg(voyage_anchor=3, global_anchor=10)
+        real_cfg = self._make_real_qec_cfg(voyage_anchor=3)
         with patch(
             "code_indexer.server.services.query_embedding_cache.QueryEmbeddingCache._live_qec_cfg",
             return_value=real_cfg,
@@ -406,7 +387,7 @@ class TestPerProviderAnchorTokensRealConfig:
     def test_per_provider_overrides_global_for_cohere(self, tmp_path: Path) -> None:
         """Cohere per-provider anchor overrides global when set."""
         cache = self._make_cache(tmp_path)
-        real_cfg = self._make_real_qec_cfg(cohere_anchor=0, global_anchor=10)
+        real_cfg = self._make_real_qec_cfg(cohere_anchor=0)
         with patch(
             "code_indexer.server.services.query_embedding_cache.QueryEmbeddingCache._live_qec_cfg",
             return_value=real_cfg,
