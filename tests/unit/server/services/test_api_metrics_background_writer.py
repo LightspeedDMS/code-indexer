@@ -1,8 +1,8 @@
 """
 Tests for ApiMetricsService background writer thread (Story #672).
 
-Tests non-blocking hot path, queue-full behavior, increment_* username
-propagation, and backward-compatible get_metrics().
+Tests non-blocking hot path, queue-full behavior, and increment_* username
+propagation.
 """
 
 import queue
@@ -252,29 +252,3 @@ class TestWriterLoopNodeId:
                 )
         finally:
             service.stop_writer()
-
-
-class TestGetMetricsBackwardCompat:
-    """Test that get_metrics() still works after the background writer is added."""
-
-    def test_get_metrics_returns_expected_keys(self, service_and_db):
-        """get_metrics() must return dict with all four expected keys."""
-        service, _db_file = service_and_db
-
-        result = service.get_metrics(window_seconds=60)
-
-        assert "semantic_searches" in result
-        assert "other_index_searches" in result
-        assert "regex_searches" in result
-        assert "other_api_calls" in result
-
-    def test_get_metrics_returns_zero_when_no_data(self, service_and_db):
-        """get_metrics() must return zero counts when no metrics have been recorded."""
-        service, _db_file = service_and_db
-
-        result = service.get_metrics(window_seconds=60)
-
-        assert result["semantic_searches"] == 0
-        assert result["other_index_searches"] == 0
-        assert result["regex_searches"] == 0
-        assert result["other_api_calls"] == 0

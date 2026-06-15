@@ -3754,10 +3754,16 @@ class ApiMetricsSqliteBackend:
         conn = self._conn_manager.get_connection()
         conn.execute("PRAGMA journal_mode=WAL")
 
-        self._ensure_schema()
+        self._ensure_legacy_api_metrics_schema()
+        self._ensure_buckets_schema()
 
-    def _ensure_schema(self) -> None:
-        """Create the api_metrics table and indexes if they do not already exist."""
+    def _ensure_legacy_api_metrics_schema(self) -> None:
+        """Create the legacy api_metrics table and indexes if they do not already exist.
+
+        This table is no longer written to by the current code, but MUST remain
+        present for rolling-restart backward compatibility: old nodes in a cluster
+        still write to it.  Never drop this table.
+        """
 
         def operation(conn: Any) -> None:
             conn.execute(
@@ -3787,7 +3793,6 @@ class ApiMetricsSqliteBackend:
             )
 
         self._conn_manager.execute_atomic(operation)
-        self._ensure_buckets_schema()
 
     # Valid values for bucket fields — used in upsert_bucket validation
     _VALID_GRANULARITIES = frozenset({"min1", "min5", "hour1", "day1"})
@@ -4033,83 +4038,6 @@ class ApiMetricsSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
-    def insert_metric(
-        self,
-        metric_type: str,
-        timestamp: Optional[str] = None,
-        node_id: Optional[str] = None,
-    ) -> None:
-        """Insert a single metric record.
-
-        Args:
-            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
-            timestamp: ISO 8601 timestamp. Uses current UTC time when None.
-            node_id: Optional cluster node identifier (NULL in standalone).
-        """
-        now = (
-            timestamp
-            if timestamp is not None
-            else datetime.now(timezone.utc).isoformat()
-        )
-
-        def operation(conn: Any) -> None:
-            conn.execute(
-                "INSERT INTO api_metrics (metric_type, timestamp, node_id) VALUES (?, ?, ?)",
-                (metric_type, now, node_id),
-            )
-
-        self._conn_manager.execute_atomic(operation)
-
-    def get_metrics(
-        self,
-        window_seconds: int = 3600,
-        node_id: Optional[str] = None,
-    ) -> Dict[str, int]:
-        """Return metric counts within the rolling window.
-
-        Args:
-            window_seconds: Time window in seconds (default 3600 = 1 hour).
-            node_id: When provided, filter to metrics from this node only.
-                     When None, aggregate across all nodes.
-
-        Returns:
-            Dict with keys: semantic_searches, other_index_searches,
-            regex_searches, other_api_calls.
-        """
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
-        ).isoformat()
-
-        conn = self._conn_manager.get_connection()
-        if node_id is not None:
-            rows = conn.execute(
-                """
-                SELECT metric_type, COUNT(*) as count
-                FROM api_metrics
-                WHERE timestamp >= ? AND node_id = ?
-                GROUP BY metric_type
-                """,
-                (cutoff, node_id),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT metric_type, COUNT(*) as count
-                FROM api_metrics
-                WHERE timestamp >= ?
-                GROUP BY metric_type
-                """,
-                (cutoff,),
-            ).fetchall()
-
-        counts = {row[0]: row[1] for row in rows}
-        return {
-            "semantic_searches": counts.get("semantic", 0),
-            "other_index_searches": counts.get("other_index", 0),
-            "regex_searches": counts.get("regex", 0),
-            "other_api_calls": counts.get("other_api", 0),
-        }
-
     # Seconds in 24 hours — identifies the period that uses 2-hour grouping
     _PERIOD_24H_SECONDS: int = 86400
 
@@ -4299,39 +4227,11 @@ class ApiMetricsSqliteBackend:
 
         return [(row[0], row[1], int(row[2])) for row in rows]
 
-    def cleanup_old(self, max_age_seconds: int = 86400) -> int:
-        """Delete metric records older than max_age_seconds.
-
-        Args:
-            max_age_seconds: Records older than this many seconds are deleted
-                             (default 86400 = 24 hours).
-
-        Returns:
-            Number of rows deleted.
-        """
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
-        ).isoformat()
-
-        def operation(conn: Any) -> int:
-            cursor = conn.execute(
-                "DELETE FROM api_metrics WHERE timestamp < ?",
-                (cutoff,),
-            )
-            return int(cursor.rowcount)
-
-        deleted: int = self._conn_manager.execute_atomic(operation)
-        if deleted:
-            logger.debug(
-                "ApiMetricsSqliteBackend: cleaned up %d old metric records", deleted
-            )
-        return deleted
-
     def reset(self) -> None:
-        """Delete all metric records (used for testing / manual resets)."""
+        """Delete all bucket data (used for testing / manual resets)."""
 
         def operation(conn: Any) -> None:
-            conn.execute("DELETE FROM api_metrics")
+            conn.execute("DELETE FROM api_metrics_buckets")
 
         self._conn_manager.execute_atomic(operation)
 

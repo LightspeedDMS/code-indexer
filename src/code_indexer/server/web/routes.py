@@ -598,7 +598,7 @@ def dashboard_stats_partial(
         request: HTTP request
         time_filter: Time filter for job stats ("24h", "7d", "30d")
         recent_filter: Time filter for recent activity ("24h", "7d", "30d")
-        api_filter: Time window in seconds for API metrics (default 60).
+        api_filter: Time window in seconds for API metrics (default 900).
             Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
 
     Returns HTML fragment for htmx partial updates.
@@ -740,7 +740,7 @@ def dashboard_api_metrics_partial(
 
     Args:
         request: HTTP request
-        api_filter: Time window in seconds for API metrics (default 60).
+        api_filter: Time window in seconds for API metrics (default 900).
             Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
 
     Returns HTML fragment for htmx partial updates.
@@ -750,7 +750,7 @@ def dashboard_api_metrics_partial(
         return HTMLResponse(content="", status_code=401)
 
     # Story #503 AC1: Use backend_registry.api_metrics for cluster-wide aggregation.
-    # In cluster (postgres) mode get_metrics(node_id=None) aggregates all nodes.
+    # In cluster (postgres) mode get_metrics_bucketed(node_id=None) aggregates all nodes.
     # In standalone mode the SQLite backend reads the local data — identical behaviour.
     backend_registry = getattr(request.app.state, "backend_registry", None)
     api_metrics_backend = (
