@@ -22,6 +22,8 @@ import socket
 import threading
 import time
 import uuid
+
+import yaml
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -64,6 +66,50 @@ ANALYSIS_STALE_TIMEOUT_SECONDS = 14400  # 4 hours — sentinel stale recovery th
 
 # Re-export for backward compatibility (callers importing from this module)
 __all__ = ["AnalysisAlreadyRunningError", "DependencyMapService"]
+
+# ---------------------------------------------------------------------------
+# YAML timestamp-safe helpers (Bug #1114 Defect 2)
+#
+# yaml.safe_load converts ISO-8601 timestamps to datetime objects; yaml.safe_dump
+# re-emits them without the 'T' separator or wraps fresh ISO strings in single
+# quotes.  Both break the line-based downstream readers that expect the canonical
+# ISO format with 'T'.
+#
+# Fix: load with _NoTimestampSafeLoader so timestamps stay as str, then post-
+# process safe_dump output to strip single-quotes around ISO timestamp strings.
+# ---------------------------------------------------------------------------
+
+
+class _NoTimestampSafeLoader(yaml.SafeLoader):
+    """SafeLoader subclass that never converts ISO-8601 strings to datetime.
+
+    Overrides the implicit resolver table to remove the timestamp tag so that
+    values like ``2024-01-01T00:00:00+00:00`` are loaded as plain ``str``
+    rather than ``datetime`` objects.
+    """
+
+
+_NoTimestampSafeLoader.yaml_implicit_resolvers = {
+    k: [(tag, regexp) for tag, regexp in v if tag != "tag:yaml.org,2002:timestamp"]
+    for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+# Matches a single-quoted ISO timestamp as emitted by yaml.safe_dump when the
+# value is a plain str that looks like a timestamp.
+_ISO_TS_SINGLE_QUOTED_RE = re.compile(r"'(\d{4}-\d{2}-\d{2}T[^']+)'")
+
+
+def _safe_dump_iso_aware(data: Any, **kwargs: Any) -> str:
+    """yaml.safe_dump wrapper that un-quotes single-quoted ISO timestamps.
+
+    yaml.safe_dump wraps ISO-8601 strings in single quotes to prevent
+    re-interpretation as timestamps.  This restores the unquoted form so that
+    the line-based downstream readers (dep_map_domain_service:513, etc.) can
+    capture them with a simple regex.  The companion _NoTimestampSafeLoader
+    ensures a future load of the emitted text keeps the value as str.
+    """
+    raw = yaml.safe_dump(data, **kwargs)
+    return _ISO_TS_SINGLE_QUOTED_RE.sub(r"\1", raw)
 
 
 class _DomainUpdateResult(Enum):
@@ -2313,6 +2359,14 @@ class DependencyMapService:
         """
         Update last_analyzed timestamp in YAML frontmatter (Story #193).
 
+        Parses the existing frontmatter as a YAML dict, sets last_analyzed,
+        then re-emits via yaml.safe_dump — so any duplicated or malformed keys
+        (e.g. the participating_repos corruption from bug #1114) are self-healed
+        rather than propagated.
+
+        On yaml.YAMLError the method logs a WARNING, falls back to a minimal
+        valid dict, and continues without raising.
+
         Args:
             existing_content: Original domain file content with frontmatter
             new_body: New content body from Claude CLI
@@ -2323,35 +2377,38 @@ class DependencyMapService:
         """
         now = datetime.now(timezone.utc).isoformat()
 
-        # Parse existing frontmatter
+        # Parse existing frontmatter block
         frontmatter_match = re.match(
             r"^---\n(.*?)\n---\n(.*)$", existing_content, re.DOTALL
         )
 
         if frontmatter_match:
-            # Update last_analyzed in existing frontmatter
             frontmatter_text = frontmatter_match.group(1)
-            frontmatter_lines = frontmatter_text.split("\n")
-            updated_lines = []
-            found_last_analyzed = False
+            try:
+                fm_dict = yaml.load(frontmatter_text, Loader=_NoTimestampSafeLoader)
+                if not isinstance(fm_dict, dict):
+                    fm_dict = {}
+            except yaml.YAMLError as exc:
+                logger.warning(
+                    "_update_frontmatter_timestamp: malformed YAML frontmatter "
+                    "for domain '%s' — falling back to minimal dict. Error: %s",
+                    domain_name,
+                    exc,
+                )
+                fm_dict = {"domain": domain_name}
 
-            for line in frontmatter_lines:
-                if line.startswith("last_analyzed:"):
-                    updated_lines.append(f"last_analyzed: {now}")
-                    found_last_analyzed = True
-                else:
-                    updated_lines.append(line)
-
-            if not found_last_analyzed:
-                updated_lines.append(f"last_analyzed: {now}")
-
-            new_frontmatter = "\n".join(updated_lines)
-            return f"---\n{new_frontmatter}\n---\n\n{new_body}"
+            fm_dict["last_analyzed"] = now
+            yaml_text = _safe_dump_iso_aware(
+                fm_dict, sort_keys=False, default_flow_style=False
+            )
+            return f"---\n{yaml_text}---\n\n{new_body}"
         else:
             # No frontmatter found, create minimal one
-            return (
-                f"---\ndomain: {domain_name}\nlast_analyzed: {now}\n---\n\n{new_body}"
+            fm_dict = {"domain": domain_name, "last_analyzed": now}
+            yaml_text = _safe_dump_iso_aware(
+                fm_dict, sort_keys=False, default_flow_style=False
             )
+            return f"---\n{yaml_text}---\n\n{new_body}"
 
     def _update_domain_file(
         self,
@@ -3979,6 +4036,14 @@ class DependencyMapService:
         Preserves all existing frontmatter fields (including last_analyzed).
         Adds or updates last_refined to the current UTC timestamp.
 
+        Parses the existing frontmatter as a YAML dict, sets last_refined,
+        then re-emits via yaml.safe_dump — so any duplicated or malformed keys
+        (e.g. the participating_repos corruption from bug #1114) are self-healed
+        rather than propagated.
+
+        On yaml.YAMLError the method logs a WARNING, falls back to a minimal
+        valid dict, and continues without raising.
+
         Args:
             existing_content: Original domain file content (may include frontmatter)
             new_body: Refined document body from Claude CLI
@@ -3992,20 +4057,31 @@ class DependencyMapService:
             r"^---\n(.*?)\n---\n(.*)$", existing_content, re.DOTALL
         )
         if not frontmatter_match:
-            return f"---\ndomain: {domain_name}\nlast_refined: {now}\n---\n\n{new_body}"
+            fm_dict: dict = {"domain": domain_name, "last_refined": now}
+            yaml_text = _safe_dump_iso_aware(
+                fm_dict, sort_keys=False, default_flow_style=False
+            )
+            return f"---\n{yaml_text}---\n\n{new_body}"
 
-        lines = frontmatter_match.group(1).split("\n")
-        updated, found_refined = [], False
-        for line in lines:
-            if line.startswith("last_refined:"):
-                updated.append(f"last_refined: {now}")
-                found_refined = True
-            else:
-                updated.append(line)  # Preserve last_analyzed and all other fields
-        if not found_refined:
-            updated.append(f"last_refined: {now}")
-        frontmatter_body = "\n".join(updated)
-        return f"---\n{frontmatter_body}\n---\n\n{new_body}"
+        frontmatter_text = frontmatter_match.group(1)
+        try:
+            fm_dict = yaml.load(frontmatter_text, Loader=_NoTimestampSafeLoader)
+            if not isinstance(fm_dict, dict):
+                fm_dict = {}
+        except yaml.YAMLError as exc:
+            logger.warning(
+                "_build_refinement_frontmatter: malformed YAML frontmatter "
+                "for domain '%s' — falling back to minimal dict. Error: %s",
+                domain_name,
+                exc,
+            )
+            fm_dict = {"domain": domain_name}
+
+        fm_dict["last_refined"] = now
+        yaml_text = _safe_dump_iso_aware(
+            fm_dict, sort_keys=False, default_flow_style=False
+        )
+        return f"---\n{yaml_text}---\n\n{new_body}"
 
     def _refine_existing_domain(
         self,

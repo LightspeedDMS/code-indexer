@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,6 +42,22 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# YAML timestamp-safe helpers (Bug #1114 Defect 2)
+#
+# yaml.safe_dump wraps ISO-8601 strings in single quotes to prevent
+# re-interpretation as timestamps.  This post-processing strips those quotes
+# so downstream line-based readers receive the canonical ISO format with 'T'.
+# ---------------------------------------------------------------------------
+
+_ISO_TS_SINGLE_QUOTED_RE = re.compile(r"'(\d{4}-\d{2}-\d{2}T[^']+)'")
+
+
+def _safe_dump_iso_aware(data: Dict[str, Any], **kwargs: Any) -> str:
+    """yaml.safe_dump wrapper that un-quotes single-quoted ISO timestamps."""
+    raw = yaml.safe_dump(data, **kwargs)
+    return _ISO_TS_SINGLE_QUOTED_RE.sub(r"\1", raw)
 
 
 def compute_delta_fingerprint(
@@ -145,7 +162,9 @@ def render_md(frontmatter: Dict[str, Any], body: str) -> str:
     Returns:
         Complete .md content string.
     """
-    yaml_text = yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False)
+    yaml_text = _safe_dump_iso_aware(
+        frontmatter, sort_keys=False, default_flow_style=False
+    )
     return f"---\n{yaml_text}---\n\n{body}"
 
 
