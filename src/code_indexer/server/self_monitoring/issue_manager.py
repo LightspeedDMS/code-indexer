@@ -12,11 +12,14 @@ import logging
 import re
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import httpx
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+if TYPE_CHECKING:
+    from code_indexer.server.storage.protocols import SelfMonitoringBackend
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ class IssueManager:
         github_repo: str,
         github_token: Optional[str] = None,
         server_name: Optional[str] = None,
+        backend: "Optional[SelfMonitoringBackend]" = None,
     ):
         """
         Initialize IssueManager.
@@ -54,12 +58,19 @@ class IssueManager:
             github_repo: GitHub repository (owner/repo)
             github_token: GitHub token for authentication (optional, Bug #87)
             server_name: Server display name for issue identification (optional, Bug #87)
+            backend: SelfMonitoringBackend for DB delegation (Bug #1140). When
+                provided, _store_metadata routes issue + fingerprint writes
+                through backend.store_issue_metadata() so they land in the same
+                store (e.g. PostgreSQL in cluster mode) that the dashboard reads
+                via backend.list_issues() / backend.fetch_stored_fingerprints().
+                Falls back to raw SQLite via _conn_manager when None (solo mode).
         """
         self.db_path = db_path
         self.scan_id = scan_id
         self.github_repo = github_repo
         self.github_token = github_token
         self.server_name = server_name
+        self._backend = backend
         self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def _get_all_server_ips(self) -> str:
@@ -270,7 +281,14 @@ class IssueManager:
         source_files: List[str],
     ) -> None:
         """
-        Store issue metadata in SQLite database.
+        Persist issue metadata (issue row + fingerprint) in the backing store.
+
+        When a backend is injected (Bug #1140), delegates to
+        backend.store_issue_metadata() so the write lands in the same store
+        (e.g. PostgreSQL in cluster mode) that the dashboard reads via
+        backend.list_issues() and LogScanner reads fingerprints via
+        backend.fetch_stored_fingerprints().  Falls back to raw SQLite via
+        _conn_manager when no backend is set (solo mode).
 
         Args:
             github_issue_number: GitHub issue number
@@ -282,11 +300,26 @@ class IssueManager:
             source_log_ids: List of log IDs
             source_files: List of source files
         """
-        # Convert lists to CSV strings outside the lambda
+        # Convert lists to CSV strings
         error_codes_str = ",".join(error_codes) if error_codes else ""
         source_log_ids_str = ",".join(str(lid) for lid in source_log_ids)
         source_files_str = ",".join(source_files) if source_files else ""
         created_at = datetime.utcnow().isoformat()
+
+        if self._backend is not None:
+            self._backend.store_issue_metadata(
+                scan_id=self.scan_id,
+                github_issue_number=github_issue_number,
+                github_issue_url=github_issue_url,
+                classification=classification,
+                title=title,
+                error_codes=error_codes_str,
+                fingerprint=fingerprint,
+                source_log_ids=source_log_ids_str,
+                source_files=source_files_str,
+                created_at=created_at,
+            )
+            return
 
         def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
