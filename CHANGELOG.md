@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.131.0] - 2026-06-14
+
+### Fixed
+- **Query-embedding cache: a corrupt cache row could break live queries (Codex review).** A mode=on cache HIT decoded the stored blob with no length/dimension validation and no try/except, so a corrupt or wrong-dimension row either raised `struct.error` into the query handler or returned a wrong-length vector that corrupted the downstream HNSW search. The on-hit decode now validates `len(blob) == dimension*4`; on any mismatch or decode error it logs a WARNING and treats the row as a MISS (recompute + rewrite), restoring the "all cache ops fail-open" contract.
+- **Indexing: a vanished file was counted as a failure instead of a skip (Codex review, refines #1118).** The FileChunkingManager TOCTOU path returned `success=False`, so a benign vanished file inflated the failure count. A vanished file is now an explicit SKIP (neither processed nor failed); genuine errors on existing files still count as failures. The vanished-file `FileNotFoundError` guard was also confirmed scoped to the absent source file.
+- **Query-embedding cache deep-fidelity audit overlap divisor (Codex review).** The audit's top-K overlap divides by `max(len of the two result lists)` so identical cached-vs-live vectors correctly yield 1.0 fidelity (a fixed `/AUDIT_TOP_K` divisor wrongly reported a perfect small-result match as 0.5); the stale docstring was corrected to match.
+
+### Removed
+- **Two orphan/hidden query-embedding-cache config knobs (Codex orphan review, Messi Rule #12).** Removed the global `query_embedding_cache_anchor_tokens` (consumed by cache-key normalization but never exposed on the config screen — a stale `config.json` value could silently govern cache keys for both providers) and the dead global `query_embedding_cache_audit_sample_rate` (zero consumers). The per-provider anchor-token and audit-sample-rate knobs remain fully wired and UI-exposed; the anchor-token default is now a module constant (2). Existing configs that still contain the removed keys load unchanged (the keys are ignored).
+
 ## [10.130.0] - 2026-06-14
 
 ### Fixed
