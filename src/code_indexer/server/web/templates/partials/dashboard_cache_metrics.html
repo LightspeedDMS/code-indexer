@@ -1,65 +1,89 @@
 <!-- Story #1109 (S5): Query-embedding cache metrics partial -->
-<!-- Mirrors dashboard_api_metrics.html card layout -->
-<article class="stat-card">
-    <header><h3>Cache Entries</h3></header>
-    <div class="stat-value">{{ cache_metrics.total_entries if cache_metrics else 0 }}</div>
-    <footer><small>Query-embedding cache (total rows)</small></footer>
-</article>
-<article class="stat-card">
-    <header><h3>Shadow Hit Rate</h3></header>
-    <div class="stat-value">
-        {% if cache_metrics and cache_metrics.shadow_requests > 0 %}
-            {{ "%.1f"|format(cache_metrics.shadow_hits / cache_metrics.shadow_requests * 100) }}%
-        {% else %}
-            --
-        {% endif %}
-    </div>
-    <footer><small>shadow mode (would-serve rate)</small></footer>
-</article>
-<article class="stat-card">
-    <header><h3>On-Mode Hit Rate</h3></header>
-    <div class="stat-value">
-        {% if cache_metrics and cache_metrics.on_requests > 0 %}
-            {{ "%.1f"|format(cache_metrics.on_hits / cache_metrics.on_requests * 100) }}%
-        {% else %}
-            --
-        {% endif %}
-    </div>
-    <footer><small>on mode (serving rate)</small></footer>
-</article>
-<article class="stat-card">
-    <header><h3>Shadow Cosine P50</h3></header>
-    <div class="stat-value">
-        {% if cache_metrics and cache_metrics.shadow_cosine_p50 is not none %}
-            {{ "%.4f"|format(cache_metrics.shadow_cosine_p50) }}
-        {% else %}
-            --
-        {% endif %}
-    </div>
-    <footer><small>median cos(cached, live) in shadow mode</small></footer>
-</article>
-{% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
-<article class="stat-card">
-    <header><h3>Audit Samples</h3></header>
-    <div class="stat-value">{{ cache_metrics.audit_total }}</div>
-    <footer><small>deep-fidelity audits run</small></footer>
-</article>
-<article class="stat-card">
-    <header><h3>Audit Top-1 Match</h3></header>
-    <div class="stat-value">
-        {{ "%.1f"|format(cache_metrics.audit_top1_matches / cache_metrics.audit_total * 100) }}%
-    </div>
-    <footer><small>cached top-1 == live top-1 rate</small></footer>
-</article>
-<article class="stat-card">
-    <header><h3>Audit Avg Top-10 Overlap</h3></header>
-    <div class="stat-value">
-        {% if cache_metrics.audit_overlap_avg is not none %}
-            {{ "%.2f"|format(cache_metrics.audit_overlap_avg) }}
-        {% else %}
-            --
-        {% endif %}
-    </div>
-    <footer><small>avg |primary ∩ second| / k across audits</small></footer>
-</article>
-{% endif %}
+<!-- Cards are wrapped in .stats-grid so they render side-by-side, matching the
+     Jobs / Repositories / API Activity sections (which all use .stats-grid).
+     The "volatile" badge marks cards whose values are in-memory + per-node and
+     reset on server restart (everything EXCEPT Cache Entries, which is DB-backed
+     and durable). -->
+<style>
+    .cache-metrics-volatile-badge {
+        display: inline-block;
+        font-size: 0.55rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #d6a93a;
+        background: rgba(214, 169, 58, 0.12);
+        border: 1px solid rgba(214, 169, 58, 0.35);
+        border-radius: 3px;
+        padding: 1px 5px;
+        margin-left: 6px;
+        vertical-align: middle;
+        white-space: nowrap;
+    }
+    .cache-metrics-volatile-note { color: #d6a93a; font-weight: 600; }
+</style>
+<div class="stats-grid">
+    <article class="stat-card">
+        <header><h3>Cache Entries</h3></header>
+        <div class="stat-value">{{ cache_metrics.total_entries if cache_metrics else 0 }}</div>
+        <footer><small>Query embeddings currently stored in the cache &mdash; durable (persisted in the cache database, survives restarts)</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Shadow Hit Rate <span class="cache-metrics-volatile-badge" title="In-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">
+            {% if cache_metrics and cache_metrics.shadow_requests > 0 %}
+                {{ "%.1f"|format(cache_metrics.shadow_hits / cache_metrics.shadow_requests * 100) }}%
+            {% else %}
+                --
+            {% endif %}
+        </div>
+        <footer><small><span class="cache-metrics-volatile-note">In-memory &middot; per-node &middot; resets on restart.</span> <strong>Shadow mode</strong> measures the cache without using it: share of queries that <em>would</em> have been served from cache (results are still computed live, so nothing changes for users)</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>On-Mode Hit Rate <span class="cache-metrics-volatile-badge" title="In-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">
+            {% if cache_metrics and cache_metrics.on_requests > 0 %}
+                {{ "%.1f"|format(cache_metrics.on_hits / cache_metrics.on_requests * 100) }}%
+            {% else %}
+                --
+            {% endif %}
+        </div>
+        <footer><small><span class="cache-metrics-volatile-note">In-memory &middot; per-node &middot; resets on restart.</span> <strong>On mode</strong> actively serves from the cache: share of queries answered with a cached embedding, skipping the embedding provider call</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Shadow Cosine P50 <span class="cache-metrics-volatile-badge" title="In-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">
+            {% if cache_metrics and cache_metrics.shadow_cosine_p50 is not none %}
+                {{ "%.4f"|format(cache_metrics.shadow_cosine_p50) }}
+            {% else %}
+                --
+            {% endif %}
+        </div>
+        <footer><small><span class="cache-metrics-volatile-note">In-memory &middot; per-node &middot; resets on restart.</span> Median similarity between the cached and a freshly-computed embedding (1.0 = identical) &mdash; how accurate a cache hit would be</small></footer>
+    </article>
+    {% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
+    <article class="stat-card">
+        <header><h3>Audit Samples</h3></header>
+        <div class="stat-value">{{ cache_metrics.audit_total }}</div>
+        <footer><small>Deep-fidelity audits run &mdash; re-checks that a cache hit returns the same search results as a live embedding</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Audit Top-1 Match</h3></header>
+        <div class="stat-value">
+            {{ "%.1f"|format(cache_metrics.audit_top1_matches / cache_metrics.audit_total * 100) }}%
+        </div>
+        <footer><small>How often the cached vector's top search result matches the live vector's top result</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Audit Avg Top-10 Overlap</h3></header>
+        <div class="stat-value">
+            {% if cache_metrics.audit_overlap_avg is not none %}
+                {{ "%.2f"|format(cache_metrics.audit_overlap_avg) }}
+            {% else %}
+                --
+            {% endif %}
+        </div>
+        <footer><small>Average share of the top-10 search results common to the cached and live vectors</small></footer>
+    </article>
+    {% endif %}
+</div>

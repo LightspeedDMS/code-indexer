@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.132.0] - 2026-06-15
+
+### Fixed
+- **Tag/commit-pinned golden repos no longer fail their refresh every cycle.** `GitPullUpdater.has_changes()` ran `git log HEAD..@{upstream}`, which raises on a detached HEAD (`@{upstream}` does not resolve), so a golden repo whose `default_branch` is a git tag or specific commit (detached HEAD) failed every scheduled refresh indefinitely (observed: `type-fest` pinned to tag `v4.8.3`, thousands of consecutive failures). Detachment is now detected via `git symbolic-ref -q HEAD` and treated as a graceful no-op (a pinned ref is immutable -- nothing to pull); the normal-branch change-detection path is byte-for-byte unchanged.
+
+### Added
+- **Query-embedding cache database is now shown on the Database Health honeycomb.** Added `query_embedding_cache.db` ("Embedding Cache") as a 9th hexagon: `_resolve_db_path` routes it to the server `data/` dir (the hexagon shows the real path + size, not "file not found"), the honeycomb `viewBox` was extended so the 3rd row renders un-clipped, and the file is registered in `POSTGRES_MIGRATED_DATABASES` (it is PostgreSQL-backed in cluster mode, so in postgres mode it is covered by the single "postgresql" check; in solo mode it renders as its own SQLite hexagon).
+- **Cache-metrics cards distinguish volatile from durable.** Shadow Hit Rate, On-Mode Hit Rate, and Shadow Cosine P50 now carry a "volatile" badge plus an "in-memory - per-node - resets on restart" footer note (these are process-local metrics that reset on restart and are not aggregated across cluster nodes); Cache Entries is marked durable (read from the cache database).
+
+### Removed
+- **Dead api_metrics read/write path.** Removed the unused `get_metrics`/`record` code path that read the empty legacy `api_metrics` table (the dashboard already reads the bucketed `api_metrics_buckets` tables). The legacy `api_metrics` table schema is deliberately KEPT (`CREATE TABLE IF NOT EXISTS`) for rolling-restart backward compatibility -- only the dead access code was removed, not the table.
+
 ## [10.131.0] - 2026-06-14
 
 ### Fixed
