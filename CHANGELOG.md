@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.134.0] - 2026-06-15
+
+### Fixed
+- **Self-monitoring was non-functional in cluster mode -- scans ran (spending Claude credits) but the dashboard showed no scan history and no created issues (Bug #1140).** `LogScanner` wrote scan records, issues, and dedup fingerprints to node-local SQLite while the cluster dashboard reads through the PostgreSQL `SelfMonitoringBackend` -- a silent split-brain (scans succeeded into the wrong store). The scanner and `IssueManager` now route all persistence (scan records, issue metadata, and dedup fingerprints) through the injected backend; the manual "Scan Now" trigger now wires the registry backend (it previously built the service with none -> SQLite); and the PostgreSQL backend gained the missing `list_issues` method so the "Created Issues" panel renders on the cluster. Added a protocol-conformance test asserting both backends implement the full `SelfMonitoringBackend` protocol (the gap that hid the missing method), and the dashboard's issue read now logs its previously-silent fallback. Solo/SQLite mode is unchanged.
+- **Dependency-map domain-file warning flood + frontmatter corruption (Bug #1114).** A domain file with structurally-invalid YAML frontmatter (duplicated, un-indented `participating_repos`) made the cross-domain graph builder emit a full-traceback WARNING on every parse (observed 47x, no de-spam). The malformed-YAML branch in `parse_domain_file_for_graph` now de-spams per distinct file path (warn once, then DEBUG; the `MALFORMED_YAML` anomaly is still recorded on every call), mirroring the existing missing-file branch. Separately, the domain-file frontmatter writers (`_update_frontmatter_timestamp`, `_build_refinement_frontmatter`, and the delta/render path) now serialize via a single dict -> `yaml.safe_dump` (which de-dupes keys) instead of line-based string manipulation -- using a timestamp-preserving loader/dumper so ISO-8601 `last_analyzed`/`last_refined` values survive byte-for-byte (with the `T` separator), keeping the line-based downstream readers working.
+
 ## [10.133.0] - 2026-06-15
 
 ### Added

@@ -10789,6 +10789,14 @@ async def trigger_manual_scan(
 
     logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: server_name={server_name}")
 
+    # Derive self-monitoring backend from registry (Bug #1140).
+    # Mirrors the lifespan.py wiring so manual scans write to PG in cluster
+    # mode instead of node-local SQLite.
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    _sm_backend = (
+        backend_registry.self_monitoring if backend_registry is not None else None
+    )
+
     # Create service instance with current configuration (Bug #87)
     logger.debug(
         "[SELF-MON-DEBUG] trigger_manual_scan: Creating SelfMonitoringService instance"
@@ -10804,6 +10812,7 @@ async def trigger_manual_scan(
         repo_root=str(repo_root) if repo_root else None,
         github_token=github_token,
         server_name=server_name,
+        storage_backend=_sm_backend,
     )
 
     # Trigger the scan
