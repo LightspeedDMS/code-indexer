@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.133.0] - 2026-06-15
+
+### Added
+- **Per-node cache-telemetry cards now show the serving node's id.** The three in-memory / per-node query-embedding-cache metrics (Shadow Hit Rate, On-Mode Hit Rate, Shadow Cosine P50) display the node id (`cluster.node_id` if set, else hostname) in their footer note and the "volatile" badge tooltip. In a cluster, HAProxy cookie affinity pins a browser to one node, so without the label two operators on different nodes can see different values for the same cluster and have no way to tell why; the node id disambiguates it. Cache Entries is unchanged (DB-backed, cluster-wide). The node id reuses `app.state.node_id` (wired by lifespan in cluster mode) with a `socket.gethostname()` fallback for solo.
+
+### Fixed
+- **Docs: corrected the cluster load-balancer session-affinity description.** `docs/cluster-architecture.md` previously claimed "the load balancer does not pin sessions to specific nodes," which contradicted the same doc's "session-pinned via HAProxy" note and `cluster-setup.md`. It now accurately states HAProxy uses cookie-based session affinity (`cookie SERVERID insert indirect nocache`) to pin each browser session to one node, with TTL-bounded cache staleness; the LB diagram label was updated to `roundrobin+sticky`.
+
 ## [10.132.0] - 2026-06-15
 
 ### Fixed
