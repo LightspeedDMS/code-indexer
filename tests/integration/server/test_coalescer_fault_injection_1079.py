@@ -1115,3 +1115,102 @@ def test_backoff_releases_slot_between_attempts() -> None:
     assert retry_transport.call_count == 3
     # In-flight returned to 0 — no leaked/held slot after both callers finished.
     assert gov._limiters[VOYAGE_EMBED].in_flight == 0  # type: ignore[attr-defined]
+
+
+# ===========================================================================
+# Story #1146 — Dedup-by-key: K same-key requests produce exactly ONE embed call
+# ===========================================================================
+
+
+def test_dedup_same_key_k_requests_produce_one_embed_call_1146() -> None:
+    """Story #1146 fault-injection gate: K same-text requests collapse to ONE embed.
+
+    An omni-style burst of K same-text requests coalesces into ONE batch.
+    Within that batch the dedup-by-key logic (Story #1146) should collapse all K
+    same-key entries to a single unique text, so the provider HTTP call carries
+    EXACTLY ONE text to the wire.
+
+    This is the deterministic fault-injection corroboration: ``_ScriptedTransport``
+    intercepts the REAL outbound embed call at the wire boundary and asserts
+    ``transport.call_count == 1`` (not K). The coalescer core is NOT mocked —
+    the full pipeline runs:
+
+        EmbeddingCoalescer.submit  (K callers)
+            -> _dispatch.do_call   (dedup: K requestors -> 1 unique text)
+                -> governor.execute
+                    -> provider.get_embeddings_batch([one_text])  (scripted wire)
+                        -> _ScriptedTransport.handle_request  (counted at wire)
+
+    The K callers each receive the multiplexed vector (same value for same key).
+    dedup_savings on the coalescer must equal K - 1.
+    """
+    K = 6  # Number of same-text requestors (> 3 per spec "K >= 3")
+    same_text = "find all authentication error events in the logs"
+
+    # Use K_MIN (8) holders and coalesce_max_batch_size=K (6) so the batch seals on
+    # the TEXTS CAP when the K-th submitter joins — this is the proven stable pattern
+    # from test_one_http_call_per_batch_sealed_by_texts_cap: the cap fires inside
+    # _enqueue (under lock) so the last submitter's join is witnessed by the seal
+    # clearing _open_batch to None, and _coalesced_burst treats that as
+    # "all K confirmed in one batch" before releasing the holders.
+    # With only K_MIN=8 holders (vs 16 previously), the holder-release window is
+    # shorter and the acquire_timeout has more headroom, eliminating the flakiness.
+    gov = _build_governor(max_concurrency=K_MIN)
+    transport = _ScriptedTransport([_voyage_embed_200()])
+    provider = _voyage_provider(_ScriptedClientFactory(transport))
+    coalescer = EmbeddingCoalescer(
+        VOYAGE_EMBED,
+        provider,
+        governor=gov,
+        acquire_timeout=5.0,
+        coalesce_max_batch_size=K,  # seal on texts cap when all K submitters join
+        config_digest="fi-test-digest-1146",  # stable digest for dedup-key building
+    )
+
+    # Saturate the lane so all K submitters coalesce into one batch before dispatch.
+    results = _coalesced_burst(coalescer, [same_text] * K, gov=gov)
+
+    # --- Wire assertion: exactly ONE HTTP call (dedup collapsed K texts to 1) ---
+    assert transport.call_count == 1, (
+        f"Story #1146 dedup failed: {transport.call_count} HTTP calls for {K} "
+        f"same-text requests (expected exactly 1 — dedup must collapse them)"
+    )
+
+    # --- Payload assertion: the single HTTP call carried exactly 1 unique text ---
+    assert len(transport.requests) == 1, "expected exactly 1 HTTP request at the wire"
+    payload = json.loads(transport.requests[0].content.decode())
+    sent_texts = payload["input"]
+    assert len(sent_texts) == 1, (
+        f"provider received {len(sent_texts)} texts in the single HTTP call "
+        f"(expected 1 — dedup must send only unique texts)"
+    )
+    assert sent_texts[0] == same_text, (
+        f"provider received '{sent_texts[0]}', expected the real text '{same_text}' "
+        "(dedup must send the real query text, not the key string)"
+    )
+
+    # --- Result assertion: all K callers received a valid vector ---
+    for idx, (vec, exc) in enumerate(results):
+        assert exc is None, f"caller {idx} failed: {exc!r}"
+        assert vec is not None and len(vec) == 1024, (
+            f"caller {idx} did not receive a valid 1024-dim vector"
+        )
+
+    # --- All K callers received the SAME vector (multiplexed) ---
+    first_vec = results[0][0]
+    for idx, (vec, _) in enumerate(results[1:], 1):
+        assert vec == first_vec, (
+            f"caller {idx} got different vector — dedup multiplex must return "
+            f"the same vector to all same-key requestors"
+        )
+
+    # --- Counter assertion: dedup_savings == K - 1 ---
+    assert coalescer.dedup_savings == K - 1, (
+        f"dedup_savings={coalescer.dedup_savings}, expected {K - 1} "
+        f"(K={K} requestors - 1 unique provider text)"
+    )
+
+    # --- provider_embed_calls == 1 (one HTTP call per dispatched batch) ---
+    assert coalescer.provider_embed_calls == 1, (
+        f"provider_embed_calls={coalescer.provider_embed_calls}, expected 1"
+    )

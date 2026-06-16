@@ -39,12 +39,22 @@ The ONLY time bound is the governor ``acquire_timeout`` (Messi #14). No
 import logging
 import threading
 from concurrent.futures import Future
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from code_indexer.server.services.provider_concurrency_governor import (
     ProviderConcurrencyGovernor,
 )
 from code_indexer.services.provider_backoff import execute_with_backoff
+
+# Module dependency decision (Story #1146, intentional):
+# embedding_coalescer -> query_embedding_cache is the ACCEPTED import direction.
+# query_embedding_cache MUST NOT import embedding_coalescer (no circular import).
+# build_key is imported lazily (inside _dispatch) to avoid top-level circular
+# import issues during module load ordering in tests.
+
+# Sentinel for over-cap texts when build_key returns None: we fall back to the
+# raw text as the dedup key so identical over-cap texts still collapse.
+_NONE_KEY_PREFIX = "\x00text:"
 
 logger = logging.getLogger(__name__)
 
@@ -168,11 +178,23 @@ class EmbeddingCoalescer:
         acquire_timeout: float = _DEFAULT_ACQUIRE_TIMEOUT,
         coalesce_max_batch_size: int = _DEFAULT_MAX_BATCH_SIZE,
         ceiling_provider: Optional[Callable[[], int]] = None,
+        config_digest: str = "",
+        anchor_depth_provider: Optional[Callable[[], int]] = None,
     ) -> None:
         self._lane = lane
         self._provider = provider
         self._governor = governor or ProviderConcurrencyGovernor.get_instance()
         self._acquire_timeout = acquire_timeout
+        # Story #1146: config_digest namespaces dedup keys (same as cache identity).
+        # An empty string is the fallback when no digest is supplied (text-based dedup
+        # still works because build_key with an empty digest still normalizes text).
+        self._config_digest = config_digest
+        # FOLD IN #4 (Story #1146 review): callable returning the live anchor depth.
+        # When set, called once per dispatch (under lock) so a runtime anchor-depth
+        # change takes effect immediately without rebuilding the coalescer.
+        # When None, build_key uses its own default (2). Same source as
+        # QueryEmbeddingCache.build_key_for_provider so the two keys never diverge.
+        self._anchor_depth_provider: Optional[Callable[[], int]] = anchor_depth_provider
 
         constraints = _ProviderConstraints(provider, coalesce_max_batch_size)
         self._token_count_fn = constraints.token_count_fn
@@ -197,6 +219,11 @@ class EmbeddingCoalescer:
         # under self._lock when a batch is successfully dispatched (one HTTP call).
         self.batches_dispatched: int = 0
         self.texts_coalesced: int = 0
+        # Story #1146: dedup counters. dedup_savings = requestors_in_live_batch
+        # minus unique_provider_texts_sent (how many embed calls were avoided).
+        # provider_embed_calls = count of actual HTTP embed calls (one per batch).
+        self.dedup_savings: int = 0
+        self.provider_embed_calls: int = 0
 
     # ------------------------------------------------------------------
     # Introspection (resolver telemetry — used by tests + Phase E)
@@ -322,60 +349,133 @@ class EmbeddingCoalescer:
         retry but the snapshot survives via closure nonlocals, so membership is
         stable. On any exception, the batch is sealed even if no slot was ever
         granted, then the exception fans out to EVERY caller.
+
+        Story #1146 — dedup-by-key: within the sealed batch, entries sharing a
+        dedup key collapse to ONE provider embed call. The first claimant per
+        key supplies its real text; all same-key Futures receive the single
+        computed vector. dedup_savings = requestors - unique_texts (live batches
+        only). provider_embed_calls increments once per dispatched batch.
+
+        Module dependency (intentional): build_key is imported from
+        query_embedding_cache. The accepted direction is
+            embedding_coalescer -> query_embedding_cache.
+        query_embedding_cache MUST NOT import embedding_coalescer.
         """
         sealed = False
-        texts: Optional[List[str]] = None
-
+        # Snapshot structures set on the FIRST do_call invocation (under lock).
+        # unique_texts: ordered unique texts to send to the provider.
+        # key_to_first_idx: key -> index in unique_texts (first claimant).
+        # entry_key_map: _Entry -> its dedup key (used for demux).
+        unique_texts: Optional[List[str]] = None
+        key_to_first_idx: Optional[Dict[str, int]] = None
+        entry_keys: Optional[List[str]] = None
         purpose: Optional[str] = None
 
         def do_call() -> List[List[float]]:
-            nonlocal sealed, texts, purpose
+            nonlocal sealed, unique_texts, key_to_first_idx, entry_keys, purpose
             with self._lock:
                 if not sealed:
                     sealed = True
                     if self._open_batch is my_batch:
                         self._open_batch = None
                         self._open_tokens = 0
-                    texts = [e.text for e in my_batch]
-                    # All entries in a query-path batch share the same purpose
-                    # (all callers of coalesced_query_embedding pass "query").
-                    # Read from the first entry; default to "query" defensively.
+                    # --- Story #1146: build dedup structures (under lock, no I/O) ---
+                    # Import build_key here (lazy) so that module-load order in tests
+                    # does not create a top-level circular import.
+                    from code_indexer.server.services.query_embedding_cache import (
+                        build_key,
+                    )
+
                     purpose = my_batch[0].embedding_purpose if my_batch else "query"
-            if texts is None:  # pragma: no cover - set on first attempt, stable after
+                    # FOLD IN #4: read live anchor depth once per dispatch (under
+                    # lock, no I/O) so a runtime anchor-depth change takes effect
+                    # immediately. When no anchor_depth_provider is wired, build_key
+                    # uses its own default (2) — unchanged from the prior behaviour.
+                    _anchor: Optional[int] = (
+                        self._anchor_depth_provider()
+                        if self._anchor_depth_provider is not None
+                        else None
+                    )
+                    # For each entry: compute its dedup key. When build_key returns
+                    # None (normalized text > 256 chars), fall back to exact-text
+                    # dedup via a sentinel prefix so identical over-cap texts still
+                    # collapse to one embed.
+                    _unique: List[str] = []
+                    _key_to_idx: Dict[str, int] = {}
+                    _ekeys: List[str] = []
+                    for e in my_batch:
+                        if _anchor is not None:
+                            k = build_key(
+                                e.text,
+                                _anchor,
+                                config_digest=self._config_digest,
+                            )
+                        else:
+                            k = build_key(
+                                e.text,
+                                config_digest=self._config_digest,
+                            )
+                        if k is None:
+                            # Over-cap: key by exact text with a sentinel prefix so
+                            # it cannot collide with a valid s:... key.
+                            k = _NONE_KEY_PREFIX + e.text
+                        _ekeys.append(k)
+                        if k not in _key_to_idx:
+                            _key_to_idx[k] = len(_unique)
+                            _unique.append(e.text)  # REAL text (first claimant)
+                    unique_texts = _unique
+                    key_to_first_idx = _key_to_idx
+                    entry_keys = _ekeys
+                    # --- end dedup snapshot ---
+
+            if unique_texts is None:  # pragma: no cover - set on first attempt
                 raise RuntimeError("coalescer batch snapshot missing")
-            # Exactly ONE HTTP call (retry=False -> provider makes a single attempt;
-            # backoff is handled by execute_with_backoff OUTSIDE the governor slot).
+            # Exactly ONE HTTP call with only the UNIQUE texts (Story #1146 dedup).
             result: List[List[float]] = self._provider.get_embeddings_batch(
-                texts, retry=False, embedding_purpose=purpose or "query"
+                unique_texts, retry=False, embedding_purpose=purpose or "query"
             )
             return result
 
         try:
-            vectors = execute_with_backoff(
+            unique_vectors = execute_with_backoff(
                 lambda: self._governor.execute(
                     self._lane, do_call, acquire_timeout=self._acquire_timeout
                 )
             )
-            if len(vectors) != len(my_batch):
-                # Defensive invariant — RAISED (not assert; assert is stripped
-                # under python -O). Fans out as shared fate below.
+            # unique_vectors corresponds 1:1 with unique_texts (deduped provider texts).
+            # Validate count against unique texts, not the full batch.
+            if unique_texts is None or key_to_first_idx is None or entry_keys is None:
+                # pragma: no cover — snapshot always set before execute_with_backoff
+                raise RuntimeError("coalescer dedup snapshot missing after dispatch")
+            n_unique = len(unique_texts)
+            if len(unique_vectors) != n_unique:
                 raise ValueError(
-                    f"provider returned {len(vectors)} vectors, "
-                    f"expected {len(my_batch)}"
+                    f"provider returned {len(unique_vectors)} vectors, "
+                    f"expected {n_unique} (unique texts in deduplicated batch)"
                 )
-            for e, v in zip(my_batch, vectors):
-                e.fut.set_result(v)  # order-preserved demux
-            # Observability (Phase E): one batch dispatched == one HTTP call.
+            # Multiplex: fan unique vectors back to all same-key Futures.
+            for e, k in zip(my_batch, entry_keys):
+                idx = key_to_first_idx[k]
+                e.fut.set_result(unique_vectors[idx])
+
+            # Observability counters (Phase E + Story #1146).
             batch_size = len(my_batch)
+            savings = batch_size - n_unique
             with self._lock:
                 self.batches_dispatched += 1
                 self.texts_coalesced += batch_size
+                self.dedup_savings += savings
+                self.provider_embed_calls += 1
             logger.debug(
-                "coalescer dispatched batch lane=%s size=%d (batches=%d texts=%d)",
+                "coalescer dispatched batch lane=%s size=%d unique=%d savings=%d"
+                " (batches=%d texts=%d dedup_savings=%d)",
                 self._lane,
                 batch_size,
+                n_unique,
+                savings,
                 self.batches_dispatched,
                 self.texts_coalesced,
+                self.dedup_savings,
             )
         except BaseException as ex:  # noqa: BLE001
             # Shared-fate fan-out even if NO slot was ever granted (e.g.

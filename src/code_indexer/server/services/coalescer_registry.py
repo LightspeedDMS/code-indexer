@@ -100,6 +100,21 @@ def _digest_for_provider(provider: Any) -> str:
         return _FALLBACK_DIGEST
 
 
+def _lane_to_provider_name(lane: str) -> str:
+    """Derive the provider name string from a lane key.
+
+    ``"voyage:embed"`` / ``"voyage:rerank"``  -> ``"voyage-ai"``
+    ``"cohere:embed"`` / ``"cohere:rerank"``  -> ``"cohere"``
+    Unknown prefix -> empty string (anchor_tokens_for falls back to default 2).
+    """
+    prefix = lane.split(":")[0]
+    if prefix == "voyage":
+        return "voyage-ai"
+    if prefix == "cohere":
+        return "cohere"
+    return ""
+
+
 class CoalescerRegistry:
     """Lazy, digest-keyed holder of per-(lane, digest) EmbeddingCoalescers.
 
@@ -121,12 +136,17 @@ class CoalescerRegistry:
         max_per_lane: int = _DEFAULT_MAX_PER_LANE,
         http_client_factory: Any = None,
         ceiling_provider: Optional[Callable[[], int]] = None,
+        # FOLD IN #4: per-lane callable ``(lane) -> anchor_depth`` so the coalescer
+        # uses the SAME live anchor depth as the cache (build_key_for_provider).
+        # When None, coalescers use build_key's own default (2) — unchanged.
+        anchor_depth_provider: Optional[Callable[[str], int]] = None,
         # Legacy keyword accepted but ignored (old tests pass coalescers= dict).
         coalescers: Optional[Dict[str, EmbeddingCoalescer]] = None,
     ) -> None:
         self._max_per_lane = max(0, max_per_lane)
         self._http_client_factory = http_client_factory
         self._ceiling_provider = ceiling_provider
+        self._anchor_depth_provider = anchor_depth_provider
         # {lane: {digest: EmbeddingCoalescer}}
         self._coalescers: Dict[str, Dict[str, EmbeddingCoalescer]] = {}
         self._lock = threading.Lock()
@@ -190,7 +210,9 @@ class CoalescerRegistry:
                 return None
 
             # Build a new coalescer from the caller's provider.
-            coalescer = self._build_coalescer(lane, provider)
+            # Pass digest so the coalescer's build_key uses the same identity as
+            # the registry key (Story #1146 dedup-key namespacing).
+            coalescer = self._build_coalescer(lane, provider, digest=digest)
             lane_map[digest] = coalescer
             logger.debug(
                 "coalescer_registry: built new coalescer lane=%s digest=%s "
@@ -205,20 +227,82 @@ class CoalescerRegistry:
     # Internal
     # ------------------------------------------------------------------
 
-    def _build_coalescer(self, lane: str, provider: Any) -> EmbeddingCoalescer:
-        """Construct an EmbeddingCoalescer from the given provider + factory/ceiling."""
+    def _build_coalescer(
+        self, lane: str, provider: Any, digest: str = ""
+    ) -> EmbeddingCoalescer:
+        """Construct an EmbeddingCoalescer from the given provider + factory/ceiling.
+
+        Args:
+            lane: Governor lane key (e.g. "voyage:embed").
+            provider: The per-repo embedding provider (its config drives the coalescer).
+            digest: Config digest for Story #1146 dedup-key namespacing. Passed as
+                config_digest so build_key produces ``s:<digest>:<normalized>`` keys
+                that are scoped to this provider config — same identity as the
+                coalescer-registry key.
+        """
         # Determine ceiling: use the live ceiling_provider if wired, else default 96.
         if self._ceiling_provider is not None:
             ceiling = int(self._ceiling_provider())
         else:
             ceiling = 96  # Safe default (Cohere texts-cap minimum)
 
+        # FOLD IN #4: build a per-lane anchor_depth_provider closure so the coalescer
+        # uses the SAME live anchor depth as QueryEmbeddingCache.build_key_for_provider.
+        # The closure captures the provider_name (derived from lane once) and delegates
+        # to self._anchor_depth_provider(provider_name) — a callable injected at
+        # registry construction time (build_coalescer_registry wires it from the cache).
+        # When self._anchor_depth_provider is None (tests / CLI), no closure is built
+        # and the coalescer falls back to build_key's own default (2).
+        coalescer_anchor_provider: Optional[Callable[[], int]] = None
+        if self._anchor_depth_provider is not None:
+            _provider_name = _lane_to_provider_name(lane)
+            _registry_anchor = self._anchor_depth_provider
+
+            def _make_anchor_fn(pname: str) -> Callable[[], int]:
+                def _anchor_fn() -> int:
+                    return _registry_anchor(pname)
+
+                return _anchor_fn
+
+            coalescer_anchor_provider = _make_anchor_fn(_provider_name)
+
         return EmbeddingCoalescer(
             lane,
             provider,
             coalesce_max_batch_size=ceiling,
             ceiling_provider=self._ceiling_provider,
+            config_digest=digest,
+            anchor_depth_provider=coalescer_anchor_provider,
         )
+
+    def metrics(self) -> Dict[str, int]:
+        """Return aggregated coalescer counters across all registered coalescers.
+
+        Sums texts_coalesced, batches_dispatched, dedup_savings, and
+        provider_embed_calls across every (lane, digest) coalescer held in this
+        registry. Returns per-node in-memory tallies (not persisted to DB).
+
+        Used by the front-door cache-metrics partial (dashboard) so cluster E2E
+        can read them without DB access.
+
+        Returns:
+            Dict with keys: texts_coalesced, batches_dispatched, dedup_savings,
+            provider_embed_calls.
+        """
+        totals: Dict[str, int] = {
+            "texts_coalesced": 0,
+            "batches_dispatched": 0,
+            "dedup_savings": 0,
+            "provider_embed_calls": 0,
+        }
+        with self._lock:
+            for lane_map in self._coalescers.values():
+                for coalescer in lane_map.values():
+                    totals["texts_coalesced"] += coalescer.texts_coalesced
+                    totals["batches_dispatched"] += coalescer.batches_dispatched
+                    totals["dedup_savings"] += coalescer.dedup_savings
+                    totals["provider_embed_calls"] += coalescer.provider_embed_calls
+        return totals
 
 
 # Process-level singleton. None until lifespan sets it (CLI/solo never does).

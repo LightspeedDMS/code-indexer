@@ -551,3 +551,130 @@ class TestLongKeyFrontDoor:
         finally:
             clear_query_embedding_cache()
             clear_query_embedding_cache_metrics()
+
+
+# ---------------------------------------------------------------------------
+# Story #1146 (BLOCKING anti-orphan): coalescer dedup counters visible on dashboard
+# ---------------------------------------------------------------------------
+
+
+class _FakeCoalescerWithCounters:
+    """Minimal fake coalescer exposing the four Story #1146 dedup counters."""
+
+    def __init__(
+        self,
+        texts_coalesced: int = 0,
+        batches_dispatched: int = 0,
+        dedup_savings: int = 0,
+        provider_embed_calls: int = 0,
+    ) -> None:
+        self.texts_coalesced = texts_coalesced
+        self.batches_dispatched = batches_dispatched
+        self.dedup_savings = dedup_savings
+        self.provider_embed_calls = provider_embed_calls
+
+
+class TestCoalescerCountersRender:
+    """Story #1146 anti-orphan: coalescer dedup counters must be rendered in the
+    dashboard cache-metrics partial.
+
+    routes.py already computes coalescer_texts_coalesced, coalescer_batches_dispatched,
+    coalescer_dedup_savings, and coalescer_provider_embed_calls into the cache_metrics
+    namespace — but dashboard_cache_metrics.html previously rendered none of them,
+    making them dead code (Messi #12 anti-orphan violation).
+
+    These tests prove that the four counters appear in the rendered HTML (front-door
+    visible) by installing a fake CoalescerRegistry with known counter values.
+    """
+
+    def test_coalescer_provider_embed_calls_rendered(self, client, admin_session_cookie):
+        """provider_embed_calls must appear in the rendered dashboard HTML."""
+        from code_indexer.server.services.coalescer_registry import (
+            CoalescerRegistry,
+            set_coalescer_registry,
+            clear_coalescer_registry,
+        )
+
+        fake_coalescer = _FakeCoalescerWithCounters(provider_embed_calls=42)
+        registry = CoalescerRegistry(
+            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
+        )
+        set_coalescer_registry(registry)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "42" in html, (
+                f"Expected provider_embed_calls '42' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_coalescer_registry()
+
+    def test_coalescer_texts_coalesced_rendered(self, client, admin_session_cookie):
+        """texts_coalesced must appear in the rendered dashboard HTML."""
+        from code_indexer.server.services.coalescer_registry import (
+            CoalescerRegistry,
+            set_coalescer_registry,
+            clear_coalescer_registry,
+        )
+
+        fake_coalescer = _FakeCoalescerWithCounters(texts_coalesced=199)
+        registry = CoalescerRegistry(
+            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
+        )
+        set_coalescer_registry(registry)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "199" in html, (
+                f"Expected texts_coalesced '199' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_coalescer_registry()
+
+    def test_coalescer_dedup_savings_rendered(self, client, admin_session_cookie):
+        """dedup_savings must appear in the rendered dashboard HTML."""
+        from code_indexer.server.services.coalescer_registry import (
+            CoalescerRegistry,
+            set_coalescer_registry,
+            clear_coalescer_registry,
+        )
+
+        fake_coalescer = _FakeCoalescerWithCounters(dedup_savings=77)
+        registry = CoalescerRegistry(
+            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
+        )
+        set_coalescer_registry(registry)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "77" in html, (
+                f"Expected dedup_savings '77' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_coalescer_registry()
+
+    def test_coalescer_batches_dispatched_rendered(self, client, admin_session_cookie):
+        """batches_dispatched must appear in the rendered dashboard HTML."""
+        from code_indexer.server.services.coalescer_registry import (
+            CoalescerRegistry,
+            set_coalescer_registry,
+            clear_coalescer_registry,
+        )
+
+        fake_coalescer = _FakeCoalescerWithCounters(batches_dispatched=13)
+        registry = CoalescerRegistry(
+            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
+        )
+        set_coalescer_registry(registry)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "13" in html, (
+                f"Expected batches_dispatched '13' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_coalescer_registry()

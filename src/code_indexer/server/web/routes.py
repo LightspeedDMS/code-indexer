@@ -866,6 +866,29 @@ def dashboard_cache_metrics_partial(request: Request):
                 "dashboard_cache_metrics_partial: snapshot() failed: %s", _exc
             )
 
+    # Story #1146: coalescer dedup counters (per-node in-memory tallies).
+    # Aggregated from all (lane, digest) coalescers in the process-level registry.
+    # Returns zeros when the registry is absent (CLI/solo/pre-lifespan).
+    from code_indexer.server.services.coalescer_registry import get_coalescer_registry
+
+    _coa_registry = get_coalescer_registry()
+    if _coa_registry is not None:
+        try:
+            _coa_metrics = _coa_registry.metrics()
+        except Exception as _coa_exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: coalescer metrics() failed: %s",
+                _coa_exc,
+            )
+            _coa_metrics = {}
+    else:
+        _coa_metrics = {}
+
+    coalescer_texts_coalesced = _coa_metrics.get("texts_coalesced", 0)
+    coalescer_batches_dispatched = _coa_metrics.get("batches_dispatched", 0)
+    coalescer_dedup_savings = _coa_metrics.get("dedup_savings", 0)
+    coalescer_provider_embed_calls = _coa_metrics.get("provider_embed_calls", 0)
+
     cache_metrics = types.SimpleNamespace(
         total_entries=total_entries,
         shadow_hits=shadow_hits,
@@ -877,6 +900,11 @@ def dashboard_cache_metrics_partial(request: Request):
         audit_top1_matches=audit_top1_matches,
         audit_overlap_avg=audit_overlap_avg,
         long_key=long_key,
+        # Story #1146 coalescer dedup counters
+        coalescer_texts_coalesced=coalescer_texts_coalesced,
+        coalescer_batches_dispatched=coalescer_batches_dispatched,
+        coalescer_dedup_savings=coalescer_dedup_savings,
+        coalescer_provider_embed_calls=coalescer_provider_embed_calls,
     )
 
     # Resolve the current node identifier for the volatile-metrics footer label.

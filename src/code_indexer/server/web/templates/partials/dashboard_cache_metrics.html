@@ -66,6 +66,26 @@
         <div class="stat-value">{{ cache_metrics.long_key if cache_metrics else 0 }}</div>
         <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Queries skipped (not cached) because the normalized-query part exceeded the 256-character key cap &mdash; each counts as a cache miss</small></footer>
     </article>
+    <article class="stat-card">
+        <header><h3>Provider Embed Calls <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.coalescer_provider_embed_calls if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Number of outbound HTTP embedding calls made to the provider &mdash; one per sealed coalesced batch (Story #1146)</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Texts Coalesced <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.coalescer_texts_coalesced if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Total texts submitted across all coalesced batches &mdash; divide by Provider Embed Calls to get average batch size</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Batches Dispatched <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.coalescer_batches_dispatched if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Number of coalesced batches dispatched through the governor to the embedding provider</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Dedup Savings <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.coalescer_dedup_savings if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Embed calls saved by same-key deduplication within a batch &mdash; requestors minus unique texts sent to the provider (Story #1146)</small></footer>
+    </article>
     {% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
     <article class="stat-card">
         <header><h3>Audit Samples</h3></header>
