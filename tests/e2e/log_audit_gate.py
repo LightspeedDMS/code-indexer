@@ -213,6 +213,49 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # not this WARNING.  Mirrors the existing cidx-meta-in-test entries above
     # ([REPO-MIGRATE-004], [CACHE-GENERAL-016], "git_pull file not found").
     "xray_pattern_service: git commit failed",
+    # Story #1133 (test_13_depmap_coordination_1133.py): the AC1 single-winner /
+    # acceptance assertions fire a REAL front-door dep-map trigger that returns 202.
+    # The accepted dep-map worker (run_full_analysis) early-returns "skipped" with no
+    # activated repos but still schedules a cidx-meta-global refresh, which in the
+    # Phase-3 in-process harness has NO indexable file content (cidx-meta-global is an
+    # ephemeral, empty data-dir clone -- not a real populated golden repo).  The refresh
+    # subprocess therefore fails deterministically with "No files found to index", and
+    # the refresh_scheduler logs two distinct ERROR lines, both ANCHORED on the
+    # "cidx-meta-global" alias:
+    #   1. "semantic indexing on source failed for cidx-meta-global: ..."
+    #   2. "Refresh failed for cidx-meta-global: ..." -- this exact suffix is ALSO carried
+    #      by the BackgroundJobManager wrapper line "Background job <id> failed: Refresh
+    #      failed for cidx-meta-global: ...", so substring-matching covers that line too
+    #      WITHOUT needing a broad "Background job" pattern.
+    # Benign: this is the unavoidable zero-data refresh artifact of running a dep-map
+    # analysis worker without real golden-repo content; the SENTINEL coordination under
+    # test (409 guard, single-winner 202) is correct and independent of the refresh
+    # outcome.  Both substrings are anchored on the "cidx-meta-global" alias, so a refresh
+    # failure for any OTHER repo (under its own real alias) would NOT be suppressed.
+    "semantic indexing on source failed for cidx-meta-global",
+    "Refresh failed for cidx-meta-global",
+    # Story #1133 (test_13_depmap_coordination_1133.py) AC2: the MALFORMED_YAML
+    # assertion seeds a domain file with deliberately unclosed YAML frontmatter so
+    # that parse_domain_file_for_graph raises and the read tool surfaces a
+    # MALFORMED_YAML anomaly on the parser channel.  The parser ALSO logs a WARNING
+    # ("parse_domain_file_for_graph: failed to read/parse .../<file>") when it records
+    # that anomaly.  This WARNING IS the asserted AC2 signal.  The seed file is named
+    # with the test-unique token "broken_1133_malformed.md" precisely so this allowlist
+    # entry is anchored on that exact filename: a parse failure on ANY real domain file
+    # (under its own name) would NOT contain this token and would NOT be suppressed.
+    "broken_1133_malformed.md",
+    # Story #1133 (test_13_depmap_coordination_1133.py) AC1: the release-then-accept
+    # and concurrent-single-winner tests each fire a REAL accepted (202) dep-map
+    # trigger, and each accepted worker schedules a cidx-meta-global refresh.  When
+    # two such refreshes overlap (back-to-back accepted triggers across tests), the
+    # dep-map worker's run_full handler catches a JobTracker duplicate-job condition
+    # and logs "Background full analysis failed: A 'global_repo_refresh' job is already
+    # running for repository 'cidx-meta-global' ...".  Benign: the same zero-data
+    # cidx-meta-global refresh coordination artifact as the two entries above, just the
+    # duplicate-refresh variant; the dep-map SENTINEL guard under test is unaffected.
+    # Anchored on the "cidx-meta-global" repository name, so a genuine duplicate-refresh
+    # collision on a REAL repo (its own alias) would NOT be suppressed.
+    "already running for repository 'cidx-meta-global'",
 ]
 
 
