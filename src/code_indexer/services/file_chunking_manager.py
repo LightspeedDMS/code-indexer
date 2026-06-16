@@ -48,6 +48,7 @@ class FileProcessingResult:
     chunks_processed: int
     processing_time: float
     error: Optional[str] = None
+    vanished: bool = False  # True when file disappeared before stat() (TOCTOU skip)
 
 
 class FileChunkingManager:
@@ -407,7 +408,22 @@ class FileChunkingManager:
         6. Call progress_callback to trigger display updates
         """
         start_time = time.time()
-        file_size = file_path.stat().st_size
+        try:
+            file_size = file_path.stat().st_size
+        except FileNotFoundError as e:
+            # Bug #1118 — TOCTOU: file vanished between enumeration and chunking.
+            # Return a vanished result (not raise) so the collector skips it gracefully.
+            # vanished=True signals that this is NOT a hard failure — it must not
+            # increment failed_files in the collector.
+            logger.warning(f"Skipping file that vanished during chunking: {file_path}")
+            return FileProcessingResult(
+                success=False,
+                vanished=True,
+                file_path=file_path,
+                chunks_processed=0,
+                processing_time=time.time() - start_time,
+                error=f"File vanished before processing: {e}",
+            )
         filename = file_path.name
 
         # Single acquire at start - create clean FileData

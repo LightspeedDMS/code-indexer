@@ -219,17 +219,21 @@ def test_reject_branching_invalid_model_enum() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Reject: ci.trigger_events contains invalid item
+# 6. Reject: ci.trigger_events contains non-string or empty-string item
 # ---------------------------------------------------------------------------
 
 
 def test_reject_ci_trigger_events_invalid_item() -> None:
     """
-    ci.trigger_events with 'invalid_event' (not in enum) must raise
+    ci.trigger_events with a non-string item (integer 123) must raise
     UnifiedResponseParseError. The error message must mention 'ci' and
-    'trigger_events' (AC-V3-4).
+    'trigger_events' (AC-V3-4 / Bug #1116).
+
+    NOTE: trigger_events is now an OPEN string list (item_type: str), NOT a
+    closed enum. Any non-empty string is valid (e.g. "release", "deployment").
+    Only non-string items or empty-string items are rejected.
     """
-    bad_ci = {**_CI_SECTION, "trigger_events": ["push", "invalid_event"]}
+    bad_ci = {**_CI_SECTION, "trigger_events": ["push", 123]}
     raw = _with_lifecycle_override("ci", bad_ci)
 
     with pytest.raises(UnifiedResponseParseError) as exc_info:
@@ -237,6 +241,107 @@ def test_reject_ci_trigger_events_invalid_item() -> None:
     msg = str(exc_info.value).lower()
     assert "ci" in msg
     assert "trigger_events" in msg
+
+
+def test_ci_trigger_events_item_type_str_semantics() -> None:
+    """
+    ci.trigger_events uses item_type: str semantics (same as required_checks).
+    This means only the Python type is checked — non-string items (e.g. int)
+    are rejected, but empty strings are valid str items (Bug #1116).
+
+    This test confirms both halves of the item_type: str contract:
+    - non-string item raises UnifiedResponseParseError (type check)
+    - empty string item is accepted (no additional empty-string check)
+    """
+    # Non-string item raises
+    bad_ci = {**_CI_SECTION, "trigger_events": ["push", 123]}
+    raw = _with_lifecycle_override("ci", bad_ci)
+    with pytest.raises(UnifiedResponseParseError) as exc_info:
+        UnifiedResponseParser.parse(raw)
+    assert "trigger_events" in str(exc_info.value).lower()
+
+    # Empty string item is accepted (matches required_checks behaviour)
+    ci_with_empty = {**_CI_SECTION, "trigger_events": ["push", ""]}
+    raw2 = _with_lifecycle_override("ci", ci_with_empty)
+    result = UnifiedResponseParser.parse(raw2)
+    assert result.lifecycle["ci"]["trigger_events"] == ["push", ""]
+
+
+# ---------------------------------------------------------------------------
+# Bug #1116: trigger_events now accepts any non-empty string (open vocabulary)
+# ---------------------------------------------------------------------------
+
+
+def test_ci_trigger_events_accepts_release() -> None:
+    """
+    ci.trigger_events containing "release" must parse successfully after the
+    Bug #1116 fix. Before the fix, "release" was not in _CI_TRIGGER_EVENT_ENUM
+    and would raise UnifiedResponseParseError, discarding the whole description.
+
+    fastapi uses 'on: release' in its GitHub Actions workflows — this test
+    is the direct reproduction of the staging failure (2026-06-14T15:55:16Z).
+    """
+    ci = {**_CI_SECTION, "trigger_events": ["release"]}
+    raw = _with_lifecycle_override("ci", ci)
+
+    result = UnifiedResponseParser.parse(raw)
+
+    assert isinstance(result, UnifiedResult)
+    assert result.lifecycle["ci"]["trigger_events"] == ["release"]
+
+
+def test_ci_trigger_events_accepts_multi_platform_events() -> None:
+    """
+    ci.trigger_events with a mix of standard and extended GitHub/GitLab
+    events must parse successfully (Bug #1116).
+
+    This covers the full open vocabulary including platform-specific events
+    that were absent from the old closed enum.
+    """
+    events = ["push", "release", "deployment", "workflow_call"]
+    ci = {**_CI_SECTION, "trigger_events": events}
+    raw = _with_lifecycle_override("ci", ci)
+
+    result = UnifiedResponseParser.parse(raw)
+
+    assert isinstance(result, UnifiedResult)
+    assert result.lifecycle["ci"]["trigger_events"] == events
+
+
+def test_ci_trigger_events_accepts_empty_list() -> None:
+    """
+    ci.trigger_events = [] (empty list) must parse successfully —
+    this is the designated escape value when no CI config is found.
+    Regression guard: the open-string validation must not reject empty lists.
+    """
+    ci = {**_CI_SECTION, "trigger_events": []}
+    raw = _with_lifecycle_override("ci", ci)
+
+    result = UnifiedResponseParser.parse(raw)
+
+    assert isinstance(result, UnifiedResult)
+    assert result.lifecycle["ci"]["trigger_events"] == []
+
+
+def test_other_enums_remain_strict_after_trigger_events_relaxed() -> None:
+    """
+    Regression guard (Bug #1116): relaxing trigger_events must NOT affect
+    other closed enum fields. branching.model and release.versioning must
+    still hard-reject invalid values.
+    """
+    # branching.model still uses a closed enum
+    bad_branching = {**_BRANCHING_SECTION, "model": "release"}  # not in enum
+    raw = _with_lifecycle_override("branching", bad_branching)
+
+    with pytest.raises(UnifiedResponseParseError):
+        UnifiedResponseParser.parse(raw)
+
+    # release.versioning still uses a closed enum
+    bad_release = {**_RELEASE_SECTION, "versioning": "release"}  # not in enum
+    raw2 = _with_lifecycle_override("release", bad_release)
+
+    with pytest.raises(UnifiedResponseParseError):
+        UnifiedResponseParser.parse(raw2)
 
 
 # ---------------------------------------------------------------------------

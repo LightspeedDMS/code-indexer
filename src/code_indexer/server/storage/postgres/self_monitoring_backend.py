@@ -246,6 +246,42 @@ class SelfMonitoringPostgresBackend:
         ]
         return [dict(zip(cols, row)) for row in rows]
 
+    def list_issues(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return issue records, most recent first.
+
+        Args:
+            limit: Maximum number of records to return (must be > 0).
+
+        Returns:
+            List of dicts with keys: id, scan_id, github_issue_number,
+            github_issue_url, classification, title, fingerprint,
+            source_log_ids, source_files, created_at.
+        """
+        if limit <= 0:
+            raise ValueError(f"list_issues: limit must be > 0, got {limit!r}")
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, scan_id, github_issue_number, github_issue_url, "
+                "classification, title, fingerprint, "
+                "source_log_ids, source_files, created_at "
+                "FROM self_monitoring_issues "
+                "ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+            ).fetchall()
+        cols = [
+            "id",
+            "scan_id",
+            "github_issue_number",
+            "github_issue_url",
+            "classification",
+            "title",
+            "fingerprint",
+            "source_log_ids",
+            "source_files",
+            "created_at",
+        ]
+        return [dict(zip(cols, row)) for row in rows]
+
     def get_running_scan_count(self) -> int:
         """Return count of scans where completed_at IS NULL (currently running)."""
         with self._pool.connection() as conn:

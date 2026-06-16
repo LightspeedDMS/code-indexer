@@ -39,7 +39,11 @@ class _FakeVoyageProvider:
         return self._token_limit
 
     def get_embeddings_batch(
-        self, texts: List[str], *, retry: bool = True
+        self,
+        texts: List[str],
+        *,
+        embedding_purpose: str = "document",
+        retry: bool = True,
     ) -> List[List[float]]:
         return [[float(len(t)), 0.0] for t in texts]
 
@@ -126,83 +130,130 @@ class _Cfg:
         self.coalesce_max_batch_size = coalesce_max_batch_size
 
 
-def _missing_key_builder(_http_client_factory):
-    """Stand-in for a provider whose API-key env var is absent (constructor raises)."""
-    raise RuntimeError("API key not configured")
-
-
-def _patch_builders(monkeypatch, lane_to_provider):
-    """Patch the registry's _LANE_PROVIDER_BUILDERS lane->constructor map.
-
-    A lane present in ``lane_to_provider`` builds that fake provider; a lane
-    absent from it gets a builder that raises (simulating a missing API key).
-    """
-    from code_indexer.server.services import coalescer_registry
-
-    builders: dict = {}
-    for lane in (VOYAGE_EMBED, COHERE_EMBED):
-        provider = lane_to_provider.get(lane)
-        if provider is None:
-            builders[lane] = _missing_key_builder
-        else:
-            builders[lane] = lambda _hcf, _p=provider: _p
-    monkeypatch.setattr(coalescer_registry, "_LANE_PROVIDER_BUILDERS", builders)
-
-
 class TestBuildRegistry:
+    """Tests for build_coalescer_registry and lazy CoalescerRegistry semantics.
+
+    Bug #1112 replaced the OLD eager-build (one provider per lane at startup via
+    _LANE_PROVIDER_BUILDERS) with a LAZY digest-keyed design.  These tests assert
+    the new behavior: build_coalescer_registry returns an EMPTY registry (no
+    providers constructed at build time); get_or_create lazily builds a coalescer
+    from the CALLER's provider.
+
+    Intent mapping from old -> new:
+      test_voyage_only_builds_voyage_lane_only   -> lazy get_or_create on voyage lane
+                                                    builds a coalescer; cohere stays None
+      test_both_providers_build_both_lanes_with_ceiling -> lazy get_or_create on both
+                                                    lanes; ceiling respected
+      test_no_providers_builds_empty_registry    -> build_coalescer_registry returns
+                                                    empty registry (get returns None)
+      test_built_coalescer_has_live_ceiling_provider -> lazily-built coalescer's
+                                                    effective cap follows live ceiling
+    """
+
     def test_voyage_only_builds_voyage_lane_only(self, monkeypatch):
+        """Lazy: get_or_create on voyage lane builds a coalescer; cohere stays None.
+
+        Old intent: only voyage lane is populated (cohere absent).
+        New invariant: the registry starts EMPTY; get_or_create on voyage builds
+        a coalescer; a cohere get_or_create call is never made -> cohere stays None.
+        """
         from code_indexer.server.services.coalescer_registry import (
             build_coalescer_registry,
+            _digest_for_provider,
         )
 
-        ProviderConcurrencyGovernor(GOVERNOR_K)  # ensure singleton exists
-        _patch_builders(monkeypatch, {VOYAGE_EMBED: _FakeVoyageProvider()})
+        ProviderConcurrencyGovernor(GOVERNOR_K)
         reg = build_coalescer_registry(_Cfg())
-        assert reg.get(VOYAGE_EMBED) is not None
+
+        # Before any get_or_create: both lanes are empty.
+        assert reg.get(VOYAGE_EMBED) is None
+        assert reg.get(COHERE_EMBED) is None
+
+        # Lazily build a voyage coalescer via get_or_create.
+        voyage_prov = _FakeVoyageProvider()
+        digest = _digest_for_provider(voyage_prov)
+        coalescer = reg.get_or_create(VOYAGE_EMBED, digest, voyage_prov)
+        assert coalescer is not None
+
+        # Cohere lane was never touched -> still None.
         assert reg.get(COHERE_EMBED) is None
 
     def test_both_providers_build_both_lanes_with_ceiling(self, monkeypatch):
+        """Lazy: get_or_create on both lanes builds coalescers; ceiling is respected.
+
+        Old intent: both lanes populated; lower config ceiling wins over provider cap.
+        New invariant: both coalescers are built lazily from the caller's provider;
+        the coalescer built with the lower-ceiling registry respects that ceiling.
+        """
         from code_indexer.server.services.coalescer_registry import (
             build_coalescer_registry,
+            _digest_for_provider,
         )
+        from code_indexer.server.services import coalescer_registry
 
         ProviderConcurrencyGovernor(GOVERNOR_K)
-        _patch_builders(
-            monkeypatch,
-            {
-                VOYAGE_EMBED: _FakeVoyageProvider(),
-                COHERE_EMBED: _FakeCohereProvider(),
-            },
+
+        live_cfg = _Cfg(coalesce_max_batch_size=LOWER_CEILING)
+
+        class _Svc:
+            def get_config(self):
+                return live_cfg
+
+        monkeypatch.setattr(
+            coalescer_registry, "get_config_service", lambda: _Svc(), raising=False
         )
-        reg = build_coalescer_registry(_Cfg(coalesce_max_batch_size=LOWER_CEILING))
-        assert reg.get(VOYAGE_EMBED) is not None
-        cohere_c = reg.get(COHERE_EMBED)
+
+        reg = build_coalescer_registry(live_cfg)
+
+        voyage_prov = _FakeVoyageProvider()
+        cohere_prov = _FakeCohereProvider()
+
+        v_digest = _digest_for_provider(voyage_prov)
+        c_digest = _digest_for_provider(cohere_prov)
+
+        voyage_c = reg.get_or_create(VOYAGE_EMBED, v_digest, voyage_prov)
+        cohere_c = reg.get_or_create(COHERE_EMBED, c_digest, cohere_prov)
+
+        assert voyage_c is not None
         assert cohere_c is not None
-        # Cohere fake caps texts at 96; the lower config ceiling wins (min).
-        assert cohere_c.texts_cap == LOWER_CEILING
+
+        # The live ceiling (LOWER_CEILING=32) governs the coalescer's effective cap.
+        assert cohere_c.effective_texts_cap() == LOWER_CEILING
 
     def test_no_providers_builds_empty_registry(self, monkeypatch):
+        """build_coalescer_registry returns an empty registry (no pre-built coalescers).
+
+        Old intent: no providers -> empty registry.
+        New invariant: build_coalescer_registry ALWAYS returns empty; get(lane)
+        returns None for any lane immediately after build.
+        """
         from code_indexer.server.services.coalescer_registry import (
             build_coalescer_registry,
         )
 
         ProviderConcurrencyGovernor(GOVERNOR_K)
-        _patch_builders(monkeypatch, {})
         reg = build_coalescer_registry(_Cfg())
+
+        # Immediately after build: no coalescers have been lazily constructed yet.
         assert reg.get(VOYAGE_EMBED) is None
         assert reg.get(COHERE_EMBED) is None
 
     def test_built_coalescer_has_live_ceiling_provider(self, monkeypatch):
-        """The built coalescer's effective cap follows the LIVE config ceiling."""
+        """The lazily-built coalescer's effective cap follows the LIVE config ceiling.
+
+        Old intent: built coalescer hot-reloads ceiling from live config.
+        New invariant: SAME — the lazily-built coalescer receives the same
+        ceiling_provider closure that reads coalesce_max_batch_size live, so a
+        runtime change to the config takes effect without a registry rebuild.
+        """
         from code_indexer.server.services import coalescer_registry
         from code_indexer.server.services.coalescer_registry import (
             build_coalescer_registry,
+            _digest_for_provider,
         )
 
         ProviderConcurrencyGovernor(GOVERNOR_K)
-        _patch_builders(monkeypatch, {VOYAGE_EMBED: _FakeVoyageProvider()})
 
-        # The builder reads coalesce_max_batch_size LIVE from get_config_service().
         live_cfg = _Cfg(coalesce_max_batch_size=DEFAULT_MAX_BATCH_SIZE)
 
         class _Svc:
@@ -214,9 +265,14 @@ class TestBuildRegistry:
         )
 
         reg = build_coalescer_registry(live_cfg)
-        coalescer = reg.get(VOYAGE_EMBED)
+
+        # Lazily build the coalescer via get_or_create.
+        voyage_prov = _FakeVoyageProvider()
+        digest = _digest_for_provider(voyage_prov)
+        coalescer = reg.get_or_create(VOYAGE_EMBED, digest, voyage_prov)
         assert coalescer is not None
         assert coalescer.effective_texts_cap() == DEFAULT_MAX_BATCH_SIZE
+
         # Hot-reload: change the live config; effective cap follows, no rebuild.
         live_cfg.coalesce_max_batch_size = LOWER_CEILING
         assert coalescer.effective_texts_cap() == LOWER_CEILING

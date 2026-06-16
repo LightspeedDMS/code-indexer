@@ -235,6 +235,7 @@ class SemanticSearchService:
             accuracy=search_request.accuracy,
             hnsw_cache=hnsw_cache,
             precomputed_query_vector=precomputed_query_vector,
+            no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
         )
 
         return SemanticSearchResponse(
@@ -277,6 +278,7 @@ class SemanticSearchService:
             exclude_path=search_request.exclude_path,
             accuracy=search_request.accuracy,
             provider_name_override=provider_name,
+            no_embedding_cache_shortcut=search_request.no_embedding_cache_shortcut,
         )
 
         return SemanticSearchResponse(
@@ -359,6 +361,7 @@ class SemanticSearchService:
         provider_name_override: Optional[str] = None,
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
         precomputed_query_vector: Optional[List[float]] = None,
+        no_embedding_cache_shortcut: bool = False,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -479,6 +482,7 @@ class SemanticSearchService:
                     # embed||index-load fan-out (None under CLI in-process -> leaf
                     # falls back to a per-call pool).
                     parallel_executor=_get_query_executor(),
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
                 if filter_conditions:
                     search_kwargs["filter_conditions"] = filter_conditions
@@ -494,7 +498,8 @@ class SemanticSearchService:
                 query_embedding = coalesced_query_embedding(
                     embedding_service,
                     query,
-                    embedding_purpose=None,
+                    embedding_purpose="query",
+                    no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
                 search_results = vector_store_client.search(
                     query_vector=query_embedding,

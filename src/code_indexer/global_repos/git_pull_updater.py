@@ -140,6 +140,24 @@ class GitPullUpdater(UpdateStrategy):
                     stderr=fetch_result.stderr,
                 )
 
+            # Detect detached HEAD (e.g. repo pinned to a tag or specific commit).
+            # git symbolic-ref -q HEAD returns rc=0 on a branch, rc!=0 when detached.
+            # A detached/pinned ref is immutable for refresh purposes — skip the
+            # upstream comparison entirely and return False gracefully.
+            symbolic_ref_result = subprocess.run(
+                ["git", "symbolic-ref", "-q", "HEAD"],
+                cwd=str(self.repo_path),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if symbolic_ref_result.returncode != 0:
+                logger.info(
+                    f"Skipping remote-change check for {self.repo_path}: "
+                    "HEAD is detached (pinned tag or commit). Nothing to pull."
+                )
+                return False
+
             # Check for commits on remote not in local using HEAD..@{upstream}
             log_result = subprocess.run(
                 ["git", "log", "HEAD..@{upstream}", "--oneline"],

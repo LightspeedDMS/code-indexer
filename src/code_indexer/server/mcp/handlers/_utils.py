@@ -1109,8 +1109,15 @@ def _expand_wildcard_patterns(
                     )
                 )
         else:
-            # Literal pattern — never subject to expansion cap
-            expanded.append(pattern)
+            # Literal pattern — never subject to expansion cap.
+            # Bug #1119: if the literal does not match any global repo directly but
+            # its "-global" form exists, promote it.  This handles omni fan-out of
+            # bare repo names (e.g. "fastapi") when repos are stored as "fastapi-global".
+            _global_form = f"{pattern}-global"
+            if pattern not in available_repos and _global_form in available_repos:
+                expanded.append(_global_form)
+            else:
+                expanded.append(pattern)
 
     # Deduplicate while preserving order
     seen: set = set()

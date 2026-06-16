@@ -260,6 +260,7 @@ class TemporalSearchService:
         path_filter: Optional[List[str]] = None,
         exclude_path: Optional[List[str]] = None,
         chunk_type: Optional[str] = None,
+        no_embedding_cache_shortcut: bool = False,
     ) -> TemporalSearchResults:
         """Execute temporal semantic search with time-range filtering.
 
@@ -438,7 +439,8 @@ class TemporalSearchService:
             query_embedding = coalesced_query_embedding(
                 self.embedding_provider,
                 query,
-                embedding_purpose=None,
+                embedding_purpose="query",
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
             raw_results = self.vector_store_client.search(
                 query_vector=query_embedding,

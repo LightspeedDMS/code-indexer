@@ -9,7 +9,7 @@ import datetime
 import json
 import logging
 import sqlite3
-from typing import Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, cast
 
 from code_indexer.server.self_monitoring.llm_response_parser import (
     extract_json_from_llm_response,
@@ -19,6 +19,9 @@ from code_indexer.server.services.dep_map_dispatcher_factory import (
     build_dep_map_dispatcher,
 )
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+if TYPE_CHECKING:
+    from code_indexer.server.storage.protocols import SelfMonitoringBackend
 
 import httpx
 
@@ -95,6 +98,7 @@ class LogScanner:
         repo_root: Optional[str] = None,
         github_token: Optional[str] = None,
         server_name: Optional[str] = None,
+        backend: "Optional[SelfMonitoringBackend]" = None,
     ):
         """
         Initialize LogScanner.
@@ -109,6 +113,15 @@ class LogScanner:
             repo_root: Path to repo root for Claude working directory
             github_token: GitHub token for authentication (optional, Bug #87)
             server_name: Server display name for issue identification (optional, Bug #87)
+            backend: SelfMonitoringBackend for DB delegation (Bug #1140). When
+                     provided, scan-record writes (create/update), fingerprint
+                     reads/writes, and issue-metadata writes are all routed
+                     through this backend so writes land in the same store
+                     (e.g. PostgreSQL in cluster mode) that the dashboard reads
+                     via list_scans() / list_issues() / fetch_stored_fingerprints().
+                     IssueManager receives the same backend so _store_metadata
+                     calls backend.store_issue_metadata() instead of raw SQLite.
+                     Falls back to raw SQLite via _conn_manager when None.
         """
         self.db_path = db_path
         self.scan_id = scan_id
@@ -119,6 +132,7 @@ class LogScanner:
         self.repo_root = repo_root
         self.github_token = github_token
         self.server_name = server_name
+        self._backend = backend
         self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
     def assemble_prompt(
@@ -242,21 +256,30 @@ class LogScanner:
         """
         Fetch and format stored fingerprints from database.
 
+        When a backend is injected (Bug #1140), delegates to
+        backend.fetch_stored_fingerprints() so reads come from the same store
+        as the writes (e.g. PostgreSQL in cluster mode). Falls back to raw
+        SQLite via _conn_manager when no backend is set.
+
         Returns:
             List of formatted fingerprint lines
         """
         lines = []
 
-        conn = self._conn_manager.get_connection()
-        cursor = conn.execute(
-            "SELECT fingerprint, classification, error_codes, title, created_at "
-            "FROM self_monitoring_issues "
-            "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
-            "ORDER BY created_at DESC",
-            (FINGERPRINT_RETENTION_DAYS,),
-        )
-
-        fingerprints = cursor.fetchall()
+        if self._backend is not None:
+            fingerprints = self._backend.fetch_stored_fingerprints(
+                FINGERPRINT_RETENTION_DAYS
+            )
+        else:
+            conn = self._conn_manager.get_connection()
+            cursor = conn.execute(
+                "SELECT fingerprint, classification, error_codes, title, created_at "
+                "FROM self_monitoring_issues "
+                "WHERE datetime(created_at) >= datetime('now', '-' || ? || ' days') "
+                "ORDER BY created_at DESC",
+                (FINGERPRINT_RETENTION_DAYS,),
+            )
+            fingerprints = cursor.fetchall()
 
         if fingerprints:
             lines.append(
@@ -280,6 +303,11 @@ class LogScanner:
         """
         Create initial scan record in database (Bug #87 issue #5).
 
+        When a backend is injected (Bug #1140), delegates to the backend so the
+        write lands in the same store the dashboard reads (e.g. PostgreSQL in
+        cluster mode). Falls back to raw SQLite via _conn_manager when no
+        backend is set.
+
         Args:
             log_id_start: Starting log ID for this scan
         """
@@ -287,6 +315,15 @@ class LogScanner:
             f"[SELF-MON-DEBUG] create_scan_record: Entry - scan_id={self.scan_id}, log_id_start={log_id_start}, db_path={self.db_path}"
         )
         started_at = datetime.datetime.utcnow().isoformat()
+
+        if self._backend is not None:
+            self._backend.create_scan_record(
+                scan_id=self.scan_id,
+                started_at=started_at,
+                log_id_start=log_id_start,
+            )
+            logger.debug("[SELF-MON-DEBUG] create_scan_record: delegated to backend")
+            return
 
         def _do_create(conn: sqlite3.Connection) -> None:
             logger.debug(
@@ -321,12 +358,23 @@ class LogScanner:
         successful scans exist. Failed scans are ignored to ensure retry from
         the same position.
 
+        When a backend is injected (Bug #1140), delegates to the backend so
+        the read comes from the same store as the writes.
+
         Returns:
             Last processed log ID, or 0 if no previous scans
         """
         logger.debug(
             f"[SELF-MON-DEBUG] get_last_scan_log_id: Entry - db_path={self.db_path}"
         )
+
+        if self._backend is not None:
+            result = self._backend.get_last_scan_log_id()
+            logger.debug(
+                f"[SELF-MON-DEBUG] get_last_scan_log_id: delegated to backend - result={result}"
+            )
+            return int(result)
+
         conn = self._conn_manager.get_connection()
         logger.debug(
             "[SELF-MON-DEBUG] get_last_scan_log_id: Executing SELECT query for last successful scan"
@@ -358,6 +406,9 @@ class LogScanner:
         On FAILURE: Updates status and error_message, preserves log_id_end
                    as None to allow retry from same position.
 
+        When a backend is injected (Bug #1140), delegates to the backend so
+        the write lands in the same store the dashboard reads.
+
         Args:
             status: Scan completion status ("SUCCESS" or "FAILURE")
             log_id_end: Last processed log ID (None for FAILURE)
@@ -365,6 +416,17 @@ class LogScanner:
             error_message: Error description (only for FAILURE)
         """
         completed_at = datetime.datetime.utcnow().isoformat()
+
+        if self._backend is not None:
+            self._backend.update_scan_record(
+                scan_id=self.scan_id,
+                status=status,
+                completed_at=completed_at,
+                log_id_end=log_id_end,
+                issues_created=issues_created,
+                error_message=error_message,
+            )
+            return
 
         # Build dynamic UPDATE based on provided fields
         update_fields = ["status = ?", "completed_at = ?"]
@@ -609,6 +671,7 @@ class LogScanner:
                 github_repo=self.github_repo,
                 github_token=self.github_token,
                 server_name=self.server_name,
+                backend=self._backend,
             )
             logger.debug(
                 f"[SELF-MON-DEBUG] execute_scan: Step 6 - Calling _create_issues_from_response() with {len(response.get('issues_created', []))} issues"

@@ -3078,6 +3078,106 @@ def make_lifespan(
                 )
             )
 
+        # Story #1105: build the query embedding cache ONCE after providers +
+        # config are available (same timing as the coalescer registry above).
+        # The cache is sourced from backend_registry.query_embedding_cache in
+        # both SQLite (solo) and PostgreSQL (cluster) modes — no fallback to an
+        # alternative backend so misconfiguration surfaces immediately.
+        # Non-fatal: failure leaves the cache unset so queries use the live path.
+        try:
+            from code_indexer.server.services.governed_call import (
+                set_query_embedding_cache,
+            )
+            from code_indexer.server.services.query_embedding_cache import (
+                QueryEmbeddingCache as _QueryEmbeddingCache,
+            )
+
+            _qec_backend = (
+                backend_registry.query_embedding_cache
+                if backend_registry is not None
+                else None
+            )
+            if _qec_backend is not None:
+                # enabled / mode are read LIVE on every call via the config service
+                # (AC3 "read LIVE each call") — no frozen snapshot at construction.
+                _query_embedding_cache = _QueryEmbeddingCache(
+                    backend=_qec_backend,
+                )
+                set_query_embedding_cache(_query_embedding_cache)
+                logger.info(
+                    "Query embedding cache built (Story #1105, "
+                    "live config reads via QueryEmbeddingCacheConfig)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Query embedding cache: no backend available (solo CLI mode) — "
+                    "cache disabled (Story #1105)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1105",
+                    f"Failed to build query embedding cache "
+                    f"(queries will use the live path): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Story #1109 (S5): build QueryEmbeddingCacheMetrics when BOTH the cache
+        # AND telemetry are available.  If telemetry is disabled or the cache was
+        # not built, the accessor stays None (CLI / no-backend paths are no-ops).
+        # Non-fatal: a failure must never abort startup.
+        try:
+            from code_indexer.server.services.governed_call import (
+                set_query_embedding_cache_metrics,
+                get_query_embedding_cache,
+            )
+            from code_indexer.server.services.query_embedding_cache_metrics import (
+                QueryEmbeddingCacheMetrics,
+            )
+
+            _wired_cache = get_query_embedding_cache()
+            if _wired_cache is not None:
+                # Pass a real OTEL meter when telemetry is enabled; None otherwise.
+                # The in-process tallies (snapshot()) work regardless — only the OTEL
+                # export instruments require a meter.  This ensures the dashboard
+                # cache-metrics cards show real data even when telemetry is disabled
+                # (the production/staging default).
+                _cache_meter = (
+                    telemetry_manager.get_meter("cidx.cache")
+                    if telemetry_manager is not None
+                    else None
+                )
+                _cache_metrics = QueryEmbeddingCacheMetrics(
+                    _cache_meter,
+                    total_entries_fn=_wired_cache.cached_total_entries,
+                )
+                set_query_embedding_cache_metrics(_cache_metrics)
+                logger.info(
+                    "QueryEmbeddingCacheMetrics built and wired "
+                    "(telemetry=%s) (Story #1109 S5 / Bug fix)",
+                    telemetry_manager is not None,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "QueryEmbeddingCacheMetrics: skipped (cache not wired) — accessor stays None",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-1109",
+                    f"Failed to build QueryEmbeddingCacheMetrics "
+                    f"(cache metrics will be disabled): {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         yield  # Server is now running
 
         # Story #1083: close the pooled production httpx client owned by the
@@ -3178,6 +3278,36 @@ def make_lifespan(
         except Exception:
             logger.debug(
                 "Coalescer registry clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Story #1105: clear the process-level query embedding cache so a
+        # subsequent lifespan cycle does not inherit a stale cache instance.
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.governed_call import (
+                clear_query_embedding_cache,
+            )
+
+            clear_query_embedding_cache()
+        except Exception:
+            logger.debug(
+                "Query embedding cache clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Story #1109 (S5): clear the process-level cache metrics so a subsequent
+        # lifespan cycle does not inherit a stale metrics instance.
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.governed_call import (
+                clear_query_embedding_cache_metrics,
+            )
+
+            clear_query_embedding_cache_metrics()
+        except Exception:
+            logger.debug(
+                "Query embedding cache metrics clear failed (expected during shutdown)",
                 exc_info=True,
             )
 

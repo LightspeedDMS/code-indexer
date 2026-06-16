@@ -371,14 +371,40 @@ class ActivatedRepoManager:
         return self._list_all_repos_fs()
 
     def _list_all_repos_fs(self) -> List[dict]:
-        """List all activated repos from filesystem (standalone mode)."""
+        """List all activated repos from filesystem (standalone mode).
+
+        Unlike _list_user_repos_fs (which hides dangling registrations so that
+        per-user consumers only see usable repos), this admin path includes ALL
+        registrations regardless of whether the on-disk directory exists.  Each
+        entry carries a boolean ``path_exists`` field so admins can identify and
+        clean up dangling registrations.
+        """
         if not os.path.exists(self.activated_repos_dir):
             return []
         all_repos: List[dict] = []
         for username in os.listdir(self.activated_repos_dir):
             user_dir = os.path.join(self.activated_repos_dir, username)
-            if os.path.isdir(user_dir):
-                all_repos.extend(self._list_user_repos_fs(username))
+            if not os.path.isdir(user_dir):
+                continue
+            for filename in os.listdir(user_dir):
+                if not filename.endswith("_metadata.json"):
+                    continue
+                metadata_path = os.path.join(user_dir, filename)
+                try:
+                    with open(metadata_path) as f:
+                        repo_data = json.load(f)
+                    user_alias = repo_data.get("user_alias", "")
+                    repo_dir = os.path.join(user_dir, user_alias)
+                    repo_data.setdefault("username", username)
+                    repo_data["path_exists"] = os.path.exists(repo_dir)
+                    all_repos.append(repo_data)
+                except (json.JSONDecodeError, KeyError, IOError) as e:
+                    self.logger.warning(
+                        "Skipping corrupted metadata file %s: %s",
+                        metadata_path,
+                        e,
+                    )
+                    continue
         return all_repos
 
     def _list_user_repos_pg(self, username: str) -> List[dict]:
@@ -393,14 +419,24 @@ class ActivatedRepoManager:
         return [self._pg_row_to_metadata(r) for r in rows]
 
     def _list_all_repos_pg(self) -> List[dict]:
-        """List all activated repos from PostgreSQL (cluster mode)."""
+        """List all activated repos from PostgreSQL (cluster mode).
+
+        Adds a ``path_exists`` boolean to each entry so the admin view is
+        consistent with the solo (_list_all_repos_fs) path.
+        """
         assert self._pool is not None
         with self._pool.connection() as conn:
             with conn.cursor(row_factory=_dict_row_factory()) as cur:
                 rows = cur.execute(
                     "SELECT * FROM activated_repos ORDER BY username, user_alias"
                 ).fetchall()
-        return [self._pg_row_to_metadata(r) for r in rows]
+        result = []
+        for r in rows:
+            entry = self._pg_row_to_metadata(r)
+            repo_path = r.get("repo_path") or ""
+            entry["path_exists"] = bool(repo_path) and os.path.exists(repo_path)
+            result.append(entry)
+        return result
 
     def activate_repository(
         self,
@@ -926,14 +962,14 @@ class ActivatedRepoManager:
         Raises:
             ActivatedRepoError: If repository not found
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        repo_dir = os.path.join(user_dir, user_alias)
-
-        # Check if repository exists
-        if (
-            not os.path.exists(repo_dir)
-            or self._load_metadata(username, user_alias) is None
-        ):
+        # Bug #1120: gate on the authoritative registry (_load_metadata), NOT on
+        # os.path.exists(repo_dir).  In cluster (PG) mode the PG row IS the
+        # registration; the on-disk directory may be absent (dangling registration)
+        # while the row still exists.  Checking the filesystem caused a permanent
+        # 404 when the dir was gone, with no front-door cleanup path.
+        # _load_metadata() dispatches to PG (cluster) or JSON file (solo) and is
+        # the single source of truth for both modes.
+        if self._load_metadata(username, user_alias) is None:
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )

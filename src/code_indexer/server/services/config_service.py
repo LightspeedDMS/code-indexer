@@ -125,15 +125,26 @@ class ConfigService:
     with validation. All changes persist to ~/.cidx-server/config.json.
     """
 
-    def __init__(self, server_dir_path: Optional[str] = None):
+    def __init__(
+        self,
+        server_dir_path: Optional[str] = None,
+        config_manager: Optional["ServerConfigManager"] = None,
+    ):
         """
         Initialize the configuration service.
 
         Args:
             server_dir_path: Optional path to server directory.
                            Defaults to ~/.cidx-server
+            config_manager: Optional pre-built ServerConfigManager instance.
+                          When provided, server_dir_path is ignored for config
+                          loading (but still used for ClaudeDelegationManager).
+                          Primarily useful for unit tests.
         """
-        self.config_manager = ServerConfigManager(server_dir_path)
+        if config_manager is not None:
+            self.config_manager = config_manager
+        else:
+            self.config_manager = ServerConfigManager(server_dir_path)
         self._config: Optional[ServerConfig] = None
         self._delegation_manager = ClaudeDelegationManager(server_dir_path)
         # Story #578: Unified DB for runtime config (SQLite or PG)
@@ -669,6 +680,21 @@ class ConfigService:
             "memory_retrieval_max_body_chars": mem_cfg.memory_retrieval_max_body_chars,
         }
 
+        # Query embedding cache settings (Story #1107 S3)
+        from code_indexer.server.utils.config_manager import QueryEmbeddingCacheConfig
+
+        qec_cfg = config.query_embedding_cache_config or QueryEmbeddingCacheConfig()
+        settings["query_embedding_cache"] = {
+            "query_embedding_cache_enabled": qec_cfg.query_embedding_cache_enabled,
+            "query_embedding_cache_max_entries": qec_cfg.query_embedding_cache_max_entries,
+            "query_embedding_cache_voyage_mode": qec_cfg.query_embedding_cache_voyage_mode,
+            "query_embedding_cache_voyage_anchor_tokens": qec_cfg.query_embedding_cache_voyage_anchor_tokens,
+            "query_embedding_cache_voyage_audit_sample_rate": qec_cfg.query_embedding_cache_voyage_audit_sample_rate,
+            "query_embedding_cache_cohere_mode": qec_cfg.query_embedding_cache_cohere_mode,
+            "query_embedding_cache_cohere_anchor_tokens": qec_cfg.query_embedding_cache_cohere_anchor_tokens,
+            "query_embedding_cache_cohere_audit_sample_rate": qec_cfg.query_embedding_cache_cohere_audit_sample_rate,
+        }
+
         # Story #885 Phase 5a: Lifecycle analysis timeout configuration (A7a)
         # lifecycle_analysis_config is guaranteed non-None by ServerConfig.__post_init__
         settings["lifecycle_analysis"] = {
@@ -814,6 +840,9 @@ class ConfigService:
             self._update_cidx_meta_backup_setting(config, key, value)
         elif category == "pace_maker":
             self._update_pace_maker_setting(config, key, value)
+        # Story #1107 S3 - Query embedding cache runtime configuration
+        elif category == "query_embedding_cache":
+            self._update_query_embedding_cache_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1467,6 +1496,55 @@ class ConfigService:
             mem.memory_retrieval_max_body_chars = int(value)
         else:
             raise ValueError(f"Unknown memory_retrieval setting: {key}")
+
+    def _update_query_embedding_cache_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a query embedding cache configuration setting (Story #1107 S3)."""
+        from code_indexer.server.utils.config_manager import QueryEmbeddingCacheConfig
+
+        if config.query_embedding_cache_config is None:
+            config.query_embedding_cache_config = QueryEmbeddingCacheConfig()
+        qec = config.query_embedding_cache_config
+
+        if key == "query_embedding_cache_enabled":
+            qec.query_embedding_cache_enabled = _parse_bool(value)
+        elif key == "query_embedding_cache_max_entries":
+            qec.query_embedding_cache_max_entries = int(value)
+        elif key == "query_embedding_cache_voyage_mode":
+            _valid_modes = {"off", "shadow", "on"}
+            str_val = str(value)
+            if str_val not in _valid_modes:
+                raise ValueError(
+                    f"Invalid voyage mode '{value}': must be one of {sorted(_valid_modes)}"
+                )
+            qec.query_embedding_cache_voyage_mode = str_val
+        elif key == "query_embedding_cache_voyage_anchor_tokens":
+            # Empty string or None means "inherit global" (reset per-provider override).
+            if value is None or value == "":
+                qec.query_embedding_cache_voyage_anchor_tokens = None
+            else:
+                qec.query_embedding_cache_voyage_anchor_tokens = int(value)
+        elif key == "query_embedding_cache_voyage_audit_sample_rate":
+            qec.query_embedding_cache_voyage_audit_sample_rate = float(value)
+        elif key == "query_embedding_cache_cohere_mode":
+            _valid_modes = {"off", "shadow", "on"}
+            str_val = str(value)
+            if str_val not in _valid_modes:
+                raise ValueError(
+                    f"Invalid cohere mode '{value}': must be one of {sorted(_valid_modes)}"
+                )
+            qec.query_embedding_cache_cohere_mode = str_val
+        elif key == "query_embedding_cache_cohere_anchor_tokens":
+            # Empty string or None means "inherit global" (reset per-provider override).
+            if value is None or value == "":
+                qec.query_embedding_cache_cohere_anchor_tokens = None
+            else:
+                qec.query_embedding_cache_cohere_anchor_tokens = int(value)
+        elif key == "query_embedding_cache_cohere_audit_sample_rate":
+            qec.query_embedding_cache_cohere_audit_sample_rate = float(value)
+        else:
+            raise ValueError(f"Unknown query_embedding_cache setting: {key}")
 
     def _update_lifecycle_analysis_setting(
         self, config: ServerConfig, key: str, value: Any

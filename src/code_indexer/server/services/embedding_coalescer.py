@@ -142,12 +142,13 @@ def _resolve_provider_texts_cap(provider: Any) -> Optional[int]:
 
 
 class _Entry:
-    """A single coalesced request: its text and the caller's Future."""
+    """A single coalesced request: its text, embedding purpose, and the caller's Future."""
 
-    __slots__ = ("text", "fut")
+    __slots__ = ("text", "embedding_purpose", "fut")
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, embedding_purpose: str = "query") -> None:
         self.text = text
+        self.embedding_purpose = embedding_purpose
         self.fut: "Future[List[float]]" = Future()
 
 
@@ -224,7 +225,7 @@ class EmbeddingCoalescer:
     # Core API
     # ------------------------------------------------------------------
 
-    def submit(self, text: str) -> List[float]:
+    def submit(self, text: str, embedding_purpose: str = "query") -> List[float]:
         """Submit one text; block until its embedding vector is available.
 
         Exactly one caller per batch is elected dispatcher; non-dispatchers block
@@ -232,8 +233,15 @@ class EmbeddingCoalescer:
         fate). The dispatcher seals the batch on the first attempt that gets a
         governor slot and issues exactly ONE HTTP call, then demuxes vectors back
         to every caller in submit order.
+
+        Args:
+            text: Text to embed.
+            embedding_purpose: Purpose for the embedding call — "query" (default,
+                for all serving-path callers) or "document" (indexing path).
+                Forwarded to get_embeddings_batch so Cohere maps it to the
+                correct input_type (search_query vs search_document).
         """
-        entry = _Entry(text)
+        entry = _Entry(text, embedding_purpose)
         n = self._token_count_fn(text)
 
         my_batch, i_am_dispatcher = self._enqueue(entry, n)
@@ -318,8 +326,10 @@ class EmbeddingCoalescer:
         sealed = False
         texts: Optional[List[str]] = None
 
+        purpose: Optional[str] = None
+
         def do_call() -> List[List[float]]:
-            nonlocal sealed, texts
+            nonlocal sealed, texts, purpose
             with self._lock:
                 if not sealed:
                     sealed = True
@@ -327,12 +337,16 @@ class EmbeddingCoalescer:
                         self._open_batch = None
                         self._open_tokens = 0
                     texts = [e.text for e in my_batch]
+                    # All entries in a query-path batch share the same purpose
+                    # (all callers of coalesced_query_embedding pass "query").
+                    # Read from the first entry; default to "query" defensively.
+                    purpose = my_batch[0].embedding_purpose if my_batch else "query"
             if texts is None:  # pragma: no cover - set on first attempt, stable after
                 raise RuntimeError("coalescer batch snapshot missing")
             # Exactly ONE HTTP call (retry=False -> provider makes a single attempt;
             # backoff is handled by execute_with_backoff OUTSIDE the governor slot).
             result: List[List[float]] = self._provider.get_embeddings_batch(
-                texts, retry=False
+                texts, retry=False, embedding_purpose=purpose or "query"
             )
             return result
 

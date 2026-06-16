@@ -13,6 +13,7 @@ import logging
 import os
 import re as _re
 import secrets
+import socket
 import sqlite3
 import sys
 import threading
@@ -218,6 +219,8 @@ _VALID_CONFIG_SECTIONS = (
     "cidx_meta_backup",
     # Story #997 - Pace-maker pacing-only enforcement
     "pace_maker",
+    # Story #1107 S3 - Query embedding cache LRU cap + Web UI config section
+    "query_embedding_cache",
 )
 
 
@@ -596,7 +599,7 @@ def dashboard_stats_partial(
         request: HTTP request
         time_filter: Time filter for job stats ("24h", "7d", "30d")
         recent_filter: Time filter for recent activity ("24h", "7d", "30d")
-        api_filter: Time window in seconds for API metrics (default 60).
+        api_filter: Time window in seconds for API metrics (default 900).
             Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
 
     Returns HTML fragment for htmx partial updates.
@@ -738,7 +741,7 @@ def dashboard_api_metrics_partial(
 
     Args:
         request: HTTP request
-        api_filter: Time window in seconds for API metrics (default 60).
+        api_filter: Time window in seconds for API metrics (default 900).
             Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
 
     Returns HTML fragment for htmx partial updates.
@@ -748,7 +751,7 @@ def dashboard_api_metrics_partial(
         return HTMLResponse(content="", status_code=401)
 
     # Story #503 AC1: Use backend_registry.api_metrics for cluster-wide aggregation.
-    # In cluster (postgres) mode get_metrics(node_id=None) aggregates all nodes.
+    # In cluster (postgres) mode get_metrics_bucketed(node_id=None) aggregates all nodes.
     # In standalone mode the SQLite backend reads the local data — identical behaviour.
     backend_registry = getattr(request.app.state, "backend_registry", None)
     api_metrics_backend = (
@@ -798,6 +801,92 @@ def dashboard_api_metrics_partial(
             "api_filter": api_filter,
             "is_cluster_mode": is_cluster_mode,
             "per_node_metrics": per_node_metrics,
+        },
+    )
+
+
+@web_router.get("/partials/dashboard-cache-metrics", response_class=HTMLResponse)
+def dashboard_cache_metrics_partial(request: Request):
+    """Story #1109 (S5): Query-embedding cache metrics partial.
+
+    Returns an HTML fragment showing total cached entries and real hit/miss
+    ratios per mode for the query-embedding cache.  Hit/ratio stats come from
+    the in-process snapshot() on QueryEmbeddingCacheMetrics (readable tallies
+    kept alongside each OTEL counter increment, so the dashboard never needs
+    an OTEL exporter).  Mirrors the dashboard-api-metrics HTMX partial pattern.
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    import types
+
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    # total_entries: reuse the same helper used by the config-page readout so the
+    # dashboard and the config page always show the same live count.  The helper
+    # calls get_query_embedding_cache() from governed_call (the process-global
+    # accessor) and is fail-open (returns 0 when the cache is not wired).
+    total_entries = _get_qec_total_entries()
+
+    # Hit/ratio data from in-process snapshot (real tallies, not OTEL exporters).
+    # Hit-ratio is DERIVED per mode in the template — never blended across modes.
+    from code_indexer.server.services.governed_call import (
+        get_query_embedding_cache_metrics,
+    )
+
+    _metrics = get_query_embedding_cache_metrics()
+    shadow_hits = 0
+    shadow_requests = 0
+    on_hits = 0
+    on_requests = 0
+    shadow_cosine_p50 = None
+    audit_total = 0
+    audit_top1_matches = 0
+    audit_overlap_avg = None
+
+    if _metrics is not None:
+        try:
+            snap = _metrics.snapshot()
+            _shadow = snap.get("shadow", {})
+            _on = snap.get("on", {})
+            shadow_hits = _shadow.get("hits", 0)
+            shadow_requests = shadow_hits + _shadow.get("misses", 0)
+            on_hits = _on.get("hits", 0)
+            on_requests = on_hits + _on.get("misses", 0)
+            shadow_cosine_p50 = snap.get("shadow_cosine_p50")
+            audit_total = snap.get("audit_total", 0) or 0
+            audit_top1_matches = snap.get("audit_top1_matches", 0) or 0
+            audit_overlap_avg = snap.get("audit_overlap_avg")
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: snapshot() failed: %s", _exc
+            )
+
+    cache_metrics = types.SimpleNamespace(
+        total_entries=total_entries,
+        shadow_hits=shadow_hits,
+        shadow_requests=shadow_requests,
+        on_hits=on_hits,
+        on_requests=on_requests,
+        shadow_cosine_p50=shadow_cosine_p50,
+        audit_total=audit_total,
+        audit_top1_matches=audit_top1_matches,
+        audit_overlap_avg=audit_overlap_avg,
+    )
+
+    # Resolve the current node identifier for the volatile-metrics footer label.
+    # In cluster (postgres) mode, lifespan.py stores the configured node_id on
+    # app.state (Story #505/#506).  In solo mode the attribute is absent; fall
+    # back to socket.gethostname().  getattr with a default is already safe.
+    node_id: str = getattr(request.app.state, "node_id", None) or socket.gethostname()
+
+    return templates.TemplateResponse(
+        "partials/dashboard_cache_metrics.html",
+        {
+            "request": request,
+            "cache_metrics": cache_metrics,
+            "node_id": node_id,
         },
     )
 
@@ -5837,6 +5926,28 @@ async def _reload_oidc_configuration():
     )
 
 
+def _get_qec_total_entries() -> int:
+    """Return the live total row count from the QueryEmbeddingCache, or 0.
+
+    Used by _get_current_config to surface the total-cached-entries readout in
+    the Web UI config page (Story #1107 S3 finding B3).  Fail-open: returns 0
+    when the cache is not wired (CLI / pre-lifespan) or on any backend error.
+    """
+    try:
+        from ..services.governed_call import get_query_embedding_cache
+
+        cache = get_query_embedding_cache()
+        if cache is None:
+            return 0
+        return int(cache.total_entries())
+    except Exception:
+        logger.warning(
+            "query_embedding_cache: failed to read total_entries for Web UI (fail-open)",
+            exc_info=True,
+        )
+        return 0
+
+
 def _get_current_config() -> dict:
     """Get current configuration from ConfigService (persisted to ~/.cidx-server/config.json)."""
     from ..services.config_service import get_config_service
@@ -5872,6 +5983,8 @@ def _get_current_config() -> dict:
         LifecycleAnalysisConfig,
         # Story #844 - Codex CLI integration configuration
         CodexIntegrationConfig,
+        # Story #1107 S3 - Query embedding cache configuration
+        QueryEmbeddingCacheConfig,
     )
     from dataclasses import asdict
 
@@ -6088,6 +6201,14 @@ def _get_current_config() -> dict:
         "xray": settings.get("xray", asdict(XRayConfig())),
         # Story #652: Reranking configuration
         "rerank": settings.get("rerank", asdict(RerankConfig())),
+        # Story #1107 S3: Query embedding cache configuration
+        # total_cached_entries is injected as a live read-only readout (B3).
+        "query_embedding_cache": {
+            **settings.get(
+                "query_embedding_cache", asdict(QueryEmbeddingCacheConfig())
+            ),
+            "total_cached_entries": _get_qec_total_entries(),
+        },
         # Story #885: Lifecycle analysis configuration
         "lifecycle_analysis": settings.get(
             "lifecycle_analysis", asdict(LifecycleAnalysisConfig())
@@ -7056,6 +7177,62 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     f"shell timeout + {LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS}s "
                     f"({min_outer}s)"
                 )
+
+    elif section == "query_embedding_cache":
+        # Story #1107 S3: Query embedding cache runtime config validation.
+        _QEC_VALID_MODES = {"off", "shadow", "on"}
+
+        for mode_field in (
+            "query_embedding_cache_voyage_mode",
+            "query_embedding_cache_cohere_mode",
+        ):
+            mode_val = data.get(mode_field)
+            if mode_val is not None:
+                if str(mode_val) not in _QEC_VALID_MODES:
+                    return (
+                        f"{mode_field} must be one of: "
+                        f"{', '.join(sorted(_QEC_VALID_MODES))}"
+                    )
+
+        for rate_field in (
+            "query_embedding_cache_voyage_audit_sample_rate",
+            "query_embedding_cache_cohere_audit_sample_rate",
+        ):
+            rate_val = data.get(rate_field)
+            if rate_val is not None:
+                try:
+                    rate_float = float(rate_val)
+                except (ValueError, TypeError):
+                    return f"{rate_field} must be a valid float"
+                if rate_float < 0.0 or rate_float > 1.0:
+                    return f"{rate_field} must be between 0.0 and 1.0"
+
+        max_entries_val = data.get("query_embedding_cache_max_entries")
+        if max_entries_val is not None:
+            try:
+                max_entries_int = int(max_entries_val)
+            except (ValueError, TypeError):
+                return "query_embedding_cache_max_entries must be a valid integer"
+            if max_entries_int < 100:
+                return (
+                    "query_embedding_cache_max_entries must be at least 100 "
+                    "(the minimum safe cap)"
+                )
+
+        for anchor_field in (
+            "query_embedding_cache_voyage_anchor_tokens",
+            "query_embedding_cache_cohere_anchor_tokens",
+        ):
+            anchor_val = data.get(anchor_field)
+            # Empty string or None means "inherit global" — accepted as a valid reset.
+            if anchor_val is None or anchor_val == "":
+                continue
+            try:
+                anchor_int = int(anchor_val)
+            except (ValueError, TypeError):
+                return f"{anchor_field} must be a valid integer"
+            if anchor_int < 0:
+                return f"{anchor_field} must be >= 0"
 
     return None
 
@@ -10612,6 +10789,14 @@ async def trigger_manual_scan(
 
     logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: server_name={server_name}")
 
+    # Derive self-monitoring backend from registry (Bug #1140).
+    # Mirrors the lifespan.py wiring so manual scans write to PG in cluster
+    # mode instead of node-local SQLite.
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    _sm_backend = (
+        backend_registry.self_monitoring if backend_registry is not None else None
+    )
+
     # Create service instance with current configuration (Bug #87)
     logger.debug(
         "[SELF-MON-DEBUG] trigger_manual_scan: Creating SelfMonitoringService instance"
@@ -10627,6 +10812,7 @@ async def trigger_manual_scan(
         repo_root=str(repo_root) if repo_root else None,
         github_token=github_token,
         server_name=server_name,
+        storage_backend=_sm_backend,
     )
 
     # Trigger the scan

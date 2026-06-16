@@ -184,9 +184,15 @@ class _ScriptedClientFactory:
         self._transport = transport
 
     def create_sync_client(
-        self, *, transport: Optional[httpx.BaseTransport] = None, **kwargs: Any
+        self,
+        *,
+        transport: Optional[httpx.BaseTransport] = None,
+        pooled: bool = False,
+        **kwargs: Any,
     ) -> httpx.Client:
-        # Drop caller-supplied transport (latency wrapper) — we own the wire.
+        # Drop caller-supplied transport (latency wrapper) and pooled flag —
+        # we own the wire; pooled is a cidx-internal kwarg not accepted by
+        # httpx.Client (Story #1083 added pooled=True call sites in providers).
         return httpx.Client(transport=self._transport, **kwargs)
 
 

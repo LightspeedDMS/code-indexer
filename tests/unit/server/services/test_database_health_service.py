@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from code_indexer.server.services.database_health_service import (
+    DATABASE_DISPLAY_NAMES,
     DatabaseHealthResult,
     DatabaseHealthStatus,
     CheckResult,
@@ -461,4 +462,45 @@ class TestManagerPathChecks:
         assert len(instance_calls) >= 1, (
             "_check_integrity() must call DatabaseConnectionManager.get_instance() "
             "to obtain its connection"
+        )
+
+
+class TestQueryEmbeddingCacheDb:
+    """
+    Tests asserting that the query-embedding cache DB (Epic #1103) is
+    registered in the Database Health honeycomb as the 9th hexagon.
+    """
+
+    def test_query_embedding_cache_db_is_in_display_names(self) -> None:
+        """query_embedding_cache.db must be present in DATABASE_DISPLAY_NAMES."""
+        assert "query_embedding_cache.db" in DATABASE_DISPLAY_NAMES, (
+            "query_embedding_cache.db is missing from DATABASE_DISPLAY_NAMES; "
+            "add it so the dashboard honeycomb shows a 9th hexagon for the cache DB"
+        )
+
+    def test_query_embedding_cache_db_display_name(self) -> None:
+        """Display name for query_embedding_cache.db must be 'Embedding Cache'."""
+        assert (
+            DATABASE_DISPLAY_NAMES.get("query_embedding_cache.db") == "Embedding Cache"
+        ), (
+            f"Expected display name 'Embedding Cache', "
+            f"got {DATABASE_DISPLAY_NAMES.get('query_embedding_cache.db')!r}"
+        )
+
+    def test_query_embedding_cache_db_resolves_under_data_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        _resolve_db_path('query_embedding_cache.db') must resolve to
+        <server_dir>/data/query_embedding_cache.db, NOT to <server_dir>/query_embedding_cache.db.
+
+        The cache DB lives at ~/.cidx-server/data/query_embedding_cache.db
+        (same subdir as cidx_server.db and api_metrics.db).
+        """
+        service = DatabaseHealthService(server_dir=str(tmp_path))
+        resolved = service._resolve_db_path("query_embedding_cache.db")
+        expected = tmp_path / "data" / "query_embedding_cache.db"
+        assert resolved == expected, (
+            f"_resolve_db_path('query_embedding_cache.db') returned {resolved!r}; "
+            f"expected {expected!r} (must be in the data/ subdir, not server root)"
         )
