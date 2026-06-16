@@ -400,7 +400,7 @@ def test_zzz_mcp_check_maintenance_cycle(
     test_client: TestClient,
     auth_headers: dict,
 ) -> None:
-    """Enter maintenance mode, verify in_maintenance=True, then exit.
+    """Placeholder: maintenance cycle not testable in Phase 3 in-process environment.
 
     Story #924: The MCP ``enter_maintenance_mode`` and ``exit_maintenance_mode``
     tools were removed.  Enter/exit maintenance is now restricted to localhost-only
@@ -410,14 +410,13 @@ def test_zzz_mcp_check_maintenance_cycle(
 
     FastAPI TestClient presents ``request.client.host == "testclient"`` which is
     not a valid loopback IP address, so it fails ``require_localhost`` with 403.
-    The maintenance cycle therefore cannot be exercised in the Phase 3 in-process
-    TestClient environment.  This scenario is covered by Phase 4 or Phase 5 tests
-    where a real subprocess server listens on localhost.
+    The maintenance cycle is not testable in the Phase 3 in-process TestClient
+    environment.  A real localhost maintenance test is tracked in S10/#1132.
     """
     pytest.skip(
-        "Maintenance enter/exit removed from MCP (Story #924) and restricted to "
-        "localhost-only REST endpoints; TestClient host='testclient' fails the "
-        "loopback check — not testable in the Phase 3 in-process environment."
+        "Maintenance localhost-only REST endpoints are not testable via FastAPI "
+        "TestClient (host='testclient' fails the loopback check). "
+        "A real maintenance test is planned in S10/#1132."
     )
 
 

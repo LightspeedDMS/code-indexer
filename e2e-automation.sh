@@ -202,32 +202,62 @@ copy_seed_repo() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: wait for server readiness by polling GET /health
+# Helper: wait for server readiness by probing /health AND /auth/login.
+#
+# Story #1123 AC2: a server that responds on /health but cannot authenticate
+# (persistent 503 on auth, broken startup) MUST fail readiness.
+# Readiness requires BOTH:
+#   1. GET /health returns HTTP < 500
+#   2. POST /auth/login (JSON body) returns HTTP 200 with an access_token
 # ---------------------------------------------------------------------------
 wait_for_server() {
-    local url="http://${E2E_SERVER_HOST}:${E2E_SERVER_PORT}/health"
+    local health_url="http://${E2E_SERVER_HOST}:${E2E_SERVER_PORT}/health"
+    local login_url="http://${E2E_SERVER_HOST}:${E2E_SERVER_PORT}/auth/login"
     local elapsed=0
 
-    _yellow "  Waiting for server at $url (timeout ${E2E_SERVER_READINESS_TIMEOUT}s)..."
+    _yellow "  Waiting for server at $health_url (timeout ${E2E_SERVER_READINESS_TIMEOUT}s)..."
+    _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
     while [[ $elapsed -lt $E2E_SERVER_READINESS_TIMEOUT ]]; do
-        local code
-        code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
-        # Any non-5xx HTTP response (including 401) means the server is bound
-        # and accepting connections. 000 = curl failed to connect.
-        if [[ "$code" != "000" ]] && [[ "$code" -ge 100 ]] && [[ "$code" -lt 500 ]]; then
-            _green "  Server ready after ${elapsed}s (HTTP $code)"
+        # Step 1: health check
+        local health_code
+        health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
+        if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
+            sleep "$E2E_SERVER_READINESS_POLL"
+            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
+            continue
+        fi
+
+        # Step 2: authenticated login probe (JSON body per CLAUDE.md E2E gotchas)
+        local login_response
+        login_response=$(curl -s -w "\n%{http_code}" \
+            -X POST "$login_url" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"${E2E_ADMIN_USER}\",\"password\":\"${E2E_ADMIN_PASS}\"}" \
+            2>/dev/null || echo -e "\n000")
+        local login_code
+        login_code=$(echo "$login_response" | tail -n1)
+        local login_body
+        login_body=$(echo "$login_response" | head -n-1)
+
+        if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
+            _green "  Server ready after ${elapsed}s (health=$health_code, auth=200+token)"
             return 0
         fi
+
+        logger_hint="health=$health_code auth=$login_code"
+        _yellow "    Not ready yet (${logger_hint}) — retrying..."
         sleep "$E2E_SERVER_READINESS_POLL"
         elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
     done
 
     _red "ERROR: Server did not become ready within ${E2E_SERVER_READINESS_TIMEOUT}s"
+    _red "       (Required: /health non-5xx AND /auth/login returns 200+token)"
     return 1
 }
 
 # ---------------------------------------------------------------------------
-# Helper: run pytest for a phase directory; returns pytest exit code
+# Helper: run pytest for a phase directory; returns pytest exit code.
+# Accumulates skip lines into SKIP_LINES for the end-of-run SKIP SUMMARY.
 # ---------------------------------------------------------------------------
 run_phase() {
     local phase_num="$1"
@@ -240,6 +270,11 @@ run_phase() {
         _yellow "  Directory $test_dir does not exist — skipping phase $phase_num"
         return 0
     fi
+
+    # Capture pytest output to a temp file so we can extract skip lines
+    # while still streaming to stdout (-v --tb=short for normal visibility).
+    local phase_output_file
+    phase_output_file=$(mktemp)
 
     local pytest_exit=0
     PYTHONPATH="$SCRIPT_DIR/src" \
@@ -258,7 +293,20 @@ run_phase() {
     E2E_FAULT_SERVER_HOST="$E2E_FAULT_SERVER_HOST" \
     E2E_FAULT_SERVER_DATA_DIR="$E2E_FAULT_SERVER_DATA_DIR" \
     E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT="$E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT" \
-        python3 -m pytest "$SCRIPT_DIR/$test_dir" -v --tb=short || pytest_exit=$?
+        python3 -m pytest "$SCRIPT_DIR/$test_dir" -v --tb=short -rs 2>&1 \
+        | tee "$phase_output_file" \
+        || pytest_exit=$?
+
+    # Collect skip lines (lines starting with "SKIPPED" in -rs short-test-summary
+    # output, or "SKIP" marker lines) into the global SKIP_LINES accumulator.
+    while IFS= read -r line; do
+        case "$line" in
+            SKIPPED*|"  SKIPPED"*|"SKIP "*|"s "*)
+                SKIP_LINES+=("Phase $phase_num ($phase_name): $line")
+                ;;
+        esac
+    done < "$phase_output_file"
+    rm -f "$phase_output_file"
 
     if [[ $pytest_exit -eq 5 ]]; then
         _yellow "  No tests collected in $test_dir — treating as success (exit 5)"
@@ -343,25 +391,52 @@ start_fault_server() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: wait for fault server readiness by polling GET /health
+# Helper: wait for fault server readiness by probing /health AND /auth/login.
+#
+# Story #1123 AC2 consistency: same hardening as wait_for_server so Phase 5
+# also requires a functional authenticated endpoint, not just /health non-5xx.
 # ---------------------------------------------------------------------------
 wait_for_fault_server() {
-    local url="http://${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}/health"
+    local health_url="http://${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}/health"
+    local login_url="http://${E2E_FAULT_SERVER_HOST}:${E2E_FAULT_SERVER_PORT}/auth/login"
     local elapsed=0
 
-    _yellow "  Waiting for fault server at $url (timeout ${E2E_FAULT_SERVER_READINESS_TIMEOUT}s)..."
+    _yellow "  Waiting for fault server at $health_url (timeout ${E2E_FAULT_SERVER_READINESS_TIMEOUT}s)..."
+    _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
     while [[ $elapsed -lt $E2E_FAULT_SERVER_READINESS_TIMEOUT ]]; do
-        local code
-        code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
-        if [[ "$code" != "000" ]] && [[ "$code" -ge 100 ]] && [[ "$code" -lt 500 ]]; then
-            _green "  Fault server ready after ${elapsed}s (HTTP $code)"
+        # Step 1: health check
+        local health_code
+        health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
+        if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
+            sleep "$E2E_SERVER_READINESS_POLL"
+            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
+            continue
+        fi
+
+        # Step 2: authenticated login probe (JSON body per CLAUDE.md E2E gotchas)
+        local login_response
+        login_response=$(curl -s -w "\n%{http_code}" \
+            -X POST "$login_url" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"${E2E_ADMIN_USER}\",\"password\":\"${E2E_ADMIN_PASS}\"}" \
+            2>/dev/null || echo -e "\n000")
+        local login_code
+        login_code=$(echo "$login_response" | tail -n1)
+        local login_body
+        login_body=$(echo "$login_response" | head -n-1)
+
+        if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
+            _green "  Fault server ready after ${elapsed}s (health=$health_code, auth=200+token)"
             return 0
         fi
+
+        _yellow "    Not ready yet (health=$health_code auth=$login_code) — retrying..."
         sleep "$E2E_SERVER_READINESS_POLL"
         elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
     done
 
     _red "ERROR: Fault server did not become ready within ${E2E_FAULT_SERVER_READINESS_TIMEOUT}s"
+    _red "       (Required: /health non-5xx AND /auth/login returns 200+token)"
     _red "       Check log: $E2E_FAULT_SERVER_DATA_DIR/server.log"
     return 1
 }
@@ -378,8 +453,10 @@ PHASE_DEFS=(
 )
 
 # ---------------------------------------------------------------------------
-# Main
+# Main — guarded so the script is SOURCE-SAFE: sourcing only defines functions
+# (lets tests source wait_for_server); the suite runs only on direct execution.
 # ---------------------------------------------------------------------------
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 _bold "======================================"
 _bold " CIDX E2E Automation Suite"
 _bold "======================================"
@@ -414,6 +491,8 @@ echo ""
 
 # Run phases
 OVERALL_EXIT=0
+# Accumulator for skip lines from all phases (populated by run_phase)
+SKIP_LINES=()
 
 for phase_def in "${PHASE_DEFS[@]}"; do
     IFS='|' read -r phase_num phase_label phase_dir <<< "$phase_def"
@@ -466,7 +545,32 @@ for phase_def in "${PHASE_DEFS[@]}"; do
     echo ""
 done
 
-# Summary
+# ---------------------------------------------------------------------------
+# SKIP SUMMARY — Story #1123 AC1
+# Emit a consolidated, loud summary of every test skipped across all phases
+# and the reason for the skip.  No skipped coverage may be silently presented
+# as passing.  This section appears BEFORE the final PASS/FAIL banner so it
+# is impossible to miss.
+# ---------------------------------------------------------------------------
+echo ""
+_bold "======================================"
+_bold " SKIP SUMMARY"
+_bold "======================================"
+if [[ ${#SKIP_LINES[@]} -eq 0 ]]; then
+    _green " No tests were skipped."
+else
+    _yellow " ${#SKIP_LINES[@]} skip(s) detected across all phases:"
+    echo ""
+    for skip_line in "${SKIP_LINES[@]}"; do
+        _yellow "  SKIP: $skip_line"
+    done
+    echo ""
+    _yellow " Review the skips above to ensure no required coverage was silently omitted."
+    _yellow " To hard-fail on any skip in CI, set: CIDX_E2E_REQUIRE_ALL=true"
+fi
+_bold "======================================"
+
+# Final summary
 echo ""
 _bold "======================================"
 if [[ $OVERALL_EXIT -eq 0 ]]; then
@@ -477,3 +581,4 @@ fi
 _bold "======================================"
 
 exit $OVERALL_EXIT
+fi
