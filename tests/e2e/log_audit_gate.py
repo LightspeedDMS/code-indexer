@@ -256,6 +256,16 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # Anchored on the "cidx-meta-global" repository name, so a genuine duplicate-refresh
     # collision on a REAL repo (its own alias) would NOT be suppressed.
     "already running for repository 'cidx-meta-global'",
+    # Story #1135 (test_15_gitwrite_globalalias_1135.py) AC1: the git-write round-trip
+    # fires a REAL git_commit on the admin's activated markupsafe workspace.  git_commit's
+    # _resolve_commit_identity (git_write.py:193-220) looks up a PAT credential for the
+    # remote to set the committer identity; in the E2E environment no PAT is configured,
+    # so it logs this EXPLICITLY non-blocking WARNING and falls back to the default
+    # author/committer identity (git_write.py:199-200).  Benign: the commit still
+    # succeeds and AC1 asserts the committed content round-trips byte-exact via
+    # git_file_at_revision.  The anchor is specific to this fallback-identity message;
+    # a genuine credential or auth failure surfaces with a different error shape.
+    "PAT credential lookup returned error (non-blocking, using fallback identity)",
 ]
 
 
