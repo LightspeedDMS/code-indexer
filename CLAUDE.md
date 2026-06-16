@@ -268,7 +268,7 @@ Persistent storage of reusable Rust evaluator patterns in cidx-meta under `xray-
 **Essential invariants** -- NEVER refactor these:
 - Three error codes exactly: `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401).
 - Kill switch returns HTTP **503 NOT 403**.
-- Recovery codes (10, bcrypt-hashed) grant narrow `scope=totp_repair` only -- never full-scope.
+- Recovery codes (10, HMAC-SHA256-hashed) grant narrow `scope=totp_repair` only -- never full-scope.
 - TOTP replay prevention via atomic CAS on `last_used_otp_counter`.
 
 -> Full reference: `docs/totp-elevation.md`
