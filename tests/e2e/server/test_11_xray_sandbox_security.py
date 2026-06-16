@@ -38,7 +38,6 @@ Log-audit gate:
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -50,6 +49,7 @@ from tests.e2e.helpers import require_xray_cli
 from tests.e2e.server.mcp_helpers import (
     HTTP_OK,
     call_mcp_tool,
+    parse_mcp_result as _parse_result,
 )
 
 # ---------------------------------------------------------------------------
@@ -106,38 +106,6 @@ _VALID_PATTERN_YAML: str = (
 
 # Lazy-load subprocess check: path to src directory
 _SRC_ROOT: str = str(Path(__file__).resolve().parent.parent.parent.parent / "src")
-
-
-# ---------------------------------------------------------------------------
-# Shared helper
-# ---------------------------------------------------------------------------
-
-
-def _parse_result(resp_body: dict[str, Any]) -> dict[str, Any]:
-    """Extract the tool result dict from a JSON-RPC 2.0 response body.
-
-    Handles both observed MCP response shapes:
-      Shape A: {"result": {"content": [{"type": "text", "text": "<json>"}]}}
-      Shape B: {"result": [{"type": "text", "text": "<json>"}]}
-
-    Returns the first successfully decoded dict, or an empty dict if none found.
-    """
-    result = resp_body.get("result", [])
-    if isinstance(result, dict):
-        items = result.get("content", [])
-    elif isinstance(result, list):
-        items = result
-    else:
-        items = []
-    for item in items:
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            try:
-                decoded = json.loads(item["text"])
-                if isinstance(decoded, dict):
-                    return decoded
-            except json.JSONDecodeError:
-                continue
-    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +538,7 @@ class TestAC3RunawayEvaluatorKilled:
         )
 
         # Server must remain alive after the runaway attempt
-        health_resp = client.get("/health")
+        health_resp = client.get("/health", headers=auth_headers)
         assert health_resp.status_code == HTTP_OK, (
             f"/health returned HTTP {health_resp.status_code} after runaway evaluator: "
             f"{health_resp.text[:200]}"

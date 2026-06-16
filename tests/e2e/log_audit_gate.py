@@ -199,6 +199,20 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # Safe: detection is proven by the test's own assertion (Step 7); the log gate does not
     # double-assert it.  Only appears during Phase 5 fault-injection runs with 429 error_codes.
     "AIMD multiplicative decrease",
+    # Story #1129 (test_12_xray_functional_1129.py): store_xray_pattern and the
+    # seed-pattern bootstrap (ensure_seed_patterns) call XrayPatternService._git_commit,
+    # which runs `git add` / `git commit` inside cidx-meta.  In the in-process Phase-3
+    # harness cidx-meta lives in an ephemeral data dir that is NOT a git-backed workspace,
+    # so the commit fails with exit status 128.  _git_commit catches the CalledProcessError,
+    # logs this WARNING (deferred-failure pattern), and RETURNS — the pattern YAML is still
+    # written to disk and the tool returns {"success": true}.  Benign: only the cidx-meta
+    # backup-git side effect fails; pattern storage, resolution, const injection, and search
+    # are all correct (proven by the AC1/AC3/mutation assertions in test_12).  The exact
+    # prefix "xray_pattern_service: git commit failed" is specific to this backup path; a
+    # genuine pattern-storage error surfaces as a distinct error_code in the tool response,
+    # not this WARNING.  Mirrors the existing cidx-meta-in-test entries above
+    # ([REPO-MIGRATE-004], [CACHE-GENERAL-016], "git_pull file not found").
+    "xray_pattern_service: git commit failed",
 ]
 
 
