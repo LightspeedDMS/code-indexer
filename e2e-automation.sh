@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # e2e-automation.sh — CIDX Comprehensive E2E Test Suite Orchestrator
 #
-# Runs all 5 E2E phases sequentially:
+# Runs all 6 E2E phases sequentially:
 #   Phase 1: CLI standalone  (tests/e2e/cli_standalone/)
 #   Phase 2: CLI daemon      (tests/e2e/cli_daemon/)
 #   Phase 3: Server in-proc  (tests/e2e/server/) via FastAPI TestClient
 #   Phase 4: CLI remote      (tests/e2e/cli_remote/) against live uvicorn subprocess
 #   Phase 5: Resiliency      (tests/e2e/phase5_resiliency/) against fault-injection server
+#   Phase 6: PG Parity       (tests/e2e/pg_parity/) against ephemeral PostgreSQL cluster
+#
+# Phase 6 requires PostgreSQL server utilities (initdb, pg_ctl) to be installed.
+# If they are absent the phase is LOUD-SKIPPED with a clear message.
+# In CI, install postgresql-server (or equivalent) as a prerequisite.
 #
 # Usage:
 #   ./e2e-automation.sh             # Run all phases
-#   ./e2e-automation.sh --phase 1   # Run single phase (1-5)
+#   ./e2e-automation.sh --phase 1   # Run single phase (1-6)
 #
 # Configuration:
 #   Copy .e2e-automation.template to .e2e-automation and fill in values.
@@ -61,6 +66,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Longer than single-provider Phase 4 timeout because Cohere reranking adds latency.
 : "${E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT:=300}"
 
+# Phase 6 PostgreSQL parity server defaults (separate port/data dirs from Phases 4 & 5)
+# E2E_PG_DATA: directory for the ephemeral PostgreSQL cluster (data dir + UNIX socket)
+# E2E_PG_SERVER_DATA_DIR: CIDX server data dir for the Phase 6 uvicorn instance
+: "${E2E_PG_SERVER_PORT:=8901}"
+: "${E2E_PG_SERVER_HOST:=127.0.0.1}"
+: "${E2E_PG_SERVER_DATA_DIR:=$HOME/.tmp/cidx-e2e-pg-server-data}"
+: "${E2E_PG_DATA:=$HOME/.tmp/cidx-e2e-pg-cluster}"
+: "${E2E_PG_DB_NAME:=cidx_e2e}"
+: "${E2E_PG_SERVER_READINESS_TIMEOUT:=60}"
+
 # ---------------------------------------------------------------------------
 # Source .e2e-automation if present (provides credentials and optional overrides)
 # ---------------------------------------------------------------------------
@@ -102,23 +117,23 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --phase)
             if [[ $# -lt 2 ]]; then
-                echo "ERROR: --phase requires a value (1, 2, 3, 4, or 5)" >&2
+                echo "ERROR: --phase requires a value (1, 2, 3, 4, 5, or 6)" >&2
                 exit 1
             fi
             ONLY_PHASE="$2"
-            if [[ ! "$ONLY_PHASE" =~ ^[1-5]$ ]]; then
-                echo "ERROR: --phase value must be 1, 2, 3, 4, or 5 (got: '$ONLY_PHASE')" >&2
+            if [[ ! "$ONLY_PHASE" =~ ^[1-6]$ ]]; then
+                echo "ERROR: --phase value must be 1, 2, 3, 4, 5, or 6 (got: '$ONLY_PHASE')" >&2
                 exit 1
             fi
             shift 2
             ;;
         --help|-h)
-            sed -n '2,28p' "$0" | sed 's/^# *//'
+            sed -n '2,30p' "$0" | sed 's/^# *//'
             exit 0
             ;;
         *)
             echo "ERROR: Unknown argument: $1" >&2
-            echo "Usage: $0 [--phase 1|2|3|4|5] [--help]" >&2
+            echo "Usage: $0 [--phase 1|2|3|4|5|6] [--help]" >&2
             exit 1
             ;;
     esac
@@ -133,10 +148,12 @@ _yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
 _bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
 # ---------------------------------------------------------------------------
-# Server subprocess state (Phase 4 + Phase 5 use separate PIDs)
+# Server subprocess state (Phase 4, Phase 5, and Phase 6 use separate PIDs)
 # ---------------------------------------------------------------------------
 SERVER_PID=""
 FAULT_SERVER_PID=""
+PG_SERVER_PID=""       # Phase 6 uvicorn (PG-backed)
+PG_CLUSTER_STARTED=""  # Set to "yes" when pg_ctl cluster is running
 
 cleanup_all_servers() {
     # Stop Phase 4 server if running
@@ -152,6 +169,24 @@ cleanup_all_servers() {
         kill "$FAULT_SERVER_PID" 2>/dev/null || true
         wait "$FAULT_SERVER_PID" 2>/dev/null || true
         FAULT_SERVER_PID=""
+    fi
+    # Stop Phase 6 PG-backed uvicorn if running
+    if [[ -n "${PG_SERVER_PID:-}" ]]; then
+        _yellow "Stopping Phase 6 PG server subprocess (PID $PG_SERVER_PID)..."
+        kill "$PG_SERVER_PID" 2>/dev/null || true
+        wait "$PG_SERVER_PID" 2>/dev/null || true
+        PG_SERVER_PID=""
+    fi
+    # Stop Phase 6 ephemeral PostgreSQL cluster if running
+    if [[ "${PG_CLUSTER_STARTED:-}" == "yes" ]] && [[ -d "${E2E_PG_DATA:-}" ]]; then
+        _yellow "Stopping ephemeral PostgreSQL cluster at $E2E_PG_DATA..."
+        pg_ctl -D "$E2E_PG_DATA/pgdata" -m immediate stop 2>/dev/null || true
+        PG_CLUSTER_STARTED=""
+    fi
+    # Wipe Phase 6 ephemeral PG data dir (eliminate leaked cluster data)
+    if [[ -d "${E2E_PG_DATA:-}" ]]; then
+        _yellow "Wiping ephemeral PG data dir: $E2E_PG_DATA"
+        rm -rf "$E2E_PG_DATA"
     fi
 }
 
@@ -442,6 +477,155 @@ wait_for_fault_server() {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: provision an ephemeral PostgreSQL cluster over a UNIX socket.
+#
+# Uses initdb + pg_ctl -w.  The cluster listens ONLY on a UNIX socket inside
+# $E2E_PG_DATA (-k "$E2E_PG_DATA" -h '') to eliminate TCP port races.
+# Creates the $E2E_PG_DB_NAME database and configures trust auth.
+# Sets PG_CLUSTER_STARTED="yes" so the EXIT trap can stop it.
+# ---------------------------------------------------------------------------
+provision_pg_cluster() {
+    _yellow "  Provisioning ephemeral PostgreSQL cluster at $E2E_PG_DATA..."
+
+    # E2E_PGDATA is the actual PostgreSQL data directory — a SUBDIR of the
+    # container ($E2E_PG_DATA).  The container holds logs and the UNIX socket.
+    # Keeping logs OUTSIDE the data dir is mandatory: writing initdb.log into
+    # the target directory before initdb runs makes initdb see a non-empty
+    # directory and fail with "directory ... exists but is not empty".
+    local E2E_PGDATA="$E2E_PG_DATA/pgdata"
+
+    # Wipe any leftover data dir from a previous failed run
+    rm -rf "$E2E_PG_DATA"
+    mkdir -p "$E2E_PG_DATA"
+    # pgdata subdir must NOT be pre-created — initdb creates it itself
+
+    # initdb: create a fresh cluster (log in container, data in subdir)
+    if ! initdb -D "$E2E_PGDATA" --auth=trust --no-locale -E UTF8 \
+            > "$E2E_PG_DATA/initdb.log" 2>&1; then
+        _red "ERROR: initdb failed. Log: $E2E_PG_DATA/initdb.log"
+        return 1
+    fi
+    _yellow "  initdb OK"
+
+    # Configure trust auth for local socket connections only (no TCP)
+    cat > "$E2E_PGDATA/pg_hba.conf" <<HBA_EOF
+# TYPE  DATABASE  USER  ADDRESS  METHOD
+local   all       all            trust
+host    all       all  127.0.0.1/32  reject
+host    all       all  ::1/128       reject
+HBA_EOF
+
+    # Start the cluster: UNIX socket only (-k = socket dir in container, -h '' = no TCP)
+    if ! pg_ctl -D "$E2E_PGDATA" -w \
+            -o "-k '$E2E_PG_DATA' -h ''" \
+            -l "$E2E_PG_DATA/postgres.log" start; then
+        _red "ERROR: pg_ctl start failed. Log: $E2E_PG_DATA/postgres.log"
+        return 1
+    fi
+    PG_CLUSTER_STARTED="yes"
+    _yellow "  PostgreSQL cluster started (UNIX socket only)"
+
+    # Create the cidx_e2e database
+    local pg_dsn_base="postgresql:///postgres?host=$E2E_PG_DATA"
+    if ! python3 -c "
+import psycopg, sys
+conn = psycopg.connect('$pg_dsn_base', autocommit=True)
+conn.execute('CREATE DATABASE $E2E_PG_DB_NAME')
+conn.close()
+print('Database $E2E_PG_DB_NAME created')
+" 2>&1; then
+        _red "ERROR: Failed to create database $E2E_PG_DB_NAME"
+        return 1
+    fi
+    _green "  Database $E2E_PG_DB_NAME created OK"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: write Phase 6 bootstrap config.json with storage_mode=postgres
+# ---------------------------------------------------------------------------
+write_pg_bootstrap_config() {
+    local pg_dsn="postgresql:///${E2E_PG_DB_NAME}?host=${E2E_PG_DATA}"
+    mkdir -p "$E2E_PG_SERVER_DATA_DIR"
+    cat > "$E2E_PG_SERVER_DATA_DIR/config.json" <<CONFIG_EOF
+{
+  "server_dir": "$E2E_PG_SERVER_DATA_DIR",
+  "host": "$E2E_PG_SERVER_HOST",
+  "port": $E2E_PG_SERVER_PORT,
+  "storage_mode": "postgres",
+  "postgres_dsn": "$pg_dsn"
+}
+CONFIG_EOF
+    _yellow "  Wrote PG bootstrap config.json to $E2E_PG_SERVER_DATA_DIR/config.json"
+    _yellow "  DSN: $pg_dsn"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: start Phase 6 PG-backed uvicorn subprocess
+# ---------------------------------------------------------------------------
+start_pg_server() {
+    _yellow "  Starting PG-backed uvicorn on ${E2E_PG_SERVER_HOST}:${E2E_PG_SERVER_PORT}..."
+    PYTHONPATH="$SCRIPT_DIR/src" \
+    CIDX_SERVER_DATA_DIR="$E2E_PG_SERVER_DATA_DIR" \
+    VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
+        python3 -m uvicorn code_indexer.server.app:app \
+            --host "$E2E_PG_SERVER_HOST" \
+            --port "$E2E_PG_SERVER_PORT" \
+            --log-level warning \
+            --workers 1 > "$E2E_PG_SERVER_DATA_DIR/server.log" 2>&1 &
+    PG_SERVER_PID=$!
+    _yellow "  PG server PID: $PG_SERVER_PID"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: wait for Phase 6 PG-backed server readiness (same hardening as
+# wait_for_server: /health non-5xx AND /auth/login returns 200+token).
+# ---------------------------------------------------------------------------
+wait_for_pg_server() {
+    local health_url="http://${E2E_PG_SERVER_HOST}:${E2E_PG_SERVER_PORT}/health"
+    local login_url="http://${E2E_PG_SERVER_HOST}:${E2E_PG_SERVER_PORT}/auth/login"
+    local elapsed=0
+
+    _yellow "  Waiting for PG server at $health_url (timeout ${E2E_PG_SERVER_READINESS_TIMEOUT}s)..."
+    _yellow "  Readiness requires: /health non-5xx AND /auth/login returns 200+token"
+    while [[ $elapsed -lt $E2E_PG_SERVER_READINESS_TIMEOUT ]]; do
+        # Step 1: health check
+        local health_code
+        health_code=$(curl -s -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null || echo "000")
+        if [[ "$health_code" == "000" ]] || [[ "$health_code" -ge 500 ]]; then
+            sleep "$E2E_SERVER_READINESS_POLL"
+            elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
+            continue
+        fi
+
+        # Step 2: authenticated login probe (JSON body per CLAUDE.md E2E gotchas)
+        local login_response
+        login_response=$(curl -s -w "\n%{http_code}" \
+            -X POST "$login_url" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"${E2E_ADMIN_USER}\",\"password\":\"${E2E_ADMIN_PASS}\"}" \
+            2>/dev/null || echo -e "\n000")
+        local login_code
+        login_code=$(echo "$login_response" | tail -n1)
+        local login_body
+        login_body=$(echo "$login_response" | head -n-1)
+
+        if [[ "$login_code" == "200" ]] && echo "$login_body" | grep -q "access_token"; then
+            _green "  PG server ready after ${elapsed}s (health=$health_code, auth=200+token)"
+            return 0
+        fi
+
+        _yellow "    Not ready yet (health=$health_code auth=$login_code) — retrying..."
+        sleep "$E2E_SERVER_READINESS_POLL"
+        elapsed=$((elapsed + E2E_SERVER_READINESS_POLL))
+    done
+
+    _red "ERROR: PG server did not become ready within ${E2E_PG_SERVER_READINESS_TIMEOUT}s"
+    _red "       (Required: /health non-5xx AND /auth/login returns 200+token)"
+    _red "       Check log: $E2E_PG_SERVER_DATA_DIR/server.log"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Phase definitions: "<num>|<label>|<test_dir>"
 # ---------------------------------------------------------------------------
 PHASE_DEFS=(
@@ -450,6 +634,7 @@ PHASE_DEFS=(
     "3|Server In-Process (TestClient)|tests/e2e/server"
     "4|CLI Remote (live server)|tests/e2e/cli_remote"
     "5|Resiliency|tests/e2e/phase5_resiliency"
+    "6|PostgreSQL Parity|tests/e2e/pg_parity"
 )
 
 # ---------------------------------------------------------------------------
@@ -536,6 +721,71 @@ for phase_def in "${PHASE_DEFS[@]}"; do
 
         cleanup_all_servers
         handle_phase_result "$phase_num" "$phase5_exit"
+    elif [[ "$phase_num" == "6" ]]; then
+        # Phase 6: PostgreSQL parity — requires initdb/pg_ctl (PostgreSQL server utilities).
+        # LOUD-SKIP the whole phase if they are absent; in CI install postgresql-server first.
+        _bold "=== Phase 6: $phase_label ==="
+        if ! command -v initdb > /dev/null 2>&1 || ! command -v pg_ctl > /dev/null 2>&1; then
+            _yellow "  SKIP: Phase 6 (PostgreSQL Parity) — initdb/pg_ctl not found on PATH."
+            _yellow "        Install postgresql-server to enable this phase."
+            _yellow "        In CI, add 'apt-get install postgresql' (or equivalent) as a prerequisite."
+            SKIP_LINES+=("Phase 6 ($phase_label): SKIPPED — initdb/pg_ctl not on PATH (install postgresql-server)")
+            continue
+        fi
+
+        _yellow "  Wiping PG server data dir: $E2E_PG_SERVER_DATA_DIR"
+        rm -rf "$E2E_PG_SERVER_DATA_DIR"
+        mkdir -p "$E2E_PG_SERVER_DATA_DIR"
+
+        phase6_exit=0
+        # Provision ephemeral PG cluster (initdb + pg_ctl + createdb)
+        if ! provision_pg_cluster; then
+            _red "Phase 6 FAILED — could not provision PostgreSQL cluster"
+            _red "       Check: $E2E_PG_DATA/initdb.log or $E2E_PG_DATA/postgres.log"
+            phase6_exit=1
+        else
+            # Write PG-pointed config.json and start uvicorn
+            write_pg_bootstrap_config
+            start_pg_server
+
+            if ! wait_for_pg_server; then
+                _red "Phase 6 FAILED — PG-backed server did not start"
+                _red "       Check log: $E2E_PG_SERVER_DATA_DIR/server.log"
+                phase6_exit=1
+            else
+                # Run the Phase 6 tests with the PG server env vars passed through
+                PYTHONPATH="$SCRIPT_DIR/src" \
+                E2E_PG_SERVER_HOST="$E2E_PG_SERVER_HOST" \
+                E2E_PG_SERVER_PORT="$E2E_PG_SERVER_PORT" \
+                E2E_ADMIN_USER="$E2E_ADMIN_USER" \
+                E2E_ADMIN_PASS="$E2E_ADMIN_PASS" \
+                E2E_SEED_CACHE_DIR="$E2E_SEED_CACHE_DIR" \
+                E2E_GOLDEN_REPO_JOB_TIMEOUT="${E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT}" \
+                VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
+                E2E_VOYAGE_API_KEY="${E2E_VOYAGE_API_KEY:-${VOYAGE_API_KEY:-}}" \
+                    python3 -m pytest "$SCRIPT_DIR/$phase_dir" -v --tb=short -rs 2>&1 \
+                    | tee /tmp/cidx-phase6-output.tmp \
+                    || phase6_exit=$?
+
+                # Accumulate skip lines
+                while IFS= read -r line; do
+                    case "$line" in
+                        SKIPPED*|"  SKIPPED"*|"SKIP "*|"s "*)
+                            SKIP_LINES+=("Phase 6 ($phase_label): $line")
+                            ;;
+                    esac
+                done < /tmp/cidx-phase6-output.tmp
+                rm -f /tmp/cidx-phase6-output.tmp
+
+                if [[ $phase6_exit -eq 5 ]]; then
+                    _yellow "  No tests collected in $phase_dir — treating as success (exit 5)"
+                    phase6_exit=0
+                fi
+            fi
+        fi
+
+        cleanup_all_servers
+        handle_phase_result "$phase_num" "$phase6_exit"
     else
         phase_exit=0
         run_phase "$phase_num" "$phase_label" "$phase_dir" || phase_exit=$?

@@ -32,7 +32,7 @@ The following are explicitly excluded from this E2E suite:
 
 ## Architecture
 
-The suite is organized into 5 phases that mirror increasing integration depth:
+The suite is organized into 6 phases that mirror increasing integration depth:
 
 ```
 tests/e2e/
@@ -44,6 +44,7 @@ tests/e2e/
     server/                    # Phase 3: server via FastAPI TestClient
     cli_remote/                # Phase 4: CLI against live uvicorn subprocess
     phase5_resiliency/         # Phase 5: fault-injection resiliency tests
+    pg_parity/                 # Phase 6: PostgreSQL/cluster parity (ephemeral initdb)
 ```
 
 ### Phase descriptions
@@ -58,9 +59,11 @@ tests/e2e/
 
 **Phase 5 — Resiliency** (`phase5_resiliency/`): Starts a real uvicorn subprocess with fault injection enabled (both VoyageAI and Cohere providers), exercises provider failure scenarios, and verifies the server recovers correctly. Requires both `E2E_VOYAGE_API_KEY` and `CO_API_KEY`.
 
+**Phase 6 — PostgreSQL Parity** (`pg_parity/`): Provisions an ephemeral PostgreSQL cluster via `initdb` + `pg_ctl` over a UNIX socket, points a fresh `config.json` at it (`storage_mode=postgres`, psycopg v3), and runs the server functional subset (login, golden add, activate, query, refresh, deactivate, delete) against a live PG-backed uvicorn. The server boot proves migrations apply (fail-fast). LOUD-skips if `initdb`/`pg_ctl` is absent. Requires `VOYAGE_API_KEY`.
+
 ### Orchestration script
 
-`e2e-automation.sh` at the repository root runs all 5 phases sequentially:
+`e2e-automation.sh` at the repository root runs all 6 phases sequentially:
 
 1. Clones seed repositories to a persistent cache (`~/.tmp/cidx-e2e-seed-repos/`)
 2. Copies fresh working copies for this run (`~/.tmp/cidx-e2e-work/`)
