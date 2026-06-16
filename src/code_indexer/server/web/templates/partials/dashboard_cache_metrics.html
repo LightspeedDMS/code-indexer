@@ -61,6 +61,11 @@
         </div>
         <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Median similarity between the cached and a freshly-computed embedding (1.0 = identical) &mdash; how accurate a cache hit would be</small></footer>
     </article>
+    <article class="stat-card">
+        <header><h3>Over-Cap Queries <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.long_key if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Queries skipped (not cached) because the normalized-query part exceeded the 256-character key cap &mdash; each counts as a cache miss</small></footer>
+    </article>
     {% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
     <article class="stat-card">
         <header><h3>Audit Samples</h3></header>

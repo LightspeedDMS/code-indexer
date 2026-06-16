@@ -844,6 +844,7 @@ def dashboard_cache_metrics_partial(request: Request):
     audit_total = 0
     audit_top1_matches = 0
     audit_overlap_avg = None
+    long_key = 0
 
     if _metrics is not None:
         try:
@@ -858,6 +859,8 @@ def dashboard_cache_metrics_partial(request: Request):
             audit_total = snap.get("audit_total", 0) or 0
             audit_top1_matches = snap.get("audit_top1_matches", 0) or 0
             audit_overlap_avg = snap.get("audit_overlap_avg")
+            # Story #1149: long_key counter (queries skipped due to >256-char cap).
+            long_key = snap.get("long_key", 0) or 0
         except Exception as _exc:
             logger.warning(
                 "dashboard_cache_metrics_partial: snapshot() failed: %s", _exc
@@ -873,6 +876,7 @@ def dashboard_cache_metrics_partial(request: Request):
         audit_total=audit_total,
         audit_top1_matches=audit_top1_matches,
         audit_overlap_avg=audit_overlap_avg,
+        long_key=long_key,
     )
 
     # Resolve the current node identifier for the volatile-metrics footer label.
@@ -917,6 +921,56 @@ def dashboard_langfuse_partial(request: Request):
             "langfuse": langfuse_data,
         },
     )
+
+
+@web_router.get("/admin/cache-sample")
+def admin_cache_sample(
+    request: Request,
+    limit: int = Query(
+        20,
+        ge=1,
+        le=200,
+        description="Number of recent cache rows to return (default 20, max 200).",
+    ),
+):
+    """Story #1149: Admin cache-sample readout.
+
+    Returns the most-recently-used rows from the query-embedding cache as
+    metadata-only tuples: (cache_key, provider, model, dimension, key_length).
+    NEVER returns embedding vectors or any secret material.
+
+    This endpoint enables cluster E2E verification of the key shape (including
+    the 's:<config-digest>:' prefix) without requiring direct database access.
+
+    Requires admin session.  Returns JSON.
+
+    Args:
+        request: HTTP request.
+        limit: Number of recent rows to return (1-200, default 20).
+
+    Returns:
+        JSON: {"rows": [...], "count": int}  where each row is a dict with
+        keys: cache_key, provider, model, dimension, key_length.
+    """
+    from fastapi.responses import JSONResponse
+
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+
+    rows = []
+    try:
+        from code_indexer.server.services.governed_call import get_query_embedding_cache
+
+        cache = get_query_embedding_cache()
+        if cache is not None:
+            backend = cache._backend  # type: ignore[attr-defined]
+            if hasattr(backend, "select_recent"):
+                rows = backend.select_recent(limit=limit)
+    except Exception as exc:
+        logger.warning("admin_cache_sample: failed to fetch rows (fail-open): %s", exc)
+
+    return JSONResponse(content={"rows": rows, "count": len(rows)})
 
 
 @web_router.get("/partials/dashboard-api-per-user", response_class=HTMLResponse)

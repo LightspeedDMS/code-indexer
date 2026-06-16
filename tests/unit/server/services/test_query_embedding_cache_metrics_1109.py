@@ -120,7 +120,7 @@ def _make_cache_and_key(mode="shadow", pre_seed=False):
     # and independent of ambient config.
     cache.mode_for = lambda provider_name: mode  # type: ignore[method-assign]
     qualifier = CacheQualifier(PROVIDER, MODEL, DIM)
-    key = build_key(TEXT)
+    key = build_key(TEXT, config_digest="testdigest")
     if pre_seed:
         backend._store[(key, PROVIDER, MODEL, DIM)] = _enc(CACHED_VEC)
         backend._count = 1
@@ -472,8 +472,11 @@ def test_provider_error_in_shadow_records_miss_and_propagates():
     cache = QueryEmbeddingCache(
         backend, enabled=True, voyage_mode="shadow", cohere_mode="shadow"
     )
+    # Pin mode so the test is immune to live config state from other tests
+    # (importing the full server stack can set mode to "on" from ~/.cidx-server/config.json)
+    cache.mode_for = lambda provider_name: "shadow"  # type: ignore[method-assign]
     qualifier = CacheQualifier(PROVIDER, MODEL, DIM)
-    key = build_key(TEXT)
+    key = build_key(TEXT, config_digest="testdigest")
     m, hits_c, miss_c, hist = _make_metrics()
 
     class _ProvError(RuntimeError):
@@ -603,8 +606,10 @@ def test_provider_error_in_shadow_no_upsert():
     cache = QueryEmbeddingCache(
         backend, enabled=True, voyage_mode="shadow", cohere_mode="shadow"
     )
+    # Pin mode so the test is immune to live config state from other tests
+    cache.mode_for = lambda provider_name: "shadow"  # type: ignore[method-assign]
     qualifier = CacheQualifier(PROVIDER, MODEL, DIM)
-    key = build_key(TEXT)
+    key = build_key(TEXT, config_digest="testdigest")
     m, _, _, _ = _make_metrics()
 
     with pytest.raises(RuntimeError):

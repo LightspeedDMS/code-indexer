@@ -99,7 +99,11 @@ def _make_cache(
     cache.enabled_for.return_value = enabled
     cache.mode_for.return_value = voyage_mode
     cache.lookup.return_value = hit_bytes
-    cache.build_key_for_provider = lambda text, provider_name: build_key(text, 2)
+    cache.build_key_for_provider = (
+        lambda text, provider_name, *, config_digest="test-digest": build_key(
+            text, 2, config_digest=config_digest
+        )
+    )
     cache.qualifier.return_value = MagicMock(
         provider=PROVIDER_NAME, model=MODEL_NAME, dimension=DIMENSION
     )

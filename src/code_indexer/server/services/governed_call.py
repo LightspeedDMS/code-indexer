@@ -344,7 +344,8 @@ def _serve_with_cache(
     Args:
         cache: QueryEmbeddingCache instance.
         provider_name: e.g. "voyage-ai".
-        cache_key: SHA-256 hex from build_key(text).
+        cache_key: String key of the form ``s:<config-digest>:<normalized-query>``
+            from build_key(text) (Story #1149).
         qualifier: CacheQualifier named-tuple.
         live_fn: Zero-arg callable that produces the live embedding vector.
         metrics: Optional QueryEmbeddingCacheMetrics; no-op when None.
@@ -526,7 +527,30 @@ def coalesced_query_embedding(
         )
         return live()
 
-    cache_key: str = cache.build_key_for_provider(text, provider_name)
+    # Story #1149: compute config-digest from provider (same as coalescer registry).
+    # Reuse _digest_for_provider so cache identity == coalescer identity.
+    config_digest: str = _digest_for_provider(provider)
+
+    # build_key_for_provider returns Optional[str]: None when normalized query > 256 chars.
+    # Story #1149: guard the None at the call boundary — skip lookup, skip write,
+    # count as MISS, increment long_key counter (Messi #13: no silent failure).
+    cache_key_opt: Optional[str] = cache.build_key_for_provider(
+        text, provider_name, config_digest=config_digest
+    )
+    if cache_key_opt is None:
+        logger.debug(
+            "coalesced_query_embedding: normalized query exceeds 256-char cap for %s "
+            "-> live (long_key)",
+            provider_name,
+        )
+        _metrics = get_query_embedding_cache_metrics()
+        mode_str: str = cache.mode_for(provider_name)
+        if _metrics is not None:
+            _metrics.record_miss(mode=mode_str, provider=provider_name)
+            _metrics.record_long_key(provider=provider_name)
+        return live()
+
+    cache_key: str = cache_key_opt
     qualifier: Any = cache.qualifier(provider)
 
     # Story #1108 (S4): bypass cache READ when requested; still write on miss.

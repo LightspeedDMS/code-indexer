@@ -156,7 +156,11 @@ def _make_cache(
     cache.lookup.return_value = hit_bytes
     # governed_call.py routes key-building through build_key_for_provider (N2),
     # so we wire a real callable here instead of setting build_key + anchor_tokens_for.
-    cache.build_key_for_provider = lambda text, provider_name: build_key(text, 2)
+    cache.build_key_for_provider = (
+        lambda text, provider_name, *, config_digest="test-digest": build_key(
+            text, 2, config_digest=config_digest
+        )
+    )
     cache.qualifier.return_value = MagicMock(
         provider=PROVIDER_NAME, model=MODEL_NAME, dimension=DIMENSION
     )

@@ -117,6 +117,11 @@ class QueryEmbeddingCacheMetrics:
         self._audit_top1_matches: int = 0
         self._audit_overlap_sum: float = 0.0
 
+        # Story #1149: long_key counter — incremented when build_key returns
+        # None (normalized-query part exceeds 256-char cap). Surfaced in
+        # snapshot() so the dashboard and REST front door can expose it.
+        self._long_key: int = 0
+
         self._register()
 
     def _register(self) -> None:
@@ -251,6 +256,23 @@ class QueryEmbeddingCacheMetrics:
         except Exception as exc:  # noqa: BLE001
             logger.debug("cache metrics: record_shadow_cosine OTEL error: %s", exc)
 
+    def record_long_key(self, *, provider: str) -> None:
+        """Increment the long_key counter (Story #1149).
+
+        Called when build_key returns None because the normalized-query part
+        exceeds the 256-char cap.  The over-cap query is NOT cached; the call
+        site also records a MISS (separate counter).  This counter is a pure
+        diagnostic: how many queries were skipped due to exceeding the cap.
+
+        Args:
+            provider: Provider name — e.g. "voyage-ai" or "cohere".
+        """
+        try:
+            with self._lock:
+                self._long_key += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("cache metrics: record_long_key error: %s", exc)
+
     def record_audit(
         self,
         *,
@@ -329,6 +351,8 @@ class QueryEmbeddingCacheMetrics:
                 audit_total = self._audit_total
                 audit_top1_matches = self._audit_top1_matches
                 audit_overlap_sum = self._audit_overlap_sum
+                # Story #1149: long_key counter.
+                long_key = self._long_key
 
             p50: Optional[float] = None
             if cosines:
@@ -351,6 +375,8 @@ class QueryEmbeddingCacheMetrics:
                 "audit_total": audit_total,
                 "audit_top1_matches": audit_top1_matches,
                 "audit_overlap_avg": audit_overlap_avg,
+                # Story #1149: long_key counter
+                "long_key": long_key,
             }
         except Exception as exc:  # noqa: BLE001
             logger.debug("cache metrics: snapshot error: %s", exc)
@@ -361,4 +387,5 @@ class QueryEmbeddingCacheMetrics:
                 "audit_total": 0,
                 "audit_top1_matches": 0,
                 "audit_overlap_avg": None,
+                "long_key": 0,
             }

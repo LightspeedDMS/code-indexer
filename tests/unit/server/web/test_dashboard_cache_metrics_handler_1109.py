@@ -474,3 +474,80 @@ class TestNodeIdOnVolatileCards:
             clear_query_embedding_cache()
             if original is not _SENTINEL:
                 app.state.node_id = original
+
+
+# ---------------------------------------------------------------------------
+# Story #1149 (BLOCKING): long_key counter surfaced through the front door
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetricsWithLongKey(_FakeMetrics):
+    """FakeMetrics that includes long_key in snapshot (Story #1149)."""
+
+    def __init__(self, long_key: int = 0, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._snap["long_key"] = long_key
+
+    def snapshot(self) -> dict:
+        return self._snap
+
+
+class TestLongKeyFrontDoor:
+    """Story #1149 (BLOCKING): long_key counter must be observable through the front door.
+
+    The rejection item requires:
+    - dashboard_cache_metrics_partial extracts long_key from snapshot() into the
+      cache_metrics SimpleNamespace
+    - the rendered dashboard_cache_metrics.html partial contains the long_key value
+    """
+
+    def test_handler_puts_long_key_in_namespace(self, client, admin_session_cookie):
+        """When snapshot includes long_key=17, the rendered HTML contains '17'.
+
+        This proves the handler extracts long_key from snapshot() and the template
+        renders it — front-door observable.
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetricsWithLongKey(long_key=17)
+        set_query_embedding_cache(_FakeCache(count=5))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "17" in html, (
+                f"Expected long_key value '17' in rendered dashboard HTML, got:\n{html[:600]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()
+
+    def test_handler_renders_long_key_zero_when_no_queries_skipped(
+        self, client, admin_session_cookie
+    ):
+        """When long_key=0 (no over-cap queries), the handler must still render 0
+        (or '--') without raising — the field is always present in the namespace.
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetricsWithLongKey(long_key=0)
+        set_query_embedding_cache(_FakeCache(count=0))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            # Must not blow up — long_key=0 is a valid state
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()

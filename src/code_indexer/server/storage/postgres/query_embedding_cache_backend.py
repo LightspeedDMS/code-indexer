@@ -12,7 +12,7 @@ the SQLite BLOB representation.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
 
@@ -222,6 +222,49 @@ class QueryEmbeddingCachePostgresBackend:
                 "QueryEmbeddingCachePostgresBackend: total_entries failed: %s", exc
             )
             return 0
+
+    def select_recent(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return the most-recently-used rows as metadata dicts (NO embedding vectors).
+
+        Story #1149: admin cache-sample readout.  Returns recent rows ordered by
+        last_used DESC so callers can verify key shape without direct DB access.
+        NEVER includes the embedding column — no vectors, no secrets.
+
+        Args:
+            limit: Maximum number of rows to return (default 10).
+
+        Returns:
+            List of dicts with keys: cache_key, provider, model, dimension, key_length.
+            key_length is LENGTH(cache_key) computed DB-side.
+            Empty list on any backend error (fail-open).
+        """
+        try:
+            with self._pool.connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT cache_key, provider, model, dimension,
+                           LENGTH(cache_key) AS key_length
+                    FROM query_embedding_cache
+                    ORDER BY last_used DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                ).fetchall()
+            return [
+                {
+                    "cache_key": row[0],
+                    "provider": row[1],
+                    "model": row[2],
+                    "dimension": row[3],
+                    "key_length": row[4],
+                }
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.warning(
+                "QueryEmbeddingCachePostgresBackend: select_recent failed: %s", exc
+            )
+            return []
 
     def clear(self) -> None:
         """Delete all rows from the cache table."""

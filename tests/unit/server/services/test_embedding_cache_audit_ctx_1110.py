@@ -83,7 +83,7 @@ def _make_cache(
     # Pin mode so tests are deterministic
     cache.mode_for = lambda pname: mode  # type: ignore[method-assign]
     qualifier = CacheQualifier(provider, MODEL, DIM)
-    key = build_key(TEXT)
+    key = build_key(TEXT, config_digest="testdigest")
     if pre_seed:
         backend._store[(key, provider, MODEL, DIM)] = _enc(CACHED_VEC)
         backend._count = 1
@@ -657,7 +657,7 @@ def _make_cache_with_corrupt_blob(blob: bytes, mode: str = "on"):
     )
     cache.mode_for = lambda pname: mode  # type: ignore[method-assign]
     qualifier = CacheQualifier(PROVIDER_VOYAGE, MODEL, DIM)
-    key = build_key(TEXT)
+    key = build_key(TEXT, config_digest="testdigest")
     backend._store[(key, PROVIDER_VOYAGE, MODEL, DIM)] = blob
     backend._count = 1
     return cache, qualifier, key
