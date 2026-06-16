@@ -4,7 +4,7 @@ Covers:
   AC1 — SKIP summary section appears in e2e-automation.sh output
   AC2 — wait_for_server in e2e-automation.sh now uses auth probe
   AC3a — phantom maintenance skip removed from test_99_destructive_mcp.py
-  AC3b — tests/e2e/README.md correctly states 5 phases (not 4)
+  AC3b — tests/e2e/README.md correctly states 6 phases (not 5)
 """
 
 from __future__ import annotations
@@ -150,21 +150,21 @@ class TestPhantomSkipRemoved:
 
 
 class TestReadmePhaseCount:
-    def test_readme_mentions_5_phases_not_4(self):
-        """tests/e2e/README.md must reflect the actual 5-phase suite."""
+    def test_readme_mentions_6_phases_not_5(self):
+        """tests/e2e/README.md must reflect the actual 6-phase suite."""
         content = E2E_README.read_text()
-        # Should say "5 phases" somewhere in the architecture/overview section
-        assert "5 phases" in content or "five phases" in content.lower(), (
-            "tests/e2e/README.md must say '5 phases' (not 4) to reflect the "
-            "current suite: Phase 5 (Resiliency) was added but README was not updated."
+        # Should say "6 phases" somewhere in the architecture/overview section
+        assert "6 phases" in content or "six phases" in content.lower(), (
+            "tests/e2e/README.md must say '6 phases' (not 5) to reflect the "
+            "current suite: Phase 6 (PostgreSQL parity) was added but README was not updated."
         )
 
-    def test_readme_does_not_say_4_phases_in_architecture_heading(self):
-        """The architecture section must not claim 4 phases."""
+    def test_readme_does_not_say_5_phases_in_architecture_heading(self):
+        """The architecture section must not claim 5 phases."""
         content = E2E_README.read_text()
-        # The old README says "organized into 4 phases" -- must be updated
-        assert "organized into 4 phases" not in content, (
-            "README still says 'organized into 4 phases'. Must be updated to 5."
+        # The old README says "organized into 5 phases" -- must be updated to 6
+        assert "organized into 5 phases" not in content, (
+            "README still says 'organized into 5 phases'. Must be updated to 6."
         )
 
     def test_readme_mentions_phase5_resiliency(self):

@@ -125,7 +125,7 @@ cp .e2e-automation.template .e2e-automation
 
 ## Running Tests
 
-### Full suite (all 5 phases)
+### Full suite (all 6 phases)
 
 ```bash
 ./e2e-automation.sh
@@ -139,6 +139,7 @@ cp .e2e-automation.template .e2e-automation
 ./e2e-automation.sh --phase 3   # Server in-process
 ./e2e-automation.sh --phase 4   # CLI remote (starts/stops live server)
 ./e2e-automation.sh --phase 5   # Resiliency (fault-injection server, requires CO_API_KEY)
+./e2e-automation.sh --phase 6   # PostgreSQL parity (ephemeral initdb cluster, requires initdb/pg_ctl)
 ```
 
 ### Manual pytest run (development)
