@@ -192,6 +192,13 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # reconciliation warning; it is logged once per config path and is benign —
     # the actual path is used and search results are correct.
     "codebase_dir mismatch",
+    # Story #1127 (test_per_lane_429_isolation_1127.py::test_ac1_voyage_429_isolates_lane_cohere_stays_clean):
+    # The AimdController emits this structured WARNING when K halves on a real 429 from the
+    # fault-injected Voyage lane.  This is the ASSERTED SIGNAL for AC1 — the test explicitly
+    # queries the log store to prove the AIMD path fired (old_k/new_k fields confirm halving).
+    # Safe: detection is proven by the test's own assertion (Step 7); the log gate does not
+    # double-assert it.  Only appears during Phase 5 fault-injection runs with 429 error_codes.
+    "AIMD multiplicative decrease",
 ]
 
 
