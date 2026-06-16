@@ -69,14 +69,118 @@ from typing import Any, Callable, List, cast
 #   false double-fail at session teardown.
 #   Safe: detection capability is fully proven by the mutation test's own assertions
 #   (steps 5 and 6 in that test), not by the autouse gate.
+#
+# --- Phase 3 negative-test / edge-path allowlist entries (Story #1122 curation) ---
+#
+# "Unexpected error in browse_directory: 'repository_alias'"
+# "Unexpected error in list_files: 'repository_alias'"
+# "Unexpected error in get_file_content: 'repository_alias'"
+#   Produced by test_04_mcp_files_ssh_guides.py which calls list_files with an
+#   empty params dict {} to verify the tool is registered and responds.  The
+#   handlers do params["repository_alias"] (required key lookup) which raises
+#   KeyError; the except-Exception block logs ERROR and returns a clean error
+#   response.  The test explicitly accepts any rc < 500.
+#   Pattern covers only the specific KeyError message; a different unhandled error
+#   in these handlers (e.g. "Unexpected error in list_files: NoneType ...") would
+#   NOT be suppressed.
+#
+# "Unexpected error in"
+#   (Covers the above three variants under one pattern; the next bullet explains
+#    why this is safe and targeted enough.)
+#   NOTE: This pattern is intentionally scoped to errors that contain
+#   "Unexpected error in" followed by the specific "repository_alias" substring,
+#   but since is_allowlisted does substring matching per entry, we use two separate
+#   narrower patterns rather than one broad one -- see below.
+#
+# "[REPO-MIGRATE-004] Failed to get branches for repository"
+#   Emitted by repository_listing_manager when get_branches is called on cidx-meta
+#   (not a real git workspace) in test_02_mcp_repos.py.  The log code REPO-MIGRATE-004
+#   is the stable identifier; a regression on a different code path would use a
+#   different log code.
+#
+# "[CACHE-GENERAL-016] Cannot trigger migration: metadata file not found"
+#   Emitted by git_operations_service when git operations on cidx-meta or
+#   cidx-meta-global are attempted and the migration metadata file is absent
+#   in the temp test data directory.  Produced by test_05_mcp_git.py git_pull /
+#   git_fetch calls.  Log code CACHE-GENERAL-016 is the stable identifier; a
+#   different missing-metadata failure would have its own distinct code.
+#
+# "git_pull file not found"
+#   Emitted by git_write.py's FileNotFoundError handler when git_pull is called
+#   on cidx-meta which does not exist as an activated-repo directory in the
+#   ephemeral test data dir.  Produced by test_05_mcp_git.py.  The stable prefix
+#   "git_pull file not found" identifies the specific operation; a FileNotFoundError
+#   in a different git operation (e.g. "git_push file not found") would still be
+#   flagged by the gate.
+#
+# "[MCP-GENERAL-120] Function repository 'claude-delegation-functions' not found"
+#   Emitted by the delegation handler when list_delegation_functions is called
+#   and the claude-delegation-functions golden repo is absent from the test server.
+#   Produced by test_06_mcp_admin.py.  Log code MCP-GENERAL-120 is the stable
+#   identifier; a delegation failure from a registered function would surface
+#   under a different message / code.
+#
+# "[REPO-GENERAL-017] ValidationError"
+#   Emitted by the error_handler middleware for every FastAPI RequestValidationError
+#   (HTTP 422).  Produced by:
+#     - test_07_rest_api.py: POST /auth/refresh with no body, GET /api/repos/discover
+#       without required `source` query param, POST /api/admin/golden-repos with no body.
+#     - test_08_auth_negative.py: test_login_empty_credentials sending {"username":"","password":""}.
+#   All four are deliberate negative tests verifying the server returns 422 for
+#   invalid input.  The log code REPO-GENERAL-017 is the stable identifier for
+#   request-validation failures; a 500 or other unexpected server error would
+#   use a different message/code and would not be suppressed.
+#
+# "Global repo 'test-global' not found"
+#   Emitted by mcp.handlers.repos when repository_status is called with alias
+#   "test-global" which is not registered in the test server's golden-repo
+#   metadata.  Produced by test_epic985_regression.py (TestS990RepositoryStatus:
+#   test_repository_status_invalid_detail and test_repository_status_global_basic).
+#   These are intentional negative tests verifying clean error handling for
+#   non-existent global repos.  A genuine regression on an existing repo would
+#   use that repo's real alias, not "test-global".
+#
+# "handle_repository_status failed: Repository 'test-activated' not found"
+#   Emitted by mcp.handlers.repos when repository_status is called with alias
+#   "test-activated" which is not an activated repo in the test server.
+#   Produced by test_epic985_regression.py (TestS990RepositoryStatus:
+#   test_repository_status_activated_basic).  The stable "test-activated" alias
+#   is a sentinel used only by this test; a real activation failure on a
+#   user-registered repo would use that repo's real alias, not "test-activated".
 
 LOG_AUDIT_ALLOWLIST: List[str] = [
+    # Infrastructure / environment entries (pre-existing)
     "http_client_factory not available on app.state",
     "CIDX_TEST_FAST_SQLITE",
     "could not read config; treating as disabled",
     "No description found",
     "No module named 'tree_sitter_languages'",
     "LOG_AUDIT_GATE_MUTATION_TEST_1122",
+    # Phase 3 negative-test / edge-path entries (Story #1122 curation)
+    # test_04: list_files / browse_directory / get_file_content called without
+    # repository_alias param — KeyError caught by except-Exception handler.
+    # The "': 'repository_alias'" suffix makes this specific to the KeyError
+    # message shape; a different unhandled exception would not match.
+    "Unexpected error in browse_directory: 'repository_alias'",
+    "Unexpected error in list_files: 'repository_alias'",
+    "Unexpected error in get_file_content: 'repository_alias'",
+    # test_02: get_branches on cidx-meta (not a real git repo) triggers
+    # migration check that logs REPO-MIGRATE-004.
+    "[REPO-MIGRATE-004] Failed to get branches for repository",
+    # test_05: git operations on cidx-meta trigger migration check;
+    # metadata file absent in ephemeral temp test data directory.
+    "[CACHE-GENERAL-016] Cannot trigger migration: metadata file not found",
+    # test_05: git_pull on cidx-meta raises FileNotFoundError (no activated-repo dir).
+    "git_pull file not found",
+    # test_06: list_delegation_functions when claude-delegation-functions repo absent.
+    "[MCP-GENERAL-120] Function repository 'claude-delegation-functions' not found",
+    # test_07 + test_08: deliberate negative tests send invalid/empty request bodies;
+    # server returns 422 and logs REPO-GENERAL-017 ValidationError.
+    "[REPO-GENERAL-017] ValidationError",
+    # test_epic985: repository_status called with non-existent "test-global" sentinel alias.
+    "Global repo 'test-global' not found",
+    # test_epic985: repository_status called with non-existent "test-activated" sentinel alias.
+    "handle_repository_status failed: Repository 'test-activated' not found",
 ]
 
 

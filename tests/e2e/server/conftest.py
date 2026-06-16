@@ -8,9 +8,11 @@ variables, which e2e-automation.sh sets for every phase before invoking pytest.
 
 Log-audit gate (Story #1122)
 ----------------------------
-log_audit_app_client  -- TestClient against the module-level app singleton.
-                         Required because admin_logs_query reads
-                         app_module.app.state (not the fresh create_app() copy).
+All log-audit gate fixtures are unified onto the single test_client app instance.
+test_client sets _app_module.app = fresh_app so admin_logs_query (which reads
+app_module.app.state for log_db_path) reads the SAME state the tests drive.
+
+log_audit_app_client  -- Alias for test_client (one app, one lifespan).
 log_audit_admin_token -- JWT for the audit client.
 log_watermark         -- Session watermark (max log id at phase start).
 _phase3_log_audit_gate -- Autouse session fixture: fails the phase on any new
@@ -73,10 +75,20 @@ def test_client(test_client_data_dir) -> Iterator[TestClient]:
     Calls create_app() directly so CIDX_SERVER_DATA_DIR is already set before
     service initialisation runs.  The module-level app singleton is created at
     import time; using create_app() gives a fresh app bound to our temp dir.
+
+    After creating the fresh app we REPLACE the module-global app singleton so
+    that admin_logs_query (which reads code_indexer.server.app.app.state for
+    log_db_path) reads the SAME app instance that the tests drive.  Without
+    this, admin_logs_query would read a DIFFERENT state object and return
+    'Log database not configured', causing all log-audit gate tests to fail.
     """
+    import code_indexer.server.app as _app_module
     from code_indexer.server.app import create_app
 
     fresh_app = create_app()
+    # Point the module-global singleton at the fresh app before entering
+    # the TestClient lifespan so admin_logs_query reads the right state.
+    _app_module.app = fresh_app
     with TestClient(fresh_app, raise_server_exceptions=False) as client:
         yield client
 
@@ -113,28 +125,21 @@ def auth_headers(admin_token: str) -> dict:
 
 
 @pytest.fixture(scope="session")
-def log_audit_app_client(test_client_data_dir: Path) -> Iterator[TestClient]:
-    """TestClient bound to the module-level app singleton (not create_app()).
+def log_audit_app_client(test_client: TestClient) -> Iterator[TestClient]:
+    """TestClient for the log-audit gate — unified with test_client.
 
-    admin_logs_query reads app_module.app.state for log_db_path; the fresh
-    create_app() copy used by test_client has a different state object, so
-    admin_logs_query returns 'Log database not configured' from that client.
+    Previously this fixture opened a SECOND TestClient on the module-level app
+    singleton, causing two apps + two lifespans to share one process-global
+    SQLiteLogHandler/SQLite connection.  They clobbered each other, and
+    admin_logs_query (which reads app_module.app.state) hit a closed/
+    uninitialized DB -> sqlite3.ProgrammingError.
 
-    This fixture uses the module-level singleton directly so the handler
-    finds log_db_path on app.state and can read logs.db.
-
-    Depends on test_client_data_dir to guarantee CIDX_SERVER_DATA_DIR is set
-    before the module-level app's lifespan runs (lifespan reads the env var
-    to locate logs.db).
+    Fix: test_client now sets _app_module.app = fresh_app before entering its
+    TestClient context, so admin_logs_query reads the SAME app state that the
+    tests drive.  This fixture simply yields test_client -- one app, one
+    lifespan, one SQLite connection.
     """
-    import code_indexer.server.app as _app_module
-
-    # test_client_data_dir has already set CIDX_SERVER_DATA_DIR; the
-    # module-level singleton's lifespan will read it when TestClient opens.
-    _ = test_client_data_dir  # Explicit dependency usage to satisfy linters
-
-    with TestClient(_app_module.app, raise_server_exceptions=False) as client:
-        yield client
+    yield test_client
 
 
 @pytest.fixture(scope="session")
