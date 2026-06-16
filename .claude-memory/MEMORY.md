@@ -32,6 +32,7 @@
 - [feedback_version_bump_must_be_push_tip.md](feedback_version_bump_must_be_push_tip.md) - The __init__.py version-bump commit MUST be the tip of its push or CI skips tag creation (compares HEAD~1..HEAD)
 - [feedback_check_running_jobs_before_restart.md](feedback_check_running_jobs_before_restart.md) - NEVER restart cidx-server without checking for active long-running jobs
 - [feedback_ruff_black_version_alignment.md](feedback_ruff_black_version_alignment.md) - Pre-commit ruff version must match system ruff; server-fast-automation uses ruff format
+- [feedback_rest_model_changes_need_fast_automation.md](feedback_rest_model_changes_need_fast_automation.md) - REST/MCP query-model or query-param changes need fast-automation.sh too (param-parity guard is in the CLI suite), not just server-fast
 - [feedback_no_unnecessary_questions.md](feedback_no_unnecessary_questions.md) - Never stop for obvious next steps — only stop if genuinely blocked
 - [feedback_no_confirmation_on_commands.md](feedback_no_confirmation_on_commands.md) - Direct commands are instructions to execute, not proposals — never ask "should I proceed?"
 - [feedback_implement_story_agentic_no_stops.md](feedback_implement_story_agentic_no_stops.md) - /implement-story-spec runs the FULL workflow non-stop — no pre-flight questions, the story breakdown is already the agreement
@@ -40,6 +41,7 @@
 - [feedback_use_code_reviewer.md](feedback_use_code_reviewer.md) - Use code-reviewer (opus) for all reviews — Codex credits running low
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex flags over-engineering, SIMPLIFY — don't commission counter-reviews
 - [feedback_verify_codex_actually_ran.md](feedback_verify_codex_actually_ran.md) - Codex-wrapper agents fall back to Claude silently — verify a real Codex run via ~/.codex/sessions before claiming "codex reviewed it"
+- [project_test_gates_flake_under_load.md](project_test_gates_flake_under_load.md) - fast-automation/server-fast flake under concurrent load (SQLite DB-open errors, timeouts); run them ALONE, re-run failures in isolation before concluding regression; omni '*' is MCP-only not REST
 
 ## Architectural Invariants
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
