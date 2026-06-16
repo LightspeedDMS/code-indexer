@@ -22,13 +22,15 @@ _phase3_log_audit_gate -- Autouse session fixture: fails the phase on any new
 from __future__ import annotations
 
 import os
+import shutil
+import time
 from pathlib import Path
 from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.e2e.helpers import _auth_headers
+from tests.e2e.helpers import _auth_headers, require_voyage_key
 
 # Environment variable names that carry admin credentials.
 # e2e-automation.sh sets these for all four phases before invoking pytest.
@@ -214,3 +216,170 @@ def _phase3_log_audit_gate(
         # pytest.fail() at session teardown surfaces as a test collection error;
         # raise AssertionError directly so it appears as a clear fixture failure.
         raise AssertionError(result.failure_message())
+
+
+# ---------------------------------------------------------------------------
+# seeded_indexed_client fixture (Story #1138)
+# ---------------------------------------------------------------------------
+
+# Alias used for the markupsafe golden repo in this phase.
+_MARKUPSAFE_ALIAS: str = "markupsafe"
+
+# Prebuilt SCIP fixture bundled with the test suite.  Contains a Calculator
+# class in src/calculator.py.  Seeded into the golden-repo SCIP path so
+# scip_definition / scip_references return real data without rustc.
+_SCIP_FIXTURE_PATH: Path = (
+    Path(__file__).parent.parent.parent
+    / "scip"
+    / "fixtures"
+    / "comprehensive_index.scip.db"
+)
+
+# Maximum seconds to wait for register + activate background jobs.
+_SEED_JOB_TIMEOUT: float = float(os.environ.get("E2E_GOLDEN_JOB_TIMEOUT", "300"))
+_SEED_JOB_POLL_INTERVAL: float = float(os.environ.get("E2E_GOLDEN_JOB_POLL", "0.5"))
+_SEED_JOB_TERMINAL: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+
+
+def _seed_wait_for_job(
+    client: TestClient,
+    job_id: str,
+    auth_headers: dict,
+    label: str,
+) -> None:
+    """Poll GET /api/jobs/{job_id} until terminal state; fail loudly on timeout/failure.
+
+    Bounded loop: terminates when either the deadline is reached (TimeoutError)
+    or the job reaches a terminal state (Messi Rule #14 — provable termination).
+    """
+    deadline = time.monotonic() + _SEED_JOB_TIMEOUT
+    while time.monotonic() < deadline:
+        resp = client.get(f"/api/jobs/{job_id}", headers=auth_headers)
+        assert resp.status_code < 500, (
+            f"{label}: job poll returned HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+        if resp.status_code == 200:
+            body = resp.json()
+            status = body.get("status")
+            if status in _SEED_JOB_TERMINAL:
+                assert status == "completed", (
+                    f"{label}: job {job_id!r} ended with status {status!r}: {body}"
+                )
+                return
+        time.sleep(_SEED_JOB_POLL_INTERVAL)
+    raise TimeoutError(
+        f"{label}: job {job_id!r} did not complete within {_SEED_JOB_TIMEOUT}s"
+    )
+
+
+@pytest.fixture(scope="session")
+def seeded_indexed_client(
+    test_client: TestClient,
+    test_client_data_dir: Path,
+    auth_headers: dict,
+) -> Iterator[tuple[TestClient, str]]:
+    """Register, index, and activate the markupsafe golden repo; yield (client, alias).
+
+    Anti-dual-app invariant:
+        Depends on the unified ``test_client`` fixture (never creates a second app).
+        ``test_client`` already sets ``_app_module.app = fresh_app`` so admin_logs_query
+        reads the same state. Adding a second TestClient / lifespan would share the
+        process-global SQLiteLogHandler with a closed/different DB, causing HTTP 500s
+        in the log-audit gate (the bug this fixture was designed to avoid).
+
+    Description-refresh mitigation:
+        ``description_refresh_enabled`` defaults to ``False`` in
+        ``ServerConfig.claude_integration_config`` (config_manager.py line 508).
+        No explicit disable step is needed — the scheduler starts but never dispatches
+        Claude invocations in the E2E test environment, so no ~300s Claude call fires.
+
+    SCIP seeding:
+        The prebuilt ``tests/scip/fixtures/comprehensive_index.scip.db`` is copied into
+        ``{data_dir}/golden-repos/{alias}/.code-indexer/scip/index.scip.db`` AFTER the
+        golden-repo registration job completes (which creates the clone directory).
+        The server's ScipQueryService walks ``{repo_path}/.code-indexer/scip/**/*.scip.db``
+        so the seeded file is picked up without any additional wiring.
+
+    Raises:
+        pytest.skip.Exception: When VOYAGE_API_KEY / E2E_VOYAGE_API_KEY is absent.
+        AssertionError: When registration or activation job fails or returns non-2xx.
+        TimeoutError: When a background job exceeds E2E_GOLDEN_JOB_TIMEOUT seconds.
+    """
+    # Guard 1: require embedding key — loud skip locally, hard-fail in CI.
+    require_voyage_key()
+
+    # Guard 2: require markupsafe seed repo to exist on disk.
+    seed_cache_dir = Path(
+        os.environ.get(
+            "E2E_SEED_CACHE_DIR", str(Path.home() / ".tmp" / "cidx-e2e-seed-repos")
+        )
+    )
+    markupsafe_path = seed_cache_dir / "markupsafe"
+    if not markupsafe_path.exists():
+        pytest.skip(
+            f"Markupsafe seed repo not found at {markupsafe_path!r} — "
+            "run e2e-automation.sh to pre-seed repos or set E2E_SEED_CACHE_DIR."
+        )
+
+    alias = _MARKUPSAFE_ALIAS
+
+    # Step 1: Register the golden repo via REST front door.
+    # POST /api/admin/golden-repos accepts JSON {repo_url, alias}.
+    # repo_url is the LOCAL path (file:// protocol not required — the server
+    # accepts absolute paths to local directories as repo_url for golden repos).
+    reg_resp = test_client.post(
+        "/api/admin/golden-repos",
+        json={"repo_url": str(markupsafe_path), "alias": alias},
+        headers=auth_headers,
+    )
+    assert reg_resp.status_code in (200, 202), (
+        f"seeded_indexed_client: register returned HTTP {reg_resp.status_code}: "
+        f"{reg_resp.text[:300]}"
+    )
+    reg_body = reg_resp.json()
+    reg_job_id: str = reg_body.get("job_id", "")
+    assert reg_job_id, (
+        f"seeded_indexed_client: register response missing job_id: {reg_body}"
+    )
+
+    # Poll until registration+indexing job completes.
+    _seed_wait_for_job(test_client, reg_job_id, auth_headers, "register")
+
+    # Step 2: Seed the SCIP fixture BEFORE activation so the SCIP index is present
+    # when activation completes and tests run.
+    # Clone path formula: {data_dir}/data/golden-repos/{alias}  (lifespan.py:133 injects "data/")
+    if _SCIP_FIXTURE_PATH.exists():
+        scip_dest_dir = (
+            test_client_data_dir
+            / "data"
+            / "golden-repos"
+            / alias
+            / ".code-indexer"
+            / "scip"
+        )
+        scip_dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_SCIP_FIXTURE_PATH, scip_dest_dir / "index.scip.db")
+
+    # Step 3: Activate the golden repo.
+    # POST /api/repos/activate with JSON {golden_repo_alias}.
+    # When user_alias is omitted the server defaults it to golden_repo_alias.
+    act_resp = test_client.post(
+        "/api/repos/activate",
+        json={"golden_repo_alias": alias},
+        headers=auth_headers,
+    )
+    assert act_resp.status_code in (200, 202), (
+        f"seeded_indexed_client: activate returned HTTP {act_resp.status_code}: "
+        f"{act_resp.text[:300]}"
+    )
+    act_body = act_resp.json()
+    act_job_id: str = act_body.get("job_id", "")
+    assert act_job_id, (
+        f"seeded_indexed_client: activate response missing job_id: {act_body}"
+    )
+
+    # Poll until activation job completes.
+    _seed_wait_for_job(test_client, act_job_id, auth_headers, "activate")
+
+    # Yield the UNIFIED client (same app, same lifespan, no dual-app bug).
+    yield test_client, alias

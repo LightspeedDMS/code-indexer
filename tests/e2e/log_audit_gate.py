@@ -181,6 +181,17 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     "Global repo 'test-global' not found",
     # test_epic985: repository_status called with non-existent "test-activated" sentinel alias.
     "handle_repository_status failed: Repository 'test-activated' not found",
+    # Story #1138 (seeded_indexed_client fixture): committer_resolution_service emits
+    # [SVC-MIGRATE-001] when a local filesystem path is used as repo_url (no hostname
+    # to extract for git author email generation).  Benign: only affects commit author
+    # metadata, not indexing or search correctness.
+    "[SVC-MIGRATE-001] Cannot extract hostname from URL",
+    # Story #1138 (seeded_indexed_client fixture): config.py emits "codebase_dir mismatch"
+    # (Bug #1033) when the activated-repo path differs from the stored codebase_dir in
+    # the golden-repo config.  This is the documented per-node NFS multi-mount
+    # reconciliation warning; it is logged once per config path and is benign —
+    # the actual path is used and search results are correct.
+    "codebase_dir mismatch",
 ]
 
 
