@@ -798,9 +798,16 @@ class TestLiveAnchorDepth:
         provider = _FakeVoyageProvider()
         # No anchor_depth_provider → falls back to default 2
         coalescer = EmbeddingCoalescer(
-            LANE, provider, governor=gov, acquire_timeout=5.0, config_digest=_TEST_DIGEST
+            LANE,
+            provider,
+            governor=gov,
+            acquire_timeout=5.0,
+            config_digest=_TEST_DIGEST,
         )
-        assert not hasattr(coalescer, "_anchor_depth_provider") or coalescer._anchor_depth_provider is None
+        assert (
+            not hasattr(coalescer, "_anchor_depth_provider")
+            or coalescer._anchor_depth_provider is None
+        )
 
         outcome = _run_saturated_submits(coalescer, gov, LANE, [text] * 3)
         assert not outcome.errors
@@ -873,7 +880,6 @@ class TestLiveAnchorDepth:
         Batch 2: depth=0 → text_a and text_b have SAME key → 1 provider call.
         This proves the depth is read live per dispatch, not once at construction.
         """
-        from code_indexer.server.services.query_embedding_cache import build_key
 
         text_a = "alpha beta gamma"
         text_b = "beta alpha gamma"

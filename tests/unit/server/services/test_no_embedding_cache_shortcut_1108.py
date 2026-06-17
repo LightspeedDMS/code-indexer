@@ -87,6 +87,11 @@ class _FakeVoyageProvider:
     def get_model_info(self) -> dict:
         return {"dimensions": DIMENSION}
 
+    def get_embedding(
+        self, text: str, *, embedding_purpose: Optional[str] = None
+    ) -> List[float]:
+        return LIVE_VEC
+
 
 def _make_cache(
     *,
@@ -214,16 +219,18 @@ class TestCoalescedQueryEmbeddingSignature:
         )
 
     def test_default_false_unchanged_behavior_no_cache(self, monkeypatch):
-        """Default False with no cache must call _compute_live (unchanged)."""
+        """Default False with no cache must call governed_query_embedding (unchanged)."""
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: None)
 
         live_calls: list = []
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose=None, acquire_timeout=30.0
+        ):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(governed_call, "governed_query_embedding", _fake_governed)
 
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
@@ -237,11 +244,13 @@ class TestCoalescedQueryEmbeddingSignature:
 
         live_calls: list = []
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose=None, acquire_timeout=30.0
+        ):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(governed_call, "governed_query_embedding", _fake_governed)
 
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT, no_embedding_cache_shortcut=True
@@ -338,11 +347,11 @@ class TestBypassWrapSemantics:
     def _fake_live_fn(self, monkeypatch):
         live_calls: list = []
 
-        def _fake(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake(provider, text, *, embedding_purpose=None, acquire_timeout=30.0):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake)
+        monkeypatch.setattr(governed_call, "governed_query_embedding", _fake)
         return live_calls
 
     def test_bypass_true_mode_on_skips_lookup_computes_live_writes_cache(

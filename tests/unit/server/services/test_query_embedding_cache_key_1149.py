@@ -446,7 +446,7 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
         assert result is None
 
     def test_none_key_skips_lookup_and_write_and_records_miss_and_long_key(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: Any
     ) -> None:
         """When build_key returns None (over-cap), coalesced_query_embedding must:
         - skip the backend lookup (no rows read)
@@ -469,6 +469,28 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
         )
         from code_indexer.server.services.query_embedding_cache_metrics import (
             QueryEmbeddingCacheMetrics,
+        )
+
+        # Isolate from live config service: ensure enabled_for() falls back to
+        # the construction-time enabled=True regardless of server config state.
+        # _live_qec_cfg() does `from config_service import get_config_service`
+        # at call time, so we patch the source module directly.
+        # Returning a config with no query_embedding_cache_config attr makes
+        # _live_qec_cfg() return None -> enabled_for() uses self._enabled=True.
+        class _NoCacheCfg:
+            pass
+
+        class _FakeConfigSvc:
+            def get_config(self) -> _NoCacheCfg:
+                return _NoCacheCfg()
+
+        import code_indexer.server.services.config_service as _cfg_mod
+
+        monkeypatch.setattr(
+            _cfg_mod,
+            "get_config_service",
+            lambda: _FakeConfigSvc(),
+            raising=False,
         )
 
         backend = _make_sqlite_backend(tmp_path)
@@ -494,7 +516,7 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
             provider.get_model_info.return_value = {"dimensions": 4}
 
             with patch(
-                "code_indexer.server.services.governed_call._compute_live",
+                "code_indexer.server.services.governed_call.governed_query_embedding",
                 return_value=live_vec,
             ):
                 result = coalesced_query_embedding(provider, long_text)
@@ -576,7 +598,7 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
             provider.get_model_info.return_value = {"dimensions": 4}
 
             with patch(
-                "code_indexer.server.services.governed_call._compute_live",
+                "code_indexer.server.services.governed_call.governed_query_embedding",
                 return_value=live_vec,
             ):
                 result = coalesced_query_embedding(provider, long_text)
@@ -628,7 +650,7 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
 
             # Patch the live path to return a short vector
             with patch(
-                "code_indexer.server.services.governed_call._compute_live",
+                "code_indexer.server.services.governed_call.governed_query_embedding",
                 return_value=live_vec,
             ):
                 from code_indexer.server.services.governed_call import (

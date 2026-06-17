@@ -37,6 +37,7 @@ The ONLY time bound is the governor ``acquire_timeout`` (Messi #14). No
 """
 
 import logging
+import random
 import threading
 from concurrent.futures import Future
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -154,12 +155,27 @@ def _resolve_provider_texts_cap(provider: Any) -> Optional[int]:
 class _Entry:
     """A single coalesced request: its text, embedding purpose, and the caller's Future."""
 
-    __slots__ = ("text", "embedding_purpose", "fut")
+    __slots__ = (
+        "text",
+        "embedding_purpose",
+        "fut",
+        "audit_ctx",
+        "no_embedding_cache_shortcut",
+    )
 
-    def __init__(self, text: str, embedding_purpose: str = "query") -> None:
+    def __init__(
+        self,
+        text: str,
+        embedding_purpose: str = "query",
+        *,
+        audit_ctx: Optional[Dict[str, Any]] = None,
+        no_embedding_cache_shortcut: bool = False,
+    ) -> None:
         self.text = text
         self.embedding_purpose = embedding_purpose
         self.fut: "Future[List[float]]" = Future()
+        self.audit_ctx: Optional[Dict[str, Any]] = audit_ctx
+        self.no_embedding_cache_shortcut: bool = no_embedding_cache_shortcut
 
 
 class EmbeddingCoalescer:
@@ -252,14 +268,30 @@ class EmbeddingCoalescer:
     # Core API
     # ------------------------------------------------------------------
 
-    def submit(self, text: str, embedding_purpose: str = "query") -> List[float]:
+    def submit(
+        self,
+        text: str,
+        embedding_purpose: str = "query",
+        *,
+        no_embedding_cache_shortcut: bool = False,
+        audit_ctx: Optional[Dict[str, Any]] = None,
+    ) -> List[float]:
         """Submit one text; block until its embedding vector is available.
 
-        Exactly one caller per batch is elected dispatcher; non-dispatchers block
-        on a Future guaranteed to be completed (success OR exception — shared
-        fate). The dispatcher seals the batch on the first attempt that gets a
-        governor slot and issues exactly ONE HTTP call, then demuxes vectors back
-        to every caller in submit order.
+        Story #1147: Lock-free pre-enqueue cache check. Cache I/O runs BEFORE
+        _enqueue() and OUTSIDE self._lock so on-mode cache HITs never consume a
+        governor slot.
+
+        Cache mode logic (Story #1147 sub-tasks 3a + 3b + 3d):
+          - accessor get_query_embedding_cache() called HERE at submit time (not
+            at constructor time) so CLI paths (None) are handled correctly and a
+            cache installed after construction is picked up.
+          - on   + HIT  -> return cached vector immediately (no _enqueue, no slot)
+          - on   + MISS -> _enqueue -> dispatch -> record_miss after live result
+          - shadow       -> always _enqueue -> dispatch; record_hit/miss after
+          - off / disabled / None -> _enqueue -> dispatch (existing path)
+          - bypass (no_embedding_cache_shortcut=True) -> skip READ, _enqueue ->
+            dispatch, record_miss after live result (still WRITES)
 
         Args:
             text: Text to embed.
@@ -267,8 +299,136 @@ class EmbeddingCoalescer:
                 for all serving-path callers) or "document" (indexing path).
                 Forwarded to get_embeddings_batch so Cohere maps it to the
                 correct input_type (search_query vs search_document).
+            no_embedding_cache_shortcut: When True, skip cache READ but still
+                WRITE the result after live embedding. Has no effect when cache
+                is absent/disabled/off.
+            audit_ctx: Optional mutable dict; propagated to cache hit recording
+                for Story #1110 deep-fidelity audit (stays at FSV chokepoint).
         """
-        entry = _Entry(text, embedding_purpose)
+        # --- Story #1147 3a: accessor at submit time (not constructor time) ---
+        # Importing here avoids circular-import issues at module load time.
+        from code_indexer.server.services.governed_call import (
+            get_query_embedding_cache,
+            get_query_embedding_cache_metrics,
+        )
+
+        cache = get_query_embedding_cache()
+
+        # Cache context resolved once at submit time; passed to _dispatch so
+        # post-dispatch cache writes (MISS write / shadow record_hit) happen
+        # outside _lock after the live embed resolves.
+        _cache_mode: Optional[str] = None
+        _cache_qualifier: Any = None
+
+        # --- Story #1147 3b: lock-free pre-enqueue cache check ---
+        # All cache I/O BEFORE _enqueue() so on-mode HITs never touch the lock
+        # or consume a governor slot.
+        if cache is not None:
+            provider_name: str = self._provider.get_provider_name()
+
+            if cache.enabled_for(provider_name) and cache.mode_for(
+                provider_name
+            ) not in ("off",):
+                _cache_mode = cache.mode_for(provider_name)
+                _cache_qualifier = cache.qualifier(self._provider)
+
+                if _cache_mode == "on" and not no_embedding_cache_shortcut:
+                    # Build cache key (lazy import — same as _dispatch uses)
+                    from code_indexer.server.services.query_embedding_cache import (
+                        build_key,
+                    )
+
+                    _anchor: Optional[int] = (
+                        self._anchor_depth_provider()
+                        if self._anchor_depth_provider is not None
+                        else None
+                    )
+                    if _anchor is not None:
+                        cache_key_opt = build_key(
+                            text, _anchor, config_digest=self._config_digest
+                        )
+                    else:
+                        cache_key_opt = build_key(
+                            text, config_digest=self._config_digest
+                        )
+
+                    if cache_key_opt is not None:
+                        cached_blob = cache.lookup(cache_key_opt, _cache_qualifier)
+                        if cached_blob is not None:
+                            # Validate blob dimension
+                            expected_bytes = _cache_qualifier.dimension * 4
+                            if len(cached_blob) == expected_bytes:
+                                import struct
+
+                                try:
+                                    n_floats = len(cached_blob) // 4
+                                    decoded_vec: List[float] = list(
+                                        struct.unpack(f"<{n_floats}f", cached_blob)
+                                    )
+                                    # Record hit (outside lock, cache I/O only)
+                                    cache.record_hit(cache_key_opt, _cache_qualifier)
+                                    metrics = get_query_embedding_cache_metrics()
+                                    if metrics is not None:
+                                        metrics.record_hit(
+                                            mode=_cache_mode, provider=provider_name
+                                        )
+                                    # BLOCKING 1 fix: populate audit_ctx per-requestor
+                                    # on sampled on-mode HITs (mirrors _serve_with_cache).
+                                    if audit_ctx is not None:
+                                        try:
+                                            from code_indexer.server.services.governed_call import (
+                                                _audit_sample_rate_for,
+                                            )
+
+                                            rate = _audit_sample_rate_for(provider_name)
+                                            if rate > 0.0 and random.random() < rate:
+                                                audit_ctx["sampled"] = True
+                                                audit_ctx["mode"] = _cache_mode
+                                                audit_ctx["provider"] = provider_name
+                                                audit_ctx["cached_blob"] = cached_blob
+                                                # No live_vec: Chunk B re-embeds from blob
+                                        except Exception as _ae:  # noqa: BLE001
+                                            logger.debug(
+                                                "coalescer: audit_ctx population failed"
+                                                " (on-mode HIT, lane=%s): %s",
+                                                self._lane,
+                                                _ae,
+                                            )
+                                    logger.debug(
+                                        "coalescer: cache HIT (mode=on, provider=%s, lane=%s)",
+                                        provider_name,
+                                        self._lane,
+                                    )
+                                    # on-mode HIT: return immediately, zero slots consumed
+                                    return decoded_vec
+                                except struct.error as _se:
+                                    logger.warning(
+                                        "coalescer: corrupt cache blob (struct.error)"
+                                        " provider=%s dim=%d blob_len=%d"
+                                        " — treating as MISS: %s",
+                                        provider_name,
+                                        _cache_qualifier.dimension,
+                                        len(cached_blob),
+                                        _se,
+                                    )
+                            else:
+                                logger.warning(
+                                    "coalescer: corrupt cache blob dimension mismatch"
+                                    " provider=%s expected_bytes=%d actual_bytes=%d"
+                                    " — treating as MISS",
+                                    provider_name,
+                                    expected_bytes,
+                                    len(cached_blob),
+                                )
+
+        # --- No cache / MISS / shadow / bypass / off / disabled ---
+        # Enqueue into the coalescer batch (may acquire governor slot)
+        entry = _Entry(
+            text,
+            embedding_purpose,
+            audit_ctx=audit_ctx,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        )
         n = self._token_count_fn(text)
 
         my_batch, i_am_dispatcher = self._enqueue(entry, n)
@@ -277,7 +437,14 @@ class EmbeddingCoalescer:
             # Future is set by THIS batch's dispatcher (always completed).
             return entry.fut.result()
 
-        self._dispatch(my_batch)
+        # Story #1147 3b/3d: dispatcher runs live embed then writes to cache
+        # (once per unique key, outside _lock) for MISS and shadow modes.
+        self._dispatch(
+            my_batch,
+            cache=cache,
+            cache_mode=_cache_mode,
+            cache_qualifier=_cache_qualifier,
+        )
         return entry.fut.result()
 
     # ------------------------------------------------------------------
@@ -341,7 +508,14 @@ class EmbeddingCoalescer:
     # Dispatch (governor is the only limiter)
     # ------------------------------------------------------------------
 
-    def _dispatch(self, my_batch: List[_Entry]) -> None:
+    def _dispatch(
+        self,
+        my_batch: List[_Entry],
+        *,
+        cache: Any = None,
+        cache_mode: Optional[str] = None,
+        cache_qualifier: Any = None,
+    ) -> None:
         """Dispatch ``my_batch`` through the governor and fan out shared fate.
 
         Seals ONCE on the first attempt that gets a slot (inside ``do_call``,
@@ -355,6 +529,11 @@ class EmbeddingCoalescer:
         key supplies its real text; all same-key Futures receive the single
         computed vector. dedup_savings = requestors - unique_texts (live batches
         only). provider_embed_calls increments once per dispatched batch.
+
+        Story #1147 3b/3d — post-dispatch cache writes: after live embed
+        succeeds, write to cache once per unique key (outside _lock):
+          - on-mode MISS (including bypass): record_miss_or_shadow per key
+          - shadow-mode: record_hit if key existed, else record_miss_or_shadow
 
         Module dependency (intentional): build_key is imported from
         query_embedding_cache. The accepted direction is
@@ -454,9 +633,149 @@ class EmbeddingCoalescer:
                     f"expected {n_unique} (unique texts in deduplicated batch)"
                 )
             # Multiplex: fan unique vectors back to all same-key Futures.
+            # BLOCKING 1 fix (shadow audit_ctx): for shadow mode, we need to know
+            # whether each unique key was a cache HIT or MISS to populate per-entry
+            # audit_ctx in the fan-out. We pre-compute the shadow lookup results here
+            # (outside _lock, before setting Futures) so the fan-out loop can use them.
+            # For on-mode, audit_ctx population is not needed at dispatch time (MISSes
+            # don't populate audit_ctx; HITs were handled earlier in submit()).
+            _shadow_blobs: Optional[Dict[str, Optional[bytes]]] = None
+            if (
+                cache is not None
+                and cache_mode == "shadow"
+                and cache_qualifier is not None
+                and key_to_first_idx is not None
+            ):
+                _shadow_blobs = {}
+                for ukey in key_to_first_idx:
+                    if ukey.startswith(_NONE_KEY_PREFIX):
+                        _shadow_blobs[ukey] = None
+                        continue
+                    try:
+                        _shadow_blobs[ukey] = cache.lookup(ukey, cache_qualifier)
+                    except Exception as _sl_exc:  # noqa: BLE001
+                        logger.debug(
+                            "coalescer: shadow pre-lookup failed (lane=%s key=%.20s): %s",
+                            self._lane,
+                            ukey,
+                            _sl_exc,
+                        )
+                        _shadow_blobs[ukey] = None
+
             for e, k in zip(my_batch, entry_keys):
                 idx = key_to_first_idx[k]
-                e.fut.set_result(unique_vectors[idx])
+                vec = unique_vectors[idx]
+                e.fut.set_result(vec)
+
+                # BLOCKING 1 fix: populate per-requestor audit_ctx for shadow HITs.
+                # Each entry gets its OWN independent random draw (per-requestor, not
+                # per-key). Fail-open: errors never propagate.
+                if (
+                    _shadow_blobs is not None
+                    and e.audit_ctx is not None
+                    and not k.startswith(_NONE_KEY_PREFIX)
+                ):
+                    shadow_b = _shadow_blobs.get(k)
+                    if shadow_b is not None:
+                        try:
+                            from code_indexer.server.services.governed_call import (
+                                _audit_sample_rate_for,
+                            )
+
+                            provider_name_for_audit = self._provider.get_provider_name()
+                            rate = _audit_sample_rate_for(provider_name_for_audit)
+                            if rate > 0.0 and random.random() < rate:
+                                e.audit_ctx["sampled"] = True
+                                e.audit_ctx["mode"] = "shadow"
+                                e.audit_ctx["provider"] = provider_name_for_audit
+                                e.audit_ctx["cached_blob"] = shadow_b
+                                e.audit_ctx["live_vec"] = list(vec)
+                        except Exception as _ae:  # noqa: BLE001
+                            logger.debug(
+                                "coalescer: audit_ctx population failed"
+                                " (shadow HIT fan-out, lane=%s): %s",
+                                self._lane,
+                                _ae,
+                            )
+
+            # Story #1147 3b/3d: post-dispatch cache writes (outside _lock).
+            # Write once per unique key so repeated-text dedup doesn't multi-write.
+            # Bypass (no_embedding_cache_shortcut) skips READ but still WRITES here.
+            # Guard: cache must be present, mode must be on or shadow, qualifier set.
+            if (
+                cache is not None
+                and cache_mode in ("on", "shadow")
+                and cache_qualifier is not None
+                and key_to_first_idx is not None
+                and unique_texts is not None
+            ):
+                try:
+                    from code_indexer.server.services.governed_call import (
+                        get_query_embedding_cache_metrics,
+                    )
+
+                    _metrics = get_query_embedding_cache_metrics()
+
+                    for ukey, uidx in key_to_first_idx.items():
+                        # Skip sentinel-prefix keys (over-cap texts that fell back
+                        # to exact-text dedup — these have no valid cache key).
+                        if ukey.startswith(_NONE_KEY_PREFIX):
+                            continue
+                        vec = unique_vectors[uidx]
+                        pname = self._provider.get_provider_name()
+                        if cache_mode == "on":
+                            # on-mode: always a MISS at this point (HITs returned
+                            # early in submit()). Write the live result.
+                            cache.record_miss_or_shadow(ukey, cache_qualifier, vec)
+                            # BLOCKING 2 fix: record miss metric (once per unique key).
+                            if _metrics is not None:
+                                _metrics.record_miss(mode="on", provider=pname)
+                        else:
+                            # shadow-mode: use pre-computed shadow blob (looked up above).
+                            # record_hit if found (touches last_used); else MISS write.
+                            # Story #1147: record_shadow_cosine fires ONCE per
+                            # key-resolution (spec: "shadow asymmetry — one cosine
+                            # per key-resolution inside the coalescer").
+                            shadow_blob = (
+                                _shadow_blobs.get(ukey)
+                                if _shadow_blobs is not None
+                                else None
+                            )
+                            if shadow_blob is None:
+                                # Fallback: look up again if pre-computation was skipped.
+                                try:
+                                    shadow_blob = cache.lookup(ukey, cache_qualifier)
+                                except Exception:  # noqa: BLE001
+                                    shadow_blob = None
+                            if shadow_blob is not None:
+                                cache.record_hit(ukey, cache_qualifier)
+                                # BLOCKING 2 fix: record shadow hit metric.
+                                if _metrics is not None:
+                                    try:
+                                        _metrics.record_hit(
+                                            mode="shadow", provider=pname
+                                        )
+                                        _metrics.record_shadow_cosine(
+                                            cached_blob=shadow_blob, live_vec=vec
+                                        )
+                                    except Exception as _m_exc:  # noqa: BLE001
+                                        logger.debug(
+                                            "coalescer: record_shadow_cosine failed"
+                                            " (lane=%s): %s",
+                                            self._lane,
+                                            _m_exc,
+                                        )
+                            else:
+                                cache.record_miss_or_shadow(ukey, cache_qualifier, vec)
+                                # BLOCKING 2 fix: record shadow miss metric.
+                                if _metrics is not None:
+                                    _metrics.record_miss(mode="shadow", provider=pname)
+                except Exception as _cache_exc:  # noqa: BLE001
+                    logger.warning(
+                        "coalescer: post-dispatch cache write failed (lane=%s): %s",
+                        self._lane,
+                        _cache_exc,
+                    )
 
             # Observability counters (Phase E + Story #1146).
             batch_size = len(my_batch)

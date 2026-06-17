@@ -587,7 +587,9 @@ class TestCoalescerCountersRender:
     visible) by installing a fake CoalescerRegistry with known counter values.
     """
 
-    def test_coalescer_provider_embed_calls_rendered(self, client, admin_session_cookie):
+    def test_coalescer_provider_embed_calls_rendered(
+        self, client, admin_session_cookie
+    ):
         """provider_embed_calls must appear in the rendered dashboard HTML."""
         from code_indexer.server.services.coalescer_registry import (
             CoalescerRegistry,

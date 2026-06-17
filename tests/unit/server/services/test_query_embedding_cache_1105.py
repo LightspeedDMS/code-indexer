@@ -24,6 +24,33 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
+# Global-state isolation fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_globals():
+    """Clear all process-global singletons before and after every test so
+    the suite is order-independent regardless of which other test file ran
+    first (e.g. a test that calls set_query_embedding_cache / set_coalescer_registry
+    without cleanup will not pollute us).  config_service is also reset so that
+    QueryEmbeddingCache.enabled_for() / _live_qec_cfg() sees a clean config."""
+    from code_indexer.server.services import governed_call
+    from code_indexer.server.services.coalescer_registry import clear_coalescer_registry
+    from code_indexer.server.services.config_service import reset_config_service
+
+    governed_call.clear_query_embedding_cache()
+    governed_call.clear_query_embedding_cache_metrics()
+    clear_coalescer_registry()
+    reset_config_service()
+    yield
+    governed_call.clear_query_embedding_cache()
+    governed_call.clear_query_embedding_cache_metrics()
+    clear_coalescer_registry()
+    reset_config_service()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
