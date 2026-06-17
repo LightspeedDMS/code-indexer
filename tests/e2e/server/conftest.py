@@ -25,7 +25,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator, Optional, Tuple
 
 import pytest
 from fastapi.testclient import TestClient
@@ -36,6 +36,86 @@ from tests.e2e.helpers import _auth_headers, require_voyage_key
 # e2e-automation.sh sets these for all four phases before invoking pytest.
 _ENV_ADMIN_USER = "E2E_ADMIN_USER"
 _ENV_ADMIN_PASS = "E2E_ADMIN_PASS"
+
+
+# ---------------------------------------------------------------------------
+# AdminTokenProvider — automatic JWT refresh on near-expiry
+# ---------------------------------------------------------------------------
+
+
+class AdminTokenProvider:
+    """Cache a JWT access token and re-login when it nears expiry.
+
+    Uses the JWT ``exp`` claim (Unix epoch seconds) to decide whether to
+    refresh.  No signature verification is performed — we only need the
+    timestamp embedded in the token.
+
+    Args:
+        login_fn:              Callable that returns ``(access_token, refresh_token)``.
+                               Called during construction and whenever the cached
+                               token is within ``REFRESH_THRESHOLD_SECONDS`` of expiry.
+        initial_access_token:  First access token, obtained by the caller before
+                               constructing the provider.
+        initial_refresh_token: Corresponding refresh token (may be ``None``).
+    """
+
+    REFRESH_THRESHOLD_SECONDS: int = 60
+
+    def __init__(
+        self,
+        login_fn: Callable[[], Tuple[str, Optional[str]]],
+        initial_access_token: str,
+        initial_refresh_token: Optional[str],
+    ) -> None:
+        self._login_fn = login_fn
+        self._access_token = initial_access_token
+        self._refresh_token = initial_refresh_token
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _exp_from_token(token: str) -> float:
+        """Decode the ``exp`` claim without verifying the JWT signature.
+
+        Returns the expiry as a Unix epoch float (seconds).
+
+        Raises:
+            ValueError: If the token has no ``exp`` claim.
+        """
+        from jose import jwt as jose_jwt
+
+        claims = jose_jwt.get_unverified_claims(token)
+        exp = claims.get("exp")
+        if exp is None:
+            raise ValueError(f"AdminTokenProvider: JWT has no 'exp' claim: {claims!r}")
+        return float(exp)
+
+    def _is_near_expiry(self, token: str) -> bool:
+        """Return True when ``now + REFRESH_THRESHOLD_SECONDS >= exp``."""
+        exp = self._exp_from_token(token)
+        return time.time() + self.REFRESH_THRESHOLD_SECONDS >= exp
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_token(self) -> str:
+        """Return a valid access token, refreshing via ``login_fn`` if near-expiry.
+
+        Thread-safe note: concurrent calls may both refresh; the last write wins.
+        This is safe for E2E test usage where a single test drives requests.
+        """
+        if self._is_near_expiry(self._access_token):
+            new_access, new_refresh = self._login_fn()
+            self._access_token = new_access
+            self._refresh_token = new_refresh
+        return self._access_token
+
+    def get_headers(self) -> dict:
+        """Return ``{"Authorization": "Bearer <token>"}`` via the shared helper."""
+        return _auth_headers(self.get_token())
 
 
 def _require_env(name: str) -> str:
@@ -96,29 +176,55 @@ def test_client(test_client_data_dir) -> Iterator[TestClient]:
 
 
 @pytest.fixture(scope="session")
-def admin_token(test_client: TestClient) -> str:
-    """Obtain a JWT once per session using the admin account credentials from env."""
-    resp = test_client.post(
-        "/auth/login",
-        json={
-            "username": _require_env(_ENV_ADMIN_USER),
-            "password": _require_env(_ENV_ADMIN_PASS),
-        },
-    )
-    assert resp.status_code == 200, (
-        f"Admin login failed: {resp.status_code} — {resp.text[:300]}"
-    )
-    return str(resp.json()["access_token"])
+def admin_token_provider(test_client: TestClient) -> AdminTokenProvider:
+    """Session-scoped AdminTokenProvider backed by the in-process TestClient.
 
-
-@pytest.fixture(scope="session")
-def auth_headers(admin_token: str) -> dict:
-    """Return authorization headers for the admin session.
-
-    Delegates to the shared _auth_headers helper so no fixture assembles
-    Authorization strings directly.
+    Performs the initial /auth/login once and caches the result.  All
+    subsequent callers (admin_token, auth_headers, log_audit_admin_token)
+    delegate here so the token is refreshed automatically if the phase runs
+    longer than the JWT TTL (~10 minutes).
     """
-    return _auth_headers(admin_token)
+    username = _require_env(_ENV_ADMIN_USER)
+    password = _require_env(_ENV_ADMIN_PASS)
+
+    def _relogin() -> tuple[str, str | None]:
+        resp = test_client.post(
+            "/auth/login",
+            json={"username": username, "password": password},
+        )
+        assert resp.status_code == 200, (
+            f"admin_token_provider re-login failed: {resp.status_code} — {resp.text[:300]}"
+        )
+        body = resp.json()
+        return str(body["access_token"]), body.get("refresh_token")
+
+    initial_access, initial_refresh = _relogin()
+    return AdminTokenProvider(
+        login_fn=_relogin,
+        initial_access_token=initial_access,
+        initial_refresh_token=initial_refresh,
+    )
+
+
+@pytest.fixture(scope="function")
+def admin_token(admin_token_provider: AdminTokenProvider) -> str:
+    """Return a fresh-enough admin JWT for the current test.
+
+    Function-scoped so each test gets a token that is not near-expiry,
+    even in long-running phases.  Delegates to the session-scoped provider
+    so no extra login round-trips occur unless the token nears its TTL.
+    """
+    return admin_token_provider.get_token()
+
+
+@pytest.fixture(scope="function")
+def auth_headers(admin_token_provider: AdminTokenProvider) -> dict:
+    """Return authorization headers for the current test.
+
+    Function-scoped: every test receives a fresh-enough token.  Delegates
+    to the shared _auth_headers helper via AdminTokenProvider.get_headers().
+    """
+    return admin_token_provider.get_headers()
 
 
 # ---------------------------------------------------------------------------
@@ -145,28 +251,30 @@ def log_audit_app_client(test_client: TestClient) -> Iterator[TestClient]:
 
 
 @pytest.fixture(scope="session")
-def log_audit_admin_token(log_audit_app_client: TestClient) -> str:
-    """JWT for the log-audit gate admin session (against the singleton client)."""
-    resp = log_audit_app_client.post(
-        "/auth/login",
-        json={
-            "username": _require_env(_ENV_ADMIN_USER),
-            "password": _require_env(_ENV_ADMIN_PASS),
-        },
-    )
-    assert resp.status_code == 200, (
-        f"log_audit_admin_token: login failed {resp.status_code} -- {resp.text[:300]}"
-    )
-    return str(resp.json()["access_token"])
+def log_audit_admin_token(admin_token_provider: AdminTokenProvider) -> str:
+    """JWT string for the log-audit gate fixtures (test_log_audit_gate_e2e.py).
+
+    Returns a plain str from the provider so callers that type-annotate as
+    ``str`` work without change.  Within a single test the token is fixed;
+    the critical teardown freshness is handled by ``_phase3_log_audit_gate``
+    which calls ``admin_token_provider.get_token()`` at teardown time directly.
+    """
+    return admin_token_provider.get_token()
 
 
 @pytest.fixture(scope="session")
-def log_watermark(log_audit_app_client: TestClient, log_audit_admin_token: str) -> int:
+def log_watermark(
+    log_audit_app_client: TestClient,
+    admin_token_provider: AdminTokenProvider,
+) -> int:
     """Record the maximum log id BEFORE the phase's tests run (watermark).
 
     Any log entry at or below this id was emitted during server startup,
     not during the phase under test.  The gate diffs against this watermark
     so pre-existing startup messages don't fail the phase.
+
+    Uses admin_token_provider.get_token() at call time to ensure the token
+    used for the watermark query is not stale.
     """
     from tests.e2e.log_audit_gate import get_log_watermark
 
@@ -177,13 +285,13 @@ def log_watermark(log_audit_app_client: TestClient, log_audit_admin_token: str) 
     if handler is not None:
         handler.flush()
 
-    return get_log_watermark(log_audit_app_client, log_audit_admin_token)
+    return get_log_watermark(log_audit_app_client, admin_token_provider.get_token())
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _phase3_log_audit_gate(
     log_audit_app_client: TestClient,
-    log_audit_admin_token: str,
+    admin_token_provider: AdminTokenProvider,
     log_watermark: int,
 ) -> Iterator[None]:
     """Autouse session fixture: run the log-audit gate at Phase 3 teardown.
@@ -193,6 +301,9 @@ def _phase3_log_audit_gate(
       2. Query admin_logs_query via MCP front door.
       3. Diff against log_watermark to find new entries.
       4. Fail with detailed report if any new non-allowlisted ERROR/WARNING found.
+
+    Calls admin_token_provider.get_token() at teardown time so the audit
+    query uses a fresh token even if the phase ran longer than the JWT TTL.
     """
     from tests.e2e.log_audit_gate import run_log_audit_gate
 
@@ -206,9 +317,12 @@ def _phase3_log_audit_gate(
     if handler is not None:
         handler.flush()
 
+    # Obtain a fresh-enough token at teardown time (not the session-start token).
+    teardown_token = admin_token_provider.get_token()
+
     result = run_log_audit_gate(
         log_audit_app_client,
-        log_audit_admin_token,
+        teardown_token,
         watermark_id=log_watermark,
         phase_name="Phase 3 (Server In-Process)",
     )
