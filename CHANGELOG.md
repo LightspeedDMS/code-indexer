@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.135.0] - 2026-06-17
+
+### Fixed
+- **EmbeddingCoalescer single-flight registry leaked memory and zeroed the hit-rate metric (#1148).** The previous implementation (rejected in code review) used thread identity to track in-flight keys and retained done futures indefinitely — causing unbounded memory growth (O(total requests) instead of O(live concurrency)), suppressing hit-rate metrics for sequential same-key warm queries on different threads (hits=0 instead of the true hit count), and leaving a latent joiner hang when the owner path had no try/finally. Reimplemented using the correct standard single-flight pattern: key registered at MISS start, removed unconditionally in try/finally on owner completion (both dispatcher and non-dispatcher paths). Concurrent same-key joiners wait on the pending Future with a bounded 60-second timeout (Messi #14); later sequential same-key callers find no registry entry, perform a real cache lookup, and each record a genuine hit metric. Cache I/O (lookup, record_hit) is restored to outside `_inflight_lock` preserving the lock-free invariant. Registry is now O(live concurrency) with zero retained entries after resolution.
+
 ## [10.134.0] - 2026-06-15
 
 ### Fixed
