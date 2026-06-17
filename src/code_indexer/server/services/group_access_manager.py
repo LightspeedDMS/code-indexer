@@ -127,7 +127,13 @@ class GroupAccessManager:
             # PG mode: backend owns its schema (migrations). Seed the default
             # groups idempotently so admins/powerusers/users exist on a fresh
             # cluster deployment (Bug #1143 — previously skipped entirely).
-            self._backend.bootstrap_default_groups()
+            #
+            # Guard: only call bootstrap_default_groups() when the backend
+            # actually implements it (PG backend does; SQLite mode passes a
+            # GroupAccessManager instance which already bootstrapped groups
+            # during its own __init__, so no second call is needed).
+            if hasattr(self._backend, "bootstrap_default_groups"):
+                self._backend.bootstrap_default_groups()
             return
         self.db_path = Path(db_path)
         self._conn_manager = DatabaseConnectionManager.get_instance(str(db_path))
