@@ -757,6 +757,9 @@ for phase_def in "${PHASE_DEFS[@]}"; do
                 PYTHONPATH="$SCRIPT_DIR/src" \
                 E2E_PG_SERVER_HOST="$E2E_PG_SERVER_HOST" \
                 E2E_PG_SERVER_PORT="$E2E_PG_SERVER_PORT" \
+                E2E_PG_DATA="$E2E_PG_DATA" \
+                E2E_PG_DB_NAME="$E2E_PG_DB_NAME" \
+                E2E_PG_SERVER_DATA_DIR="$E2E_PG_SERVER_DATA_DIR" \
                 E2E_ADMIN_USER="$E2E_ADMIN_USER" \
                 E2E_ADMIN_PASS="$E2E_ADMIN_PASS" \
                 E2E_SEED_CACHE_DIR="$E2E_SEED_CACHE_DIR" \
