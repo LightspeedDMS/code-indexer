@@ -569,10 +569,24 @@ class TestS992GroupMembers:
         )
         _assert_no_500(resp_create, "grp_create")
 
+        # manage_group_members uses _validate_group_id which expects a numeric
+        # group_id (int as string), not the group name.  create_group returns the
+        # numeric id in the "group_id" field; use it when the group was created.
+        # When group_manager is not configured, create_group returns success=False
+        # and group_id is absent — fall back to the name so the handler at least
+        # routes to the inner handler and returns its own "not configured" error.
+        create_inner = (
+            _get_result_content(resp_create.json())
+            if resp_create.status_code == HTTP_OK
+            else {}
+        )
+        numeric_group_id = create_inner.get("group_id")
+        group_id_arg = str(numeric_group_id) if numeric_group_id is not None else grp
+
         resp_add = call_mcp_tool(
             test_client,
             "manage_group_members",
-            {"action": "add", "group_id": grp, "user_id": "admin"},
+            {"action": "add", "group_id": group_id_arg, "user_id": "admin"},
             auth_headers,
         )
         _assert_no_500(resp_add, "grp_add_member")
@@ -588,7 +602,7 @@ class TestS992GroupMembers:
         resp_rm = call_mcp_tool(
             test_client,
             "manage_group_members",
-            {"action": "remove", "group_id": grp, "user_id": "admin"},
+            {"action": "remove", "group_id": group_id_arg, "user_id": "admin"},
             auth_headers,
         )
         _assert_no_500(resp_rm, "grp_remove_member")
