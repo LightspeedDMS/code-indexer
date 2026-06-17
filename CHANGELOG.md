@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.136.0] - 2026-06-17
+
+### Fixed
+- **Omni multi-repo search re-embedded the query per repo and inflated the cache hit/miss metric (#1148, completion).** Building on the single-flight fix in 10.135.0, the per-config coalescer is now the single embedding chokepoint that records hit/miss EXACTLY ONCE per `(text, provider-config)` key-resolution per user query. An omni over K same-config repos embeds the query ONCE and reuses the vector across all K (cold omni -> 1 miss + 1 provider call; warm omni -> 1 hit, not K); a single-repo query reuses its one embedding across the primary search and the memory-retrieval pass. `_compute_shared_query_vector` returns `(vector, config-digest)` and `multi_search_service` reuses the precomputed vector for a repo only when the repo's own provider-config digest matches AND neither digest is the fail-open sentinel (`is_fallback_digest` guard) — a different-config repo (e.g. Cohere embed-v4.0 1536-dim vs Voyage 1024-dim) never receives a wrong-config vector and embeds via its own provider. When a precomputed vector is present, `FilesystemVectorStore.search` uses it directly and bypasses `coalesced_query_embedding` (no re-embed, no second metric). Over-cap queries count as exactly one miss + one `long_key` per query.
+
+### Added
+- **Shadow-cosine distribution histogram on the Database Health dashboard (#1152).** The single Shadow Cosine P50 (stuck at 1.0000 in production) is replaced by a full-range distribution histogram: 40 uniform buckets spanning [-1.0, 1.0] (width 0.05, named constants), bar lengths log10-scaled so the dominant ~1.0 spike and the thin sub-1.0 collision tail are both visible, with raw-count labels and a P50 / Min / P05 summary. Computed from the existing bounded shadow-cosine ring buffer under the existing lock — observability-only, no new persistence, schema, or behavior change. Bar lengths are precomputed in Python (no Jinja `log` filter, which previously 500'd the card on any populated bucket).
+
 ## [10.135.0] - 2026-06-17
 
 ### Fixed
