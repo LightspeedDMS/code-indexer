@@ -127,6 +127,10 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     dependencies.user_manager = user_manager
     dependencies.oauth_manager = oauth_manager
     dependencies.mcp_credential_manager = mcp_credential_manager
+    # Bug #1144: Wire API key bearer authentication
+    from code_indexer.server.auth.api_key_manager import ApiKeyManager as _ApiKeyManager
+
+    dependencies.api_key_manager = _ApiKeyManager(user_manager=user_manager)
 
     # Seed initial admin user
     user_manager.seed_initial_admin()

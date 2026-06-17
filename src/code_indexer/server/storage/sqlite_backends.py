@@ -452,20 +452,53 @@ class UsersSqliteBackend:
         key_hash: str,
         key_prefix: str,
         name: Optional[str] = None,
+        key_sha256: Optional[str] = None,
     ) -> None:
-        """Add an API key for a user."""
+        """Add an API key for a user.
+
+        key_sha256: SHA-256 hex of the raw key for O(1) bearer-auth lookup
+            (Bug #1144). None for legacy callers that don't supply it.
+        """
         now = datetime.now(timezone.utc).isoformat()
 
         def operation(conn):
             conn.execute(
                 """INSERT INTO user_api_keys
-                   (key_id, username, key_hash, key_prefix, name, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (key_id, username, key_hash, key_prefix, name, now),
+                   (key_id, username, key_hash, key_prefix, name, created_at, key_sha256)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (key_id, username, key_hash, key_prefix, name, now, key_sha256),
             )
             return None
 
         self._conn_manager.execute_atomic(operation)
+
+    def get_api_key_by_sha256(self, sha256_hex: str) -> Optional[Dict[str, Any]]:
+        """Look up an API key record by its SHA-256 hex digest (Bug #1144).
+
+        Direct indexed SELECT — never scans all rows. Returns None when not found
+        (including legacy rows with NULL key_sha256).
+
+        Returns a dict with at minimum: key_id, username, key_hash.
+        NEVER cached — must be a live DB read so revocation takes effect immediately.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT key_id, username, key_hash, key_prefix, name, created_at
+               FROM user_api_keys
+               WHERE key_sha256 = ?""",
+            (sha256_hex,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "key_id": row[0],
+            "username": row[1],
+            "key_hash": row[2],
+            "key_prefix": row[3],
+            "name": row[4],
+            "created_at": row[5],
+        }
 
     def add_mcp_credential(
         self,
