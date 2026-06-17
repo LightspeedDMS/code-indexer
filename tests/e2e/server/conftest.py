@@ -390,7 +390,7 @@ def _seed_wait_for_job(
 def seeded_indexed_client(
     test_client: TestClient,
     test_client_data_dir: Path,
-    auth_headers: dict,
+    admin_token_provider: AdminTokenProvider,
 ) -> Iterator[tuple[TestClient, str]]:
     """Register, index, and activate the markupsafe golden repo; yield (client, alias).
 
@@ -413,6 +413,12 @@ def seeded_indexed_client(
         golden-repo registration job completes (which creates the clone directory).
         The server's ScipQueryService walks ``{repo_path}/.code-indexer/scip/**/*.scip.db``
         so the seeded file is picked up without any additional wiring.
+
+    Uses ``admin_token_provider`` (session-scoped) instead of the function-scoped
+    ``auth_headers`` fixture to avoid a ScopeMismatch error (session fixture cannot
+    request a function-scoped fixture).  Headers are obtained via
+    ``admin_token_provider.get_headers()`` at each HTTP call point so the token is
+    always fresh even for long-running registration jobs.
 
     Raises:
         pytest.skip.Exception: When VOYAGE_API_KEY / E2E_VOYAGE_API_KEY is absent.
@@ -441,6 +447,7 @@ def seeded_indexed_client(
     # POST /api/admin/golden-repos accepts JSON {repo_url, alias}.
     # repo_url is the LOCAL path (file:// protocol not required — the server
     # accepts absolute paths to local directories as repo_url for golden repos).
+    auth_headers = admin_token_provider.get_headers()
     reg_resp = test_client.post(
         "/api/admin/golden-repos",
         json={"repo_url": str(markupsafe_path), "alias": alias},
@@ -457,7 +464,10 @@ def seeded_indexed_client(
     )
 
     # Poll until registration+indexing job completes.
-    _seed_wait_for_job(test_client, reg_job_id, auth_headers, "register")
+    # Refresh headers before the long-running poll in case token nears expiry.
+    _seed_wait_for_job(
+        test_client, reg_job_id, admin_token_provider.get_headers(), "register"
+    )
 
     # Step 2: Seed the SCIP fixture BEFORE activation so the SCIP index is present
     # when activation completes and tests run.
@@ -480,7 +490,7 @@ def seeded_indexed_client(
     act_resp = test_client.post(
         "/api/repos/activate",
         json={"golden_repo_alias": alias},
-        headers=auth_headers,
+        headers=admin_token_provider.get_headers(),
     )
     assert act_resp.status_code in (200, 202), (
         f"seeded_indexed_client: activate returned HTTP {act_resp.status_code}: "
@@ -493,7 +503,9 @@ def seeded_indexed_client(
     )
 
     # Poll until activation job completes.
-    _seed_wait_for_job(test_client, act_job_id, auth_headers, "activate")
+    _seed_wait_for_job(
+        test_client, act_job_id, admin_token_provider.get_headers(), "activate"
+    )
 
     # Yield the UNIFIED client (same app, same lifespan, no dual-app bug).
     yield test_client, alias

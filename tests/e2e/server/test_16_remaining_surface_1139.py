@@ -109,6 +109,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import require_voyage_key
+from tests.e2e.server.conftest import AdminTokenProvider
 from tests.e2e.server.mcp_helpers import call_mcp_tool, parse_mcp_result
 
 logger = logging.getLogger(__name__)
@@ -385,7 +386,7 @@ def _list_global_aliases(client: TestClient, auth_headers: dict) -> set[str]:
 @pytest.fixture(scope="module")
 def extra_global_repos(
     seeded_indexed_client: tuple[TestClient, str],
-    auth_headers: dict,
+    admin_token_provider: AdminTokenProvider,
 ) -> Iterator[Tuple[TestClient, str, list[str]]]:
     """Register + activate two SMALL extra golden repos for AC1/AC3.
 
@@ -396,6 +397,12 @@ def extra_global_repos(
     Module-scoped so the (slow) real indexing runs once for the whole file.
     Teardown removes both extra golden repos (front door) so the omni global
     repo set and the session log gate are unaffected by sibling tests.
+
+    Uses ``admin_token_provider`` (session-scoped) instead of the function-scoped
+    ``auth_headers`` fixture to avoid a ScopeMismatch error (module fixture cannot
+    request a function-scoped fixture).  Headers are obtained via
+    ``admin_token_provider.get_headers()`` per helper invocation so the token
+    stays fresh across the long-running registration jobs.
     """
     require_voyage_key()
     client, markupsafe_alias = seeded_indexed_client
@@ -411,14 +418,18 @@ def extra_global_repos(
 
     registered: list[str] = []
     try:
-        _register_and_activate(client, auth_headers, scip_src, _ALIAS_SCIP)
+        _register_and_activate(
+            client, admin_token_provider.get_headers(), scip_src, _ALIAS_SCIP
+        )
         registered.append(_ALIAS_SCIP)
-        _register_and_activate(client, auth_headers, mock_src, _ALIAS_MOCK)
+        _register_and_activate(
+            client, admin_token_provider.get_headers(), mock_src, _ALIAS_MOCK
+        )
         registered.append(_ALIAS_MOCK)
         yield client, markupsafe_alias, [_ALIAS_SCIP, _ALIAS_MOCK]
     finally:
         for alias in registered:
-            _remove_golden_repo(client, auth_headers, alias)
+            _remove_golden_repo(client, admin_token_provider.get_headers(), alias)
 
 
 # ===========================================================================
