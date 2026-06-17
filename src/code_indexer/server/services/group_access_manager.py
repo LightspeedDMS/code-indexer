@@ -124,7 +124,10 @@ class GroupAccessManager:
         self._audit_service: Optional["AuditLogService"] = None
         self._backend = storage_backend
         if self._backend is not None:
-            # PG mode: backend owns its own schema and bootstrap; skip SQLite init
+            # PG mode: backend owns its schema (migrations). Seed the default
+            # groups idempotently so admins/powerusers/users exist on a fresh
+            # cluster deployment (Bug #1143 — previously skipped entirely).
+            self._backend.bootstrap_default_groups()
             return
         self.db_path = Path(db_path)
         self._conn_manager = DatabaseConnectionManager.get_instance(str(db_path))
