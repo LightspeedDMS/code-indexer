@@ -265,7 +265,11 @@ class EmbeddingCoalescer:
         self._inflight_lock = threading.Lock()
         # Maps cache_key -> PENDING Future[List[float]].
         # Entries exist ONLY while resolution is in-flight.
-        self._inflight_keys: Dict[str, "Future[List[float]]"] = {}
+        # Defect #1148 fix: values are (Future, resolution_container) tuples.
+        # resolution_container is a 1-element list [None]; the HIT-owner fills
+        # it with cached_blob upon a successful on-mode cache HIT so that
+        # joiners can correctly populate their audit_ctx (see submit()).
+        self._inflight_keys: Dict[str, "Tuple[Future[List[float]], list]"] = {}
 
         # Observability counters (Phase E). Read for metrics/logging — the
         # coalescing ratio is texts_coalesced / batches_dispatched. Incremented
@@ -399,101 +403,49 @@ class EmbeddingCoalescer:
                         )
 
                     if cache_key_opt is not None:
-                        # --- Step 1: LOCK-FREE cache lookup (outside _inflight_lock) ---
-                        # on-mode: genuine pre-existing HITs return immediately and
-                        # each record their own metric (no inflight entry needed).
-                        # shadow: always embed live (skip the lookup shortcut).
-                        if _cache_mode == "on":
-                            cached_blob = cache.lookup(cache_key_opt, _cache_qualifier)
-                            if cached_blob is not None:
-                                expected_bytes = _cache_qualifier.dimension * 4
-                                if len(cached_blob) == expected_bytes:
-                                    import struct
-
-                                    try:
-                                        n_floats = len(cached_blob) // 4
-                                        decoded_vec: List[float] = list(
-                                            struct.unpack(f"<{n_floats}f", cached_blob)
-                                        )
-                                        cache.record_hit(
-                                            cache_key_opt, _cache_qualifier
-                                        )
-                                        metrics = get_query_embedding_cache_metrics()
-                                        if metrics is not None:
-                                            metrics.record_hit(
-                                                mode=_cache_mode,
-                                                provider=provider_name,
-                                            )
-                                        if audit_ctx is not None:
-                                            try:
-                                                from code_indexer.server.services.governed_call import (
-                                                    _audit_sample_rate_for,
-                                                )
-
-                                                rate = _audit_sample_rate_for(
-                                                    provider_name
-                                                )
-                                                if (
-                                                    rate > 0.0
-                                                    and random.random() < rate
-                                                ):
-                                                    audit_ctx["sampled"] = True
-                                                    audit_ctx["mode"] = _cache_mode
-                                                    audit_ctx["provider"] = (
-                                                        provider_name
-                                                    )
-                                                    audit_ctx["cached_blob"] = (
-                                                        cached_blob
-                                                    )
-                                            except Exception as _ae:  # noqa: BLE001
-                                                logger.debug(
-                                                    "coalescer: audit_ctx population"
-                                                    " failed (on-mode HIT,"
-                                                    " lane=%s): %s",
-                                                    self._lane,
-                                                    _ae,
-                                                )
-                                        logger.debug(
-                                            "coalescer: cache HIT (mode=on,"
-                                            " provider=%s, lane=%s)",
-                                            provider_name,
-                                            self._lane,
-                                        )
-                                        return decoded_vec
-                                    except struct.error as _se:
-                                        logger.warning(
-                                            "coalescer: corrupt cache blob"
-                                            " (struct.error) provider=%s dim=%d"
-                                            " blob_len=%d — treating as MISS: %s",
-                                            provider_name,
-                                            _cache_qualifier.dimension,
-                                            len(cached_blob),
-                                            _se,
-                                        )
-                                        # Fall through to MISS / single-flight.
-                                else:
-                                    logger.warning(
-                                        "coalescer: corrupt cache blob dimension"
-                                        " mismatch provider=%s expected_bytes=%d"
-                                        " actual_bytes=%d — treating as MISS",
-                                        provider_name,
-                                        expected_bytes,
-                                        len(cached_blob),
-                                    )
-                                    # Fall through to MISS / single-flight.
-
-                        # --- Step 2: MISS (or shadow). Acquire _inflight_lock BRIEFLY. ---
-                        # No cache I/O under this lock — only fast dict ops.
-                        # If key already present -> JOIN the pending future.
-                        # If key absent -> register as OWNER.
+                        # --- Step 1: Acquire _inflight_lock BRIEFLY — register owner or JOIN. ---
+                        # Story #1148 PART 1 fix: the single-flight registry now covers
+                        # BOTH on-mode HITs and MISSes. Previously the HIT path returned
+                        # before the registry check, so K concurrent warm requestors each
+                        # independently recorded a hit (K hits per key-resolution).
+                        #
+                        # Correct behavior (from the story design):
+                        #   - Check _inflight_keys FIRST (under _inflight_lock, fast dict op).
+                        #   - Key absent -> become OWNER: register a fresh Future, then
+                        #     do the cache lookup outside the lock (lock-free I/O invariant).
+                        #     Owner completes the Future (result or exception) in finally.
+                        #   - Key present -> become JOINER: await the owner's Future
+                        #     (bounded wait), return result, NO metric.
+                        #
+                        # Lock discipline (unchanged, deadlock-free):
+                        #   - _inflight_lock: fast dict op only (no I/O, no HTTP, no _lock).
+                        #   - Cache I/O (lookup/record_hit) OUTSIDE _inflight_lock.
+                        #   - Joiner wait OUTSIDE both locks.
+                        # Defect #1148 fix (DEFECT 2 — joiner audit semantics):
+                        # _inflight_keys now stores (Future, resolution_container)
+                        # where resolution_container is a 1-element list [None].
+                        # The HIT-owner fills it with the cached_blob upon a
+                        # successful on-mode cache HIT, leaving it as [None] when
+                        # the resolution is LIVE (MISS or shadow).  The joiner
+                        # reads resolution_container[0] after the Future resolves:
+                        #   - not None -> owner served a CACHED vector -> populate
+                        #     audit_ctx with mode="on" + cached_blob (correct).
+                        #   - None     -> owner served a LIVE vector -> leave
+                        #     audit_ctx untouched (no cached blob to compare;
+                        #     a "live vs live" audit is meaningless, Messi #2).
                         _join_fut: "Optional[Future[List[float]]]" = None
+                        _join_resolution_container: "Optional[list]" = None
+                        _resolution_container: "list" = [None]  # owner fills on HIT
                         with self._inflight_lock:
                             _existing = self._inflight_keys.get(cache_key_opt)
                             if _existing is not None:
-                                _join_fut = _existing
+                                _join_fut, _join_resolution_container = _existing
                             else:
                                 _owned_future = Future()
-                                self._inflight_keys[cache_key_opt] = _owned_future
+                                self._inflight_keys[cache_key_opt] = (
+                                    _owned_future,
+                                    _resolution_container,
+                                )
                                 _am_inflight_owner = True
                                 _inflight_key = cache_key_opt
 
@@ -502,27 +454,175 @@ class EmbeddingCoalescer:
                             result_vec = _join_fut.result(
                                 timeout=_INFLIGHT_JOIN_TIMEOUT
                             )
-                            # Per-requestor audit_ctx draw for joiners (mirrors HITs).
-                            if audit_ctx is not None:
-                                try:
-                                    from code_indexer.server.services.governed_call import (
-                                        _audit_sample_rate_for,
-                                    )
+                            # Per-requestor audit_ctx draw: populate ONLY when the
+                            # owner resolved via on-mode cache HIT (has cached_blob).
+                            # A live-resolution joiner has no cached_blob to compare
+                            # — setting mode="on" without cached_blob would cause the
+                            # audit to re-embed and compare live-vs-live (trivially
+                            # identical, misleading; Defect #1148 DEFECT 2 fix).
+                            if (
+                                audit_ctx is not None
+                                and _join_resolution_container is not None
+                            ):
+                                _owner_cached_blob = _join_resolution_container[0]
+                                if _owner_cached_blob is not None:
+                                    try:
+                                        from code_indexer.server.services.governed_call import (
+                                            _audit_sample_rate_for,
+                                        )
 
-                                    rate = _audit_sample_rate_for(provider_name)
-                                    if rate > 0.0 and random.random() < rate:
-                                        audit_ctx["sampled"] = True
-                                        audit_ctx["mode"] = _cache_mode
-                                        audit_ctx["provider"] = provider_name
-                                        audit_ctx["live_vec"] = list(result_vec)
-                                except Exception as _ae:  # noqa: BLE001
-                                    logger.debug(
-                                        "coalescer: audit_ctx population failed"
-                                        " (joiner, lane=%s): %s",
-                                        self._lane,
-                                        _ae,
-                                    )
+                                        rate = _audit_sample_rate_for(provider_name)
+                                        if rate > 0.0 and random.random() < rate:
+                                            audit_ctx["sampled"] = True
+                                            audit_ctx["mode"] = "on"
+                                            audit_ctx["provider"] = provider_name
+                                            audit_ctx["cached_blob"] = (
+                                                _owner_cached_blob
+                                            )
+                                    except Exception as _ae:  # noqa: BLE001
+                                        logger.debug(
+                                            "coalescer: audit_ctx population failed"
+                                            " (joiner HIT, lane=%s): %s",
+                                            self._lane,
+                                            _ae,
+                                        )
+                                # Live-resolution joiner: leave audit_ctx untouched.
                             return result_vec
+
+                        # --- Step 2: OWNER — LOCK-FREE cache lookup (outside _inflight_lock). ---
+                        # on-mode: genuine pre-existing HITs complete the owned Future with
+                        # the cached vector and return (no _enqueue, no governor slot).
+                        # shadow: always embed live (skip the lookup shortcut).
+                        #
+                        # HIT owner try/finally: the HIT path returns early (before the
+                        # _enqueue section's finally blocks). We need a dedicated
+                        # try/finally here so the _inflight_key is ALWAYS popped whether
+                        # the owner returns via HIT or falls through to MISS/_enqueue.
+                        # The finally block sets the Future (if not already set) and pops
+                        # the key so joiners are never stranded. The MISS/_enqueue path
+                        # will set the Future and pop the key via the outer finally blocks
+                        # (non-dispatcher / dispatcher), so we only act in this finally if
+                        # we are still the owner AND the Future was resolved here (HIT case).
+                        _hit_vec: Optional[List[float]] = None
+                        try:
+                            if _cache_mode == "on":
+                                cached_blob = cache.lookup(
+                                    cache_key_opt, _cache_qualifier
+                                )
+                                if cached_blob is not None:
+                                    expected_bytes = _cache_qualifier.dimension * 4
+                                    if len(cached_blob) == expected_bytes:
+                                        import struct
+
+                                        try:
+                                            n_floats = len(cached_blob) // 4
+                                            decoded_vec: List[float] = list(
+                                                struct.unpack(
+                                                    f"<{n_floats}f", cached_blob
+                                                )
+                                            )
+                                            cache.record_hit(
+                                                cache_key_opt, _cache_qualifier
+                                            )
+                                            metrics = (
+                                                get_query_embedding_cache_metrics()
+                                            )
+                                            if metrics is not None:
+                                                metrics.record_hit(
+                                                    mode=_cache_mode,
+                                                    provider=provider_name,
+                                                )
+                                            if audit_ctx is not None:
+                                                try:
+                                                    from code_indexer.server.services.governed_call import (
+                                                        _audit_sample_rate_for,
+                                                    )
+
+                                                    rate = _audit_sample_rate_for(
+                                                        provider_name
+                                                    )
+                                                    if (
+                                                        rate > 0.0
+                                                        and random.random() < rate
+                                                    ):
+                                                        audit_ctx["sampled"] = True
+                                                        audit_ctx["mode"] = _cache_mode
+                                                        audit_ctx["provider"] = (
+                                                            provider_name
+                                                        )
+                                                        audit_ctx["cached_blob"] = (
+                                                            cached_blob
+                                                        )
+                                                except Exception as _ae:  # noqa: BLE001
+                                                    logger.debug(
+                                                        "coalescer: audit_ctx population"
+                                                        " failed (on-mode HIT,"
+                                                        " lane=%s): %s",
+                                                        self._lane,
+                                                        _ae,
+                                                    )
+                                            logger.debug(
+                                                "coalescer: cache HIT (mode=on,"
+                                                " provider=%s, lane=%s)",
+                                                provider_name,
+                                                self._lane,
+                                            )
+                                            # Record resolved vector for finally block.
+                                            _hit_vec = decoded_vec
+                                            # Defect #1148 DEFECT 2 fix: fill the
+                                            # resolution container with cached_blob
+                                            # BEFORE the Future is set so any joiner
+                                            # that unblocks sees the blob and correctly
+                                            # populates its audit_ctx with mode="on".
+                                            _resolution_container[0] = cached_blob
+                                        except struct.error as _se:
+                                            logger.warning(
+                                                "coalescer: corrupt cache blob"
+                                                " (struct.error) provider=%s dim=%d"
+                                                " blob_len=%d — treating as MISS: %s",
+                                                provider_name,
+                                                _cache_qualifier.dimension,
+                                                len(cached_blob),
+                                                _se,
+                                            )
+                                            # Fall through to MISS / dispatch.
+                                    else:
+                                        logger.warning(
+                                            "coalescer: corrupt cache blob dimension"
+                                            " mismatch provider=%s expected_bytes=%d"
+                                            " actual_bytes=%d — treating as MISS",
+                                            provider_name,
+                                            expected_bytes,
+                                            len(cached_blob),
+                                        )
+                                        # Fall through to MISS / dispatch.
+                        finally:
+                            # HIT owner cleanup: if we resolved a HIT vector, set the
+                            # owned Future so any concurrent JOINER gets the result,
+                            # then pop the key from the registry. Joiners that are still
+                            # waiting on _join_fut.result() will unblock and return.
+                            # If _hit_vec is None (MISS / fall-through), the outer
+                            # finally blocks (_enqueue path) handle Future + pop.
+                            if _hit_vec is not None and _am_inflight_owner:
+                                if (
+                                    _owned_future is not None
+                                    and not _owned_future.done()
+                                ):
+                                    _owned_future.set_result(_hit_vec)
+                                with self._inflight_lock:
+                                    # _inflight_key is always non-None here:
+                                    # _am_inflight_owner=True implies line 429
+                                    # executed (_inflight_key = cache_key_opt).
+                                    assert _inflight_key is not None  # noqa: S101
+                                    self._inflight_keys.pop(_inflight_key, None)
+                                # Mark as no longer owner so the _enqueue finally
+                                # blocks do not double-pop or double-set.
+                                _am_inflight_owner = False
+                                _inflight_key = None
+                                _owned_future = None
+
+                        if _hit_vec is not None:
+                            return _hit_vec
 
         # --- No cache / MISS (owner) / shadow (owner) / bypass / off / disabled ---
         entry = _Entry(

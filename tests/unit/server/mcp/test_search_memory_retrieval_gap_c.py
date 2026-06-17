@@ -207,7 +207,7 @@ def _invoke_with_precomputed_vector_mock(pipeline_instance):
         patch(_PIPELINE_CLS_PATCH, pipeline_cls),
         patch(
             _COMPUTE_VECTOR_PATCH,
-            return_value=_EXPECTED_PRECOMPUTED_VECTOR,
+            return_value=(_EXPECTED_PRECOMPUTED_VECTOR, "mock-digest"),
         ),
     ):
         mock_app.app.state.access_filtering_service = None

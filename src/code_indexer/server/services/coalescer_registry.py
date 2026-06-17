@@ -53,6 +53,18 @@ _DEFAULT_MAX_PER_LANE: int = 64
 _FALLBACK_DIGEST: str = "fallback-no-config"
 
 
+def is_fallback_digest(digest: str) -> bool:
+    """Return True when *digest* is the sentinel produced by a failed extraction.
+
+    Use this predicate (rather than comparing against the string literal) so the
+    sentinel value is defined in exactly ONE place.  Callers that need to guard
+    against sentinel-collapse (two providers both returning the sentinel and
+    therefore appearing config-identical) should call this instead of
+    ``digest == "fallback-no-config"``.
+    """
+    return digest == _FALLBACK_DIGEST
+
+
 def _digest_for_provider(provider: Any) -> str:
     """Compute a stable digest over the provider's behavior-affecting config.
 
