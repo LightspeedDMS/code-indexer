@@ -9779,8 +9779,30 @@ def auth_login(ctx, username: Optional[str], password: Optional[str]):
             console.print("❌ Password cannot be empty", style="red")
             sys.exit(1)
 
-        # Create auth client and login
-        auth_client = AuthAPIClient(server_url, project_root)
+        # Wire TOTP provider only when running interactively.
+        # When stdin is not a TTY (e.g. CI, scripts, pipes) we pass None so
+        # the library raises an actionable AuthenticationError rather than
+        # blocking on stdin.  An aborted prompt (Ctrl-C / EOF) is treated as
+        # a login cancellation — not an auth failure — so we clean-exit with
+        # a clear message and exit code 1.
+        def _make_totp_provider():
+            if not sys.stdin.isatty():
+                return None
+
+            def _prompt_totp() -> str:
+                try:
+                    return str(click.prompt("Enter your TOTP code")).strip()
+                except (click.Abort, EOFError):
+                    # User cancelled the TOTP prompt — surface clean message
+                    console.print("\n❌ TOTP entry cancelled", style="red")
+                    sys.exit(1)
+
+            return _prompt_totp
+
+        totp_provider = _make_totp_provider()
+        auth_client = AuthAPIClient(
+            server_url, project_root, totp_provider=totp_provider
+        )
 
         with console.status("🔐 Authenticating..."):
             auth_response = auth_client.login(

@@ -76,6 +76,7 @@ class CIDXRemoteAPIClient:
         server_url: str,
         credentials: Dict[str, Any],
         project_root: Optional[Path] = None,
+        totp_provider: Optional[Callable[[], str]] = None,
     ):
         """Initialize base API client with persistent token management.
 
@@ -83,10 +84,16 @@ class CIDXRemoteAPIClient:
             server_url: Base URL of the CIDX server
             credentials: Encrypted credentials dictionary
             project_root: Project root for persistent token storage
+            totp_provider: Optional callable that returns a TOTP code string.
+                Used when the server requires MFA on login.  For interactive
+                CLI use, wire ``lambda: click.prompt("Enter your TOTP code")``.
+                When None and MFA is required, AuthenticationError is raised
+                with an actionable message.
         """
         self.server_url = server_url.rstrip("/")
         self.credentials = credentials
         self.project_root = project_root
+        self._totp_provider = totp_provider
         self.jwt_manager = JWTTokenManager()
         self._session: Optional[httpx.Client] = None
         self._current_token: Optional[str] = None
@@ -244,6 +251,20 @@ class CIDXRemoteAPIClient:
             if response.status_code == 200:
                 auth_response = response.json()
                 token = auth_response.get("access_token")
+
+                # Detect MFA challenge: server returns mfa_required+mfa_token, no access_token
+                if (
+                    not token
+                    and auth_response.get("mfa_required")
+                    and auth_response.get("mfa_token")
+                ):
+                    mfa_token = auth_response["mfa_token"]
+                    token = self._complete_mfa_challenge(mfa_token)
+                    # _complete_mfa_challenge raises on failure; token is valid here
+                    self._record_auth_success()
+                    self._store_token_persistently(cast(str, token))
+                    return cast(str, token)
+
                 if not token or not isinstance(token, str):
                     raise AuthenticationError("No valid access token in response")
 
@@ -295,6 +316,67 @@ class CIDXRemoteAPIClient:
 
         # This should never be reached as all paths above either return or raise
         raise AuthenticationError("Unexpected code path in authentication")
+
+    def _complete_mfa_challenge(self, mfa_token: str) -> str:
+        """Complete a TOTP MFA challenge returned by POST /auth/login.
+
+        Called when the login response contains ``mfa_required: true`` and an
+        ``mfa_token`` but no ``access_token``.  Posts to
+        ``POST /auth/mfa/verify`` with the mfa_token and the TOTP code
+        supplied by ``_totp_provider``.
+
+        Args:
+            mfa_token: The one-time challenge token from the login response.
+                       NEVER logged.
+
+        Returns:
+            The JWT access_token from the verify response.
+
+        Raises:
+            AuthenticationError: If no totp_provider configured, if the TOTP
+                code is wrong (401), or if the MFA service is unavailable (other
+                non-200 status).
+        """
+        if self._totp_provider is None:
+            raise AuthenticationError(
+                "This account requires TOTP MFA to log in. "
+                "Run in an interactive terminal or configure a TOTP provider."
+            )
+
+        # Obtain TOTP code from provider — never log it
+        totp_code = self._totp_provider()
+
+        verify_endpoint = f"{self.server_url}/auth/mfa/verify"
+        verify_payload = {"mfa_token": mfa_token, "totp_code": totp_code}
+
+        verify_response = self.session.post(verify_endpoint, json=verify_payload)
+
+        if verify_response.status_code == 200:
+            verify_data = verify_response.json()
+            token = verify_data.get("access_token")
+            if not token or not isinstance(token, str):
+                raise AuthenticationError(
+                    "MFA verification succeeded but no access token in response"
+                )
+            return cast(str, token)
+
+        if verify_response.status_code == 401:
+            self._record_auth_failure()
+            try:
+                detail = verify_response.json().get("detail", "Invalid TOTP code")
+            except Exception:
+                detail = "Invalid TOTP code"
+            raise AuthenticationError(f"MFA verification failed: {detail}")
+
+        # All other statuses (including 503 MFA service unavailable)
+        self._record_auth_failure()
+        try:
+            detail = verify_response.json().get(
+                "detail", f"HTTP {verify_response.status_code}"
+            )
+        except Exception:
+            detail = f"HTTP {verify_response.status_code}"
+        raise AuthenticationError(f"MFA verification error: {detail}")
 
     def _store_token_persistently(self, token: str) -> None:
         """Store JWT token persistently if manager is available.

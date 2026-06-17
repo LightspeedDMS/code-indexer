@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, TypedDict, List
+from typing import Callable, Dict, Any, Optional, TypedDict, List
 
 from .base_client import CIDXRemoteAPIClient, APIClientError, AuthenticationError
 from ..remote.credential_manager import (
@@ -75,6 +75,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         server_url: str,
         project_root: Optional[Path] = None,
         credentials: Optional[Dict[str, Any]] = None,
+        totp_provider: Optional[Callable[[], str]] = None,
     ):
         """Initialize authentication API client.
 
@@ -82,10 +83,15 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             server_url: Base URL of the CIDX server
             project_root: Project root directory for credential storage
             credentials: Optional existing credentials dictionary
+            totp_provider: Optional callable that returns a TOTP code string.
+                Used when the server requires MFA on login.  For interactive
+                CLI use, wire ``lambda: click.prompt("Enter your TOTP code")``.
+                When None and MFA is required, AuthenticationError is raised
+                with an actionable message.
         """
         # Initialize with empty credentials if none provided
         creds = credentials or {}
-        super().__init__(server_url, creds, project_root)
+        super().__init__(server_url, creds, project_root, totp_provider=totp_provider)
 
         self.project_root = project_root
         self.credential_manager = ProjectCredentialManager()
@@ -118,9 +124,20 @@ class AuthAPIClient(CIDXRemoteAPIClient):
 
             if response.status_code == 200:
                 auth_response = response.json()
+                access_token = auth_response.get("access_token")
 
-                # Validate response format
-                if not auth_response.get("access_token"):
+                # Detect MFA challenge: server returns mfa_required+mfa_token, no access_token
+                if (
+                    not access_token
+                    and auth_response.get("mfa_required")
+                    and auth_response.get("mfa_token")
+                ):
+                    mfa_token = auth_response["mfa_token"]
+                    # _complete_mfa_challenge raises AuthenticationError on any failure
+                    access_token = self._complete_mfa_challenge(mfa_token)
+
+                # Validate response format (covers both normal and post-MFA paths)
+                if not access_token or not isinstance(access_token, str):
                     raise AuthenticationError("No access token in response")
 
                 # Store credentials securely if project root provided
@@ -134,7 +151,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
                 }
 
                 return AuthResponse(
-                    access_token=auth_response["access_token"],
+                    access_token=access_token,
                     token_type=auth_response.get("token_type", "bearer"),
                     user_id=auth_response.get("user_id"),
                 )
