@@ -669,8 +669,8 @@ class TestAC4NeverLowercaseKey:
         # Verify the two queries produce different build_key outputs (unit-level proof)
         from code_indexer.server.services.query_embedding_cache import build_key
 
-        key_camel = build_key(_QUERY_CAMELCASE)
-        key_lower = build_key(_QUERY_CAMELCASE_LOWER)
+        key_camel = build_key(_QUERY_CAMELCASE, config_digest="test-digest")
+        key_lower = build_key(_QUERY_CAMELCASE_LOWER, config_digest="test-digest")
         assert key_camel != key_lower, (
             f"build_key must produce DIFFERENT keys for CamelCase vs lowercase: "
             f"'{_QUERY_CAMELCASE}' -> {key_camel}, "
