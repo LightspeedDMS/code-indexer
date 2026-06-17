@@ -4,7 +4,7 @@ Job Reconciliation Service (Story #422).
 Runs a background sweep every ``sweep_interval`` seconds (default 5 s) to
 detect and reclaim jobs that have been abandoned by crashed cluster nodes.
 
-Two reclaim conditions are checked on every sweep:
+Three reclaim conditions are checked on every sweep:
 
 1. **Dead-node reclaim**: A job is in ``status='running'`` but its
    ``executing_node`` is NOT in the list of currently active nodes
@@ -15,9 +15,18 @@ Two reclaim conditions are checked on every sweep:
    ``started_at`` is older than ``max_execution_time`` seconds
    (default 1800 s / 30 min).  This is a safety net for runaway jobs.
 
-Reclaimed jobs are reset to ``status='pending'`` with
-``executing_node=NULL`` and ``started_at=NULL`` so they can be re-claimed
-by a healthy node.
+3. **Stuck index-blocking reclaim** (Bug #1141): A job is in ``status='pending'``
+   or ``status='running'`` with a NULL ``started_at`` (so path 2 misses it)
+   and is older than ``max_execution_time`` based on COALESCE(started_at,
+   claimed_at, created_at).  These jobs are set to ``status='failed'``
+   (not ``pending``) so the partial unique index ``idx_active_job_per_repo``
+   is freed and a fresh job can be submitted.
+
+Paths 1 & 2 reset jobs to ``status='pending'`` with ``executing_node=NULL``
+and ``started_at=NULL`` so they can be re-claimed by a healthy node.
+
+Path 3 uses ``status='failed'`` because setting to ``pending`` would keep
+the job in the active index and block future submissions.
 
 This module is cluster-only and must only be loaded when
 storage_mode="postgres".  No SQLite dependency.
@@ -29,7 +38,7 @@ import logging
 import random
 import threading
 import time
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -133,8 +142,10 @@ class JobReconciliationService:
         """
         active_nodes = self._heartbeat_service.get_active_nodes()
         reclaimed = 0
-        reclaimed += self._reclaim_dead_node_jobs(active_nodes)
-        reclaimed += self._reclaim_timed_out_jobs()
+        reclaimed_ids: Set[str] = set()
+        reclaimed += self._reclaim_dead_node_jobs(active_nodes, reclaimed_ids)
+        reclaimed += self._reclaim_timed_out_jobs(reclaimed_ids)
+        reclaimed += self._reclaim_stuck_index_blocking_jobs(reclaimed_ids)
         if reclaimed:
             logger.info(
                 "JobReconciliationService: reclaimed %d job(s) this sweep",
@@ -146,7 +157,9 @@ class JobReconciliationService:
     # Internal
     # ------------------------------------------------------------------
 
-    def _reclaim_dead_node_jobs(self, active_nodes: List[str]) -> int:
+    def _reclaim_dead_node_jobs(
+        self, active_nodes: List[str], _reclaimed_ids_out: Optional[Set[str]] = None
+    ) -> int:
         """
         Reset jobs whose executing_node is not in the active nodes list.
 
@@ -208,6 +221,9 @@ class JobReconciliationService:
                 else:
                     raise
 
+        if _reclaimed_ids_out is not None:
+            _reclaimed_ids_out.update(r[0] for r in rows)
+
         for row in rows:
             logger.info(
                 "JobReconciliationService: reclaimed job %s (dead node: %s) -> pending",
@@ -216,7 +232,9 @@ class JobReconciliationService:
             )
         return len(rows)
 
-    def _reclaim_timed_out_jobs(self) -> int:
+    def _reclaim_timed_out_jobs(
+        self, _reclaimed_ids_out: Optional[Set[str]] = None
+    ) -> int:
         """
         Reset jobs that have been running longer than max_execution_time.
 
@@ -260,10 +278,76 @@ class JobReconciliationService:
                 else:
                     raise
 
+        if _reclaimed_ids_out is not None:
+            _reclaimed_ids_out.update(r[0] for r in rows)
+
         for row in rows:
             logger.warning(
                 "JobReconciliationService: reclaimed timed-out job %s "
                 "(node: %s, started_at: %s) -> pending",
+                row[0],
+                row[1],
+                row[2],
+            )
+        return len(rows)
+
+    def _reclaim_stuck_index_blocking_jobs(self, reclaimed_ids: Set[str]) -> int:
+        """Bug #1141: fail jobs stuck in an index-blocking active status.
+
+        Jobs in 'pending' or 'running' with a NULL started_at (path 2 misses
+        them) — or pending jobs that no path touches — can sit ACTIVE forever
+        and block idx_active_job_per_repo, rejecting all new same-key jobs.
+        Move them to terminal 'failed' (NOT 'pending', which would keep them
+        active) so a fresh job can be submitted. Age uses
+        COALESCE(started_at, claimed_at, created_at) so NULL started_at is
+        handled. Excludes job_ids already reclaimed by the dead-node / timeout
+        paths this sweep (clobber-safety — those were intentionally re-queued).
+        """
+        exclude = list(reclaimed_ids)
+        base_sql = (
+            "UPDATE background_jobs "
+            "SET    status = 'failed', "
+            "       error  = COALESCE(error, 'Reclaimed by JobReconciliationService: "
+            "stuck in active state beyond max_execution_time (Bug #1141)') "
+            "WHERE  status IN ('pending', 'running') "
+            "  AND  COALESCE(started_at, claimed_at, created_at) "
+            "       <= NOW() - %s * INTERVAL '1 second' "
+        )
+        params: List[Any] = [self._max_execution_time]
+        if exclude:
+            base_sql += "  AND  job_id <> ALL(%s) "
+            params.append(exclude)
+        sql = base_sql + "RETURNING job_id, status, executing_node"
+
+        rows = []
+        for attempt in range(_DEADLOCK_MAX_RETRIES):
+            try:
+                with self._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql, tuple(params))
+                        rows = cur.fetchall()
+                    conn.commit()
+                break
+            except Exception as exc:
+                sqlstate = getattr(exc, "sqlstate", None)
+                if sqlstate == "40P01" and attempt < _DEADLOCK_MAX_RETRIES - 1:
+                    jitter = random.uniform(0.1, 0.5)
+                    logger.warning(
+                        "JobReconciliationService: deadlock in "
+                        "_reclaim_stuck_index_blocking_jobs (attempt %d/%d), "
+                        "retrying in %.2fs",
+                        attempt + 1,
+                        _DEADLOCK_MAX_RETRIES,
+                        jitter,
+                    )
+                    time.sleep(jitter)
+                else:
+                    raise
+
+        for row in rows:
+            logger.warning(
+                "JobReconciliationService: failed stuck index-blocking job %s "
+                "(status was %s, node: %s) -> failed (Bug #1141)",
                 row[0],
                 row[1],
                 row[2],
