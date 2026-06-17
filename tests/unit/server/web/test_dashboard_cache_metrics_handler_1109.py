@@ -680,3 +680,123 @@ class TestCoalescerCountersRender:
             )
         finally:
             clear_coalescer_registry()
+
+
+# ---------------------------------------------------------------------------
+# Story #1152 (BLOCKING): populated histogram must not crash with | log(10)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetricsWithHistogram(_FakeMetrics):
+    """FakeMetrics that includes a populated shadow_cosine_histogram (Story #1152).
+
+    Provides a histogram with a big bucket near 1.0 and a small lower bucket
+    to exercise the log10-scaling path.  Also provides min/p05/p50 stats.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        # Build a sparse 40-bucket histogram: bucket 38 [0.90,0.95) has 500
+        # hits, bucket 39 [0.95,1.00) has 1 hit (exercises log10 scaling).
+        # All others are 0.
+        histogram = []
+        for i in range(40):
+            lo = round(-1.0 + i * 0.05, 10)
+            hi = round(-1.0 + (i + 1) * 0.05, 10)
+            if i == 38:
+                histogram.append((lo, hi, 500))
+            elif i == 20:
+                histogram.append((lo, hi, 1))
+            else:
+                histogram.append((lo, hi, 0))
+        self._snap["shadow_cosine_histogram"] = histogram
+        self._snap["shadow_cosine_min"] = 0.03
+        self._snap["shadow_cosine_p05"] = 0.92
+        self._snap["shadow_cosine_p50"] = 0.94
+
+
+class TestPopulatedHistogramRender:
+    """Story #1152: populated histogram must render without the | log(10) crash.
+
+    The old template contained:
+      {%- set log_len = ((count + 1) | log(10) / ...) -%}
+    Jinja2 has no built-in `log` filter -> TemplateAssertionError -> HTTP 500.
+
+    These tests MUST fail against the old | log(10) template and PASS after the
+    Python-precompute fix is applied (bar percentages computed in routes.py).
+    """
+
+    def test_populated_histogram_renders_without_crash(
+        self, client, admin_session_cookie
+    ):
+        """HTTP 200 (not 500) when the snapshot includes a populated histogram.
+
+        This test FAILS if the template still uses `| log(10)` (Jinja raises
+        TemplateAssertionError which FastAPI converts to HTTP 500).
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetricsWithHistogram()
+        set_query_embedding_cache(_FakeCache(count=10))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200, (
+                f"Expected HTTP 200 for populated histogram, got {resp.status_code}. "
+                f"If 500, the | log(10) Jinja filter crash is still present.\n"
+                f"Response body (first 800 chars):\n{resp.text[:800]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()
+
+    def test_populated_histogram_shows_bar_elements_and_stats(
+        self, client, admin_session_cookie
+    ):
+        """Rendered HTML must contain bar elements (# chars) + raw counts + P50/min/P05.
+
+        Asserts the Python-precompute path produces visible chart content and
+        the summary statistics are surfaced from the snapshot.
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetricsWithHistogram()
+        set_query_embedding_cache(_FakeCache(count=10))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            # Raw counts: the big bucket has 500 hits
+            assert "500" in html, (
+                f"Expected bucket count '500' in rendered HTML, got:\n{html[:800]}"
+            )
+            # Bar chars: at least one '#' must appear in the histogram section
+            assert "#" in html, (
+                f"Expected '#' bar character in rendered histogram, got:\n{html[:800]}"
+            )
+            # P50 summary: 0.9400 (from fake_metrics)
+            assert "0.9400" in html, (
+                f"Expected P50 '0.9400' in rendered HTML, got:\n{html[:800]}"
+            )
+            # Min summary: 0.0300 (from fake_metrics)
+            assert "0.0300" in html, (
+                f"Expected min '0.0300' in rendered HTML, got:\n{html[:800]}"
+            )
+            # P05 summary: 0.9200 (from fake_metrics)
+            assert "0.9200" in html, (
+                f"Expected P05 '0.9200' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()

@@ -27,13 +27,27 @@ import logging
 import struct
 import threading
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Maximum number of shadow-cosine values kept for p50 computation.
 # Bounded to avoid unbounded memory growth in long-running servers.
 _MAX_COSINE_BUFFER = 1000
+
+# Story #1152: Named constants for the shadow-cosine histogram bucketing.
+# 40 uniform buckets of width 0.05 spanning the full cosine range [-1.0, 1.0].
+# Log-frequency display uses base-10 logarithm.
+COSINE_HIST_MIN: float = -1.0
+COSINE_HIST_MAX: float = 1.0
+COSINE_HIST_BUCKET_WIDTH: float = 0.05
+COSINE_HIST_LOG_BASE: int = 10
+
+# Derived constant: number of buckets (40).  Not exported because the named
+# constants above are the contract; callers derive n_buckets from them.
+_COSINE_HIST_N_BUCKETS: int = round(
+    (COSINE_HIST_MAX - COSINE_HIST_MIN) / COSINE_HIST_BUCKET_WIDTH
+)
 
 # Metric names (match AC1/AC2 spec exactly)
 _METRIC_HITS = "cidx.cache.embedding.hits"
@@ -326,6 +340,51 @@ class QueryEmbeddingCacheMetrics:
     # Readable in-process snapshot (GAP 2)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _build_histogram(cosines: List[float]) -> List[Tuple[float, float, int]]:
+        """Build a 40-bucket cosine histogram over [-1.0, 1.0].
+
+        Returns an ordered list of (lo, hi, count) tuples.
+
+        Bucketing rules:
+          index = int((val - COSINE_HIST_MIN) / COSINE_HIST_BUCKET_WIDTH)
+          Interior boundary: if val falls exactly on a bucket lo edge (val ==
+            lo_base + idx * width) AND idx > 0, decrement idx by 1 so that an
+            exact boundary value goes to the LOWER bucket (the one whose hi==val).
+          Top edge clamp: 1.0 yields idx==40 which is clamped to 39 (last bucket).
+          Bottom clamp: idx < 0 clamped to 0.
+
+        Args:
+            cosines: Snapshot copy of the cosine buffer (may be empty).
+
+        Returns:
+            List of 40 (lo, hi, count) tuples ordered from -1.0 to 1.0.
+        """
+        n = _COSINE_HIST_N_BUCKETS
+        w = COSINE_HIST_BUCKET_WIDTH
+        lo_base = COSINE_HIST_MIN
+        counts = [0] * n
+        for val in cosines:
+            idx = int((val - lo_base) / w)
+            if idx >= n:
+                idx = n - 1
+            elif idx < 0:
+                idx = 0
+            else:
+                # If val falls exactly on the lower edge of bucket idx (interior
+                # boundary), map it to the LOWER bucket (idx-1) instead.
+                # Exception: idx==0 has no lower bucket; top edge (1.0) is already
+                # clamped to n-1 above and does not hit this branch.
+                if idx > 0 and abs(val - (lo_base + idx * w)) < 1e-12:
+                    idx -= 1
+            counts[idx] += 1
+        result = []
+        for i in range(n):
+            lo = round(lo_base + i * w, 10)
+            hi = round(lo_base + (i + 1) * w, 10)
+            result.append((lo, hi, counts[i]))
+        return result
+
     def snapshot(self) -> Dict[str, Any]:
         """Return a point-in-time snapshot of in-process tallies.
 
@@ -333,12 +392,20 @@ class QueryEmbeddingCacheMetrics:
             {
                 "shadow": {"hits": int, "misses": int},
                 "on":     {"hits": int, "misses": int},
-                "shadow_cosine_p50": float | None,
+                "shadow_cosine_p50":       float | None,
+                "shadow_cosine_histogram": list[tuple[float,float,int]],
+                "shadow_cosine_min":       float | None,
+                "shadow_cosine_p05":       float | None,
             }
 
         Hit-ratio is DERIVED per mode in the caller (never blended).
         shadow_cosine_p50 is the median of the bounded cosine buffer, or None
         when no cosines have been recorded.
+        shadow_cosine_histogram is always a 40-element list of (lo, hi, count)
+        tuples spanning [-1.0, 1.0] with bucket width 0.05.
+        shadow_cosine_min is the minimum cosine value in the buffer, or None.
+        shadow_cosine_p05 is the 5th-percentile value (sorted[int(0.05*n)]),
+        or None when the buffer is empty.
 
         Thread-safe: acquires the internal lock for a brief copy.
         """
@@ -355,13 +422,25 @@ class QueryEmbeddingCacheMetrics:
                 long_key = self._long_key
 
             p50: Optional[float] = None
+            p05: Optional[float] = None
+            cosine_min: Optional[float] = None
             if cosines:
                 sorted_cosines = sorted(cosines)
-                mid = len(sorted_cosines) // 2
-                if len(sorted_cosines) % 2 == 0:
+                n = len(sorted_cosines)
+                # p50: median
+                mid = n // 2
+                if n % 2 == 0:
                     p50 = (sorted_cosines[mid - 1] + sorted_cosines[mid]) / 2.0
                 else:
                     p50 = sorted_cosines[mid]
+                # p05: 5th-percentile — value at index int(0.05 * n), clamped
+                p05_idx = min(int(0.05 * n), n - 1)
+                p05 = sorted_cosines[p05_idx]
+                # min
+                cosine_min = sorted_cosines[0]
+
+            # Histogram always present (all-zero for empty buffer).
+            histogram = self._build_histogram(cosines)
 
             audit_overlap_avg: Optional[float] = (
                 audit_overlap_sum / audit_total if audit_total > 0 else None
@@ -371,6 +450,10 @@ class QueryEmbeddingCacheMetrics:
                 "shadow": shadow,
                 "on": on,
                 "shadow_cosine_p50": p50,
+                # Story #1152: histogram + min + p05
+                "shadow_cosine_histogram": histogram,
+                "shadow_cosine_min": cosine_min,
+                "shadow_cosine_p05": p05,
                 # Story #1110 (S6): audit fields
                 "audit_total": audit_total,
                 "audit_top1_matches": audit_top1_matches,
@@ -384,6 +467,9 @@ class QueryEmbeddingCacheMetrics:
                 "shadow": {"hits": 0, "misses": 0},
                 "on": {"hits": 0, "misses": 0},
                 "shadow_cosine_p50": None,
+                "shadow_cosine_histogram": self._build_histogram([]),
+                "shadow_cosine_min": None,
+                "shadow_cosine_p05": None,
                 "audit_total": 0,
                 "audit_top1_matches": 0,
                 "audit_overlap_avg": None,

@@ -841,6 +841,9 @@ def dashboard_cache_metrics_partial(request: Request):
     on_hits = 0
     on_requests = 0
     shadow_cosine_p50 = None
+    shadow_cosine_histogram = None
+    shadow_cosine_min = None
+    shadow_cosine_p05 = None
     audit_total = 0
     audit_top1_matches = 0
     audit_overlap_avg = None
@@ -856,6 +859,10 @@ def dashboard_cache_metrics_partial(request: Request):
             on_hits = _on.get("hits", 0)
             on_requests = on_hits + _on.get("misses", 0)
             shadow_cosine_p50 = snap.get("shadow_cosine_p50")
+            # Story #1152: histogram + min + p05
+            shadow_cosine_histogram = snap.get("shadow_cosine_histogram")
+            shadow_cosine_min = snap.get("shadow_cosine_min")
+            shadow_cosine_p05 = snap.get("shadow_cosine_p05")
             audit_total = snap.get("audit_total", 0) or 0
             audit_top1_matches = snap.get("audit_top1_matches", 0) or 0
             audit_overlap_avg = snap.get("audit_overlap_avg")
@@ -896,6 +903,10 @@ def dashboard_cache_metrics_partial(request: Request):
         on_hits=on_hits,
         on_requests=on_requests,
         shadow_cosine_p50=shadow_cosine_p50,
+        # Story #1152: histogram + min + p05
+        shadow_cosine_histogram=shadow_cosine_histogram,
+        shadow_cosine_min=shadow_cosine_min,
+        shadow_cosine_p05=shadow_cosine_p05,
         audit_total=audit_total,
         audit_top1_matches=audit_top1_matches,
         audit_overlap_avg=audit_overlap_avg,
@@ -913,12 +924,31 @@ def dashboard_cache_metrics_partial(request: Request):
     # back to socket.gethostname().  getattr with a default is already safe.
     node_id: str = getattr(request.app.state, "node_id", None) or socket.gethostname()
 
+    # Story #1152: precompute log10-scaled bar percentages in Python so the
+    # template never needs the nonexistent Jinja `log` filter (which causes a
+    # 500 on any populated histogram bucket).
+    # histogram_bars is a list of dicts: {lo, hi, count, bar_pct (0-100 int)}.
+    # bar_pct is log10(count+1) normalised to the max bucket's log10 value.
+    # Empty histogram or all-zero counts -> all bar_pct=0 (no division).
+    import math
+
+    histogram_bars: List[Dict[str, Any]] = []
+    if shadow_cosine_histogram:
+        bars_log = [math.log10(c + 1) for (_, _, c) in shadow_cosine_histogram]
+        max_bar = max(bars_log) if bars_log else 0.0
+        for (lo, hi, count), blog in zip(shadow_cosine_histogram, bars_log):
+            bar_pct = round(100 * blog / max_bar) if max_bar > 0 else 0
+            histogram_bars.append(
+                {"lo": lo, "hi": hi, "count": count, "bar_pct": bar_pct}
+            )
+
     return templates.TemplateResponse(
         "partials/dashboard_cache_metrics.html",
         {
             "request": request,
             "cache_metrics": cache_metrics,
             "node_id": node_id,
+            "histogram_bars": histogram_bars,
         },
     )
 
