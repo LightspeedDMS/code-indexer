@@ -200,15 +200,19 @@ class ActivatedRepoIndexManager:
 
         # Submit background job
         # BackgroundJobManager accepts *args/**kwargs despite signature showing Callable[[], Dict[str, Any]]
-        # The implementation uses inspect.signature() to detect and inject progress_callback parameter
+        # The implementation uses inspect.signature() to detect and inject progress_callback parameter.
+        # Bug #1154: worker params must be passed as positional *args so they reach func(*args, ...).
+        # Passing them as **kwargs would have repo_alias= consumed by submit_job's own tracking kwarg.
+        # Positional order matches _execute_indexing_job(repo_alias, repo_path, index_types, clear).
         job_id = self.background_job_manager.submit_job(
             "reindex",
             self._execute_indexing_job,  # type: ignore[arg-type]
-            repo_alias=repo_alias,
-            repo_path=repo_path,
-            index_types=index_types,
-            clear=clear,
+            repo_alias,  # *args[0] -> worker's positional repo_alias
+            repo_path,  # *args[1] -> worker's positional repo_path
+            index_types,  # *args[2] -> worker's positional index_types
+            clear,  # *args[3] -> worker's positional clear
             submitter_username=username,
+            repo_alias=repo_alias,  # submit_job tracking kwarg (keyword-only, no conflict with positional)
         )
 
         self.logger.info(
