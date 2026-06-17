@@ -441,7 +441,7 @@ class ActivatedRepoIndexManager:
                     logger.error(
                         format_error_log(
                             "SVC-MIGRATE-003",
-                            "Failed to index {index_type}: {error_msg}",
+                            f"Failed to index {index_type}: {error_msg}",
                         ),
                         extra=get_log_extra("SVC-MIGRATE-003"),
                     )

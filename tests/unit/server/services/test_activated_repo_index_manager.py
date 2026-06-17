@@ -544,3 +544,113 @@ class TestRepoAliasForwardingBug1154:
         assert received_kwargs.get("clear") is False
 
         real_bjm.shutdown()
+
+
+class TestSvcMigrate003Regression:
+    """Regression tests for SVC-MIGRATE-003 log interpolation bug.
+
+    Before the fix, the logger.error call in _execute_all_index_types used
+    a plain string with {index_type}/{error_msg} placeholders instead of an
+    f-string, so the actual values were never substituted.  These tests verify
+    that after the fix the real values appear in the logged message.
+    """
+
+    def test_svc_migrate_003_log_contains_real_index_type_and_error(
+        self, index_manager, temp_data_dir
+    ):
+        """SVC-MIGRATE-003: logged message must contain actual index_type and error string.
+
+        Drives _execute_all_index_types directly by patching
+        _execute_single_index_type to return a failure dict, then captures the
+        logger.error call and asserts the message contains the real values.
+        """
+        from unittest.mock import patch
+
+        repo_path = str(
+            Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        )
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        expected_error = "Voyage AI timed out after 30s"
+        expected_type = "semantic"
+
+        def _fake_single(rp, index_type, clear):
+            return {"success": False, "error": expected_error}
+
+        captured_calls = []
+
+        def _fake_logger_error(msg, *args, **kwargs):
+            captured_calls.append(msg)
+
+        with patch.object(
+            index_manager, "_execute_single_index_type", side_effect=_fake_single
+        ):
+            with patch.object(
+                index_manager.logger, "error", side_effect=_fake_logger_error
+            ):
+                index_manager._execute_all_index_types(
+                    repo_path=repo_path,
+                    index_types=[expected_type],
+                    clear=False,
+                    update_progress=lambda pct, message="": None,
+                    allocator=None,
+                )
+
+        assert len(captured_calls) >= 1, (
+            "SVC-MIGRATE-003: expected logger.error to be called at least once"
+        )
+        logged_msg = captured_calls[0]
+        assert expected_type in logged_msg, (
+            f"SVC-MIGRATE-003: log message must contain the real index_type '{expected_type}', "
+            f"got: {logged_msg!r}"
+        )
+        assert expected_error in logged_msg, (
+            f"SVC-MIGRATE-003: log message must contain the real error '{expected_error}', "
+            f"got: {logged_msg!r}"
+        )
+        assert "{index_type}" not in logged_msg, (
+            f"SVC-MIGRATE-003: log message must not contain literal '{{index_type}}', "
+            f"got: {logged_msg!r}"
+        )
+        assert "{error_msg}" not in logged_msg, (
+            f"SVC-MIGRATE-003: log message must not contain literal '{{error_msg}}', "
+            f"got: {logged_msg!r}"
+        )
+
+    def test_execute_all_index_types_returns_success_false_on_index_failure(
+        self, index_manager, temp_data_dir
+    ):
+        """_execute_all_index_types must return success=False when any index_type fails.
+
+        This ensures the job-completion logic in BackgroundJobManager correctly
+        marks the job as FAILED (not COMPLETED) when indexing partially or
+        fully fails, preventing a 300s e2e poll timeout.
+        """
+        repo_path = str(
+            Path(temp_data_dir) / "activated-repos" / "testuser" / "test-repo"
+        )
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        def _fake_single(rp, index_type, clear):
+            if index_type == "semantic":
+                return {"success": False, "error": "VoyageAI connection refused"}
+            return {"success": True, "message": "ok"}
+
+        with patch.object(
+            index_manager, "_execute_single_index_type", side_effect=_fake_single
+        ):
+            results = index_manager._execute_all_index_types(
+                repo_path=repo_path,
+                index_types=["semantic", "fts"],
+                clear=False,
+                update_progress=lambda pct, message="": None,
+                allocator=None,
+            )
+
+        assert "semantic" in results
+        assert results["semantic"]["success"] is False, (
+            "_execute_all_index_types must preserve the failure result dict from "
+            "_execute_single_index_type so the caller can compute all_success=False"
+        )
+        assert "fts" in results
+        assert results["fts"]["success"] is True
