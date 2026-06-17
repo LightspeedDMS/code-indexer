@@ -6855,6 +6855,50 @@ class QueryEmbeddingCacheSqliteBackend:
         row = conn.execute("SELECT COUNT(*) FROM query_embedding_cache").fetchone()
         return row[0] if row else 0
 
+    def select_recent(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return the most-recently-used rows as metadata dicts (NO embedding vectors).
+
+        Story #1149: admin cache-sample readout.  Returns recent rows ordered by
+        last_used DESC so callers can verify key shape without direct DB access.
+        NEVER includes the embedding column — no vectors, no secrets.
+
+        Args:
+            limit: Maximum number of rows to return (default 10).
+
+        Returns:
+            List of dicts with keys: cache_key, provider, model, dimension, key_length.
+            key_length is len(cache_key) computed DB-side for efficiency.
+            Empty list on any backend error (fail-open).
+        """
+        try:
+            conn = self._conn_manager.get_connection()
+            rows = conn.execute(
+                """
+                SELECT cache_key, provider, model, dimension,
+                       LENGTH(cache_key) AS key_length
+                FROM query_embedding_cache
+                ORDER BY last_used DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "cache_key": row[0],
+                    "provider": row[1],
+                    "model": row[2],
+                    "dimension": row[3],
+                    "key_length": row[4],
+                }
+                for row in rows
+            ]
+        except Exception:
+            logger.warning(
+                "QueryEmbeddingCacheSqliteBackend: select_recent failed (fail-open)",
+                exc_info=True,
+            )
+            return []
+
     def clear(self) -> None:
         """Delete all rows from the cache table."""
 

@@ -83,7 +83,7 @@ def _make_cache(
     # Pin mode so tests are deterministic
     cache.mode_for = lambda pname: mode  # type: ignore[method-assign]
     qualifier = CacheQualifier(provider, MODEL, DIM)
-    key = build_key(TEXT)
+    key = build_key(TEXT, config_digest="testdigest")
     if pre_seed:
         backend._store[(key, provider, MODEL, DIM)] = _enc(CACHED_VEC)
         backend._count = 1
@@ -355,16 +355,23 @@ def test_audit_ctx_none_no_crash_on_mode_miss():
 
 
 def test_coalesced_query_embedding_accepts_audit_ctx_kwarg():
-    """coalesced_query_embedding must accept audit_ctx=None (default) without error."""
-    from code_indexer.server.services import governed_call
+    """coalesced_query_embedding must accept audit_ctx=None (default) without error.
 
-    # Clear cache so we go through the live path (no cache wired)
+    Story #1147 3c: no cache + no registry -> Path B direct governed call.
+    After 3c, _compute_live is no longer the observable live-path entry; patch
+    governed_query_embedding (the actual direct call) instead.
+    """
+    from code_indexer.server.services import governed_call
+    from code_indexer.server.services.coalescer_registry import clear_coalescer_registry
+
+    # Clear cache and registry so we hit Path B (direct governed call)
     governed_call.clear_query_embedding_cache()
+    clear_coalescer_registry()
 
     fake_provider = MagicMock()
     fake_provider.get_provider_name.return_value = PROVIDER_VOYAGE
 
-    with patch.object(governed_call, "_compute_live", return_value=LIVE_VEC):
+    with patch.object(governed_call, "governed_query_embedding", return_value=LIVE_VEC):
         # Default: audit_ctx not passed
         result = governed_call.coalesced_query_embedding(fake_provider, TEXT)
         assert result == LIVE_VEC
@@ -657,7 +664,7 @@ def _make_cache_with_corrupt_blob(blob: bytes, mode: str = "on"):
     )
     cache.mode_for = lambda pname: mode  # type: ignore[method-assign]
     qualifier = CacheQualifier(PROVIDER_VOYAGE, MODEL, DIM)
-    key = build_key(TEXT)
+    key = build_key(TEXT, config_digest="testdigest")
     backend._store[(key, PROVIDER_VOYAGE, MODEL, DIM)] = blob
     backend._count = 1
     return cache, qualifier, key

@@ -320,8 +320,70 @@ class MultiSearchService:
             # Bug #881 Phase 3: pass hnsw_cache=None to prevent fan-out searches
             # from populating the global HNSW index cache and causing unbounded
             # memory growth when many repositories are searched concurrently.
+            # Story #1148 PART 1: pass precomputed_query_vector so the omni
+            # fan-out reuses ONE embedding computed before fan-out, avoiding
+            # K separate coalesced_query_embedding calls (K cache key-resolutions).
+            # Defect #1148 fix (mixed-config isolation): only reuse the precomputed
+            # vector when this repo's embedding service has the SAME provider-config
+            # digest as the one used to produce the vector.  A different digest
+            # (different provider, model, endpoint, or key) means different vector
+            # space / dimension — using the wrong vector would produce incorrect
+            # search results ("Query is everything").  Repos with a different digest
+            # receive None and embed via their own chokepoint with the correct config.
+            effective_precomputed: Optional[List[float]] = None
+            if (
+                request.precomputed_query_vector is not None
+                and request.precomputed_query_vector_digest
+            ):
+                try:
+                    from code_indexer.server.services.search_service import (
+                        EmbeddingProviderFactory,
+                        _load_repo_config,
+                        _get_http_client_factory,
+                    )
+                    from code_indexer.server.services.coalescer_registry import (
+                        _digest_for_provider,
+                        is_fallback_digest,
+                    )
+
+                    repo_config = _load_repo_config(repo_path)
+                    repo_embedding_service = EmbeddingProviderFactory.create(
+                        config=repo_config,
+                        http_client_factory=_get_http_client_factory(),
+                    )
+                    repo_digest = _digest_for_provider(repo_embedding_service)
+                    precomp_digest = request.precomputed_query_vector_digest
+                    allow_reuse = (
+                        not is_fallback_digest(precomp_digest)
+                        and not is_fallback_digest(repo_digest)
+                        and repo_digest == precomp_digest
+                    )
+                    if allow_reuse:
+                        effective_precomputed = request.precomputed_query_vector
+                    else:
+                        logger.debug(
+                            "multi_search: repo %s digest %s differs/sentinel — "
+                            "embedding via own provider (precomp digest %s)",
+                            repo_id,
+                            repo_digest[:12] if repo_digest else "",
+                            precomp_digest[:12] if precomp_digest else "",
+                        )
+                except Exception as _dex:  # noqa: BLE001
+                    # Digest comparison failed (config missing, factory unavailable,
+                    # etc.) — do NOT reuse the precomputed vector; let the repo embed
+                    # independently.  Logged at DEBUG; never breaks query path.
+                    logger.debug(
+                        "multi_search: digest comparison failed for repo %s (%s); "
+                        "embedding via own provider",
+                        repo_id,
+                        _dex,
+                    )
+
             response = search_service.search_repository_path(
-                repo_path, single_repo_request, hnsw_cache=None
+                repo_path,
+                single_repo_request,
+                hnsw_cache=None,
+                precomputed_query_vector=effective_precomputed,
             )
 
             # Convert response to dict format

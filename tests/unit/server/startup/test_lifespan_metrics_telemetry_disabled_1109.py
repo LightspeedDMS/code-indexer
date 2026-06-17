@@ -333,7 +333,7 @@ class TestServeWithCacheMeterNoneMetrics:
         model = "voyage-code-3"
         dim = 3
         text = "test query for shadow hit"
-        key = build_key(text)
+        key = build_key(text, config_digest="testdigest")
         qualifier = CacheQualifier(provider, model, dim)
 
         # Pre-seed a cached embedding

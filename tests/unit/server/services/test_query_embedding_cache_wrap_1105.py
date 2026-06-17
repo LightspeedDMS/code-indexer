@@ -94,12 +94,23 @@ class _FakeConfigService:
 
 
 class _FakeCoalescer:
-    """Coalescer spy that returns LIVE_VEC (simulating the live path)."""
+    """Coalescer spy that returns LIVE_VEC (simulating the live path).
+
+    Story #1147 3c: submit() now accepts no_embedding_cache_shortcut and
+    audit_ctx kwargs (forwarded by coalesced_query_embedding on Path A).
+    """
 
     def __init__(self) -> None:
         self.submitted: List[str] = []
 
-    def submit(self, text: str, embedding_purpose: str = "query") -> List[float]:
+    def submit(
+        self,
+        text: str,
+        embedding_purpose: str = "query",
+        *,
+        no_embedding_cache_shortcut: bool = False,
+        audit_ctx=None,
+    ) -> List[float]:
         self.submitted.append(text)
         return LIVE_VEC
 
@@ -111,9 +122,17 @@ class _FakeCoalescer:
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
+    from code_indexer.server.services.config_service import reset_config_service
+
     clear_coalescer_registry()
+    governed_call.clear_query_embedding_cache()
+    governed_call.clear_query_embedding_cache_metrics()
+    reset_config_service()
     yield
     clear_coalescer_registry()
+    governed_call.clear_query_embedding_cache()
+    governed_call.clear_query_embedding_cache_metrics()
+    reset_config_service()
 
 
 def _install_registry_with_coalescer(coalescer):
@@ -156,7 +175,11 @@ def _make_cache(
     cache.lookup.return_value = hit_bytes
     # governed_call.py routes key-building through build_key_for_provider (N2),
     # so we wire a real callable here instead of setting build_key + anchor_tokens_for.
-    cache.build_key_for_provider = lambda text, provider_name: build_key(text, 2)
+    cache.build_key_for_provider = (
+        lambda text, provider_name, *, config_digest="test-digest": build_key(
+            text, 2, config_digest=config_digest
+        )
+    )
     cache.qualifier.return_value = MagicMock(
         provider=PROVIDER_NAME, model=MODEL_NAME, dimension=DIMENSION
     )
@@ -170,20 +193,30 @@ def _make_cache(
 
 class TestNoRegistryBypassesCache:
     """When get_query_embedding_cache() returns None (no cache installed),
-    coalesced_query_embedding delegates directly to _compute_live and never
-    calls any cache method.  This is the CLI / daemon / solo path."""
+    coalesced_query_embedding delegates directly to governed_query_embedding and
+    never calls any cache method.  This is the CLI / daemon / solo path.
+
+    Story #1147 3c: after the thin-shim rewire, no-cache + no-registry goes
+    directly to governed_query_embedding (Path B direct), not _compute_live.
+    _compute_live is an internal helper; the observable contract is that the
+    live governed call fires and the result is returned without cache I/O.
+    """
 
     def test_cache_none_calls_compute_live_cache_never_touched(self, monkeypatch):
-        # Ensure NO cache is installed
+        # Ensure NO cache is installed and no registry (CLI path)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: None)
 
         live_calls: list = []
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose=None, acquire_timeout=30.0
+        ):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(
+            governed_call, "governed_query_embedding", _fake_governed, raising=False
+        )
 
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
@@ -236,8 +269,13 @@ class TestKillSwitchBypassesCache:
     def test_coalesce_disabled_cache_miss_calls_compute_live_and_records(
         self, monkeypatch
     ):
-        """MISS: cache returns None -> _compute_live called (goes direct since
-        coalesce is off) and record_miss_or_shadow invoked; live vec returned."""
+        """MISS: cache returns None -> direct governed call (coalesce off, Path B)
+        and record_miss_or_shadow invoked; live vec returned.
+
+        Story #1147 3c: coalesce disabled means no coalescer (Path B). The
+        live_fn for Path B is governed_query_embedding. _compute_live is an
+        internal helper that is no longer the observable contract point.
+        """
         _patch_config(monkeypatch, enabled=False)
 
         cache = _make_cache(enabled=True, voyage_mode="on", hit_bytes=None)
@@ -245,19 +283,23 @@ class TestKillSwitchBypassesCache:
 
         live_calls: list = []
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose=None, acquire_timeout=30.0
+        ):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(
+            governed_call, "governed_query_embedding", _fake_governed, raising=False
+        )
 
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
-        # _compute_live must be called on a MISS
+        # governed_query_embedding must be called on a MISS
         assert live_calls == [TEST_TEXT]
-        # Cache lookup IS called (outermost), and miss recorded
+        # Cache lookup IS called (cache is the outer gate even without coalescer)
         cache.lookup.assert_called_once()
         cache.record_miss_or_shadow.assert_called_once()
         cache.record_hit.assert_not_called()
@@ -307,8 +349,12 @@ class TestLaneAbsentBypassesCache:
         cache.record_miss_or_shadow.assert_not_called()
 
     def test_lane_absent_cache_miss_calls_compute_live_and_records(self, monkeypatch):
-        """MISS with no coalescer lane: _compute_live called (goes direct) and
-        record_miss_or_shadow invoked; live vec returned."""
+        """MISS with no coalescer lane: direct governed call (Path B) and
+        record_miss_or_shadow invoked; live vec returned.
+
+        Story #1147 3c: lane absent -> no coalescer -> Path B uses
+        governed_query_embedding as live_fn inside _serve_with_cache.
+        """
         self._install_registry_no_lanes()
         _patch_config(monkeypatch, enabled=True)
 
@@ -317,11 +363,15 @@ class TestLaneAbsentBypassesCache:
 
         live_calls: list = []
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose=None, acquire_timeout=30.0
+        ):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(
+            governed_call, "governed_query_embedding", _fake_governed, raising=False
+        )
 
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
@@ -361,7 +411,13 @@ class TestCacheNoneBypassesCache:
 
 
 class TestCacheDisabledForProviderBypassesCache:
-    def test_not_enabled_for_provider_calls_compute_live(self, monkeypatch):
+    """Story #1147 3c: when cache is disabled or mode=off, the cache is skipped and
+    the live path is used.  With a coalescer wired, the live path is Path A
+    (coalescer.submit).  Without a coalescer, it is Path B (governed_query_embedding).
+    The key contract is: cache.lookup must NOT be called."""
+
+    def test_not_enabled_for_provider_calls_live_path(self, monkeypatch):
+        """Cache not enabled for provider -> cache skipped; coalescer used (Path A)."""
         coalescer = _FakeCoalescer()
         _install_registry_with_coalescer(coalescer)
         _patch_config(monkeypatch, enabled=True)
@@ -369,22 +425,17 @@ class TestCacheDisabledForProviderBypassesCache:
         cache = _make_cache(enabled=False)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        live_calls: list = []
-
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
-            live_calls.append(text)
-            return LIVE_VEC
-
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
-
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
-        assert live_calls == [TEST_TEXT]
+        # cache.lookup must NOT be called (cache disabled)
         cache.lookup.assert_not_called()
+        # Live path goes through the coalescer (Path A) since registry is wired
+        assert coalescer.submitted == [TEST_TEXT]
 
-    def test_mode_off_calls_compute_live(self, monkeypatch):
+    def test_mode_off_calls_live_path(self, monkeypatch):
+        """Cache mode=off -> cache skipped; coalescer used (Path A)."""
         coalescer = _FakeCoalescer()
         _install_registry_with_coalescer(coalescer)
         _patch_config(monkeypatch, enabled=True)
@@ -393,20 +444,14 @@ class TestCacheDisabledForProviderBypassesCache:
         cache = _make_cache(enabled=True, voyage_mode="off")
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        live_calls: list = []
-
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
-            live_calls.append(text)
-            return LIVE_VEC
-
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
-
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
-        assert live_calls == [TEST_TEXT]
+        # cache.lookup must NOT be called (mode=off)
         cache.lookup.assert_not_called()
+        # Live path goes through the coalescer (Path A) since registry is wired
+        assert coalescer.submitted == [TEST_TEXT]
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +460,20 @@ class TestCacheDisabledForProviderBypassesCache:
 
 
 class TestOnModeHit:
-    def test_hit_returns_cached_vec_compute_live_not_called(self, monkeypatch):
+    """Story #1147 3c: on-mode HIT with coalescer present routes to Path A
+    (coalescer.submit).  The coalescer owns the cache HIT check internally.
+    _FakeCoalescer returns LIVE_VEC (it does not implement cache logic), so
+    we verify the routing contract (submit was called) rather than the cache
+    I/O contract (which is proven in TestCQEThinShim3c with a real coalescer).
+    """
+
+    def test_hit_routes_to_coalescer_submit_path_a(self, monkeypatch):
+        """on-mode HIT: coalesced_query_embedding delegates to coalescer.submit() (Path A).
+
+        The HIT short-circuit (CACHED_VEC, zero provider calls) is the coalescer's
+        responsibility and is proven in TestCQEThinShim3c::test_on_mode_hit_*.
+        Here we verify the routing contract: submit() is called with the text.
+        """
         coalescer = _FakeCoalescer()
         _install_registry_with_coalescer(coalescer)
         _patch_config(monkeypatch, enabled=True)
@@ -424,27 +482,14 @@ class TestOnModeHit:
         cache = _make_cache(enabled=True, voyage_mode="on", hit_bytes=cached_bytes)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        live_calls: list = []
-
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
-            live_calls.append(text)
-            return LIVE_VEC
-
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
-
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
 
-        # Must return the cached vector, not the live one
-        assert result == pytest.approx(CACHED_VEC, abs=1e-4)
-        # _compute_live and coalescer.submit must NOT be called
-        assert live_calls == []
-        assert coalescer.submitted == []
-        # record_hit (touch_last_used) must be called
-        cache.record_hit.assert_called_once()
-        # record_miss_or_shadow must NOT be called
-        cache.record_miss_or_shadow.assert_not_called()
+        # Path A: coalescer.submit must be called with the text
+        assert coalescer.submitted == [TEST_TEXT]
+        # Result is what coalescer returned (LIVE_VEC from _FakeCoalescer)
+        assert result == LIVE_VEC
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +498,14 @@ class TestOnModeHit:
 
 
 class TestOnModeMiss:
-    def test_miss_calls_live_path_and_record_miss(self, monkeypatch):
+    """Story #1147 3c: on-mode MISS with coalescer present routes to Path A.
+    The coalescer's submit() owns the MISS write. _FakeCoalescer does not
+    call cache.record_miss_or_shadow — that I/O is proven in
+    TestCQEThinShim3c::test_on_mode_miss_record_miss_fires_exactly_once.
+    """
+
+    def test_miss_routes_to_coalescer_submit_path_a(self, monkeypatch):
+        """on-mode MISS: coalesced_query_embedding delegates to coalescer.submit() (Path A)."""
         coalescer = _FakeCoalescer()
         _install_registry_with_coalescer(coalescer)
         _patch_config(monkeypatch, enabled=True)
@@ -466,12 +518,8 @@ class TestOnModeMiss:
         )
 
         assert result == LIVE_VEC
-        # Live path goes through coalescer.submit on a cache-active path
+        # Path A: coalescer.submit must be called with the text
         assert coalescer.submitted == [TEST_TEXT]
-        # record_miss_or_shadow must be called (upsert)
-        cache.record_miss_or_shadow.assert_called_once()
-        # record_hit must NOT be called
-        cache.record_hit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +528,14 @@ class TestOnModeMiss:
 
 
 class TestShadowModeHit:
-    def test_hit_still_calls_live_path_returns_live_vec(self, monkeypatch):
+    """Story #1147 3c: shadow-mode HIT with coalescer routes to Path A.
+    The coalescer's submit() owns shadow recording (record_hit + record_shadow_cosine).
+    _FakeCoalescer doesn't call cache methods — that I/O is proven in
+    TestCQEThinShim3c::test_shadow_mode_exactly_one_record_shadow_cosine.
+    """
+
+    def test_hit_routes_to_coalescer_submit_path_a(self, monkeypatch):
+        """shadow-mode HIT: coalesced_query_embedding delegates to coalescer.submit() (Path A)."""
         coalescer = _FakeCoalescer()
         _install_registry_with_coalescer(coalescer)
         _patch_config(monkeypatch, enabled=True)
@@ -493,23 +548,25 @@ class TestShadowModeHit:
             _FakeVoyageProvider(), TEST_TEXT
         )
 
-        # In shadow mode: returns the LIVE vector, not the cached one
+        # In shadow mode: _FakeCoalescer returns LIVE_VEC (it always embeds live)
         assert result == LIVE_VEC
-        # Live path goes through coalescer.submit
+        # Path A: coalescer.submit must be called with the text
         assert coalescer.submitted == [TEST_TEXT]
-        # touch_last_used called (it's a HIT for shadow bookkeeping)
-        cache.record_hit.assert_called_once()
-        # record_miss_or_shadow must NOT be called on a HIT
-        cache.record_miss_or_shadow.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Path 10: shadow-mode MISS — _compute_live called, record_miss called, return LIVE
+# Path 10: shadow-mode MISS — coalescer.submit called (Path A), return LIVE
 # ---------------------------------------------------------------------------
 
 
 class TestShadowModeMiss:
-    def test_miss_calls_live_path_and_record_miss_returns_live(self, monkeypatch):
+    """Story #1147 3c: shadow-mode MISS with coalescer routes to Path A.
+    The coalescer's submit() owns the MISS write. Cache I/O verified in
+    TestCQEThinShim3c.
+    """
+
+    def test_miss_routes_to_coalescer_submit_path_a(self, monkeypatch):
+        """shadow-mode MISS: coalesced_query_embedding delegates to coalescer.submit() (Path A)."""
         coalescer = _FakeCoalescer()
         _install_registry_with_coalescer(coalescer)
         _patch_config(monkeypatch, enabled=True)
@@ -522,10 +579,8 @@ class TestShadowModeMiss:
         )
 
         assert result == LIVE_VEC
-        # Live path goes through coalescer.submit
+        # Path A: coalescer.submit must be called with the text
         assert coalescer.submitted == [TEST_TEXT]
-        cache.record_miss_or_shadow.assert_called_once()
-        cache.record_hit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -589,14 +644,18 @@ class TestAnchorTokenDialThroughWrap:
         """
         cache = self._make_real_cache(tmp_path, anchor_tokens=0)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+        # Story #1147 3c: Path B (no coalescer) calls governed_query_embedding directly.
+        monkeypatch.setattr(governed_call, "get_coalescer_registry", lambda: None)
 
         live_call_count: List[int] = [0]
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose="query", acquire_timeout=30.0
+        ) -> List[float]:
             live_call_count[0] += 1
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(governed_call, "governed_query_embedding", _fake_governed)
 
         q1 = "find authentication middleware"
         q2 = "authentication find middleware"  # same tokens, different order
@@ -620,14 +679,18 @@ class TestAnchorTokenDialThroughWrap:
         """
         cache = self._make_real_cache(tmp_path, anchor_tokens=3)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+        # Story #1147 3c: Path B (no coalescer) calls governed_query_embedding directly.
+        monkeypatch.setattr(governed_call, "get_coalescer_registry", lambda: None)
 
         live_call_count: List[int] = [0]
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose="query", acquire_timeout=30.0
+        ) -> List[float]:
             live_call_count[0] += 1
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(governed_call, "governed_query_embedding", _fake_governed)
 
         q1 = "find authentication middleware"
         q2 = "authentication find middleware"  # same 3 tokens, different order

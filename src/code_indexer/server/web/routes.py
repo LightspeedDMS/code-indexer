@@ -841,9 +841,13 @@ def dashboard_cache_metrics_partial(request: Request):
     on_hits = 0
     on_requests = 0
     shadow_cosine_p50 = None
+    shadow_cosine_histogram = None
+    shadow_cosine_min = None
+    shadow_cosine_p05 = None
     audit_total = 0
     audit_top1_matches = 0
     audit_overlap_avg = None
+    long_key = 0
 
     if _metrics is not None:
         try:
@@ -855,13 +859,42 @@ def dashboard_cache_metrics_partial(request: Request):
             on_hits = _on.get("hits", 0)
             on_requests = on_hits + _on.get("misses", 0)
             shadow_cosine_p50 = snap.get("shadow_cosine_p50")
+            # Story #1152: histogram + min + p05
+            shadow_cosine_histogram = snap.get("shadow_cosine_histogram")
+            shadow_cosine_min = snap.get("shadow_cosine_min")
+            shadow_cosine_p05 = snap.get("shadow_cosine_p05")
             audit_total = snap.get("audit_total", 0) or 0
             audit_top1_matches = snap.get("audit_top1_matches", 0) or 0
             audit_overlap_avg = snap.get("audit_overlap_avg")
+            # Story #1149: long_key counter (queries skipped due to >256-char cap).
+            long_key = snap.get("long_key", 0) or 0
         except Exception as _exc:
             logger.warning(
                 "dashboard_cache_metrics_partial: snapshot() failed: %s", _exc
             )
+
+    # Story #1146: coalescer dedup counters (per-node in-memory tallies).
+    # Aggregated from all (lane, digest) coalescers in the process-level registry.
+    # Returns zeros when the registry is absent (CLI/solo/pre-lifespan).
+    from code_indexer.server.services.coalescer_registry import get_coalescer_registry
+
+    _coa_registry = get_coalescer_registry()
+    if _coa_registry is not None:
+        try:
+            _coa_metrics = _coa_registry.metrics()
+        except Exception as _coa_exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: coalescer metrics() failed: %s",
+                _coa_exc,
+            )
+            _coa_metrics = {}
+    else:
+        _coa_metrics = {}
+
+    coalescer_texts_coalesced = _coa_metrics.get("texts_coalesced", 0)
+    coalescer_batches_dispatched = _coa_metrics.get("batches_dispatched", 0)
+    coalescer_dedup_savings = _coa_metrics.get("dedup_savings", 0)
+    coalescer_provider_embed_calls = _coa_metrics.get("provider_embed_calls", 0)
 
     cache_metrics = types.SimpleNamespace(
         total_entries=total_entries,
@@ -870,9 +903,19 @@ def dashboard_cache_metrics_partial(request: Request):
         on_hits=on_hits,
         on_requests=on_requests,
         shadow_cosine_p50=shadow_cosine_p50,
+        # Story #1152: histogram + min + p05
+        shadow_cosine_histogram=shadow_cosine_histogram,
+        shadow_cosine_min=shadow_cosine_min,
+        shadow_cosine_p05=shadow_cosine_p05,
         audit_total=audit_total,
         audit_top1_matches=audit_top1_matches,
         audit_overlap_avg=audit_overlap_avg,
+        long_key=long_key,
+        # Story #1146 coalescer dedup counters
+        coalescer_texts_coalesced=coalescer_texts_coalesced,
+        coalescer_batches_dispatched=coalescer_batches_dispatched,
+        coalescer_dedup_savings=coalescer_dedup_savings,
+        coalescer_provider_embed_calls=coalescer_provider_embed_calls,
     )
 
     # Resolve the current node identifier for the volatile-metrics footer label.
@@ -881,12 +924,31 @@ def dashboard_cache_metrics_partial(request: Request):
     # back to socket.gethostname().  getattr with a default is already safe.
     node_id: str = getattr(request.app.state, "node_id", None) or socket.gethostname()
 
+    # Story #1152: precompute log10-scaled bar percentages in Python so the
+    # template never needs the nonexistent Jinja `log` filter (which causes a
+    # 500 on any populated histogram bucket).
+    # histogram_bars is a list of dicts: {lo, hi, count, bar_pct (0-100 int)}.
+    # bar_pct is log10(count+1) normalised to the max bucket's log10 value.
+    # Empty histogram or all-zero counts -> all bar_pct=0 (no division).
+    import math
+
+    histogram_bars: List[Dict[str, Any]] = []
+    if shadow_cosine_histogram:
+        bars_log = [math.log10(c + 1) for (_, _, c) in shadow_cosine_histogram]
+        max_bar = max(bars_log) if bars_log else 0.0
+        for (lo, hi, count), blog in zip(shadow_cosine_histogram, bars_log):
+            bar_pct = round(100 * blog / max_bar) if max_bar > 0 else 0
+            histogram_bars.append(
+                {"lo": lo, "hi": hi, "count": count, "bar_pct": bar_pct}
+            )
+
     return templates.TemplateResponse(
         "partials/dashboard_cache_metrics.html",
         {
             "request": request,
             "cache_metrics": cache_metrics,
             "node_id": node_id,
+            "histogram_bars": histogram_bars,
         },
     )
 
@@ -917,6 +979,56 @@ def dashboard_langfuse_partial(request: Request):
             "langfuse": langfuse_data,
         },
     )
+
+
+@web_router.get("/admin/cache-sample")
+def admin_cache_sample(
+    request: Request,
+    limit: int = Query(
+        20,
+        ge=1,
+        le=200,
+        description="Number of recent cache rows to return (default 20, max 200).",
+    ),
+):
+    """Story #1149: Admin cache-sample readout.
+
+    Returns the most-recently-used rows from the query-embedding cache as
+    metadata-only tuples: (cache_key, provider, model, dimension, key_length).
+    NEVER returns embedding vectors or any secret material.
+
+    This endpoint enables cluster E2E verification of the key shape (including
+    the 's:<config-digest>:' prefix) without requiring direct database access.
+
+    Requires admin session.  Returns JSON.
+
+    Args:
+        request: HTTP request.
+        limit: Number of recent rows to return (1-200, default 20).
+
+    Returns:
+        JSON: {"rows": [...], "count": int}  where each row is a dict with
+        keys: cache_key, provider, model, dimension, key_length.
+    """
+    from fastapi.responses import JSONResponse
+
+    session = _require_admin_session(request)
+    if not session:
+        return JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+
+    rows = []
+    try:
+        from code_indexer.server.services.governed_call import get_query_embedding_cache
+
+        cache = get_query_embedding_cache()
+        if cache is not None:
+            backend = cache._backend  # type: ignore[attr-defined]
+            if hasattr(backend, "select_recent"):
+                rows = backend.select_recent(limit=limit)
+    except Exception as exc:
+        logger.warning("admin_cache_sample: failed to fetch rows (fail-open): %s", exc)
+
+    return JSONResponse(content={"rows": rows, "count": len(rows)})
 
 
 @web_router.get("/partials/dashboard-api-per-user", response_class=HTMLResponse)
@@ -10789,6 +10901,14 @@ async def trigger_manual_scan(
 
     logger.debug(f"[SELF-MON-DEBUG] trigger_manual_scan: server_name={server_name}")
 
+    # Derive self-monitoring backend from registry (Bug #1140).
+    # Mirrors the lifespan.py wiring so manual scans write to PG in cluster
+    # mode instead of node-local SQLite.
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    _sm_backend = (
+        backend_registry.self_monitoring if backend_registry is not None else None
+    )
+
     # Create service instance with current configuration (Bug #87)
     logger.debug(
         "[SELF-MON-DEBUG] trigger_manual_scan: Creating SelfMonitoringService instance"
@@ -10804,6 +10924,7 @@ async def trigger_manual_scan(
         repo_root=str(repo_root) if repo_root else None,
         github_token=github_token,
         server_name=server_name,
+        storage_backend=_sm_backend,
     )
 
     # Trigger the scan

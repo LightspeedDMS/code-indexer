@@ -344,7 +344,8 @@ def _serve_with_cache(
     Args:
         cache: QueryEmbeddingCache instance.
         provider_name: e.g. "voyage-ai".
-        cache_key: SHA-256 hex from build_key(text).
+        cache_key: String key of the form ``s:<config-digest>:<normalized-query>``
+            from build_key(text) (Story #1149).
         qualifier: CacheQualifier named-tuple.
         live_fn: Zero-arg callable that produces the live embedding vector.
         metrics: Optional QueryEmbeddingCacheMetrics; no-op when None.
@@ -476,75 +477,176 @@ def coalesced_query_embedding(
 ) -> List[float]:
     """Server-gated entry point for a single query embedding (Story #1079 Phase E).
 
-    Story #1105 adds a QueryEmbeddingCache layer as the OUTERMOST layer.  The
-    cache intercepts before the coalescer/governor so cache HITs avoid any
-    concurrency-governor overhead, and the cache works regardless of whether
-    the coalescer kill-switch is on or off:
+    Story #1147 sub-task 3c: this function is now a THIN SHIM.  The cache
+    logic has been relocated into the coalescer's submit() (Stories 3a/3b/3d).
+    There are now exactly two live paths:
 
-    - Cache None / provider not enabled / mode=="off" -> _compute_live() as before.
-    - Mode "on"  + HIT  -> decode cached bytes; skip _compute_live entirely.
-    - Mode "on"  + MISS -> _compute_live() (handles coalescer/direct); record_miss;
-                           return live vec.
-    - Mode "shadow" + HIT  -> _compute_live() (always); touch_last_used; return LIVE.
-    - Mode "shadow" + MISS -> _compute_live(); record_miss; return live vec.
+    Path A — coalescer present (server mode, registry wired, kill-switch on):
+        Delegate directly to coalescer.submit(text, embedding_purpose, …).
+        The coalescer owns the full cache check (lock-free pre-enqueue in
+        submit()), live embedding, and post-dispatch cache write.
+        _serve_with_cache is NOT called on this path.
 
-    Story #1108 (S4): no_embedding_cache_shortcut bypasses the cache READ when True.
-    The write (record_miss_or_shadow) still fires so future requests can benefit.
-    The mode==off / not-enabled gates fire FIRST (no_embedding_cache_shortcut cannot
-    re-enable a disabled cache).
+    Path B — no coalescer (CLI/solo, kill-switch off, cap exceeded, …):
+        Cache check runs HERE via _serve_with_cache whose live_fn is a direct
+        governed_query_embedding call.  So the cache stays in play even on
+        the direct path (on-mode HIT skips the provider; MISS writes).
 
-    Story #1110 (S6): audit_ctx (optional mutable dict) is threaded into
-    _serve_with_cache.  On a sampled cache HIT (per-provider audit_sample_rate),
-    the dict is populated with {"sampled": True, "mode": ..., "provider": ...,
-    "cached_blob": ...} (on-mode) or additionally "live_vec" (shadow-mode).
-    Default None is a documented no-op; all existing callers unaffected.
+    Cache-absent / disabled / mode-off:
+        Both paths fall through to _compute_live (no cache consulted).
 
-    The 4 query sites call this (swapping only the function name). ALL gating
+    Story #1108 (S4): no_embedding_cache_shortcut bypasses the cache READ when
+    True.  On Path A it is forwarded to coalescer.submit(); on Path B it is
+    handled by the bypass branch before _serve_with_cache.
+
+    Story #1110 (S6): audit_ctx is forwarded to coalescer.submit() (Path A) or
+    to _serve_with_cache (Path B).  Default None is a documented no-op.
+
+    The 4 query sites call this (swapping only the function name).  ALL gating
     lives here so call sites are identical on CLI and server.
     """
 
-    def live() -> List[float]:
-        return _compute_live(provider, text, embedding_purpose, acquire_timeout)
+    def _direct_live() -> List[float]:
+        """Direct governed call — used as live_fn for the no-coalescer path."""
+        return governed_query_embedding(
+            provider,
+            text,
+            embedding_purpose=embedding_purpose,
+            acquire_timeout=acquire_timeout,
+        )
 
     cache = get_query_embedding_cache()
+
+    # ------------------------------------------------------------------
+    # Step 1: cache gating (same for both paths)
+    # ------------------------------------------------------------------
+    if cache is not None:
+        provider_name: str = provider.get_provider_name()
+
+        if not cache.enabled_for(provider_name):
+            logger.debug(
+                "coalesced_query_embedding: cache disabled for %s -> live",
+                provider_name,
+            )
+            cache = None  # treat as absent — fall through to _compute_live
+
+        elif cache.mode_for(provider_name) == "off":
+            logger.debug(
+                "coalesced_query_embedding: cache mode=off for %s -> live",
+                provider_name,
+            )
+            cache = None  # treat as absent
+
+        else:
+            # Build cache key; guard long-key (> 256 chars after normalization).
+            config_digest: str = _digest_for_provider(provider)
+            cache_key_opt: Optional[str] = cache.build_key_for_provider(
+                text, provider_name, config_digest=config_digest
+            )
+            if cache_key_opt is None:
+                logger.debug(
+                    "coalesced_query_embedding: normalized query exceeds 256-char cap "
+                    "for %s -> live (long_key)",
+                    provider_name,
+                )
+                _metrics = get_query_embedding_cache_metrics()
+                mode_str: str = cache.mode_for(provider_name)
+                if _metrics is not None:
+                    _metrics.record_miss(mode=mode_str, provider=provider_name)
+                    _metrics.record_long_key(provider=provider_name)
+                cache = None  # fall through to _compute_live
+
+    # ------------------------------------------------------------------
+    # Step 2: route to coalescer (Path A) or direct (Path B)
+    # ------------------------------------------------------------------
+
+    # Attempt to get a coalescer (same logic as the old _compute_live inner path).
+    registry = get_coalescer_registry()
+    coalescer = None
+    if registry is not None:
+        try:
+            coalesce_enabled = bool(get_config_service().get_config().coalesce_enabled)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "coalesced_query_embedding: could not read coalesce_enabled (%s); "
+                "falling back to direct governed call",
+                exc,
+            )
+            coalesce_enabled = False
+
+        if coalesce_enabled:
+            lane = _get_embedding_budget(provider)
+            try:
+                coalescer = registry.get_or_create(
+                    lane, _digest_for_provider(provider), provider
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "coalesced_query_embedding: get_or_create error (%s) -> direct call",
+                    exc,
+                )
+                coalescer = None
+            if coalescer is None:
+                logger.debug(
+                    "coalesced_query_embedding: no coalescer for lane=%s "
+                    "(cap exceeded) -> direct call",
+                    lane,
+                )
+
+    if coalescer is not None:
+        # ----------------------------------------------------------
+        # PATH A: coalescer present — delegate entirely to submit().
+        # submit() owns the cache check (3b lock-free pre-enqueue),
+        # live embedding, and post-dispatch cache write.
+        # _serve_with_cache is NOT invoked on this path.
+        # ----------------------------------------------------------
+        logger.debug(
+            "coalesced_query_embedding: delegating to coalescer.submit (Path A)"
+        )
+        from typing import cast
+
+        return cast(
+            List[float],
+            coalescer.submit(
+                text,
+                embedding_purpose or "query",
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                audit_ctx=audit_ctx,
+            ),
+        )
+
+    # ----------------------------------------------------------
+    # PATH B: no coalescer — direct governed call.
+    # Cache (if active) is still consulted via _serve_with_cache
+    # so on-mode HITs skip the provider and MISSes write to cache.
+    # ----------------------------------------------------------
     if cache is None:
-        return live()
-
-    provider_name: str = provider.get_provider_name()
-
-    if not cache.enabled_for(provider_name):
+        # Cache absent/disabled/off — go straight to direct governed call.
         logger.debug(
-            "coalesced_query_embedding: cache disabled for %s -> live",
-            provider_name,
+            "coalesced_query_embedding: no coalescer, no cache -> direct governed call"
         )
-        return live()
+        return _direct_live()
 
-    if cache.mode_for(provider_name) == "off":
-        logger.debug(
-            "coalesced_query_embedding: cache mode=off for %s -> live",
-            provider_name,
-        )
-        return live()
-
-    cache_key: str = cache.build_key_for_provider(text, provider_name)
-    qualifier: Any = cache.qualifier(provider)
-
-    # Story #1108 (S4): bypass cache READ when requested; still write on miss.
+    # Cache active, no coalescer: _serve_with_cache with governed_query_embedding
+    # as the live_fn (bypass handled before the _serve_with_cache call).
     if no_embedding_cache_shortcut:
         logger.debug(
-            "coalesced_query_embedding: bypass=True for %s -> skip read, compute live",
-            provider_name,
+            "coalesced_query_embedding: bypass=True, direct path -> skip read, live"
         )
-        live_vec: List[float] = live()
-        cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
+        live_vec: List[float] = _direct_live()
+        # cache, cache_key_opt, qualifier are always set here (cache is not None)
+        cache.record_miss_or_shadow(cache_key_opt, cache.qualifier(provider), live_vec)  # type: ignore[arg-type]
         return live_vec
 
+    logger.debug(
+        "coalesced_query_embedding: no coalescer, cache active -> _serve_with_cache (Path B)"
+    )
     return _serve_with_cache(
         cache,
-        provider_name,
-        cache_key,
-        qualifier,
-        live,
+        provider_name,  # type: ignore[possibly-undefined]
+        cache_key_opt,  # type: ignore[arg-type]
+        cache.qualifier(provider),
+        _direct_live,
         metrics=get_query_embedding_cache_metrics(),
         audit_ctx=audit_ctx,
     )

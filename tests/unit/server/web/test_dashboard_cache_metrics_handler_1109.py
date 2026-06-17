@@ -474,3 +474,329 @@ class TestNodeIdOnVolatileCards:
             clear_query_embedding_cache()
             if original is not _SENTINEL:
                 app.state.node_id = original
+
+
+# ---------------------------------------------------------------------------
+# Story #1149 (BLOCKING): long_key counter surfaced through the front door
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetricsWithLongKey(_FakeMetrics):
+    """FakeMetrics that includes long_key in snapshot (Story #1149)."""
+
+    def __init__(self, long_key: int = 0, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._snap["long_key"] = long_key
+
+    def snapshot(self) -> dict:
+        return self._snap
+
+
+class TestLongKeyFrontDoor:
+    """Story #1149 (BLOCKING): long_key counter must be observable through the front door.
+
+    The rejection item requires:
+    - dashboard_cache_metrics_partial extracts long_key from snapshot() into the
+      cache_metrics SimpleNamespace
+    - the rendered dashboard_cache_metrics.html partial contains the long_key value
+    """
+
+    def test_handler_puts_long_key_in_namespace(self, client, admin_session_cookie):
+        """When snapshot includes long_key=17, the rendered HTML contains '17'.
+
+        This proves the handler extracts long_key from snapshot() and the template
+        renders it — front-door observable.
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetricsWithLongKey(long_key=17)
+        set_query_embedding_cache(_FakeCache(count=5))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "17" in html, (
+                f"Expected long_key value '17' in rendered dashboard HTML, got:\n{html[:600]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()
+
+    def test_handler_renders_long_key_zero_when_no_queries_skipped(
+        self, client, admin_session_cookie
+    ):
+        """When long_key=0 (no over-cap queries), the handler must still render 0
+        (or '--') without raising — the field is always present in the namespace.
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetricsWithLongKey(long_key=0)
+        set_query_embedding_cache(_FakeCache(count=0))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            # Must not blow up — long_key=0 is a valid state
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()
+
+
+# ---------------------------------------------------------------------------
+# Story #1146 (BLOCKING anti-orphan): coalescer dedup counters visible on dashboard
+# ---------------------------------------------------------------------------
+
+
+class _FakeCoalescerWithCounters:
+    """Minimal fake coalescer exposing the four Story #1146 dedup counters."""
+
+    def __init__(
+        self,
+        texts_coalesced: int = 0,
+        batches_dispatched: int = 0,
+        dedup_savings: int = 0,
+        provider_embed_calls: int = 0,
+    ) -> None:
+        self.texts_coalesced = texts_coalesced
+        self.batches_dispatched = batches_dispatched
+        self.dedup_savings = dedup_savings
+        self.provider_embed_calls = provider_embed_calls
+
+
+class TestCoalescerCountersRender:
+    """Story #1146 anti-orphan: coalescer dedup counters must be rendered in the
+    dashboard cache-metrics partial.
+
+    routes.py already computes coalescer_texts_coalesced, coalescer_batches_dispatched,
+    coalescer_dedup_savings, and coalescer_provider_embed_calls into the cache_metrics
+    namespace — but dashboard_cache_metrics.html previously rendered none of them,
+    making them dead code (Messi #12 anti-orphan violation).
+
+    These tests prove that the four counters appear in the rendered HTML (front-door
+    visible) by installing a fake CoalescerRegistry with known counter values.
+    """
+
+    def test_coalescer_provider_embed_calls_rendered(
+        self, client, admin_session_cookie
+    ):
+        """provider_embed_calls must appear in the rendered dashboard HTML."""
+        from code_indexer.server.services.coalescer_registry import (
+            CoalescerRegistry,
+            set_coalescer_registry,
+            clear_coalescer_registry,
+        )
+
+        fake_coalescer = _FakeCoalescerWithCounters(provider_embed_calls=42)
+        registry = CoalescerRegistry(
+            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
+        )
+        set_coalescer_registry(registry)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "42" in html, (
+                f"Expected provider_embed_calls '42' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_coalescer_registry()
+
+    def test_coalescer_texts_coalesced_rendered(self, client, admin_session_cookie):
+        """texts_coalesced must appear in the rendered dashboard HTML."""
+        from code_indexer.server.services.coalescer_registry import (
+            CoalescerRegistry,
+            set_coalescer_registry,
+            clear_coalescer_registry,
+        )
+
+        fake_coalescer = _FakeCoalescerWithCounters(texts_coalesced=199)
+        registry = CoalescerRegistry(
+            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
+        )
+        set_coalescer_registry(registry)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "199" in html, (
+                f"Expected texts_coalesced '199' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_coalescer_registry()
+
+    def test_coalescer_dedup_savings_rendered(self, client, admin_session_cookie):
+        """dedup_savings must appear in the rendered dashboard HTML."""
+        from code_indexer.server.services.coalescer_registry import (
+            CoalescerRegistry,
+            set_coalescer_registry,
+            clear_coalescer_registry,
+        )
+
+        fake_coalescer = _FakeCoalescerWithCounters(dedup_savings=77)
+        registry = CoalescerRegistry(
+            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
+        )
+        set_coalescer_registry(registry)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "77" in html, (
+                f"Expected dedup_savings '77' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_coalescer_registry()
+
+    def test_coalescer_batches_dispatched_rendered(self, client, admin_session_cookie):
+        """batches_dispatched must appear in the rendered dashboard HTML."""
+        from code_indexer.server.services.coalescer_registry import (
+            CoalescerRegistry,
+            set_coalescer_registry,
+            clear_coalescer_registry,
+        )
+
+        fake_coalescer = _FakeCoalescerWithCounters(batches_dispatched=13)
+        registry = CoalescerRegistry(
+            coalescers={"voyage:embed": fake_coalescer}  # type: ignore[arg-type]
+        )
+        set_coalescer_registry(registry)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            assert "13" in html, (
+                f"Expected batches_dispatched '13' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_coalescer_registry()
+
+
+# ---------------------------------------------------------------------------
+# Story #1152 (BLOCKING): populated histogram must not crash with | log(10)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetricsWithHistogram(_FakeMetrics):
+    """FakeMetrics that includes a populated shadow_cosine_histogram (Story #1152).
+
+    Provides a histogram with a big bucket near 1.0 and a small lower bucket
+    to exercise the log10-scaling path.  Also provides min/p05/p50 stats.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        # Build a sparse 40-bucket histogram: bucket 38 [0.90,0.95) has 500
+        # hits, bucket 39 [0.95,1.00) has 1 hit (exercises log10 scaling).
+        # All others are 0.
+        histogram = []
+        for i in range(40):
+            lo = round(-1.0 + i * 0.05, 10)
+            hi = round(-1.0 + (i + 1) * 0.05, 10)
+            if i == 38:
+                histogram.append((lo, hi, 500))
+            elif i == 20:
+                histogram.append((lo, hi, 1))
+            else:
+                histogram.append((lo, hi, 0))
+        self._snap["shadow_cosine_histogram"] = histogram
+        self._snap["shadow_cosine_min"] = 0.03
+        self._snap["shadow_cosine_p05"] = 0.92
+        self._snap["shadow_cosine_p50"] = 0.94
+
+
+class TestPopulatedHistogramRender:
+    """Story #1152: populated histogram must render without the | log(10) crash.
+
+    The old template contained:
+      {%- set log_len = ((count + 1) | log(10) / ...) -%}
+    Jinja2 has no built-in `log` filter -> TemplateAssertionError -> HTTP 500.
+
+    These tests MUST fail against the old | log(10) template and PASS after the
+    Python-precompute fix is applied (bar percentages computed in routes.py).
+    """
+
+    def test_populated_histogram_renders_without_crash(
+        self, client, admin_session_cookie
+    ):
+        """HTTP 200 (not 500) when the snapshot includes a populated histogram.
+
+        This test FAILS if the template still uses `| log(10)` (Jinja raises
+        TemplateAssertionError which FastAPI converts to HTTP 500).
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetricsWithHistogram()
+        set_query_embedding_cache(_FakeCache(count=10))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200, (
+                f"Expected HTTP 200 for populated histogram, got {resp.status_code}. "
+                f"If 500, the | log(10) Jinja filter crash is still present.\n"
+                f"Response body (first 800 chars):\n{resp.text[:800]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()
+
+    def test_populated_histogram_shows_bar_elements_and_stats(
+        self, client, admin_session_cookie
+    ):
+        """Rendered HTML must contain bar elements (# chars) + raw counts + P50/min/P05.
+
+        Asserts the Python-precompute path produces visible chart content and
+        the summary statistics are surfaced from the snapshot.
+        """
+        from code_indexer.server.services.governed_call import (
+            set_query_embedding_cache,
+            clear_query_embedding_cache,
+            set_query_embedding_cache_metrics,
+            clear_query_embedding_cache_metrics,
+        )
+
+        fake_metrics = _FakeMetricsWithHistogram()
+        set_query_embedding_cache(_FakeCache(count=10))
+        set_query_embedding_cache_metrics(fake_metrics)
+        try:
+            resp = client.get("/admin/partials/dashboard-cache-metrics")
+            assert resp.status_code == 200
+            html = resp.text
+            # Raw counts: the big bucket has 500 hits
+            assert "500" in html, (
+                f"Expected bucket count '500' in rendered HTML, got:\n{html[:800]}"
+            )
+            # Bar chars: at least one '#' must appear in the histogram section
+            assert "#" in html, (
+                f"Expected '#' bar character in rendered histogram, got:\n{html[:800]}"
+            )
+            # P50 summary: 0.9400 (from fake_metrics)
+            assert "0.9400" in html, (
+                f"Expected P50 '0.9400' in rendered HTML, got:\n{html[:800]}"
+            )
+            # Min summary: 0.0300 (from fake_metrics)
+            assert "0.0300" in html, (
+                f"Expected min '0.0300' in rendered HTML, got:\n{html[:800]}"
+            )
+            # P05 summary: 0.9200 (from fake_metrics)
+            assert "0.9200" in html, (
+                f"Expected P05 '0.9200' in rendered HTML, got:\n{html[:800]}"
+            )
+        finally:
+            clear_query_embedding_cache()
+            clear_query_embedding_cache_metrics()

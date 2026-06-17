@@ -509,6 +509,7 @@ class SelfMonitoringService:
             repo_root=self._repo_root,
             github_token=github_token,
             server_name=self._server_name,
+            backend=self._backend,  # Bug #1140: route scan-record writes through backend
         )
 
         # Execute scan (this handles all workflow including creating scan record)

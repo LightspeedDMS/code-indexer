@@ -54,6 +54,30 @@ class MultiSearchRequest(BaseModel):
         False,
         description="Bypass the query-embedding cache for this request (Story #1108)",
     )
+    # Story #1148 PART 1: pre-computed embedding vector for omni fan-out reuse.
+    # When set, each per-repo semantic search uses this vector via
+    # _PrecomputedEmbeddingProvider instead of calling coalesced_query_embedding
+    # again. This ensures exactly ONE cache key-resolution per omni query,
+    # deterministically, regardless of how many repos share the same provider config.
+    # Excluded from JSON serialisation (not a user-facing API field).
+    precomputed_query_vector: Optional[List[float]] = Field(
+        None,
+        description="Pre-computed query embedding vector (Story #1148 omni reuse; internal only)",
+        exclude=True,
+    )
+    # Defect #1148 fix: provider-config digest of the provider that produced
+    # precomputed_query_vector.  _search_semantic_sync compares this against
+    # each repo's own embedding-service digest and only reuses the vector when
+    # they match.  Repos on a different provider config get None (embed via their
+    # own chokepoint with the correct config).  Excluded from JSON serialisation.
+    precomputed_query_vector_digest: Optional[str] = Field(
+        None,
+        description=(
+            "Config digest of provider that produced precomputed_query_vector "
+            "(Story #1148 mixed-config isolation; internal only)"
+        ),
+        exclude=True,
+    )
 
     @field_validator("repositories")
     @classmethod

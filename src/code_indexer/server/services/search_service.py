@@ -37,13 +37,14 @@ def _get_http_client_factory() -> Any:
     Extracted as a module-level function so unit tests can patch it without
     needing to set up the full app.state (following _get_golden_repos_dir() pattern).
 
-    Raises:
-        AttributeError: If lifespan did not set app.state.http_client_factory
-            (should never happen in production; startup guarantees it is set).
+    Returns None when app.state.http_client_factory is not set (e.g. CLI
+    in-process / unit tests). EmbeddingProviderFactory.create accepts
+    http_client_factory=None and falls back to per-call client creation, which
+    is correct for the non-server path. Matches the _get_query_executor() pattern.
     """
     from ..app import app as _app
 
-    return _app.state.http_client_factory
+    return getattr(_app.state, "http_client_factory", None)
 
 
 def _get_query_executor() -> Any:
@@ -458,22 +459,21 @@ class SemanticSearchService:
                 accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
                 ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
 
-                # Story #883 Component 1: reuse a precomputed Voyage vector when
-                # provided (avoids a second API call in the parallel memory branch).
-                if precomputed_query_vector is not None:
-                    from code_indexer.server.services.memory_candidate_retriever import (
-                        _PrecomputedEmbeddingProvider,
-                    )
-
-                    effective_embedding_provider = _PrecomputedEmbeddingProvider(
-                        precomputed_query_vector
-                    )
-                else:
-                    effective_embedding_provider = embedding_service
-
+                # Story #883 Component 1 / Bug #1148: reuse a precomputed vector when
+                # provided (avoids a second API call in the parallel memory branch and
+                # in the omni per-repo reuse path).
+                #
+                # Fix: pass the precomputed vector directly as precomputed_query_vector=
+                # to FSV.search(), which skips generate_embedding() entirely.
+                # Do NOT wrap it in _PrecomputedEmbeddingProvider and pass as
+                # embedding_provider — that adaptor lacks get_provider_name(), so
+                # coalesced_query_embedding() crashes with AttributeError on every
+                # omni repo (producing zero results).
+                # The real embedding_service is always passed as embedding_provider
+                # (required for resolve_collection_name and the default single-repo path).
                 search_kwargs = dict(
                     query=query,
-                    embedding_provider=effective_embedding_provider,
+                    embedding_provider=embedding_service,
                     collection_name=collection_name,
                     limit=limit,
                     return_timing=True,
@@ -484,6 +484,11 @@ class SemanticSearchService:
                     parallel_executor=_get_query_executor(),
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
+                if precomputed_query_vector is not None:
+                    # Omni per-repo reuse: supply the precomputed vector so FSV skips
+                    # generate_embedding() (no coalesced_query_embedding call, no
+                    # get_provider_name call, no second cache metric event).
+                    search_kwargs["precomputed_query_vector"] = precomputed_query_vector
                 if filter_conditions:
                     search_kwargs["filter_conditions"] = filter_conditions
                 search_results, _ = vector_store_client.search(**search_kwargs)

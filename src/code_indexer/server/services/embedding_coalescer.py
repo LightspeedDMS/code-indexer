@@ -37,14 +37,25 @@ The ONLY time bound is the governor ``acquire_timeout`` (Messi #14). No
 """
 
 import logging
+import random
 import threading
 from concurrent.futures import Future
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from code_indexer.server.services.provider_concurrency_governor import (
     ProviderConcurrencyGovernor,
 )
 from code_indexer.services.provider_backoff import execute_with_backoff
+
+# Module dependency decision (Story #1146, intentional):
+# embedding_coalescer -> query_embedding_cache is the ACCEPTED import direction.
+# query_embedding_cache MUST NOT import embedding_coalescer (no circular import).
+# build_key is imported lazily (inside _dispatch) to avoid top-level circular
+# import issues during module load ordering in tests.
+
+# Sentinel for over-cap texts when build_key returns None: we fall back to the
+# raw text as the dedup key so identical over-cap texts still collapse.
+_NONE_KEY_PREFIX = "\x00text:"
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +69,10 @@ _DEFAULT_MAX_BATCH_SIZE: int = 96
 # Provider split safety margin — matches the providers' own ``* 0.9`` /
 # ``* 90 / 100`` margin (truncated to int, exactly as the providers do).
 _TOKEN_SAFETY_MARGIN: float = 0.9
+
+# Bounded wait for in-flight key join (Messi #14 — no unbounded waits).
+# Long enough that no legitimate embed call should exceed it.
+_INFLIGHT_JOIN_TIMEOUT: float = 60.0
 
 
 class _ProviderConstraints:
@@ -144,12 +159,27 @@ def _resolve_provider_texts_cap(provider: Any) -> Optional[int]:
 class _Entry:
     """A single coalesced request: its text, embedding purpose, and the caller's Future."""
 
-    __slots__ = ("text", "embedding_purpose", "fut")
+    __slots__ = (
+        "text",
+        "embedding_purpose",
+        "fut",
+        "audit_ctx",
+        "no_embedding_cache_shortcut",
+    )
 
-    def __init__(self, text: str, embedding_purpose: str = "query") -> None:
+    def __init__(
+        self,
+        text: str,
+        embedding_purpose: str = "query",
+        *,
+        audit_ctx: Optional[Dict[str, Any]] = None,
+        no_embedding_cache_shortcut: bool = False,
+    ) -> None:
         self.text = text
         self.embedding_purpose = embedding_purpose
         self.fut: "Future[List[float]]" = Future()
+        self.audit_ctx: Optional[Dict[str, Any]] = audit_ctx
+        self.no_embedding_cache_shortcut: bool = no_embedding_cache_shortcut
 
 
 class EmbeddingCoalescer:
@@ -168,11 +198,23 @@ class EmbeddingCoalescer:
         acquire_timeout: float = _DEFAULT_ACQUIRE_TIMEOUT,
         coalesce_max_batch_size: int = _DEFAULT_MAX_BATCH_SIZE,
         ceiling_provider: Optional[Callable[[], int]] = None,
+        config_digest: str = "",
+        anchor_depth_provider: Optional[Callable[[], int]] = None,
     ) -> None:
         self._lane = lane
         self._provider = provider
         self._governor = governor or ProviderConcurrencyGovernor.get_instance()
         self._acquire_timeout = acquire_timeout
+        # Story #1146: config_digest namespaces dedup keys (same as cache identity).
+        # An empty string is the fallback when no digest is supplied (text-based dedup
+        # still works because build_key with an empty digest still normalizes text).
+        self._config_digest = config_digest
+        # FOLD IN #4 (Story #1146 review): callable returning the live anchor depth.
+        # When set, called once per dispatch (under lock) so a runtime anchor-depth
+        # change takes effect immediately without rebuilding the coalescer.
+        # When None, build_key uses its own default (2). Same source as
+        # QueryEmbeddingCache.build_key_for_provider so the two keys never diverge.
+        self._anchor_depth_provider: Optional[Callable[[], int]] = anchor_depth_provider
 
         constraints = _ProviderConstraints(provider, coalesce_max_batch_size)
         self._token_count_fn = constraints.token_count_fn
@@ -192,11 +234,53 @@ class EmbeddingCoalescer:
         self._open_batch: Optional[List[_Entry]] = None
         self._open_tokens: int = 0
 
+        # Story #1148: Standard single-flight registry.
+        #
+        # Problem: K concurrent same-key COLD submits all pass the lock-free
+        # cache lookup (cache is empty for all K at check time). The first owner
+        # embeds and writes the cache; the K-1 others arrive after, find the
+        # written cache entry, and each record a phantom HIT -> 1 miss +
+        # (K-1) spurious hits for a single cold key-resolution.
+        #
+        # Correct design (standard single-flight, per reviewer prescription):
+        #   - _inflight_keys maps cache_key -> pending Future[List[float]].
+        #   - Key present AND pending -> another thread is resolving; JOIN it
+        #     (bounded wait, no metric).
+        #   - Key absent -> caller becomes OWNER: inserts a fresh Future, proceeds
+        #     to embed/dispatch, records ONE metric for the group.
+        #   - Owner completion: try/finally ALWAYS (a) sets the Future result or
+        #     exception, (b) pops the key from _inflight_keys. Registry therefore
+        #     holds ONLY currently-in-flight keys — O(live concurrency), no leak.
+        #   - NO thread identity. A later sequential caller finds NO entry (it was
+        #     popped in the owner's finally), does a real cache lookup, and records
+        #     its genuine hit metric. Different-thread sequential warm hits are
+        #     preserved correctly.
+        #
+        # Lock discipline (deadlock-free, Messi #14):
+        #   - _inflight_lock: held ONLY for fast dict read/write (no I/O, no HTTP,
+        #     no _lock). NEVER co-held with self._lock.
+        #   - Cache I/O (lookup/record_hit) OUTSIDE _inflight_lock — lock-free.
+        #   - Joiner waits (join_fut.result(timeout=...)) OUTSIDE both locks —
+        #     bounded by _INFLIGHT_JOIN_TIMEOUT.
+        self._inflight_lock = threading.Lock()
+        # Maps cache_key -> PENDING Future[List[float]].
+        # Entries exist ONLY while resolution is in-flight.
+        # Defect #1148 fix: values are (Future, resolution_container) tuples.
+        # resolution_container is a 1-element list [None]; the HIT-owner fills
+        # it with cached_blob upon a successful on-mode cache HIT so that
+        # joiners can correctly populate their audit_ctx (see submit()).
+        self._inflight_keys: Dict[str, "Tuple[Future[List[float]], list]"] = {}
+
         # Observability counters (Phase E). Read for metrics/logging — the
         # coalescing ratio is texts_coalesced / batches_dispatched. Incremented
         # under self._lock when a batch is successfully dispatched (one HTTP call).
         self.batches_dispatched: int = 0
         self.texts_coalesced: int = 0
+        # Story #1146: dedup counters. dedup_savings = requestors_in_live_batch
+        # minus unique_provider_texts_sent (how many embed calls were avoided).
+        # provider_embed_calls = count of actual HTTP embed calls (one per batch).
+        self.dedup_savings: int = 0
+        self.provider_embed_calls: int = 0
 
     # ------------------------------------------------------------------
     # Introspection (resolver telemetry — used by tests + Phase E)
@@ -225,14 +309,39 @@ class EmbeddingCoalescer:
     # Core API
     # ------------------------------------------------------------------
 
-    def submit(self, text: str, embedding_purpose: str = "query") -> List[float]:
+    def submit(
+        self,
+        text: str,
+        embedding_purpose: str = "query",
+        *,
+        no_embedding_cache_shortcut: bool = False,
+        audit_ctx: Optional[Dict[str, Any]] = None,
+    ) -> List[float]:
         """Submit one text; block until its embedding vector is available.
 
-        Exactly one caller per batch is elected dispatcher; non-dispatchers block
-        on a Future guaranteed to be completed (success OR exception — shared
-        fate). The dispatcher seals the batch on the first attempt that gets a
-        governor slot and issues exactly ONE HTTP call, then demuxes vectors back
-        to every caller in submit order.
+        Story #1147: Lock-free pre-enqueue cache check. Cache I/O runs BEFORE
+        _enqueue() and OUTSIDE self._lock so on-mode cache HITs never consume a
+        governor slot.
+
+        Story #1148: Standard single-flight for exactly-one-metric-per-key.
+        on-mode MISS: register key in _inflight_keys before dispatch; remove in
+        finally so later sequential callers find no entry, do a real lookup, and
+        record their genuine hit. Concurrent same-key submits JOIN the pending
+        future (no metric for joiners — owner records ONE metric for the group).
+        on-mode HIT: immediate return, no inflight entry registered (hit metric
+        is genuine and independent per requestor, any thread).
+
+        Cache mode logic (Story #1147 sub-tasks 3a + 3b + 3d):
+          - accessor get_query_embedding_cache() called HERE at submit time (not
+            at constructor time) so CLI paths (None) are handled correctly and a
+            cache installed after construction is picked up.
+          - on   + HIT  -> return cached vector immediately (no _enqueue, no slot)
+          - on   + MISS -> single-flight owner -> _enqueue -> dispatch ->
+                           record_miss; concurrent joiners wait, no metric
+          - shadow       -> always _enqueue -> dispatch; owner records one metric
+          - off / disabled / None -> _enqueue -> dispatch (existing path)
+          - bypass (no_embedding_cache_shortcut=True) -> skip READ, _enqueue ->
+            dispatch, record_miss after live result (still WRITES)
 
         Args:
             text: Text to embed.
@@ -240,17 +349,352 @@ class EmbeddingCoalescer:
                 for all serving-path callers) or "document" (indexing path).
                 Forwarded to get_embeddings_batch so Cohere maps it to the
                 correct input_type (search_query vs search_document).
+            no_embedding_cache_shortcut: When True, skip cache READ but still
+                WRITE the result after live embedding. Has no effect when cache
+                is absent/disabled/off.
+            audit_ctx: Optional mutable dict; propagated to cache hit recording
+                for Story #1110 deep-fidelity audit (stays at FSV chokepoint).
         """
-        entry = _Entry(text, embedding_purpose)
+        # --- Story #1147 3a: accessor at submit time (not constructor time) ---
+        from code_indexer.server.services.governed_call import (
+            get_query_embedding_cache,
+            get_query_embedding_cache_metrics,
+        )
+
+        cache = get_query_embedding_cache()
+
+        # Cache context resolved once at submit time; passed to _dispatch so
+        # post-dispatch cache writes happen outside _lock after live embed.
+        _cache_mode: Optional[str] = None
+        _cache_qualifier: Any = None
+
+        # Story #1148 single-flight state for this submit call.
+        _am_inflight_owner: bool = False
+        _inflight_key: Optional[str] = None
+        _owned_future: "Optional[Future[List[float]]]" = None
+
+        # --- Story #1147 3b + Story #1148: combined pre-enqueue path ---
+        if cache is not None:
+            provider_name: str = self._provider.get_provider_name()
+
+            if cache.enabled_for(provider_name) and cache.mode_for(
+                provider_name
+            ) not in ("off",):
+                _cache_mode = cache.mode_for(provider_name)
+                _cache_qualifier = cache.qualifier(self._provider)
+
+                if _cache_mode in ("on", "shadow") and not no_embedding_cache_shortcut:
+                    from code_indexer.server.services.query_embedding_cache import (
+                        build_key,
+                    )
+
+                    _anchor: Optional[int] = (
+                        self._anchor_depth_provider()
+                        if self._anchor_depth_provider is not None
+                        else None
+                    )
+                    if _anchor is not None:
+                        cache_key_opt = build_key(
+                            text, _anchor, config_digest=self._config_digest
+                        )
+                    else:
+                        cache_key_opt = build_key(
+                            text, config_digest=self._config_digest
+                        )
+
+                    if cache_key_opt is not None:
+                        # --- Step 1: Acquire _inflight_lock BRIEFLY — register owner or JOIN. ---
+                        # Story #1148 PART 1 fix: the single-flight registry now covers
+                        # BOTH on-mode HITs and MISSes. Previously the HIT path returned
+                        # before the registry check, so K concurrent warm requestors each
+                        # independently recorded a hit (K hits per key-resolution).
+                        #
+                        # Correct behavior (from the story design):
+                        #   - Check _inflight_keys FIRST (under _inflight_lock, fast dict op).
+                        #   - Key absent -> become OWNER: register a fresh Future, then
+                        #     do the cache lookup outside the lock (lock-free I/O invariant).
+                        #     Owner completes the Future (result or exception) in finally.
+                        #   - Key present -> become JOINER: await the owner's Future
+                        #     (bounded wait), return result, NO metric.
+                        #
+                        # Lock discipline (unchanged, deadlock-free):
+                        #   - _inflight_lock: fast dict op only (no I/O, no HTTP, no _lock).
+                        #   - Cache I/O (lookup/record_hit) OUTSIDE _inflight_lock.
+                        #   - Joiner wait OUTSIDE both locks.
+                        # Defect #1148 fix (DEFECT 2 — joiner audit semantics):
+                        # _inflight_keys now stores (Future, resolution_container)
+                        # where resolution_container is a 1-element list [None].
+                        # The HIT-owner fills it with the cached_blob upon a
+                        # successful on-mode cache HIT, leaving it as [None] when
+                        # the resolution is LIVE (MISS or shadow).  The joiner
+                        # reads resolution_container[0] after the Future resolves:
+                        #   - not None -> owner served a CACHED vector -> populate
+                        #     audit_ctx with mode="on" + cached_blob (correct).
+                        #   - None     -> owner served a LIVE vector -> leave
+                        #     audit_ctx untouched (no cached blob to compare;
+                        #     a "live vs live" audit is meaningless, Messi #2).
+                        _join_fut: "Optional[Future[List[float]]]" = None
+                        _join_resolution_container: "Optional[list]" = None
+                        _resolution_container: "list" = [None]  # owner fills on HIT
+                        with self._inflight_lock:
+                            _existing = self._inflight_keys.get(cache_key_opt)
+                            if _existing is not None:
+                                _join_fut, _join_resolution_container = _existing
+                            else:
+                                _owned_future = Future()
+                                self._inflight_keys[cache_key_opt] = (
+                                    _owned_future,
+                                    _resolution_container,
+                                )
+                                _am_inflight_owner = True
+                                _inflight_key = cache_key_opt
+
+                        if _join_fut is not None:
+                            # JOINER: await owner's result (bounded wait, no metric).
+                            result_vec = _join_fut.result(
+                                timeout=_INFLIGHT_JOIN_TIMEOUT
+                            )
+                            # Per-requestor audit_ctx draw: populate ONLY when the
+                            # owner resolved via on-mode cache HIT (has cached_blob).
+                            # A live-resolution joiner has no cached_blob to compare
+                            # — setting mode="on" without cached_blob would cause the
+                            # audit to re-embed and compare live-vs-live (trivially
+                            # identical, misleading; Defect #1148 DEFECT 2 fix).
+                            if (
+                                audit_ctx is not None
+                                and _join_resolution_container is not None
+                            ):
+                                _owner_cached_blob = _join_resolution_container[0]
+                                if _owner_cached_blob is not None:
+                                    try:
+                                        from code_indexer.server.services.governed_call import (
+                                            _audit_sample_rate_for,
+                                        )
+
+                                        rate = _audit_sample_rate_for(provider_name)
+                                        if rate > 0.0 and random.random() < rate:
+                                            audit_ctx["sampled"] = True
+                                            audit_ctx["mode"] = "on"
+                                            audit_ctx["provider"] = provider_name
+                                            audit_ctx["cached_blob"] = (
+                                                _owner_cached_blob
+                                            )
+                                    except Exception as _ae:  # noqa: BLE001
+                                        logger.debug(
+                                            "coalescer: audit_ctx population failed"
+                                            " (joiner HIT, lane=%s): %s",
+                                            self._lane,
+                                            _ae,
+                                        )
+                                # Live-resolution joiner: leave audit_ctx untouched.
+                            return result_vec
+
+                        # --- Step 2: OWNER — LOCK-FREE cache lookup (outside _inflight_lock). ---
+                        # on-mode: genuine pre-existing HITs complete the owned Future with
+                        # the cached vector and return (no _enqueue, no governor slot).
+                        # shadow: always embed live (skip the lookup shortcut).
+                        #
+                        # HIT owner try/finally: the HIT path returns early (before the
+                        # _enqueue section's finally blocks). We need a dedicated
+                        # try/finally here so the _inflight_key is ALWAYS popped whether
+                        # the owner returns via HIT or falls through to MISS/_enqueue.
+                        # The finally block sets the Future (if not already set) and pops
+                        # the key so joiners are never stranded. The MISS/_enqueue path
+                        # will set the Future and pop the key via the outer finally blocks
+                        # (non-dispatcher / dispatcher), so we only act in this finally if
+                        # we are still the owner AND the Future was resolved here (HIT case).
+                        _hit_vec: Optional[List[float]] = None
+                        try:
+                            if _cache_mode == "on":
+                                cached_blob = cache.lookup(
+                                    cache_key_opt, _cache_qualifier
+                                )
+                                if cached_blob is not None:
+                                    expected_bytes = _cache_qualifier.dimension * 4
+                                    if len(cached_blob) == expected_bytes:
+                                        import struct
+
+                                        try:
+                                            n_floats = len(cached_blob) // 4
+                                            decoded_vec: List[float] = list(
+                                                struct.unpack(
+                                                    f"<{n_floats}f", cached_blob
+                                                )
+                                            )
+                                            cache.record_hit(
+                                                cache_key_opt, _cache_qualifier
+                                            )
+                                            metrics = (
+                                                get_query_embedding_cache_metrics()
+                                            )
+                                            if metrics is not None:
+                                                metrics.record_hit(
+                                                    mode=_cache_mode,
+                                                    provider=provider_name,
+                                                )
+                                            if audit_ctx is not None:
+                                                try:
+                                                    from code_indexer.server.services.governed_call import (
+                                                        _audit_sample_rate_for,
+                                                    )
+
+                                                    rate = _audit_sample_rate_for(
+                                                        provider_name
+                                                    )
+                                                    if (
+                                                        rate > 0.0
+                                                        and random.random() < rate
+                                                    ):
+                                                        audit_ctx["sampled"] = True
+                                                        audit_ctx["mode"] = _cache_mode
+                                                        audit_ctx["provider"] = (
+                                                            provider_name
+                                                        )
+                                                        audit_ctx["cached_blob"] = (
+                                                            cached_blob
+                                                        )
+                                                except Exception as _ae:  # noqa: BLE001
+                                                    logger.debug(
+                                                        "coalescer: audit_ctx population"
+                                                        " failed (on-mode HIT,"
+                                                        " lane=%s): %s",
+                                                        self._lane,
+                                                        _ae,
+                                                    )
+                                            logger.debug(
+                                                "coalescer: cache HIT (mode=on,"
+                                                " provider=%s, lane=%s)",
+                                                provider_name,
+                                                self._lane,
+                                            )
+                                            # Record resolved vector for finally block.
+                                            _hit_vec = decoded_vec
+                                            # Defect #1148 DEFECT 2 fix: fill the
+                                            # resolution container with cached_blob
+                                            # BEFORE the Future is set so any joiner
+                                            # that unblocks sees the blob and correctly
+                                            # populates its audit_ctx with mode="on".
+                                            _resolution_container[0] = cached_blob
+                                        except struct.error as _se:
+                                            logger.warning(
+                                                "coalescer: corrupt cache blob"
+                                                " (struct.error) provider=%s dim=%d"
+                                                " blob_len=%d — treating as MISS: %s",
+                                                provider_name,
+                                                _cache_qualifier.dimension,
+                                                len(cached_blob),
+                                                _se,
+                                            )
+                                            # Fall through to MISS / dispatch.
+                                    else:
+                                        logger.warning(
+                                            "coalescer: corrupt cache blob dimension"
+                                            " mismatch provider=%s expected_bytes=%d"
+                                            " actual_bytes=%d — treating as MISS",
+                                            provider_name,
+                                            expected_bytes,
+                                            len(cached_blob),
+                                        )
+                                        # Fall through to MISS / dispatch.
+                        finally:
+                            # HIT owner cleanup: if we resolved a HIT vector, set the
+                            # owned Future so any concurrent JOINER gets the result,
+                            # then pop the key from the registry. Joiners that are still
+                            # waiting on _join_fut.result() will unblock and return.
+                            # If _hit_vec is None (MISS / fall-through), the outer
+                            # finally blocks (_enqueue path) handle Future + pop.
+                            if _hit_vec is not None and _am_inflight_owner:
+                                if (
+                                    _owned_future is not None
+                                    and not _owned_future.done()
+                                ):
+                                    _owned_future.set_result(_hit_vec)
+                                with self._inflight_lock:
+                                    # _inflight_key is always non-None here:
+                                    # _am_inflight_owner=True implies line 429
+                                    # executed (_inflight_key = cache_key_opt).
+                                    assert _inflight_key is not None  # noqa: S101
+                                    self._inflight_keys.pop(_inflight_key, None)
+                                # Mark as no longer owner so the _enqueue finally
+                                # blocks do not double-pop or double-set.
+                                _am_inflight_owner = False
+                                _inflight_key = None
+                                _owned_future = None
+
+                        if _hit_vec is not None:
+                            return _hit_vec
+
+        # --- No cache / MISS (owner) / shadow (owner) / bypass / off / disabled ---
+        entry = _Entry(
+            text,
+            embedding_purpose,
+            audit_ctx=audit_ctx,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        )
         n = self._token_count_fn(text)
 
         my_batch, i_am_dispatcher = self._enqueue(entry, n)
 
         if not i_am_dispatcher:
-            # Future is set by THIS batch's dispatcher (always completed).
+            # Batch's dispatcher will complete entry.fut.
+            # If we are the inflight owner but not the dispatcher, we must still
+            # complete _owned_future and remove the key in a finally so joiners
+            # are never stranded even if dispatch raises (shared fate, Messi #13).
+            if (
+                _am_inflight_owner
+                and _inflight_key is not None
+                and _owned_future is not None
+            ):
+                try:
+                    result_vec = entry.fut.result()
+                    if not _owned_future.done():
+                        _owned_future.set_result(result_vec)
+                except BaseException as _ex:  # noqa: BLE001
+                    if not _owned_future.done():
+                        try:
+                            _owned_future.set_exception(_ex)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    raise
+                finally:
+                    with self._inflight_lock:
+                        self._inflight_keys.pop(_inflight_key, None)
+                return result_vec
             return entry.fut.result()
 
-        self._dispatch(my_batch)
+        # Dispatcher path: run live embed, write cache, complete owned future.
+        # try/finally ALWAYS (a) completes _owned_future, (b) removes the key.
+        # entry.fut is set by _dispatch (success) or its exception handler.
+        try:
+            self._dispatch(
+                my_batch,
+                cache=cache,
+                cache_mode=_cache_mode,
+                cache_qualifier=_cache_qualifier,
+            )
+        finally:
+            if (
+                _am_inflight_owner
+                and _inflight_key is not None
+                and _owned_future is not None
+            ):
+                try:
+                    if not _owned_future.done():
+                        exc = entry.fut.exception()
+                        if exc is not None:
+                            _owned_future.set_exception(exc)
+                        else:
+                            _owned_future.set_result(entry.fut.result())
+                except Exception as _set_ex:  # noqa: BLE001
+                    logger.debug(
+                        "coalescer: owner future completion failed (lane=%s): %s",
+                        self._lane,
+                        _set_ex,
+                    )
+                finally:
+                    with self._inflight_lock:
+                        self._inflight_keys.pop(_inflight_key, None)
+
         return entry.fut.result()
 
     # ------------------------------------------------------------------
@@ -314,7 +758,14 @@ class EmbeddingCoalescer:
     # Dispatch (governor is the only limiter)
     # ------------------------------------------------------------------
 
-    def _dispatch(self, my_batch: List[_Entry]) -> None:
+    def _dispatch(
+        self,
+        my_batch: List[_Entry],
+        *,
+        cache: Any = None,
+        cache_mode: Optional[str] = None,
+        cache_qualifier: Any = None,
+    ) -> None:
         """Dispatch ``my_batch`` through the governor and fan out shared fate.
 
         Seals ONCE on the first attempt that gets a slot (inside ``do_call``,
@@ -322,65 +773,238 @@ class EmbeddingCoalescer:
         retry but the snapshot survives via closure nonlocals, so membership is
         stable. On any exception, the batch is sealed even if no slot was ever
         granted, then the exception fans out to EVERY caller.
+
+        Story #1146 — dedup-by-key: within the sealed batch, entries sharing a
+        dedup key collapse to ONE provider embed call. The first claimant per
+        key supplies its real text; all same-key Futures receive the single
+        computed vector. dedup_savings = requestors - unique_texts (live batches
+        only). provider_embed_calls increments once per dispatched batch.
+
+        Story #1147 3b/3d — post-dispatch cache writes: after live embed
+        succeeds, write to cache once per unique key (outside _lock):
+          - on-mode MISS (including bypass): record_miss_or_shadow per key
+          - shadow-mode: record_hit if key existed, else record_miss_or_shadow
+
+        Module dependency (intentional): build_key is imported from
+        query_embedding_cache. The accepted direction is
+            embedding_coalescer -> query_embedding_cache.
+        query_embedding_cache MUST NOT import embedding_coalescer.
         """
         sealed = False
-        texts: Optional[List[str]] = None
-
+        # Snapshot structures set on the FIRST do_call invocation (under lock).
+        unique_texts: Optional[List[str]] = None
+        key_to_first_idx: Optional[Dict[str, int]] = None
+        entry_keys: Optional[List[str]] = None
         purpose: Optional[str] = None
 
         def do_call() -> List[List[float]]:
-            nonlocal sealed, texts, purpose
+            nonlocal sealed, unique_texts, key_to_first_idx, entry_keys, purpose
             with self._lock:
                 if not sealed:
                     sealed = True
                     if self._open_batch is my_batch:
                         self._open_batch = None
                         self._open_tokens = 0
-                    texts = [e.text for e in my_batch]
-                    # All entries in a query-path batch share the same purpose
-                    # (all callers of coalesced_query_embedding pass "query").
-                    # Read from the first entry; default to "query" defensively.
+                    # --- Story #1146: build dedup structures (under lock, no I/O) ---
+                    from code_indexer.server.services.query_embedding_cache import (
+                        build_key,
+                    )
+
                     purpose = my_batch[0].embedding_purpose if my_batch else "query"
-            if texts is None:  # pragma: no cover - set on first attempt, stable after
+                    _anchor: Optional[int] = (
+                        self._anchor_depth_provider()
+                        if self._anchor_depth_provider is not None
+                        else None
+                    )
+                    _unique: List[str] = []
+                    _key_to_idx: Dict[str, int] = {}
+                    _ekeys: List[str] = []
+                    for e in my_batch:
+                        if _anchor is not None:
+                            k = build_key(
+                                e.text,
+                                _anchor,
+                                config_digest=self._config_digest,
+                            )
+                        else:
+                            k = build_key(
+                                e.text,
+                                config_digest=self._config_digest,
+                            )
+                        if k is None:
+                            k = _NONE_KEY_PREFIX + e.text
+                        _ekeys.append(k)
+                        if k not in _key_to_idx:
+                            _key_to_idx[k] = len(_unique)
+                            _unique.append(e.text)
+                    unique_texts = _unique
+                    key_to_first_idx = _key_to_idx
+                    entry_keys = _ekeys
+
+            if unique_texts is None:  # pragma: no cover - set on first attempt
                 raise RuntimeError("coalescer batch snapshot missing")
-            # Exactly ONE HTTP call (retry=False -> provider makes a single attempt;
-            # backoff is handled by execute_with_backoff OUTSIDE the governor slot).
             result: List[List[float]] = self._provider.get_embeddings_batch(
-                texts, retry=False, embedding_purpose=purpose or "query"
+                unique_texts, retry=False, embedding_purpose=purpose or "query"
             )
             return result
 
         try:
-            vectors = execute_with_backoff(
+            unique_vectors = execute_with_backoff(
                 lambda: self._governor.execute(
                     self._lane, do_call, acquire_timeout=self._acquire_timeout
                 )
             )
-            if len(vectors) != len(my_batch):
-                # Defensive invariant — RAISED (not assert; assert is stripped
-                # under python -O). Fans out as shared fate below.
+            if unique_texts is None or key_to_first_idx is None or entry_keys is None:
+                # pragma: no cover
+                raise RuntimeError("coalescer dedup snapshot missing after dispatch")
+            n_unique = len(unique_texts)
+            if len(unique_vectors) != n_unique:
                 raise ValueError(
-                    f"provider returned {len(vectors)} vectors, "
-                    f"expected {len(my_batch)}"
+                    f"provider returned {len(unique_vectors)} vectors, "
+                    f"expected {n_unique} (unique texts in deduplicated batch)"
                 )
-            for e, v in zip(my_batch, vectors):
-                e.fut.set_result(v)  # order-preserved demux
-            # Observability (Phase E): one batch dispatched == one HTTP call.
+            # Shadow pre-lookup: determine per-key hit/miss for audit_ctx fan-out.
+            _shadow_blobs: Optional[Dict[str, Optional[bytes]]] = None
+            if (
+                cache is not None
+                and cache_mode == "shadow"
+                and cache_qualifier is not None
+                and key_to_first_idx is not None
+            ):
+                _shadow_blobs = {}
+                for ukey in key_to_first_idx:
+                    if ukey.startswith(_NONE_KEY_PREFIX):
+                        _shadow_blobs[ukey] = None
+                        continue
+                    try:
+                        _shadow_blobs[ukey] = cache.lookup(ukey, cache_qualifier)
+                    except Exception as _sl_exc:  # noqa: BLE001
+                        logger.debug(
+                            "coalescer: shadow pre-lookup failed (lane=%s key=%.20s): %s",
+                            self._lane,
+                            ukey,
+                            _sl_exc,
+                        )
+                        _shadow_blobs[ukey] = None
+
+            for e, k in zip(my_batch, entry_keys):
+                idx = key_to_first_idx[k]
+                vec = unique_vectors[idx]
+                e.fut.set_result(vec)
+
+                # Per-requestor audit_ctx for shadow HITs (own random draw per entry).
+                if (
+                    _shadow_blobs is not None
+                    and e.audit_ctx is not None
+                    and not k.startswith(_NONE_KEY_PREFIX)
+                ):
+                    shadow_b = _shadow_blobs.get(k)
+                    if shadow_b is not None:
+                        try:
+                            from code_indexer.server.services.governed_call import (
+                                _audit_sample_rate_for,
+                            )
+
+                            provider_name_for_audit = self._provider.get_provider_name()
+                            rate = _audit_sample_rate_for(provider_name_for_audit)
+                            if rate > 0.0 and random.random() < rate:
+                                e.audit_ctx["sampled"] = True
+                                e.audit_ctx["mode"] = "shadow"
+                                e.audit_ctx["provider"] = provider_name_for_audit
+                                e.audit_ctx["cached_blob"] = shadow_b
+                                e.audit_ctx["live_vec"] = list(vec)
+                        except Exception as _ae:  # noqa: BLE001
+                            logger.debug(
+                                "coalescer: audit_ctx population failed"
+                                " (shadow HIT fan-out, lane=%s): %s",
+                                self._lane,
+                                _ae,
+                            )
+
+            # Story #1147 3b/3d: post-dispatch cache writes (outside _lock).
+            if (
+                cache is not None
+                and cache_mode in ("on", "shadow")
+                and cache_qualifier is not None
+                and key_to_first_idx is not None
+                and unique_texts is not None
+            ):
+                try:
+                    from code_indexer.server.services.governed_call import (
+                        get_query_embedding_cache_metrics,
+                    )
+
+                    _metrics = get_query_embedding_cache_metrics()
+
+                    for ukey, uidx in key_to_first_idx.items():
+                        if ukey.startswith(_NONE_KEY_PREFIX):
+                            continue
+                        vec = unique_vectors[uidx]
+                        pname = self._provider.get_provider_name()
+                        if cache_mode == "on":
+                            cache.record_miss_or_shadow(ukey, cache_qualifier, vec)
+                            if _metrics is not None:
+                                _metrics.record_miss(mode="on", provider=pname)
+                        else:
+                            shadow_blob = (
+                                _shadow_blobs.get(ukey)
+                                if _shadow_blobs is not None
+                                else None
+                            )
+                            if shadow_blob is None:
+                                try:
+                                    shadow_blob = cache.lookup(ukey, cache_qualifier)
+                                except Exception:  # noqa: BLE001
+                                    shadow_blob = None
+                            if shadow_blob is not None:
+                                cache.record_hit(ukey, cache_qualifier)
+                                if _metrics is not None:
+                                    try:
+                                        _metrics.record_hit(
+                                            mode="shadow", provider=pname
+                                        )
+                                        _metrics.record_shadow_cosine(
+                                            cached_blob=shadow_blob, live_vec=vec
+                                        )
+                                    except Exception as _m_exc:  # noqa: BLE001
+                                        logger.debug(
+                                            "coalescer: record_shadow_cosine failed"
+                                            " (lane=%s): %s",
+                                            self._lane,
+                                            _m_exc,
+                                        )
+                            else:
+                                cache.record_miss_or_shadow(ukey, cache_qualifier, vec)
+                                if _metrics is not None:
+                                    _metrics.record_miss(mode="shadow", provider=pname)
+                except Exception as _cache_exc:  # noqa: BLE001
+                    logger.warning(
+                        "coalescer: post-dispatch cache write failed (lane=%s): %s",
+                        self._lane,
+                        _cache_exc,
+                    )
+
             batch_size = len(my_batch)
+            savings = batch_size - n_unique
             with self._lock:
                 self.batches_dispatched += 1
                 self.texts_coalesced += batch_size
+                self.dedup_savings += savings
+                self.provider_embed_calls += 1
             logger.debug(
-                "coalescer dispatched batch lane=%s size=%d (batches=%d texts=%d)",
+                "coalescer dispatched batch lane=%s size=%d unique=%d savings=%d"
+                " (batches=%d texts=%d dedup_savings=%d)",
                 self._lane,
                 batch_size,
+                n_unique,
+                savings,
                 self.batches_dispatched,
                 self.texts_coalesced,
+                self.dedup_savings,
             )
         except BaseException as ex:  # noqa: BLE001
-            # Shared-fate fan-out even if NO slot was ever granted (e.g.
-            # GovernorBusyError): seal so a late joiner can't attach to a dead
-            # batch, then set the exception on EVERY caller.
+            # Shared-fate fan-out: seal so late joiners can't attach to a dead
+            # batch, then propagate the exception to every caller.
             with self._lock:
                 if not sealed:
                     sealed = True
