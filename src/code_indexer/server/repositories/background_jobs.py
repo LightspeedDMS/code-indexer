@@ -217,6 +217,12 @@ class BackgroundJobManager:
         # Bug #1063 Part 3: Bounded worker pool shutdown signal.
         self._pool_shutdown = threading.Event()
 
+        # Bug #1153: Cancel-handler registry keyed by operation_type.
+        # Handlers are callables that signal cooperative cancellation to the
+        # service owning the running job (e.g. DependencyMapService._cancel_event).
+        # Registered at startup via register_cancel_handler().
+        self._cancel_handlers: Dict[str, Callable[[], Any]] = {}
+
         # Load persisted jobs
         self._load_jobs()
 
@@ -267,6 +273,25 @@ class BackgroundJobManager:
     def max_concurrent_jobs(self) -> int:
         """Get the maximum number of concurrent background jobs (Story #26)."""
         return self._background_jobs_config.max_concurrent_background_jobs  # type: ignore[no-any-return]
+
+    def register_cancel_handler(
+        self, operation_type: str, handler: Callable[[], Any]
+    ) -> None:
+        """Register a cooperative-cancellation handler for a given operation_type.
+
+        Bug #1153: when cancel_job is called for a RUNNING local job, the
+        generic path only terminates xray child processes.  For operation types
+        that manage their own threading.Event (e.g. DependencyMapService), the
+        service must register a handler here so cancel_job can signal it.
+
+        The handler is invoked at most once per cancel_job call, wrapped in a
+        try/except so a handler error never breaks the cancel_job response.
+
+        Args:
+            operation_type: The job operation_type string (e.g. "dependency_map_full").
+            handler: Zero-argument callable that signals cancellation to the service.
+        """
+        self._cancel_handlers[operation_type] = handler
 
     def count_active_refresh_jobs(self) -> int:
         """Count PENDING+RUNNING global_repo_refresh jobs in memory.
@@ -861,6 +886,21 @@ class BackgroundJobManager:
             # Story #996: Terminate driver processes for running xray jobs
             if was_running:
                 self._terminate_child_processes(job_id)
+                # Bug #1153: Invoke cooperative-cancellation handler for the
+                # operation_type (e.g. DependencyMapService.cancel_running_analysis).
+                # Without this, dep-map workers keep running and the
+                # SharedJobSentinel is never released, causing 409 forever.
+                _cancel_handler = self._cancel_handlers.get(job.operation_type)
+                if _cancel_handler is not None:
+                    try:
+                        _cancel_handler()
+                    except Exception:
+                        logging.exception(
+                            "Cancel handler for operation_type=%s raised; "
+                            "cancellation still marked on job %s",
+                            job.operation_type,
+                            job_id,
+                        )
             logging.info(f"Job {job_id} cancelled by user {username}")
             return {"success": True, "message": "Job cancelled successfully"}
 
@@ -911,6 +951,29 @@ class BackgroundJobManager:
                     cancelled=True,
                     completed_at=datetime.now(timezone.utc).isoformat(),
                 )
+
+                # Bug #1153: Dep-map jobs reach this path because they register
+                # via JobTracker.register_job_if_no_conflict WITHOUT submit_job,
+                # so self.jobs is empty for their job_id.  The self.jobs branch
+                # above never fires, meaning the cancel handler was silently skipped.
+                # Fix: for locally-running jobs (JobTracker has the job as "running"
+                # and a handler is registered for its operation_type), invoke the
+                # handler here so the dep-map worker's _cancel_event gets set and
+                # the SharedJobSentinel is released.
+                if db_status == "running" and self._job_tracker is not None:
+                    _op_type = db_job.get("operation_type") or ""
+                    _cancel_handler = self._cancel_handlers.get(_op_type)
+                    if _cancel_handler is not None:
+                        try:
+                            _cancel_handler()
+                        except Exception:
+                            logging.exception(
+                                "Cancel handler for operation_type=%s raised; "
+                                "cancellation still marked on job %s",
+                                _op_type,
+                                job_id,
+                            )
+
                 logging.info(f"Job {job_id} cancelled in DB by user {username}")
                 return {"success": True, "message": "Job cancelled successfully"}
             except Exception as e:

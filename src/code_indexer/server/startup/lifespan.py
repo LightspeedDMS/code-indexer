@@ -1742,6 +1742,20 @@ def make_lifespan(
             dependency_map_service.start_scheduler()
             app.state.dependency_map_service = dependency_map_service
 
+            # Bug #1153: Wire dep-map cooperative-cancellation handlers so that
+            # BackgroundJobManager.cancel_job() can stop the dep-map worker thread
+            # and release the SharedJobSentinel when a cancel is requested via the
+            # generic MCP cancel_job tool.  Without this, the worker keeps running
+            # and new triggers 409 forever.
+            background_job_manager.register_cancel_handler(
+                "dependency_map_full",
+                dependency_map_service.cancel_running_analysis,
+            )
+            background_job_manager.register_cancel_handler(
+                "dependency_map_delta",
+                dependency_map_service.cancel_running_analysis,
+            )
+
             if server_config.claude_integration_config.dependency_map_enabled:
                 logger.info(
                     f"Dependency map scheduler started "
