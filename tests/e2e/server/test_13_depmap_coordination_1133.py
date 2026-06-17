@@ -263,7 +263,7 @@ def _drain_jobs(client: TestClient, auth_headers: dict, job_ids: list[str]) -> N
 # ===========================================================================
 @pytest.fixture(scope="module")
 def depmap_enabled_client(
-    test_client: TestClient, auth_headers: dict
+    test_client: TestClient,
 ) -> Iterator[TestClient]:
     """Yield a TestClient with ``dependency_map_enabled`` turned on (front door).
 
@@ -271,6 +271,11 @@ def depmap_enabled_client(
     all tests in this module.  No teardown reset is required — the config lives
     in the session-scoped ``test_client`` data dir which is discarded with the
     session.
+
+    Note: ``auth_headers`` is intentionally NOT a parameter here — it is
+    ``scope="function"`` (for JWT near-expiry refresh) and cannot be requested
+    by a ``scope="module"`` fixture.  The fixture body does not need it:
+    ``_enable_dependency_map`` performs its own web-form login internally.
     """
     _enable_dependency_map(test_client)
     try:
@@ -417,6 +422,26 @@ def test_ac1_release_then_trigger_is_accepted(
         if active is not None and active.job_id == seed_job_id:
             sentinel.release(SENTINEL_OP_ANALYSIS, expected_job_id=seed_job_id)
         _drain_jobs(depmap_enabled_client, auth_headers, accepted_job_ids)
+
+        # Wait for the accepted worker's sentinel to clear before returning.
+        #
+        # Race: run_full_analysis releases the sentinel BEFORE calling
+        # complete_job/fail_job in its finally block.  However, when the worker
+        # raises an exception the except block calls fail_job (marking the job
+        # terminal) and then raises — only then does the finally run
+        # sentinel.release.  So _drain_jobs above can return (job is terminal)
+        # while the finally block of the worker thread has not yet executed
+        # sentinel.release.  If this test returns in that window, the next test
+        # (test_ac1_concurrent_triggers_single_winner) finds an active sentinel
+        # and fails its zero-contention precheck.
+        #
+        # Fix: bounded-wait for the sentinel to clear after draining the job
+        # (Messi Rule #14: all loops must have provable termination bounds).
+        _sentinel_clear_deadline = time.monotonic() + _JOB_DRAIN_TIMEOUT_S
+        while time.monotonic() < _sentinel_clear_deadline:
+            if sentinel.read_active(SENTINEL_OP_ANALYSIS) is None:
+                break
+            time.sleep(_JOB_DRAIN_POLL_S)
 
 
 def test_ac1_concurrent_triggers_single_winner(
