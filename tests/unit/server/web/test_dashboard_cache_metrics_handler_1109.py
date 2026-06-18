@@ -781,9 +781,9 @@ class TestPopulatedHistogramRender:
             assert "500" in html, (
                 f"Expected bucket count '500' in rendered HTML, got:\n{html[:800]}"
             )
-            # Bar chars: at least one '#' must appear in the histogram section
-            assert "#" in html, (
-                f"Expected '#' bar character in rendered histogram, got:\n{html[:800]}"
+            # CSS bar: at least one bar fill with a width% style must appear
+            assert "width:" in html, (
+                f"Expected CSS 'width:' bar fill in rendered histogram, got:\n{html[:800]}"
             )
             # P50 summary: 0.9400 (from fake_metrics)
             assert "0.9400" in html, (
@@ -800,3 +800,90 @@ class TestPopulatedHistogramRender:
         finally:
             clear_query_embedding_cache()
             clear_query_embedding_cache_metrics()
+
+
+# ---------------------------------------------------------------------------
+# CSS bar chart: contained layout, empty state, no ASCII overflow
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetricsAllZeroBuckets(_FakeMetrics):
+    """FakeMetrics with a histogram where every bucket count is 0 (no samples yet)."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._snap["shadow_cosine_histogram"] = [
+            (round(-1.0 + i * 0.05, 10), round(-1.0 + (i + 1) * 0.05, 10), 0)
+            for i in range(40)
+        ]
+        self._snap["shadow_cosine_min"] = None
+        self._snap["shadow_cosine_p05"] = None
+        self._snap["shadow_cosine_p50"] = None
+
+
+def _fetch_cache_metrics_html(client, fake_metrics, cache_count: int) -> str:
+    """Shared helper: install fake cache+metrics, fetch the partial, return HTML.
+
+    The shared abstraction that keeps TestCSSBarChartRender test methods DRY —
+    each method calls this directly, so there is no duplicated setup/teardown.
+    Raises AssertionError if the response is not HTTP 200.
+    """
+    from code_indexer.server.services.governed_call import (
+        set_query_embedding_cache,
+        clear_query_embedding_cache,
+        set_query_embedding_cache_metrics,
+        clear_query_embedding_cache_metrics,
+    )
+
+    set_query_embedding_cache(_FakeCache(count=cache_count))
+    set_query_embedding_cache_metrics(fake_metrics)
+    try:
+        resp = client.get("/admin/partials/dashboard-cache-metrics")
+        assert resp.status_code == 200, (
+            f"Expected HTTP 200, got {resp.status_code}: {resp.text[:400]}"
+        )
+        return str(resp.text)
+    finally:
+        clear_query_embedding_cache()
+        clear_query_embedding_cache_metrics()
+
+
+class TestCSSBarChartRender:
+    """CSS bar chart template: contained layout, empty state, no ASCII overflow.
+
+    These tests validate the replacement of the broken ASCII `white-space: pre`
+    chart (which overflowed horizontally) with a proper CSS bar chart.
+    Each test calls _fetch_cache_metrics_html — the shared DRY abstraction.
+    """
+
+    def test_css_bars_present_when_populated(self, client, admin_session_cookie):
+        """When histogram has non-zero buckets, rendered HTML contains CSS bar
+        fills with `width:` style attribute, not `#` ASCII characters.
+        """
+        html = _fetch_cache_metrics_html(client, _FakeMetricsWithHistogram(), 10)
+        assert "width:" in html, (
+            f"Expected CSS 'width:' on bar fill elements, got:\n{html[:800]}"
+        )
+        assert "500" in html, (
+            f"Expected bucket count '500' in rendered HTML, got:\n{html[:800]}"
+        )
+
+    def test_empty_state_when_all_zero(self, client, admin_session_cookie):
+        """When all histogram bucket counts are 0, render the empty-state message
+        instead of 40 empty bar rows.
+        """
+        html = _fetch_cache_metrics_html(client, _FakeMetricsAllZeroBuckets(), 0)
+        assert "No shadow cosine samples" in html, (
+            f"Expected empty-state message 'No shadow cosine samples' in HTML "
+            f"when all buckets are zero, got:\n{html[:800]}"
+        )
+
+    def test_no_whitespace_pre_in_chart_body(self, client, admin_session_cookie):
+        """The chart body must NOT use `white-space: pre` which caused horizontal
+        overflow when Jinja whitespace-control stripped newlines between buckets.
+        """
+        html = _fetch_cache_metrics_html(client, _FakeMetricsWithHistogram(), 10)
+        assert "white-space: pre" not in html, (
+            "Found 'white-space: pre' in rendered HTML — this causes horizontal "
+            "overflow. The chart must use a block/flex layout instead."
+        )

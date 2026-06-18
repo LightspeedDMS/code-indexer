@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.138.0] - 2026-06-18
+
+### Fixed
+- **Query Embedding Cache "Clear" button now sits next to the "Total Cached Entries" count** on the admin config screen (it was previously in the section footer next to "Edit", ~9 rows below the count, so it read as missing). Moved in both `config_section.html` and the `qec_display.html` HTMX swap-target partial; HTMX behavior unchanged.
+- **Shadow Cosine Distribution dashboard card rendered as an unreadable single overflowing line** instead of a chart. The ASCII bar chart relied on Jinja whitespace-control that stripped the newlines between the 40 buckets, collapsing them onto one line that overflowed the card. Replaced with a contained CSS horizontal bar chart (bar width = the existing log-scaled `bar_pct`), with `overflow-x` hidden + a capped scrollable height, plus a "No shadow cosine samples recorded yet" empty state when no samples have been recorded.
+
 ## [10.137.0] - 2026-06-18
 
 ### Fixed

@@ -21,6 +21,13 @@
         white-space: nowrap;
     }
     .cache-metrics-volatile-note { color: #d6a93a; font-weight: 600; }
+    .cosine-chart { font-size: 0.7rem; line-height: 1.8; overflow-x: hidden; }
+    .cosine-chart-empty { font-size: 0.75rem; color: #888; text-align: center; padding: 1rem 0; }
+    .cosine-row { display: flex; align-items: center; gap: 0.4rem; width: 100%; }
+    .cosine-label { flex: 0 0 9rem; font-family: monospace; white-space: nowrap; }
+    .cosine-track { flex: 1 1 0; background: rgba(255,255,255,0.07); border-radius: 2px; height: 0.65rem; overflow: hidden; }
+    .cosine-fill { height: 100%; background: #d6a93a; border-radius: 2px; min-width: 0; }
+    .cosine-count { flex: 0 0 3.5rem; text-align: right; font-family: monospace; color: #aaa; }
 </style>
 <div class="stats-grid">
     <article class="stat-card">
@@ -69,11 +76,19 @@
     {% if histogram_bars %}
     <article class="stat-card" style="grid-column: span 2;">
         <header><h3>Shadow Cosine Distribution <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
-        <div style="font-size:0.7rem; line-height:1.6; font-family: monospace; white-space: pre;">
-        {%- for b in histogram_bars -%}
-            {%- set bar_len = (b.bar_pct // 5) -%}
-[{{ "%.2f"|format(b.lo) }}, {{ "%.2f"|format(b.hi) }}) {{ "#" * bar_len }}{{ " " * (20 - bar_len) }} {{ b.count }}
-        {%- endfor %}
+        {% set total = histogram_bars | sum(attribute='count') %}
+        <div class="cosine-chart" style="max-height: 28rem; overflow-y: auto;">
+        {% if total == 0 %}
+            <div class="cosine-chart-empty">No shadow cosine samples recorded yet</div>
+        {% else %}
+            {% for b in histogram_bars %}
+            <div class="cosine-row">
+                <span class="cosine-label">[{{ "%.2f"|format(b.lo) }}, {{ "%.2f"|format(b.hi) }})</span>
+                <div class="cosine-track"><div class="cosine-fill" style="width: {{ b.bar_pct }}%"></div></div>
+                <span class="cosine-count">{{ b.count }}</span>
+            </div>
+            {% endfor %}
+        {% endif %}
         </div>
         <footer>
             <small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span>
