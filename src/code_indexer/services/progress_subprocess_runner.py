@@ -31,6 +31,7 @@ Usage::
     )
 """
 
+import io
 import logging
 import os
 import select
@@ -41,6 +42,23 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _get_fd(stream) -> "Optional[int]":
+    """Return the OS file descriptor for *stream*, or None if unavailable.
+
+    Real subprocess PIPE streams always expose a valid fd via fileno().
+    Mocked/StringIO streams raise io.UnsupportedOperation (or AttributeError /
+    ValueError) — those callers get None and fall back to line-iteration.
+    """
+    if stream is None:
+        return None
+    try:
+        fd = stream.fileno()
+        # A non-negative integer means a real OS fd.
+        return fd if isinstance(fd, int) and fd >= 0 else None
+    except (io.UnsupportedOperation, AttributeError, ValueError):
+        return None
 
 
 class IndexingSubprocessError(Exception):
@@ -228,6 +246,88 @@ def run_with_popen_progress(
             f"Failed to {error_label}: subprocess stdout pipe was not created"
         )
 
+    # Watchdog thread enforces timeout independent of stdout line production.
+    # This ensures the process is killed even if it produces no output.
+    # Declared here so both the fallback (no-fd) and real-fd paths can use it.
+    timed_out = threading.Event()
+
+    if timeout is not None:
+
+        def _watchdog() -> None:
+            if not timed_out.wait(timeout=timeout):
+                # Event was not set within timeout — process still running.
+                # Kill the entire process group (child + grandchildren) so any
+                # inherited pipe fds held by grandchildren are also closed.
+                timed_out.set()
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    # Process already exited between the check and the kill.
+                    pass
+                except OSError:
+                    # Fallback: kill just the direct child if getpgid fails.
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+        watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+        watchdog_thread.start()
+    else:
+        watchdog_thread = None
+
+    # Detect whether stdout exposes a real OS file descriptor.
+    # Real subprocess PIPE streams always do; mocked/StringIO streams do not.
+    # The fallback path uses simple line-iteration (safe for mocks, no wedge
+    # protection needed).  The real-fd path uses the select/shutdown-pipe reader
+    # (BUG1/C1/C2 wedge protection — preserved completely unchanged).
+    stdout_fd = _get_fd(process.stdout)
+
+    if stdout_fd is None:
+        # --- Fallback path: no real OS fd (mocked / StringIO stdout) --------
+        # Simple line-iteration — identical progress/error semantics to the
+        # real-fd path but without the select machinery (a mock can't wedge).
+        for raw_line in process.stdout:
+            all_stdout.append(raw_line)
+            parsed = parse_progress_line(raw_line)
+            if parsed is not None:
+                global_pct = int(
+                    allocator.map_phase_progress(
+                        phase_name, parsed["current"], parsed["total"]
+                    )
+                )
+                _emit(global_pct, phase=phase_name, detail=parsed.get("info", ""))
+
+        # Drain stderr from mock stream if present.
+        stderr_output = ""
+        if process.stderr is not None:
+            stderr_output = "".join(process.stderr)
+        all_stderr.append(stderr_output)
+
+        process.wait()
+
+        # Signal watchdog that process finished (prevents spurious kill).
+        timed_out.set()
+        if watchdog_thread is not None:
+            watchdog_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+
+        if process.returncode != 0:
+            stdout_output = "".join(all_stdout)
+            if process.returncode is not None and process.returncode < 0:
+                signal_str = f"Exit code {process.returncode}"
+                detail = stderr_output or stdout_output or ""
+                error_details = (
+                    f"{signal_str}. {detail}".rstrip(". ") if detail else signal_str
+                )
+            else:
+                error_details = (
+                    stderr_output or stdout_output or f"Exit code {process.returncode}"
+                )
+            raise IndexingSubprocessError(f"Failed to {error_label}: {error_details}")
+
+        return high_water
+    # --- End fallback path ---------------------------------------------------
+
     # Shared constants and shutdown pipe for both stdout and stderr readers.
     #
     # Both reader threads select on their respective pipe fd AND shutdown_r.
@@ -237,8 +337,9 @@ def run_with_popen_progress(
     READ_BUFFER_SIZE = 4096
     POLL_INTERVAL_SECONDS = 0.05
 
-    stdout_fd = process.stdout.fileno()
-    stderr_fd = process.stderr.fileno() if process.stderr else -1
+    stderr_fd = _get_fd(process.stderr) if process.stderr else -1
+    if stderr_fd is None:
+        stderr_fd = -1
     shutdown_r, shutdown_w = os.pipe()
 
     # Thread-safe queue: stdout reader puts decoded lines (str) or None (sentinel).
@@ -287,35 +388,6 @@ def run_with_popen_progress(
 
     stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
     stderr_thread.start()
-
-    # Watchdog thread enforces timeout independent of stdout line production.
-    # This ensures the process is killed even if it produces no output.
-    timed_out = threading.Event()
-
-    if timeout is not None:
-
-        def _watchdog() -> None:
-            if not timed_out.wait(timeout=timeout):
-                # Event was not set within timeout — process still running.
-                # Kill the entire process group (child + grandchildren) so any
-                # inherited pipe fds held by grandchildren are also closed.
-                timed_out.set()
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    # Process already exited between the check and the kill.
-                    pass
-                except OSError:
-                    # Fallback: kill just the direct child if getpgid fails.
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-
-        watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
-        watchdog_thread.start()
-    else:
-        watchdog_thread = None
 
     # Poll-aware read loop — the core fix for the grandchild fd-wedge problem.
     #
