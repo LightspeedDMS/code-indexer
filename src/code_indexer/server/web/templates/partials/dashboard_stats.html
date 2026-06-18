@@ -205,6 +205,7 @@
 <!-- Recent Activity Section (Story #201: Fixed to 24h, dropdown removed) -->
 <h2>Recent Activity</h2>
 
+{% set has_providers = (has_provider_results | default(false)) or (recent_jobs and recent_jobs | selectattr('result') | selectattr('result.provider_results', 'defined') | list | length > 0) %}
 <div class="recent-activity">
     <table role="grid">
         <thead>
@@ -212,29 +213,14 @@
                 <th>Repository</th>
                 <th>Job Type</th>
                 <th>Completed</th>
+                <th>User</th>
                 <th>Status</th>
+                {% if has_providers %}<th>Providers</th>{% endif %}
             </tr>
         </thead>
         <!-- Story #69: Granular refresh target for table body ONLY -->
         <tbody id="recent-jobs-tbody">
-            {% if recent_jobs and recent_jobs|length > 0 %}
-            {% for job in recent_jobs %}
-            <tr>
-                <td>
-                    <a href="/admin/jobs?job_id={{ job.job_id }}">{{ job.repo_name }}</a>
-                </td>
-                <td>{{ job.job_type }}</td>
-                <td>{{ (job.completion_time|string)[:19] if job.completion_time else 'N/A' }}</td>
-                <td>
-                    <span class="job-status status-{{ job.status }}">{{ job.status | capitalize }}</span>
-                </td>
-            </tr>
-            {% endfor %}
-            {% else %}
-            <tr>
-                <td colspan="4" style="text-align: center;">No recent activity to display.</td>
-            </tr>
-            {% endif %}
+            {% include "partials/dashboard_recent_jobs.html" %}
         </tbody>
     </table>
 </div>
