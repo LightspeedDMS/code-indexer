@@ -189,6 +189,32 @@ class QueryEmbeddingCacheMetrics:
             logger.debug("cache metrics: failed to register instruments: %s", exc)
 
     # ------------------------------------------------------------------
+    # Test-isolation helper
+    # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Zero all in-process tallies.
+
+        Intended for test isolation: call before a test that asserts on
+        counter deltas so that accumulated state from prior operations
+        (e.g. from shared fixtures or background threads) does not
+        contaminate the test's baseline.
+
+        OTEL cumulative instruments (counters, histograms) are NOT reset —
+        they are designed to be monotonic and are only used for export.
+        Only the in-process tallies consumed by snapshot() are zeroed.
+
+        Thread-safe: acquires the internal lock.
+        """
+        with self._lock:
+            self._tallies.clear()
+            self._cosine_buffer.clear()
+            self._long_key = 0
+            self._audit_total = 0
+            self._audit_top1_matches = 0
+            self._audit_overlap_sum = 0.0
+
+    # ------------------------------------------------------------------
     # Public record methods (all fail-open)
     # ------------------------------------------------------------------
 

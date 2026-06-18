@@ -871,3 +871,60 @@ def test_histogram_p05_calculation():
     # p05 is somewhere near or at 0.5/1.0 boundary
     # The exact value depends on percentile method — just check it's a valid float
     assert 0.5 <= snap["shadow_cosine_p05"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# reset() — test isolation helper (Story #1124 E2E fix)
+# ---------------------------------------------------------------------------
+
+
+def test_reset_zeroes_all_tallies():
+    """reset() zeroes all in-process tallies so tests can start with a clean slate.
+
+    Verifies that after accumulating shadow + on hits/misses, a cosine value,
+    audit tallies, and a long_key count, reset() brings every in-process counter
+    back to zero.  The OTEL instruments are NOT reset (they are cumulative by
+    design) — only the in-process tallies used by snapshot() are zeroed.
+    """
+    m, _hits_c, _miss_c, _hist = _make_metrics()
+
+    # Accumulate some state across all tally types.
+    m.record_hit(mode="shadow", provider=PROVIDER)
+    m.record_miss(mode="shadow", provider=PROVIDER)
+    m.record_hit(mode="on", provider=PROVIDER)
+    m.record_miss(mode="on", provider=PROVIDER)
+    m.record_shadow_cosine(cached_blob=_enc(CACHED_VEC), live_vec=LIVE_VEC)
+    m.record_long_key(provider=PROVIDER)
+    m.record_audit(top10_overlap=0.8, top1_match=True, provider=PROVIDER, mode="shadow")
+
+    snap_before = m.snapshot()
+    assert snap_before["shadow"]["hits"] == 1
+    assert snap_before["shadow"]["misses"] == 1
+    assert snap_before["on"]["hits"] == 1
+    assert snap_before["on"]["misses"] == 1
+    assert snap_before["shadow_cosine_p50"] is not None
+    assert snap_before["long_key"] == 1
+    assert snap_before["audit_total"] == 1
+
+    # Reset clears all in-process tallies.
+    m.reset()
+
+    snap_after = m.snapshot()
+    assert snap_after["shadow"]["hits"] == 0, "reset() should zero shadow hits"
+    assert snap_after["shadow"]["misses"] == 0, "reset() should zero shadow misses"
+    assert snap_after["on"]["hits"] == 0, "reset() should zero on hits"
+    assert snap_after["on"]["misses"] == 0, "reset() should zero on misses"
+    assert snap_after["shadow_cosine_p50"] is None, "reset() should clear cosine buffer"
+    assert snap_after["long_key"] == 0, "reset() should zero long_key counter"
+    assert snap_after["audit_total"] == 0, "reset() should zero audit_total"
+    assert snap_after["audit_top1_matches"] == 0, (
+        "reset() should zero audit_top1_matches"
+    )
+
+    # After reset, new tallies accumulate from zero.
+    m.record_hit(mode="on", provider=PROVIDER)
+    snap_post = m.snapshot()
+    assert snap_post["on"]["hits"] == 1, "after reset(), new tallies start from 0"
+    assert snap_post["shadow"]["hits"] == 0, (
+        "shadow tallies still zero after on-mode hit"
+    )
