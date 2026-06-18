@@ -266,23 +266,6 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # git_file_at_revision.  The anchor is specific to this fallback-identity message;
     # a genuine credential or auth failure surfaces with a different error shape.
     "PAT credential lookup returned error (non-blocking, using fallback identity)",
-    # Story #1139 (test_16_remaining_surface_1139.py) AC2 + Bug #1154: the reindex
-    # test fires a REAL trigger_reindex front-door call.  The reindex WORKER currently
-    # fails because ActivatedRepoIndexManager.trigger_reindex passes repo_alias= as a
-    # kwarg that collides with BackgroundJobManager.submit_job's reserved repo_alias
-    # parameter, so _execute_indexing_job never receives it.  The BackgroundJobManager
-    # logs "Background job <uuid> failed: _execute_indexing_job() missing 1 required
-    # positional argument: 'repo_alias'".  This benign ERROR fires whenever the test
-    # invokes trigger_reindex (the worker dispatch fails before reaching the job
-    # tracker, so GET /api/jobs/{job_id} 404s or hangs non-terminal).  The test asserts
-    # ONLY the deterministic front-door submission (job_id returned), NOT this log line;
-    # this entry allowlists the benign #1154 worker-failure ERROR so the Phase-3 log
-    # gate does not trip on it.  Bug filed as #1154.  The
-    # anchor is the stable error SUFFIX (not the variable job UUID): a genuine indexing
-    # failure for any OTHER reason surfaces with a different message and is NOT
-    # suppressed.  Remove this entry once #1154 is fixed (the reindex worker will then
-    # receive repo_alias and the job will complete without this ERROR).
-    "_execute_indexing_job() missing 1 required positional argument: 'repo_alias'",
     # Story #1139 (test_16_remaining_surface_1139.py) AC3: the omni wildcard cap-mutation
     # test DELIBERATELY lowers the omni caps below the global-repo count and fires the
     # bare-'*' MCP search, asserting the fan-out is REFUSED (capped, not unbounded).  The
@@ -310,6 +293,28 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # The [config-init-diag] prefix uniquely anchors these entries; genuine config failures
     # surface with different error codes (e.g. [SVC-MIGRATE-003]).
     "[config-init-diag]",
+    # dependency_map_analyzer._reconcile_domains_json: a domain that exists in the
+    # graph JSON but has no corresponding .md file in cidx-meta is a "ghost" and is
+    # pruned from the graph on the next reconciliation pass.  This is normal housekeeping
+    # in a test environment where dep-map state may be partially populated; it is not
+    # an indexing or search failure.  Anchored on the static message prefix; a genuine
+    # missing-domain failure would surface through a different code path and message.
+    "_reconcile_domains_json: ghost domain",
+    # SharedJobSentinel.release called for an op_type whose sentinel was never claimed
+    # (or was already released).  This is idempotent teardown — releasing a non-existent
+    # sentinel is a no-op and is explicitly designed to be harmless.  Appears during
+    # Phase-3 test teardown when dep-map coordination tests clean up after themselves.
+    # Anchored on the static message prefix; a sentinel claim failure or corruption
+    # surfaces with a different message shape.
+    "SharedJobSentinel.release: no sentinel for op_type=",
+    # meta_description_hook.on_repo_removed: when the cidx-meta coarse write lock is
+    # held by another operation during repo removal, the description-.md deletion is
+    # gracefully skipped and the orphan is reaped on the next pass.  This is the
+    # documented non-fatal lock-contention path (the write lock guard intentionally
+    # returns False rather than blocking).  Appears during Phase-3 test teardown when
+    # concurrent cidx-meta operations overlap.  Anchored on the static message prefix;
+    # a genuine write-failure would surface with a different error shape.
+    "on_repo_removed: write lock not acquired, skipping deletion of",
 ]
 
 
