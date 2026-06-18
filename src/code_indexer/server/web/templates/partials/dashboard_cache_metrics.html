@@ -133,7 +133,11 @@
     <article class="stat-card">
         <header><h3>Audit Top-1 Match</h3></header>
         <div class="stat-value">
-            {{ "%.1f"|format(cache_metrics.audit_top1_matches / cache_metrics.audit_total * 100) }}%
+            {% if cache_metrics.audit_total %}
+                {{ "%.1f"|format(cache_metrics.audit_top1_matches / cache_metrics.audit_total * 100) }}%
+            {% else %}
+                --
+            {% endif %}
         </div>
         <footer><small>How often the cached vector's top search result matches the live vector's top result</small></footer>
     </article>
@@ -141,7 +145,7 @@
         <header><h3>Audit Avg Top-10 Overlap</h3></header>
         <div class="stat-value">
             {% if cache_metrics.audit_overlap_avg is not none %}
-                {{ "%.2f"|format(cache_metrics.audit_overlap_avg) }}
+                {{ "%.1f"|format(cache_metrics.audit_overlap_avg * 100) }}%
             {% else %}
                 --
             {% endif %}

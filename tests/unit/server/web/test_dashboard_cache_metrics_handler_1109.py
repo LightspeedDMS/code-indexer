@@ -297,13 +297,17 @@ class TestAuditRowsRender:
             assert "20" in html, (
                 f"Expected audit_total '20' in HTML, got:\n{html[:600]}"
             )
-            # Top-1 match rate = 15/20 * 100 = 75.0 %
-            assert "75" in html, (
-                f"Expected top-1 match rate '75' in HTML, got:\n{html[:600]}"
+            # Top-1 match rate = 15/20 * 100 = 75.0% (rendered as a percentage)
+            assert "75.0%" in html, (
+                f"Expected top-1 match rate '75.0%' in HTML, got:\n{html[:600]}"
             )
-            # Avg overlap = 0.85 must appear
-            assert "0.85" in html, (
-                f"Expected overlap avg '0.85' in HTML, got:\n{html[:600]}"
+            # Avg overlap = 0.85 -> 85.0% (percentage, consistent with Top-1 Match;
+            # no longer the bare decimal '0.85')
+            assert "85.0%" in html, (
+                f"Expected overlap avg '85.0%' in HTML, got:\n{html[:600]}"
+            )
+            assert "0.85" not in html, (
+                "Top-10 overlap must render as a percentage, not the bare decimal '0.85'"
             )
         finally:
             clear_query_embedding_cache()
