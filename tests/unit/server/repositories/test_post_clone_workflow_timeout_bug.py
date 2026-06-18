@@ -23,10 +23,9 @@ Fix B: _execute_fts_indexing and _execute_semantic_indexing must check that
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from typing import List, Optional
-from unittest.mock import MagicMock, call, patch
+from typing import List
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -97,10 +96,14 @@ class TestPostCloneWorkflowTimeout:
 
         # run_with_popen_progress is lazily imported INSIDE _execute_post_clone_workflow,
         # so we must patch it at the source module, not the golden_repo_manager module.
+        def _capture_popen(*args: object, **kw: object) -> int:
+            captured_kwargs.append(kw)
+            return 0
+
         with (
             patch(
                 "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
-                side_effect=lambda *args, **kw: (captured_kwargs.append(kw) or 0),
+                side_effect=_capture_popen,
             ),
             patch("subprocess.run", return_value=mock_subprocess_result),
             patch(
@@ -143,10 +146,14 @@ class TestPostCloneWorkflowTimeout:
         mock_subprocess_result.stdout = ""
         mock_subprocess_result.stderr = ""
 
+        def _capture_popen2(*args: object, **kw: object) -> int:
+            captured_kwargs.append(kw)
+            return 0
+
         with (
             patch(
                 "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
-                side_effect=lambda *args, **kw: (captured_kwargs.append(kw) or 0),
+                side_effect=_capture_popen2,
             ),
             patch("subprocess.run", return_value=mock_subprocess_result),
             patch(
@@ -276,17 +283,13 @@ class TestActivatedRepoIndexManagerInitGuard:
         fake_result.stdout = ""
         fake_result.stderr = ""
 
-        original_run = index_manager._run_subprocess_with_telemetry
-
-        def _capture_run(
-            args: List[str], repo_path: str, timeout: int
-        ) -> MagicMock:
+        def _capture_run(args: List[str], repo_path: str, timeout: int) -> MagicMock:
             captured_calls.append(args)
             return fake_result
 
         index_manager._run_subprocess_with_telemetry = _capture_run  # type: ignore[method-assign]
 
-        result = index_manager._execute_fts_indexing(str(tmp_repo), clear=False)
+        index_manager._execute_fts_indexing(str(tmp_repo), clear=False)
 
         # Must have actually called cidx index
         assert len(captured_calls) >= 1, (
@@ -311,15 +314,13 @@ class TestActivatedRepoIndexManagerInitGuard:
         fake_result.stdout = ""
         fake_result.stderr = ""
 
-        def _capture_run(
-            args: List[str], repo_path: str, timeout: int
-        ) -> MagicMock:
+        def _capture_run(args: List[str], repo_path: str, timeout: int) -> MagicMock:
             captured_calls.append(args)
             return fake_result
 
         index_manager._run_subprocess_with_telemetry = _capture_run  # type: ignore[method-assign]
 
-        result = index_manager._execute_semantic_indexing(str(tmp_repo), clear=False)
+        index_manager._execute_semantic_indexing(str(tmp_repo), clear=False)
 
         assert len(captured_calls) >= 1, (
             "_execute_semantic_indexing did not call _run_subprocess_with_telemetry "
