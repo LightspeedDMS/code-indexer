@@ -46,19 +46,9 @@ AC2 -- Provider-index management + reindex
   * action="status" -> per-provider on-disk index state for the seeded repo:
     ``exists: true``, ``vector_count > 0``, ``collection_name``, ``model`` --
     derived from the real index produced by VoyageAI indexing, NOT a stub.
-``trigger_reindex`` submits a real background reindex job and returns a job_id;
-that front-door submission (a real job handle) is the asserted effect.
-
-KNOWN BUG (filed as #1154, discovered during this construction): the reindex
-WORKER currently fails because ``ActivatedRepoIndexManager.trigger_reindex``
-passes ``repo_alias=`` as a kwarg that collides with ``submit_job``'s reserved
-``repo_alias`` parameter, so ``_execute_indexing_job`` never receives it
-(``missing 1 required positional argument: 'repo_alias'``).  Because of this the
-worker outcome is NON-DETERMINISTIC (the job either 404s as never-registered or
-hangs in a non-terminal state), so this test asserts ONLY the deterministic
-front-door submission (job_id returned) and observes the worker outcome for
-diagnostics WITHOUT asserting it -- so it neither masks #1154 nor fails
-spuriously.  Once #1154 is fixed, strengthen this test to assert ``completed``.
+``trigger_reindex`` submits a real background reindex job and asserts the worker
+reaches the ``completed`` terminal state (Bug #1154 fixed -- worker now receives
+all parameters correctly and the proxy-mode guard prevents composite-repo cwd errors).
 
 AC3 -- Omni ``*`` wildcard fan-out within caps + cap mutation (MCP-only)
 -----------------------------------------------------------------------
@@ -158,10 +148,6 @@ _JOB_TIMEOUT_S = float(os.environ.get("E2E_GOLDEN_JOB_TIMEOUT", "300"))
 _JOB_POLL_S = 0.5
 _REINDEX_TIMEOUT_S = 90.0
 _TERMINAL_JOB_STATES = frozenset({"completed", "failed", "cancelled"})
-
-# AC2 / Bug #1154: the reindex worker currently fails with this exact signature.
-# Anchored so the test does not mask the bug but also does not fail once fixed.
-_REINDEX_1154_SIGNATURE = "_execute_indexing_job"
 
 # AC3 cap-breach error codes (server-side, from _utils.CapBreach.error_code).
 _WILDCARD_CAP_BREACH = "wildcard_cap_exceeded"
@@ -633,18 +619,13 @@ class TestAC2ProviderIndexManagement:
         seeded_indexed_client: tuple[TestClient, str],
         auth_headers: dict,
     ) -> None:
-        """``trigger_reindex`` asserts front-door submission; observes worker outcome.
+        """``trigger_reindex`` submits an FTS reindex job that reaches ``completed``.
 
-        The deterministic, front-door-observable AC2 effect is that
-        ``trigger_reindex`` ACCEPTS the request and returns a real ``job_id``
-        (asserted below).  Per Bug #1154 the reindex WORKER is currently broken
-        (the ``repo_alias`` kwarg collides with ``submit_job``'s reserved
-        parameter, so ``_execute_indexing_job`` never receives it), and the
-        downstream job outcome is NON-DETERMINISTIC: the job either 404s as
-        never-registered or hangs in a non-terminal state.  This test therefore
-        does NOT assert the worker outcome -- we observe it once for diagnostics
-        only.  Once #1154 is fixed, strengthen this test to assert the job
-        reaches ``completed``.
+        Asserts the full worker path end-to-end: the MCP tool returns a real
+        job_id, and that job reaches the ``completed`` terminal state within
+        ``_REINDEX_TIMEOUT_S`` seconds.  A ``failed`` outcome is also a
+        terminal state and causes an explicit assertion failure so the error
+        detail is visible in the test output.
         """
         require_voyage_key()
         client, alias = seeded_indexed_client
@@ -661,26 +642,12 @@ class TestAC2ProviderIndexManagement:
         job_id = submitted.get("job_id")
         assert job_id, f"AC2: trigger_reindex returned no job_id: {submitted}"
 
-        # The deterministic, front-door-observable AC2 effect is that
-        # trigger_reindex ACCEPTS the request and returns a real job handle
-        # (asserted above).  Per Bug #1154 the reindex WORKER is currently broken
-        # (the ``repo_alias`` kwarg collides with ``submit_job``'s reserved
-        # parameter, so ``_execute_indexing_job`` never receives it), and the
-        # downstream job outcome is NON-DETERMINISTIC: the job either 404s as
-        # never-registered or hangs in a non-terminal state.  We therefore do NOT
-        # assert on the worker outcome (asserting it would be flaky) -- we observe
-        # it once for diagnostics only.  Once #1154 is fixed, strengthen this test
-        # to assert the job reaches "completed".
-        probe = client.get(JOB_STATUS_TMPL.format(job_id=job_id), headers=auth_headers)
-        observed = (
-            probe.json().get("status")
-            if probe.status_code == 200
-            else f"http_{probe.status_code}"
+        status, body = _poll_job(
+            client, job_id, auth_headers, "AC2-reindex-fts", timeout=_REINDEX_TIMEOUT_S
         )
-        logger.info(
-            "AC2 reindex job %s worker outcome (Bug #1154, not asserted): %s",
-            job_id,
-            observed,
+        assert status == "completed", (
+            f"AC2: reindex job {job_id!r} reached terminal state {status!r} "
+            f"instead of 'completed'. Job body: {body}"
         )
 
 

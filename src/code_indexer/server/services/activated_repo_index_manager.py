@@ -457,6 +457,28 @@ class ActivatedRepoIndexManager:
 
         return results
 
+    def _is_proxy_mode_repo(self, repo_path: str) -> bool:
+        """Return True if repo_path is a composite proxy-mode repository.
+
+        Reads .code-indexer/config.json and checks for proxy_mode: true.
+        Returns False when the config file is absent (not a proxy repo) or
+        when any read/parse error occurs (fail-open: let the subprocess
+        produce its own diagnostic).
+        """
+        config_path = Path(repo_path) / ".code-indexer" / "config.json"
+        if not config_path.exists():
+            return False
+        try:
+            config_data = json.loads(config_path.read_text())
+            return bool(config_data.get("proxy_mode", False))
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to read proxy_mode from %s: %s; treating as non-proxy",
+                config_path,
+                exc,
+            )
+            return False
+
     def _execute_single_index_type(
         self, repo_path: str, index_type: str, clear: bool
     ) -> Dict[str, Any]:
@@ -471,6 +493,21 @@ class ActivatedRepoIndexManager:
         Returns:
             Result dictionary
         """
+        # Pre-flight: composite repos have proxy_mode: true in .code-indexer/config.json.
+        # Running 'cidx index' from a proxy-mode cwd is blocked by CommandModeDetector,
+        # producing the SVC-MIGRATE-003 "no configuration found" error.  Fail fast here
+        # with a diagnostic that names the actual cause instead of surfacing the cryptic
+        # subprocess exit message.
+        if self._is_proxy_mode_repo(repo_path):
+            return {
+                "success": False,
+                "error": (
+                    f"Cannot reindex composite (proxy-mode) repository at {repo_path!r}: "
+                    "composite repos are proxy containers, not directly indexable. "
+                    "Reindex the individual member repositories instead."
+                ),
+            }
+
         if index_type == "semantic":
             return self._execute_semantic_indexing(repo_path, clear)
         elif index_type == "fts":
