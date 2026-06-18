@@ -21,6 +21,7 @@ _phase3_log_audit_gate -- Autouse session fixture: fails the phase on any new
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import time
@@ -28,10 +29,13 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional, Tuple
 
 import pytest
+from _pytest.monkeypatch import MonkeyPatch
 from fastapi.testclient import TestClient
 
 from code_indexer.server.services.auto_watch_manager import auto_watch_manager
 from tests.e2e.helpers import _auth_headers, require_voyage_key
+
+logger = logging.getLogger(__name__)
 
 # Environment variable names that carry admin credentials.
 # e2e-automation.sh sets these for all four phases before invoking pytest.
@@ -153,6 +157,49 @@ def test_client_data_dir(tmp_path_factory) -> Iterator[Path]:
         os.environ.pop("CIDX_SERVER_DATA_DIR", None)
     else:
         os.environ["CIDX_SERVER_DATA_DIR"] = previous
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _disable_registration_lifecycle_hook(
+    test_client_data_dir: Path,
+) -> Iterator[None]:
+    """Disable the inline Claude-CLI lifecycle call during golden-repo registration.
+
+    GoldenRepoManager._register_lifecycle_after_registration runs a blocking
+    real ``claude -p`` subprocess on the background-worker thread immediately
+    after clone+init+index.  In Phase 3 each register job takes 3-4 minutes
+    instead of ~1 minute, saturating the 5-worker pool and causing the 300s
+    poll deadline to be exceeded when several repos are registered back-to-back.
+
+    This fixture replaces the method with a fast no-op for the entire e2e
+    session.  The lifecycle/description feature is covered by its own dedicated
+    tests and does not need to be exercised here.
+
+    Depends on ``test_client_data_dir`` (the root session fixture) so the patch
+    is installed BEFORE ``test_client`` creates the app and BEFORE any
+    golden-repo registration fires.
+    """
+    mp = MonkeyPatch()
+
+    def _noop_register_lifecycle(
+        self: object, alias: str, submitter_username: str
+    ) -> None:
+        logger.info(
+            "[e2e] registration lifecycle hook disabled for test session"
+            " (alias=%r, submitter=%r)",
+            alias,
+            submitter_username,
+        )
+
+    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+
+    mp.setattr(
+        GoldenRepoManager,
+        "_register_lifecycle_after_registration",
+        _noop_register_lifecycle,
+    )
+    yield
+    mp.undo()
 
 
 @pytest.fixture(scope="session")
