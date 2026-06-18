@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.137.0] - 2026-06-18
+
+### Fixed
+- **Activated-repo reindex failed "not initialized" and timed out (server in-process path).** `ActivatedRepoIndexManager` constructed with no `data_dir` hardcoded `~/.cidx-server/data`, ignoring `CIDX_SERVER_DATA_DIR`, so the reindex worker shelled `cidx index` against the wrong directory and reported "no configuration found - project needs initialization." The constructor now reads `CIDX_SERVER_DATA_DIR` (mirroring `startup/lifespan.py`); behavior is unchanged when the env var is unset.
+- **Reindex job was invisible to the job-status API.** The four reindex / index-status handlers (`mcp/handlers/admin`, `routers/indexing`) constructed `ActivatedRepoIndexManager()` without injecting the app's shared `BackgroundJobManager`, so the job ran in a throwaway manager and `GET /api/jobs/{id}` never saw it (poll timeout) — and each call leaked a worker-thread pool. The handlers now inject `app.state.background_job_manager` (and `activated_repo_manager`), failing loud if unavailable.
+- **Finished background jobs could appear stuck RUNNING forever under SQLite contention.** `_execute_job` evicted a terminal job from memory even when its terminal-status persist silently failed, leaving the polled status stale. Memory eviction is now gated on a successful persist; on failure the job is retained in memory with its terminal status (anti-silent-failure).
+
+### Tests
+- e2e Phase 3 hardening: per-request admin-token refresh in the snapshot-retention test (long-running token expiry), disabled the inline registration lifecycle Claude call (registration latency), refreshed the log-audit allowlist (dropped the stale #1154 entry, added benign operational-warning patterns), strengthened the AC2 reindex assertion to require `completed`, and widened the `fake_popen_progress` mock to accept the registration-index `timeout` kwarg.
+
 ## [10.136.0] - 2026-06-17
 
 ### Fixed
