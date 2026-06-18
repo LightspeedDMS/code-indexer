@@ -299,9 +299,12 @@ def run_with_popen_progress(
                 _emit(global_pct, phase=phase_name, detail=parsed.get("info", ""))
 
         # Drain stderr from mock stream if present.
+        # Use .readlines() rather than direct iteration: the test mocks configure
+        # stderr via mock.stderr.readlines.return_value, and real subprocess PIPE
+        # streams also support .readlines() — so this is correct for both paths.
         stderr_output = ""
         if process.stderr is not None:
-            stderr_output = "".join(process.stderr)
+            stderr_output = "".join(process.stderr.readlines())
         all_stderr.append(stderr_output)
 
         process.wait()
