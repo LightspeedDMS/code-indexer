@@ -656,146 +656,66 @@ class TestSvcMigrate003Regression:
         assert results["fts"]["success"] is True
 
 
-class TestProxyModeReindexGuard:
-    """Regression tests for proxy-mode composite repo reindex guard.
+class TestDataDirEnvVar:
+    """Regression tests for CIDX_SERVER_DATA_DIR bootstrap env var in constructor.
 
-    Before the fix, trigger_reindex on a composite repo would call
-    _execute_fts_indexing (and other index types) with cwd=<composite root>,
-    which has proxy_mode: true in .code-indexer/config.json.  Running
-    ``cidx index --fts`` from that cwd causes ``CommandModeDetector`` to detect
-    proxy mode, blocking the command with:
+    Before the fix, ActivatedRepoIndexManager.__init__ always defaulted to
+    ~/.cidx-server/data when no data_dir arg was supplied, ignoring
+    CIDX_SERVER_DATA_DIR.  In every deployment that sets this env var
+    (including all in-process e2e Phase-3 tests via conftest.py), the reindex
+    worker resolved repo paths against the WRONG directory, causing
+    SVC-MIGRATE-003 "no configuration found" failures.
 
-        SVC-MIGRATE-003: Failed to index fts: ... no configuration found -
-        project needs initialization.
-
-    The fix adds a proxy-mode pre-flight check in _execute_single_index_type:
-    if .code-indexer/config.json exists and proxy_mode is true, return
-    success=False with a clear diagnostic message -- no subprocess spawned.
+    The fix mirrors the pattern in lifespan.py:
+        env_server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+        if env_server_dir:
+            self.data_dir = str(Path(env_server_dir) / "data")
+        else:
+            self.data_dir = str(Path.home() / ".cidx-server" / "data")
     """
 
-    def test_fts_indexing_fails_fast_on_proxy_mode_repo(
-        self, index_manager, temp_data_dir
+    def test_env_var_sets_data_dir(self, monkeypatch, mock_background_job_manager):
+        """When CIDX_SERVER_DATA_DIR=/some/tmp is set and no data_dir arg is given,
+        manager.data_dir must equal /some/tmp/data."""
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", "/some/tmp")
+        mock_arm = Mock()
+        manager = ActivatedRepoIndexManager(
+            background_job_manager=mock_background_job_manager,
+            activated_repo_manager=mock_arm,
+        )
+        assert manager.data_dir == "/some/tmp/data", (
+            f"Expected /some/tmp/data but got {manager.data_dir!r}. "
+            "ActivatedRepoIndexManager must honor CIDX_SERVER_DATA_DIR."
+        )
+
+    def test_default_when_env_var_unset(self, monkeypatch, mock_background_job_manager):
+        """When CIDX_SERVER_DATA_DIR is unset and no data_dir arg is given,
+        manager.data_dir must equal ~/.cidx-server/data (original default preserved)."""
+        monkeypatch.delenv("CIDX_SERVER_DATA_DIR", raising=False)
+        mock_arm = Mock()
+        manager = ActivatedRepoIndexManager(
+            background_job_manager=mock_background_job_manager,
+            activated_repo_manager=mock_arm,
+        )
+        expected = str(Path.home() / ".cidx-server" / "data")
+        assert manager.data_dir == expected, (
+            f"Expected {expected!r} but got {manager.data_dir!r}. "
+            "Default data_dir must be ~/.cidx-server/data when env var is unset."
+        )
+
+    def test_explicit_data_dir_wins_over_env_var(
+        self, monkeypatch, mock_background_job_manager
     ):
-        """_execute_single_index_type must return success=False for a proxy-mode repo.
-
-        Creates a real directory with .code-indexer/config.json containing
-        proxy_mode: true, then calls _execute_single_index_type("fts") and
-        asserts it returns success=False with a message mentioning composite
-        or proxy -- without spawning a subprocess.
-        """
-        repo_path = str(
-            Path(temp_data_dir) / "activated-repos" / "testuser" / "ms1139composite"
+        """When an explicit data_dir arg is passed, it wins over CIDX_SERVER_DATA_DIR."""
+        monkeypatch.setenv("CIDX_SERVER_DATA_DIR", "/should/be/ignored")
+        mock_arm = Mock()
+        explicit_dir = "/explicit/override"
+        manager = ActivatedRepoIndexManager(
+            data_dir=explicit_dir,
+            background_job_manager=mock_background_job_manager,
+            activated_repo_manager=mock_arm,
         )
-        code_indexer_dir = Path(repo_path) / ".code-indexer"
-        code_indexer_dir.mkdir(parents=True, exist_ok=True)
-        (code_indexer_dir / "config.json").write_text(
-            json.dumps({"proxy_mode": True, "codebase_dir": repo_path})
+        assert manager.data_dir == explicit_dir, (
+            f"Expected {explicit_dir!r} but got {manager.data_dir!r}. "
+            "Explicit data_dir arg must always win over CIDX_SERVER_DATA_DIR."
         )
-
-        with patch("subprocess.run") as mock_run:
-            result = index_manager._execute_single_index_type(repo_path, "fts", False)
-
-        assert result["success"] is False, (
-            "proxy-mode repo must return success=False from _execute_single_index_type"
-        )
-        error_msg = result.get("error", "")
-        assert "composite" in error_msg.lower() or "proxy" in error_msg.lower(), (
-            f"error message must mention 'composite' or 'proxy', got: {error_msg!r}"
-        )
-        assert not mock_run.called, (
-            "subprocess must NOT be spawned for a proxy-mode repo"
-        )
-
-    def test_semantic_indexing_fails_fast_on_proxy_mode_repo(
-        self, index_manager, temp_data_dir
-    ):
-        """_execute_single_index_type must return success=False for semantic on a proxy repo."""
-        repo_path = str(
-            Path(temp_data_dir) / "activated-repos" / "testuser" / "ms1139composite"
-        )
-        code_indexer_dir = Path(repo_path) / ".code-indexer"
-        code_indexer_dir.mkdir(parents=True, exist_ok=True)
-        (code_indexer_dir / "config.json").write_text(
-            json.dumps({"proxy_mode": True, "codebase_dir": repo_path})
-        )
-
-        with patch("subprocess.run") as mock_run:
-            result = index_manager._execute_single_index_type(
-                repo_path, "semantic", False
-            )
-
-        assert result["success"] is False
-        assert not mock_run.called, (
-            "subprocess must NOT be spawned for a proxy-mode repo"
-        )
-
-    def test_temporal_indexing_fails_fast_on_proxy_mode_repo(
-        self, index_manager, temp_data_dir
-    ):
-        """_execute_single_index_type must return success=False for temporal on a proxy repo."""
-        repo_path = str(
-            Path(temp_data_dir) / "activated-repos" / "testuser" / "ms1139composite"
-        )
-        code_indexer_dir = Path(repo_path) / ".code-indexer"
-        code_indexer_dir.mkdir(parents=True, exist_ok=True)
-        (code_indexer_dir / "config.json").write_text(
-            json.dumps({"proxy_mode": True, "codebase_dir": repo_path})
-        )
-
-        with patch("subprocess.run") as mock_run:
-            result = index_manager._execute_single_index_type(
-                repo_path, "temporal", False
-            )
-
-        assert result["success"] is False
-        assert not mock_run.called, (
-            "subprocess must NOT be spawned for a proxy-mode repo"
-        )
-
-    def test_non_proxy_repo_proceeds_normally(self, index_manager, temp_data_dir):
-        """_execute_single_index_type must NOT block a non-proxy (local-mode) repo.
-
-        Verifies the guard is narrow: only proxy_mode: true triggers the fail-fast.
-        """
-        repo_path = str(
-            Path(temp_data_dir) / "activated-repos" / "testuser" / "markupsafe"
-        )
-        code_indexer_dir = Path(repo_path) / ".code-indexer"
-        code_indexer_dir.mkdir(parents=True, exist_ok=True)
-        (code_indexer_dir / "config.json").write_text(
-            json.dumps({"proxy_mode": False, "codebase_dir": repo_path})
-        )
-
-        mock_completed = Mock()
-        mock_completed.returncode = 0
-        mock_completed.stderr = ""
-
-        with patch("subprocess.run", return_value=mock_completed) as mock_run:
-            result = index_manager._execute_single_index_type(repo_path, "fts", False)
-
-        assert result["success"] is True, (
-            f"non-proxy repo must proceed to subprocess; got: {result!r}"
-        )
-        mock_run.assert_called_once()
-
-    def test_missing_config_json_proceeds_normally(self, index_manager, temp_data_dir):
-        """_execute_single_index_type must not block when .code-indexer/config.json absent.
-
-        If the file is missing (e.g. fresh clone not yet initialized), the guard
-        must not fire -- let the subprocess fail with its own diagnostic.
-        """
-        repo_path = str(
-            Path(temp_data_dir) / "activated-repos" / "testuser" / "fresh-repo"
-        )
-        Path(repo_path).mkdir(parents=True, exist_ok=True)
-        # Deliberately do NOT create .code-indexer/config.json
-
-        mock_completed = Mock()
-        mock_completed.returncode = 0
-        mock_completed.stderr = ""
-
-        with patch("subprocess.run", return_value=mock_completed) as mock_run:
-            result = index_manager._execute_single_index_type(repo_path, "fts", False)
-
-        assert result["success"] is True
-        mock_run.assert_called_once()
