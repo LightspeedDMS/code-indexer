@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.141.0] - 2026-06-18
+
+### Fixed
+- **Audit cache-metric cards rendered inconsistently:** "Audit Top-1 Match" showed a percentage while "Audit Avg Top-10 Overlap" showed a bare decimal (0.97), though both are [0,1] proportions. Top-10 Overlap now renders as a percentage too. Also added a zero-guard to Top-1 Match (it divided by `audit_total` with no check — a `ZeroDivisionError` when no audit samples exist, e.g. just after a node restart); it now shows `--` like the other cards, so both are consistent in format and no-data handling.
+
 ## [10.140.0] - 2026-06-18
 
 ### Fixed
