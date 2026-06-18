@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Callable, cast
 import httpx
@@ -66,6 +67,40 @@ class CircuitBreakerOpenError(APIClientError):
     """Exception raised when circuit breaker is open (blocking requests)."""
 
     pass
+
+
+@dataclass(frozen=True)
+class _LoginOutcome:
+    """Validated result of a successful POST /auth/login (or /auth/mfa/verify) transaction.
+
+    Returned only on success; failure paths raise _LoginTransportError.
+    The mfa_token shape never crosses this boundary.
+    """
+
+    access_token: str  # validated: non-empty str
+    token_type: str = "bearer"  # defaulted "bearer" if absent from server response
+    user_id: Optional[str] = None
+    mfa_used: bool = False
+
+
+class _LoginTransportError(Exception):
+    """Internal neutral carrier for non-success outcomes of _perform_login_request.
+
+    Callers (_authenticate, AuthAPIClient.login) map this to their own
+    public exception types and apply their own side effects.
+    Never carries secrets (no TOTP codes, no raw passwords).
+    """
+
+    def __init__(
+        self,
+        status_code: Optional[int] = None,
+        detail: Optional[str] = None,
+        cause: Optional[Exception] = None,
+    ) -> None:
+        super().__init__(detail or "login transport error")
+        self.status_code = status_code
+        self.detail = detail
+        self.cause = cause
 
 
 class CIDXRemoteAPIClient:
@@ -235,77 +270,41 @@ class CIDXRemoteAPIClient:
             NetworkError: If network operation fails
             CircuitBreakerOpenError: If circuit breaker is open
         """
-        # Check circuit breaker
+        # Check circuit breaker BEFORE any POST (AC6a)
         self._check_circuit_breaker()
 
-        auth_endpoint = f"{self.server_url}/auth/login"
-
-        auth_payload = {
-            "username": self.credentials["username"],
-            "password": self.credentials["password"],
-        }
-
         try:
-            response = self.session.post(auth_endpoint, json=auth_payload)
+            outcome = self._perform_login_request(
+                self.credentials["username"],
+                self.credentials["password"],
+            )
+            # Success path: record then persist then return (AC6b) — uniform for MFA and non-MFA
+            self._record_auth_success()
+            self._store_token_persistently(outcome.access_token)
+            return outcome.access_token
 
-            if response.status_code == 200:
-                auth_response = response.json()
-                token = auth_response.get("access_token")
-
-                # Detect MFA challenge: server returns mfa_required+mfa_token, no access_token
-                if (
-                    not token
-                    and auth_response.get("mfa_required")
-                    and auth_response.get("mfa_token")
-                ):
-                    mfa_token = auth_response["mfa_token"]
-                    token = self._complete_mfa_challenge(mfa_token)
-                    # _complete_mfa_challenge raises on failure; token is valid here
-                    self._record_auth_success()
-                    self._store_token_persistently(cast(str, token))
-                    return cast(str, token)
-
-                if not token or not isinstance(token, str):
-                    raise AuthenticationError("No valid access token in response")
-
-                # Record successful authentication
-                self._record_auth_success()
-
-                # Store token persistently if possible
-                self._store_token_persistently(cast(str, token))
-
-                return cast(str, token)
-
-            elif response.status_code == 401:
+        except _LoginTransportError as e:
+            if e.cause is not None:
+                # Network/timeout: classify via handler (may raise NetworkConnectionError,
+                # NetworkTimeoutError, etc.) — record failure first
                 self._record_auth_failure()
                 try:
-                    error_detail = response.json().get("detail", "Invalid credentials")
-                except json.JSONDecodeError:
-                    error_detail = "Invalid credentials"
-                raise AuthenticationError(f"Authentication failed: {error_detail}")
-
+                    self._network_error_handler.classify_network_error(e.cause)
+                except Exception as network_error:
+                    raise network_error
+            elif e.status_code == 401:
+                self._record_auth_failure()
+                raise AuthenticationError(
+                    f"Authentication failed: {e.detail or 'Invalid credentials'}"
+                )
+            elif e.status_code == 200:
+                # Malformed 200 (missing/non-str token) — does NOT record failure (AC9/behavior pin)
+                raise AuthenticationError("No valid access token in response")
             else:
                 self._record_auth_failure()
-                try:
-                    error_detail = response.json().get(
-                        "detail", f"HTTP {response.status_code}"
-                    )
-                except json.JSONDecodeError:
-                    error_detail = f"HTTP {response.status_code}"
-                raise AuthenticationError(f"Authentication error: {error_detail}")
-
-        except httpx.NetworkError as e:
-            self._record_auth_failure()
-            try:
-                self._network_error_handler.classify_network_error(e)
-            except Exception as network_error:
-                raise network_error
-        except httpx.TimeoutException as e:
-            self._record_auth_failure()
-            try:
-                self._network_error_handler.classify_network_error(e)
-            except Exception as network_error:
-                raise network_error
+                raise AuthenticationError(
+                    f"Authentication error: {e.detail or f'HTTP {e.status_code}'}"
+                )
         except Exception as e:
             if isinstance(
                 e, (AuthenticationError, NetworkError, CircuitBreakerOpenError)
@@ -377,6 +376,95 @@ class CIDXRemoteAPIClient:
         except Exception:
             detail = f"HTTP {verify_response.status_code}"
         raise AuthenticationError(f"MFA verification error: {detail}")
+
+    def _perform_login_request(self, username: str, password: str) -> "_LoginOutcome":
+        """Single side-effect-free login transaction primitive.
+
+        Owns: payload build, POST /auth/login, status dispatch (200/401/429/other),
+        MFA-challenge detection, and access-token validation.
+
+        On MFA challenge (not access_token + mfa_required + mfa_token), completes
+        the challenge via _complete_mfa_challenge and returns the resulting outcome.
+
+        Args:
+            username: Username for authentication (explicit, not read from self)
+            password: Password for authentication (explicit, not read from self)
+
+        Returns:
+            _LoginOutcome on success (access_token is validated non-empty str)
+
+        Raises:
+            _LoginTransportError: On ANY non-success outcome:
+                - status_code=401, detail=<server detail>: invalid credentials
+                - status_code=429, detail=<server detail>: rate limited
+                - status_code=<other>, detail=<server detail>: other HTTP error
+                - status_code=200, detail=None: malformed response (missing/non-str token)
+                - status_code=None, cause=<httpx exc>: network/timeout error
+
+        MUST be side-effect-free: NO _check_circuit_breaker, NO _record_auth_*,
+        NO _store_token_persistently, NO self.credentials mutation.
+        """
+        auth_payload = {
+            "username": username,
+            "password": password,
+        }
+
+        try:
+            response = self.session.post(
+                f"{self.server_url}/auth/login", json=auth_payload
+            )
+        except httpx.NetworkError as e:
+            raise _LoginTransportError(status_code=None, cause=e)
+        except httpx.TimeoutException as e:
+            raise _LoginTransportError(status_code=None, cause=e)
+
+        if response.status_code == 200:
+            auth_response = response.json()
+            token = auth_response.get("access_token")
+
+            # Detect MFA challenge: mfa_required + mfa_token, no access_token
+            if (
+                not token
+                and auth_response.get("mfa_required")
+                and auth_response.get("mfa_token")
+            ):
+                mfa_token = auth_response["mfa_token"]
+                # _complete_mfa_challenge raises AuthenticationError on failure.
+                # On the MFA failure sub-path, _complete_mfa_challenge also calls
+                # _record_auth_failure() (transitive breaker effect) — preserved
+                # from the originals, intentional. Do NOT "purify" this helper
+                # by removing that call or the transitive effect will be silently lost.
+                completed_token = self._complete_mfa_challenge(mfa_token)
+                return _LoginOutcome(
+                    access_token=completed_token,
+                    token_type=auth_response.get("token_type", "bearer"),
+                    user_id=auth_response.get("user_id"),
+                    mfa_used=True,
+                )
+
+            if not token or not isinstance(token, str):
+                raise _LoginTransportError(status_code=200, detail=None)
+
+            return _LoginOutcome(
+                access_token=token,
+                token_type=auth_response.get("token_type", "bearer"),
+                user_id=auth_response.get("user_id"),
+                mfa_used=False,
+            )
+
+        elif response.status_code == 401:
+            try:
+                detail: Optional[str] = response.json().get("detail")
+            except json.JSONDecodeError:
+                detail = None
+            raise _LoginTransportError(status_code=401, detail=detail)
+
+        else:
+            try:
+                detail = response.json().get("detail")
+            except json.JSONDecodeError:
+                detail = None
+            raise _LoginTransportError(status_code=response.status_code, detail=detail)
 
     def _store_token_persistently(self, token: str) -> None:
         """Store JWT token persistently if manager is available.

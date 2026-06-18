@@ -11,7 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional, TypedDict, List
 
-from .base_client import CIDXRemoteAPIClient, APIClientError, AuthenticationError
+from .base_client import (
+    CIDXRemoteAPIClient,
+    APIClientError,
+    AuthenticationError,
+    _LoginTransportError,
+)
 from ..remote.credential_manager import (
     ProjectCredentialManager,
     store_encrypted_credentials,
@@ -112,76 +117,45 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            # Make login request to server
-            auth_payload = {
+            outcome = self._perform_login_request(username, password)
+
+            # Store credentials securely if project root provided
+            if self.project_root:
+                self._store_credentials_securely(username, password)
+
+            # Update internal credentials for future API calls
+            self.credentials = {
                 "username": username,
                 "password": password,
             }
 
-            # Use session directly for login (no auth header needed)
-            auth_endpoint = f"{self.server_url}/auth/login"
-            response = self.session.post(auth_endpoint, json=auth_payload)
+            return AuthResponse(
+                access_token=outcome.access_token,
+                token_type=outcome.token_type,
+                user_id=outcome.user_id,
+            )
 
-            if response.status_code == 200:
-                auth_response = response.json()
-                access_token = auth_response.get("access_token")
-
-                # Detect MFA challenge: server returns mfa_required+mfa_token, no access_token
-                if (
-                    not access_token
-                    and auth_response.get("mfa_required")
-                    and auth_response.get("mfa_token")
-                ):
-                    mfa_token = auth_response["mfa_token"]
-                    # _complete_mfa_challenge raises AuthenticationError on any failure
-                    access_token = self._complete_mfa_challenge(mfa_token)
-
-                # Validate response format (covers both normal and post-MFA paths)
-                if not access_token or not isinstance(access_token, str):
-                    raise AuthenticationError("No access token in response")
-
-                # Store credentials securely if project root provided
-                if self.project_root:
-                    self._store_credentials_securely(username, password)
-
-                # Update internal credentials for future API calls
-                self.credentials = {
-                    "username": username,
-                    "password": password,
-                }
-
-                return AuthResponse(
-                    access_token=access_token,
-                    token_type=auth_response.get("token_type", "bearer"),
-                    user_id=auth_response.get("user_id"),
+        except _LoginTransportError as e:
+            if e.cause is not None:
+                # D3: network/timeout swallowed into AuthenticationError (zero-behavior-change)
+                raise AuthenticationError(f"Unexpected error during login: {e.cause}")
+            elif e.status_code == 401:
+                raise AuthenticationError(
+                    f"Authentication failed: {e.detail or 'Invalid username or password'}"
                 )
-
-            elif response.status_code == 401:
-                try:
-                    error_detail = response.json().get(
-                        "detail", "Invalid username or password"
-                    )
-                except json.JSONDecodeError:
-                    error_detail = "Invalid username or password"
-                raise AuthenticationError(f"Authentication failed: {error_detail}")
-
-            elif response.status_code == 429:
+            elif e.status_code == 429:
                 raise APIClientError(
                     "Too many login attempts. Please wait before trying again.",
-                    response.status_code,
+                    429,
                 )
-
+            elif e.status_code == 200:
+                # Malformed 200 (missing/non-str token)
+                raise AuthenticationError("No access token in response")
             else:
-                try:
-                    error_detail = response.json().get(
-                        "detail", f"HTTP {response.status_code}"
-                    )
-                except json.JSONDecodeError:
-                    error_detail = f"HTTP {response.status_code}"
                 raise APIClientError(
-                    f"Login failed: {error_detail}", response.status_code
+                    f"Login failed: {e.detail or f'HTTP {e.status_code}'}",
+                    e.status_code,
                 )
-
         except (AuthenticationError, APIClientError):
             raise
         except Exception as e:
