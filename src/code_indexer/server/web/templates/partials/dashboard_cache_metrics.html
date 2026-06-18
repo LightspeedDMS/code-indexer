@@ -77,11 +77,11 @@
     <article class="stat-card" style="grid-column: span 2;">
         <header><h3>Shadow Cosine Distribution <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
         {% set total = histogram_bars | sum(attribute='count') %}
-        <div class="cosine-chart" style="max-height: 28rem; overflow-y: auto;">
+        <div class="cosine-chart" style="max-height: 14rem; overflow-y: auto;">
         {% if total == 0 %}
             <div class="cosine-chart-empty">No shadow cosine samples recorded yet</div>
         {% else %}
-            {% for b in histogram_bars %}
+            {% for b in histogram_bars | reverse %}
             <div class="cosine-row">
                 <span class="cosine-label">[{{ "%.2f"|format(b.lo) }}, {{ "%.2f"|format(b.hi) }})</span>
                 <div class="cosine-track"><div class="cosine-fill" style="width: {{ b.bar_pct }}%"></div></div>
@@ -92,7 +92,7 @@
         </div>
         <footer>
             <small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span>
-            Log&#x2081;&#x2080;-scaled bar chart (40 buckets, width 0.05). Bar length = log&#x2081;&#x2080;(count+1) normalized to max bucket.
+            Log&#x2081;&#x2080;-scaled bar chart (40 buckets, width 0.05, highest similarity first). Bar length = log&#x2081;&#x2080;(count+1) normalized to max bucket.
             &mdash;
             Min:
             {% if cache_metrics.shadow_cosine_min is not none %}{{ "%.4f"|format(cache_metrics.shadow_cosine_min) }}{% else %}--{% endif %}
