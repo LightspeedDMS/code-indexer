@@ -887,3 +887,106 @@ class TestCSSBarChartRender:
             "Found 'white-space: pre' in rendered HTML — this causes horizontal "
             "overflow. The chart must use a block/flex layout instead."
         )
+
+
+# ---------------------------------------------------------------------------
+# Visibility fix: high-cosine buckets must render at the top (reversed order)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMetricsOnlyHighBucket(_FakeMetrics):
+    """FakeMetrics where ONLY the last bucket [0.95, 1.00) has a non-zero count.
+
+    Mirrors the real-world scenario: shadow-cosine audits on cached embeddings
+    of the SAME query always cluster at ~1.0, so index 39 (the highest bucket)
+    is the only populated one.  All 39 lower buckets are zero.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        histogram = []
+        for i in range(40):
+            lo = round(-1.0 + i * 0.05, 10)
+            hi = round(-1.0 + (i + 1) * 0.05, 10)
+            count = 30 if i == 39 else 0  # only [0.95, 1.00) has samples
+            histogram.append((lo, hi, count))
+        self._snap["shadow_cosine_histogram"] = histogram
+        self._snap["shadow_cosine_min"] = 0.97
+        self._snap["shadow_cosine_p05"] = 0.98
+        self._snap["shadow_cosine_p50"] = 0.99
+
+
+class TestCosineChartReverseOrder:
+    """Visibility fix: populated high-cosine buckets must appear FIRST (top of chart).
+
+    Before the fix the chart rendered buckets in ascending order (index 0 first,
+    index 39 last).  With max-height: 28rem only ~22 of 40 rows were visible, so
+    the single populated bucket at index 39 was scrolled off the bottom.
+
+    After the fix ({% for b in histogram_bars | reverse %}) index 39 renders
+    FIRST, making the data immediately visible without scrolling.
+    """
+
+    def test_high_cosine_bucket_renders_before_low_cosine_bucket(
+        self, client, admin_session_cookie
+    ):
+        """[0.95, 1.00) row must appear earlier in the HTML than [-1.00, -0.95).
+
+        With only the [0.95, 1.00) bucket populated the reversed chart places it
+        at the top; the always-empty [-1.00, -0.95) row scrolls below.
+        """
+        html = _fetch_cache_metrics_html(client, _FakeMetricsOnlyHighBucket(), 5)
+
+        # Both bucket labels must be present (all 40 rows still render).
+        assert "[0.95, 1.00)" in html, "Expected '[0.95, 1.00)' label in rendered HTML"
+        assert "[-1.00, -0.95)" in html, (
+            "Expected '[-1.00, -0.95)' label in rendered HTML"
+        )
+
+        # After reversal the [0.95, 1.00) row must appear BEFORE [-1.00, -0.95).
+        idx_high = html.index("[0.95, 1.00)")
+        idx_low = html.index("[-1.00, -0.95)")
+        assert idx_high < idx_low, (
+            f"Expected [0.95, 1.00) to appear before [-1.00, -0.95) in the HTML "
+            f"(populated data at top), but got offsets: high={idx_high}, low={idx_low}. "
+            "The histogram_bars loop must use '| reverse' so data-rich buckets "
+            "are visible without scrolling."
+        )
+
+    def test_populated_bucket_count_visible_in_first_rows(
+        self, client, admin_session_cookie
+    ):
+        """The count '30' from the [0.95, 1.00) bucket must appear in the HTML
+        near the top (before any empty bucket rows), confirming data is not
+        scrolled off.
+        """
+        html = _fetch_cache_metrics_html(client, _FakeMetricsOnlyHighBucket(), 5)
+
+        # The populated [0.95, 1.00) row should appear before the first empty
+        # zero-count row in the HTML (empty rows have count 0).
+        idx_count_30 = html.find(">30<")
+        # The label for the low bucket (always empty) marks where empty rows start.
+        idx_low_label = html.find("[-1.00, -0.95)")
+        assert idx_count_30 != -1, "Expected count '30' in rendered HTML"
+        assert idx_count_30 < idx_low_label, (
+            f"Count '30' (at offset {idx_count_30}) must appear before "
+            f"the [-1.00, -0.95) row (at offset {idx_low_label}), confirming "
+            "that populated data renders at the top of the chart."
+        )
+
+    def test_max_height_is_compact(self, client, admin_session_cookie):
+        """The cosine-chart container must use max-height: 14rem (not 28rem).
+
+        A compact container ensures the visible viewport starts at the top
+        (where data is after reversal) without wasting vertical space on the
+        always-empty tail.
+        """
+        html = _fetch_cache_metrics_html(client, _FakeMetricsOnlyHighBucket(), 5)
+        assert "max-height: 14rem" in html, (
+            "Expected 'max-height: 14rem' on the cosine-chart container. "
+            "The container was previously 28rem which hid populated buckets "
+            "when they were at the bottom."
+        )
+        assert "max-height: 28rem" not in html, (
+            "Found old 'max-height: 28rem' still in the HTML — replace with 14rem."
+        )

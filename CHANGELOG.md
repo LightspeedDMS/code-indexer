@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.140.0] - 2026-06-18
+
+### Fixed
+- **Shadow Cosine Distribution chart appeared empty even when samples existed.** Cosine-audit similarities (cached vs freshly-computed embedding of the same query) cluster at ~1.0, so all samples land in the last bucket `[0.95, 1.00)` of the 40 ascending buckets — which was scrolled off the bottom of the `max-height: 28rem` container, so the chart looked all-zero. Now renders highest-similarity buckets first (reversed) with a compact `max-height: 14rem`, so the populated buckets are visible without scrolling. Full 40-bucket distribution retained (low-cosine outliers still show on scroll).
+
 ## [10.139.0] - 2026-06-18
 
 ### Fixed
