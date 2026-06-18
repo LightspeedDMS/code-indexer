@@ -1219,7 +1219,8 @@ class BackgroundJobManager:
                         job.status = JobStatus.CANCELLED
                         job.completed_at = datetime.now(timezone.utc)
                 # Story #267 Component 3-4: Persist outside lock
-                self._persist_jobs(job_id=job_id)
+                # Bug fix: capture persist success so eviction is gated on durable write.
+                terminal_persisted = self._persist_jobs(job_id=job_id)
 
                 # Story #311: Notify tracker of completion (AC3) or cancellation (AC10)
                 if self._job_tracker is not None:
@@ -1251,14 +1252,25 @@ class BackgroundJobManager:
                 # Story #267 Component 8: Remove completed/cancelled/failed jobs from memory
                 # Only when SQLite backend is available (data is preserved in DB)
                 # Bug #679: COMPLETED_PARTIAL is also a terminal status — must be evicted
+                # Bug fix: gate eviction on terminal persist having succeeded. If the
+                # persist failed, keep the job in memory with its terminal status so
+                # get_job_status() can still serve the correct state from memory instead
+                # of falling back to SQLite where the row still shows RUNNING.
                 if self._sqlite_backend and job.status in (
                     JobStatus.COMPLETED,
                     JobStatus.COMPLETED_PARTIAL,
                     JobStatus.CANCELLED,
                     JobStatus.FAILED,
                 ):
-                    with self._lock:
-                        self.jobs.pop(job_id, None)
+                    if terminal_persisted:
+                        with self._lock:
+                            self.jobs.pop(job_id, None)
+                    else:
+                        logging.warning(
+                            f"Terminal persist failed for job {job_id} "
+                            f"(status={job.status.value}); retaining in memory "
+                            "to prevent stuck-RUNNING zombie state."
+                        )
 
                 if job.status == JobStatus.FAILED:
                     logging.warning(
@@ -1277,13 +1289,20 @@ class BackgroundJobManager:
                     job.error = str(e)
                     job.progress = 0
                 # Story #267 Component 3-4: Persist outside lock
-                self._persist_jobs(job_id=job_id)
+                # Bug fix: gate eviction on persist success.
+                interrupted_persisted = self._persist_jobs(job_id=job_id)
                 # Tracker notification skipped for InterruptedError (always
                 # cancellation) — fail_job would overwrite status to "failed".
                 # Story #267 Component 8: Remove from memory after persist (SQLite only)
                 if self._sqlite_backend:
-                    with self._lock:
-                        self.jobs.pop(job_id, None)
+                    if interrupted_persisted:
+                        with self._lock:
+                            self.jobs.pop(job_id, None)
+                    else:
+                        logging.warning(
+                            f"Terminal persist failed for cancelled job {job_id}; "
+                            "retaining in memory to prevent stuck-RUNNING zombie state."
+                        )
             except Exception as e:
                 error_msg = str(e)
 
@@ -1305,7 +1324,8 @@ class BackgroundJobManager:
                         job.progress = 0
                         logging.error(f"Background job {job_id} failed: {error_msg}")
                 # Story #267 Component 3-4: Persist outside lock
-                self._persist_jobs(job_id=job_id)
+                # Bug fix: gate eviction on persist success.
+                exception_persisted = self._persist_jobs(job_id=job_id)
                 # Story #311 AC3: Notify tracker of failure (skip for
                 # cancelled jobs — fail_job overwrites status to "failed").
                 if self._job_tracker is not None and not job.cancelled:
@@ -1321,8 +1341,15 @@ class BackgroundJobManager:
                         )
                 # Story #267 Component 8: Remove from memory after persist (SQLite only)
                 if self._sqlite_backend:
-                    with self._lock:
-                        self.jobs.pop(job_id, None)
+                    if exception_persisted:
+                        with self._lock:
+                            self.jobs.pop(job_id, None)
+                    else:
+                        logging.warning(
+                            f"Terminal persist failed for job {job_id} "
+                            f"(status={job.status.value}); retaining in memory "
+                            "to prevent stuck-RUNNING zombie state."
+                        )
 
             finally:
                 # Bug #1063 Part 3: Semaphore removed; bounded pool manages
@@ -1711,14 +1738,17 @@ class BackgroundJobManager:
             "actor_username": job.actor_username,
         }
 
-    def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> None:
+    def _persist_job_to_sqlite(self, job_id: str, snapshot: Dict[str, Any]) -> bool:
         """Persist a single job snapshot to SQLite without holding the memory lock.
 
         Story #267 Component 4: This method does SQLite I/O outside the lock.
         If the write fails, the in-memory state is still correct.
+
+        Returns:
+            True if the persist succeeded, False if it was swallowed (logged as error).
         """
         if not self._sqlite_backend:
-            return
+            return True  # No backend — nothing to persist, treat as success
         try:
             existing = self._sqlite_backend.get_job(job_id)
             if existing:
@@ -1764,10 +1794,12 @@ class BackgroundJobManager:
                     # Story #1032 AC12: persist actor_username audit trail
                     actor_username=snapshot.get("actor_username"),
                 )
+            return True
         except Exception as e:
             logging.error(f"Failed to persist job {job_id} to SQLite: {e}")
+            return False
 
-    def _persist_jobs(self, job_id: Optional[str] = None) -> None:
+    def _persist_jobs(self, job_id: Optional[str] = None) -> bool:
         """
         Persist jobs to storage (SQLite or JSON file).
 
@@ -1777,20 +1809,27 @@ class BackgroundJobManager:
         Note: For SQLite single-job persist, this method can be called outside the lock
         since it uses _persist_job_to_sqlite which does its own error handling.
         For full persist and JSON, this should be called within a lock.
+
+        Returns:
+            True if the persist succeeded (or no persistence backend is configured),
+            False if the single-job SQLite persist failed (caller should retain the
+            job in memory so get_job_status can still serve the terminal state).
+            Bulk/JSON paths always return True — they are not on the terminal-eviction
+            hot path.
         """
         # Use SQLite backend if enabled
         if self._sqlite_backend:
             if job_id is not None:
                 # Story #267 Component 1: Single-job persist (2 ops instead of 20K)
-                self._persist_single_job_sqlite(job_id)
+                return self._persist_single_job_sqlite(job_id)
             else:
                 # Full persist (shutdown only)
                 self._persist_jobs_sqlite()
-            return
+                return True
 
         # Fall back to JSON file storage
         if not self.storage_path:
-            return
+            return True
 
         try:
             storage_file = Path(self.storage_path)
@@ -1820,22 +1859,27 @@ class BackgroundJobManager:
             # Jobs should still work in memory even if persistence fails
             logging.error(f"Failed to persist jobs: {e}")
 
-    def _persist_single_job_sqlite(self, job_id: str) -> None:
+        return True
+
+    def _persist_single_job_sqlite(self, job_id: str) -> bool:
         """Persist a single job to SQLite.
 
         Story #267 Component 1: Instead of iterating all jobs (20K ops),
         persist only the one job that changed (2 ops: get + save/update).
+
+        Returns:
+            True if the persist succeeded (or there is no backend), False on failure.
         """
         if not self._sqlite_backend:
-            return
+            return True  # No backend — treat as success
 
         with self._lock:
             job = self.jobs.get(job_id)
             if job is None:
-                return  # Job was removed between lock release and persist
+                return True  # Job was removed between lock release and persist
             snapshot = self._snapshot_job(job)
 
-        self._persist_job_to_sqlite(job_id, snapshot)
+        return self._persist_job_to_sqlite(job_id, snapshot)
 
     def _persist_jobs_sqlite(self) -> None:
         """
