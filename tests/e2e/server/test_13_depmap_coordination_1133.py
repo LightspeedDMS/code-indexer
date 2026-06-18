@@ -114,6 +114,10 @@ _TERMINAL_JOB_STATES = frozenset({"completed", "failed", "cancelled"})
 # Bounded-loop budgets (monotonic deadline — Messi Rule #14)
 _JOB_DRAIN_TIMEOUT_S = 30.0
 _JOB_DRAIN_POLL_S = 0.25
+# Generous budget for cancel-then-wait: worker checks _cancel_event at domain
+# boundaries; after signalling cancel the lock + sentinel should free within
+# seconds even under full-phase load.  120 s is a safe ceiling (Messi Rule #14).
+_CANCEL_WAIT_TIMEOUT_S = 120.0
 
 # CSRF token is rendered as a hidden form input on the login + config pages.
 _CSRF_INPUT_RE = re.compile(r'name="csrf_token"\s+value="([^"]+)"')
@@ -253,6 +257,37 @@ def _wait_for_service_available(
     Bounded by timeout_s (Messi Rule #14).
     """
     dep_map_service = _dep_map_service(client)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if dep_map_service.is_available():
+            return True
+        time.sleep(_JOB_DRAIN_POLL_S)
+    return bool(dep_map_service.is_available())
+
+
+def _cancel_and_wait_for_available(
+    client: TestClient, *, timeout_s: float = _CANCEL_WAIT_TIMEOUT_S
+) -> bool:
+    """Signal cancellation to any running analysis, then wait for is_available().
+
+    Calls cancel_running_analysis() directly on the service object (no HTTP
+    elevation needed — we have direct access to app.state) which sets the
+    _cancel_event threading.Event.  The running worker checks _cancel_event at
+    every domain-loop boundary and stops promptly.  In the test harness (no
+    real repos) the worker may hit early_return before any domain loop, but
+    even then cancel is a no-op and is_available() returns True immediately.
+
+    This is load-independent: instead of waiting for the worker to finish on
+    its own (which may exceed any fixed budget under full-phase load), we
+    actively signal it to stop, causing the lock + sentinel to release at the
+    next cancel-check boundary — typically within milliseconds.
+
+    Returns True when the service becomes available within timeout_s; False
+    when the deadline expires despite cancellation (a genuine stuck state).
+    Bounded by timeout_s (Messi Rule #14).
+    """
+    dep_map_service = _dep_map_service(client)
+    dep_map_service.cancel_running_analysis()
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if dep_map_service.is_available():
@@ -467,9 +502,22 @@ def test_ac1_release_then_trigger_is_accepted(
         # file while the worker still holds the lock, leaving is_available()
         # returning False and causing [409,409].
         #
-        # Waiting for is_available() covers both resources with one predicate
-        # (Messi Rule #14: bounded wait).
-        _wait_for_service_available(depmap_enabled_client)
+        # Strategy (load-independent):
+        #   Phase 1 — passive bounded wait via is_available() (fast path: normal case).
+        #   Phase 2 — if still unavailable, ACTIVELY CANCEL the running analysis so
+        #             the worker stops at its next _cancel_event check and releases
+        #             BOTH the threading.Lock and the sentinel promptly, regardless
+        #             of how long the worker would have run under load.  Then wait
+        #             again with a generous budget.
+        #
+        # This guarantees the next test (test_ac1_concurrent_triggers_single_winner)
+        # never inherits a running analysis — cancel, not wait, makes it load-
+        # independent (Messi Rule #14: bounded wait).
+        service_available = _wait_for_service_available(depmap_enabled_client)
+        if not service_available:
+            # Active cancel: signal _cancel_event so the worker stops at next
+            # domain-loop boundary and releases lock + sentinel.
+            _cancel_and_wait_for_available(depmap_enabled_client)
 
 
 async def test_ac1_concurrent_triggers_single_winner(
@@ -516,33 +564,32 @@ async def test_ac1_concurrent_triggers_single_winner(
     #             while the threading.Lock is held.
     #
     # (Messi Rule #14: all loops must have provable termination bounds.)
-    precheck_sentinel = _new_sentinel(depmap_enabled_client)
     service_available = _wait_for_service_available(depmap_enabled_client)
 
     if not service_available:
-        # Service still unavailable after the full wait.  The only residual holder
-        # at this point is a worker from a PRIOR test — not the concurrent pair
-        # we are about to fire.  Force-clear the sentinel file to unblock a
-        # stale/leaked lock file, then give the threading.Lock a short window to
-        # release (it should be nearly free since the lock releases BEFORE the
-        # sentinel in run_full_analysis.finally).
-        sentinel_path = (
-            precheck_sentinel._sentinel_dir / f"_active_{SENTINEL_OP_ANALYSIS}.lock"
-        )
-        try:
-            os.unlink(str(sentinel_path))
-        except FileNotFoundError:
-            pass  # Already cleared by a concurrent release — that's fine.
-
-        # SHORT bounded wait: after the sentinel file is gone, the threading.Lock
-        # should release imminently (lock.release() ran just before sentinel.release()
-        # so the lock is either already free or will be within milliseconds).
-        # We wait up to _JOB_DRAIN_TIMEOUT_S for is_available() rather than just
-        # checking the sentinel to avoid the race.
-        service_available = _wait_for_service_available(depmap_enabled_client)
+        # Service still unavailable after the full passive wait.  The prior test's
+        # teardown already attempted cancel+wait, but under extreme load the worker
+        # may still be running.  Attempt a cancel here as a final backstop:
+        #
+        #   Why cancel beats force-clear-sentinel (the prior approach that failed):
+        #   Force-clearing the sentinel FILE while the prior worker's threading.Lock
+        #   is still held leaves is_available() returning False because is_available()
+        #   checks BOTH the file AND the lock.  The [409,409] failure mode was:
+        #     1. Force-clear removed sentinel file.
+        #     2. Worker's finally block had not yet called self._lock.release().
+        #     3. is_available() returned False (lock still held).
+        #     4. Both concurrent requests got 409 from the pre-flight check.
+        #
+        #   Cancel (setting _cancel_event) causes the worker to exit its domain loop
+        #   at the next check, run its finally block (which releases the lock THEN
+        #   the sentinel), and leave is_available() returning True.  This is
+        #   load-independent: the worker terminates on its own schedule regardless
+        #   of how busy the system is — cancel + bounded wait replaces the
+        #   force-clear + hope pattern (Messi Rule #14).
+        service_available = _cancel_and_wait_for_available(depmap_enabled_client)
 
     assert service_available, (
-        "dep_map_service.is_available() still False after bounded wait and force-clear — "
+        "dep_map_service.is_available() still False after bounded wait and cancel — "
         "analysis sentinel or threading.Lock is stuck; cannot establish zero-contention "
         "baseline for concurrent-triggers test"
     )
