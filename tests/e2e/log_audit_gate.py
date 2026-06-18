@@ -302,6 +302,14 @@ LOG_AUDIT_ALLOWLIST: List[str] = [
     # Anchored on the exact static message: a real deactivation FAILURE surfaces with
     # a different (error) message and is NOT suppressed.
     "Repository deactivation initiated",
+    # Phase 3 registration diagnostic probe (golden_repo_manager._execute_post_clone_workflow):
+    # After cidx init and before cidx index --fts, two WARNING-level probes check whether
+    # .code-indexer/config.json is present.  These probes were raised from DEBUG to WARNING
+    # so they appear in the Phase-3 log store for post-mortem diagnosis of the config-init
+    # race (Bug: non-atomic _write_embedding_providers_to_config left config.json truncated).
+    # The [config-init-diag] prefix uniquely anchors these entries; genuine config failures
+    # surface with different error codes (e.g. [SVC-MIGRATE-003]).
+    "[config-init-diag]",
 ]
 
 
