@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.139.0] - 2026-06-18
+
+### Fixed
+- **"Recent Activity" dashboard table rendered "N/A" under the Status header with the status badge floating unlabeled to its right.** The HTMX refresh partial (`dashboard_recent_jobs.html`) renders 5 columns (Repository, Job Type, Completed, User, Status) plus a conditional Providers column, but `dashboard_stats.html`'s `<thead>` (and its inline initial body) had only 4, so after a refresh the rows misaligned under the header. Fixed the `<thead>` to match (added "User" + a conditional "Providers" header) and replaced the inline initial body with `{% include "partials/dashboard_recent_jobs.html" %}` so initial render and HTMX refresh share one row source and can't drift. Regression guard: `test_dashboard_stats_thead_alignment.py`.
+
 ## [10.138.0] - 2026-06-18
 
 ### Fixed
