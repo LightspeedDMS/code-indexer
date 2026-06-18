@@ -190,8 +190,104 @@ cleanup_all_servers() {
     fi
 }
 
+# Number of newest pytest temp dirs to keep when pruning (older ones are removed).
+PYTEST_DIRS_TO_KEEP=3
+
+# ---------------------------------------------------------------------------
+# Helper: reap stale test daemons whose cmdline is rooted under /tmp/.
+#
+# SAFETY SCOPE: only processes whose command line contains "code_indexer.daemon"
+# AND references a path under /tmp/ are killed.  A developer's real daemon
+# (rooted in ~/... or any non-/tmp path) is NEVER touched.  This is an explicit
+# design invariant — do NOT change this filter to a blanket pkill.
+#
+# Sets caller-scoped variable _REAP_COUNT to the number of processes reaped.
+# Idempotent: silent no-op when no matching processes exist.
+# Never aborts the suite (every kill path uses || true).
+# ---------------------------------------------------------------------------
+_reap_tmp_test_daemons() {
+    _REAP_COUNT=0
+    local pids=()
+    local line pid rest
+
+    # pgrep -af prints "PID full-cmdline" — may produce no output if none running.
+    # Use process substitution to avoid a subshell that would discard the array.
+    while IFS= read -r line; do
+        pid="${line%% *}"
+        rest="${line#* }"
+        # Only reap if the cmdline references a path under /tmp/
+        if [[ "$rest" == */tmp/* ]]; then
+            pids+=("$pid")
+        fi
+    done < <(pgrep -af 'code_indexer\.daemon' 2>/dev/null || true)
+
+    _REAP_COUNT="${#pids[@]}"
+    if [[ "$_REAP_COUNT" -eq 0 ]]; then
+        return 0
+    fi
+
+    _yellow "  Reaping $_REAP_COUNT stale test daemon(s) with /tmp/ paths..."
+    # SIGTERM first
+    for pid in "${pids[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    # Brief grace period, then SIGKILL any survivors
+    sleep 1
+    for pid in "${pids[@]}"; do
+        # kill -0 checks if process still exists; if so, escalate
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Helper: idempotent environment reset — call at STARTUP and via EXIT trap.
+#
+# 1. Reaps stale code_indexer.daemon processes whose paths are under /tmp/.
+# 2. Prunes old pytest temp dirs to reclaim space (keeps newest PYTEST_DIRS_TO_KEEP).
+#
+# Safe to call repeatedly; never aborts the suite on failure.
+# ---------------------------------------------------------------------------
+reset_test_environment() {
+    # --- Step 1: reap stale test daemons (count returned in _REAP_COUNT) ---
+    _reap_tmp_test_daemons
+    local reaped="$_REAP_COUNT"
+
+    # --- Step 2: prune old pytest temp dirs (keep newest PYTEST_DIRS_TO_KEEP) ---
+    local pruned=0
+    local pytest_base="/tmp/pytest-of-${USER:-jsbattig}"
+    if [[ -d "$pytest_base" ]]; then
+        # List pytest-NN dirs sorted newest-first, skip the N newest, remove the rest
+        local dirs_to_remove=()
+        local idx=0
+        while IFS= read -r dir; do
+            idx=$((idx + 1))
+            if [[ $idx -gt $PYTEST_DIRS_TO_KEEP ]]; then
+                dirs_to_remove+=("$dir")
+            fi
+        done < <(ls -dt "${pytest_base}"/pytest-* 2>/dev/null || true)
+
+        pruned="${#dirs_to_remove[@]}"
+        for dir in "${dirs_to_remove[@]}"; do
+            # Extra safety: only remove paths that are genuinely under pytest_base
+            if [[ "$dir" == "${pytest_base}/"* ]]; then
+                rm -rf "$dir" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    _bold "Resetting test environment (reaped $reaped stale daemon(s), pruned $pruned old temp dir(s))"
+}
+
 # Single composite EXIT trap — bash EXIT traps are global, not per-phase.
-trap cleanup_all_servers EXIT
+# Calls reset_test_environment so THIS run's daemons are reaped on exit,
+# preventing accumulation for the next run.
+cleanup_all_servers_and_reset() {
+    cleanup_all_servers
+    reset_test_environment
+}
+trap cleanup_all_servers_and_reset EXIT
 
 # ---------------------------------------------------------------------------
 # Helper: clone seed repo into cache (idempotent — skips if .git exists)
@@ -650,6 +746,11 @@ echo ""
 # Ensure base directories exist
 mkdir -p "$E2E_SEED_CACHE_DIR"
 mkdir -p "$E2E_WORK_DIR"
+
+# Reset environment: reap stale test daemons from prior runs + prune old temp dirs.
+# This runs BEFORE any phase so a polluted environment left by a crashed/killed
+# prior run is cleaned to a known-good state.  Also runs on EXIT (see trap above).
+reset_test_environment
 
 # Wipe server data dir (clean slate each run)
 _yellow "Wiping server data dir: $E2E_SERVER_DATA_DIR"
