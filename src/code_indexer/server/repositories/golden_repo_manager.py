@@ -1639,6 +1639,20 @@ class GoldenRepoManager:
                         raise GitOperationError(f"cidx init failed: {combined_output}")
 
                 logging.info(f"cidx init completed for {clone_path}")
+                _config_json_post_init = (
+                    Path(clone_path) / ".code-indexer" / "config.json"
+                )
+                if _config_json_post_init.exists():
+                    logger.debug(
+                        "post-init config.json present: path=%s mtime=%.6f",
+                        _config_json_post_init,
+                        _config_json_post_init.stat().st_mtime,
+                    )
+                else:
+                    logger.debug(
+                        "post-init config.json ABSENT: path=%s",
+                        _config_json_post_init,
+                    )
                 if progress_callback is not None:
                     progress_callback(
                         5,
@@ -1697,6 +1711,20 @@ class GoldenRepoManager:
                         )
 
             # Step 2: cidx index --fts --progress-json (semantic + FTS, Popen for real progress)
+            _config_json_pre_index = Path(clone_path) / ".code-indexer" / "config.json"
+            if _config_json_pre_index.exists():
+                logger.debug(
+                    "pre-index config.json present: path=%s mtime=%.6f cwd=%s",
+                    _config_json_pre_index,
+                    _config_json_pre_index.stat().st_mtime,
+                    clone_path,
+                )
+            else:
+                logger.debug(
+                    "pre-index config.json ABSENT: path=%s cwd=%s",
+                    _config_json_pre_index,
+                    clone_path,
+                )
             logging.info(f"Executing cidx index --fts for {clone_path}")
             _run_popen_with_telemetry(
                 ["cidx", "index", "--fts", "--progress-json"],

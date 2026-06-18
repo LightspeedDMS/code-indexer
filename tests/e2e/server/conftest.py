@@ -30,6 +30,7 @@ from typing import Callable, Iterator, Optional, Tuple
 import pytest
 from fastapi.testclient import TestClient
 
+from code_indexer.server.services.auto_watch_manager import auto_watch_manager
 from tests.e2e.helpers import _auth_headers, require_voyage_key
 
 # Environment variable names that carry admin credentials.
@@ -143,6 +144,10 @@ def test_client_data_dir(tmp_path_factory) -> Iterator[Path]:
     d = tmp_path_factory.mktemp("cidx_testclient_data")
     previous = os.environ.get("CIDX_SERVER_DATA_DIR")
     os.environ["CIDX_SERVER_DATA_DIR"] = str(d)
+    # Phase 3 is a REST/MCP functional suite; watch-mode (Phase 2's concern) is
+    # disabled to prevent watch-daemon accumulation across the session-scoped server
+    # — the root-cause trigger of the ms1139scip golden-repo registration failure.
+    auto_watch_manager.auto_watch_enabled = False
     yield d
     if previous is None:
         os.environ.pop("CIDX_SERVER_DATA_DIR", None)
