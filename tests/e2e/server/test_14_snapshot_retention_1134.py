@@ -55,12 +55,13 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import require_voyage_key
+from tests.e2e.server.conftest import AdminTokenProvider
 
 # ---------------------------------------------------------------------------
 # Configuration resolved from environment variables
@@ -130,12 +131,19 @@ def _commit_and_push_change(src: Path, n: int) -> None:
 # Front-door job-wait helper (TestClient, mirrors test_09 style)
 # ---------------------------------------------------------------------------
 def _wait_for_job(
-    client: TestClient, job_id: str, headers: dict[str, str], label: str
+    client: TestClient,
+    job_id: str,
+    headers_fn: Callable[[], dict[str, str]],
+    label: str,
 ) -> dict[str, Any]:
-    """Poll GET /api/jobs/{job_id} until a terminal state. Bounded (Messi #14)."""
+    """Poll GET /api/jobs/{job_id} until a terminal state. Bounded (Messi #14).
+
+    ``headers_fn`` is called on EVERY poll iteration so that long-lived waits
+    (multiple minutes per refresh) always use a fresh JWT and never hit 401.
+    """
     deadline = time.monotonic() + _JOB_TIMEOUT
     while time.monotonic() < deadline:
-        resp = client.get(f"/api/jobs/{job_id}", headers=headers)
+        resp = client.get(f"/api/jobs/{job_id}", headers=headers_fn())
         assert resp.status_code < 500, (
             f"{label}: job poll returned HTTP {resp.status_code}: {resp.text[:200]}"
         )
@@ -163,7 +171,7 @@ def _list_snapshot_dirs(snapshot_manager: Any, alias: str) -> list[tuple[str, in
 @pytest.fixture
 def retention_repo(
     test_client: TestClient,
-    auth_headers: dict[str, str],
+    admin_token_provider: AdminTokenProvider,
 ) -> Iterator[dict[str, Any]]:
     """Register a throwaway golden repo on the LOCAL backend; yield context.
 
@@ -171,8 +179,12 @@ def retention_repo(
     re-indexes via VoyageAI.  Robust teardown deregisters the golden repo and
     removes all temp directories so later tests + the S1 log gate are unaffected.
 
-    Yields a dict with: client, headers, alias, source path, golden_repos_dir,
-    base_clone path, snapshot_manager, golden_repo_manager.
+    Yields a dict with: client, token_provider, alias, source path,
+    golden_repos_dir, base_clone path, snapshot_manager, golden_repo_manager.
+
+    ``token_provider`` replaces the old frozen ``headers`` entry: callers must
+    call ``ctx["token_provider"].get_headers()`` immediately before each request
+    so that tokens are always fresh across the multi-minute refresh sequences.
     """
     require_voyage_key()
 
@@ -204,17 +216,20 @@ def retention_repo(
     src = _make_source_repo(workdir)
 
     # Register the golden repo (auto global-activates + runs cidx init/index).
+    # Fetch headers fresh immediately before the request.
     reg = test_client.post(
         "/api/admin/golden-repos",
         json={"repo_url": str(src), "alias": _ALIAS},
-        headers=auth_headers,
+        headers=admin_token_provider.get_headers(),
     )
     assert reg.status_code in (200, 202), (
         f"register returned HTTP {reg.status_code}: {reg.text[:300]}"
     )
     reg_job = reg.json().get("job_id", "")
     assert reg_job, f"register response missing job_id: {reg.json()}"
-    status = _wait_for_job(test_client, reg_job, auth_headers, "register")
+    status = _wait_for_job(
+        test_client, reg_job, admin_token_provider.get_headers, "register"
+    )
     assert status.get("status") == "completed", (
         f"register job ended {status.get('status')!r}: {status.get('error')}"
     )
@@ -227,7 +242,7 @@ def retention_repo(
 
     ctx = {
         "client": test_client,
-        "headers": auth_headers,
+        "token_provider": admin_token_provider,
         "alias": _ALIAS,
         "source": src,
         "golden_repos_dir": Path(golden_repos_dir),
@@ -240,30 +255,46 @@ def retention_repo(
         yield ctx
     finally:
         # Teardown: deregister golden repo, then remove temp dirs.
+        # Fetch headers fresh at teardown time (token may have been refreshed).
         try:
             d = test_client.request(
-                "DELETE", f"/api/admin/golden-repos/{_ALIAS}", headers=auth_headers
+                "DELETE",
+                f"/api/admin/golden-repos/{_ALIAS}",
+                headers=admin_token_provider.get_headers(),
             )
             if d.status_code in (200, 202):
                 jid = d.json().get("job_id")
                 if jid:
-                    _wait_for_job(test_client, jid, auth_headers, "deregister")
+                    _wait_for_job(
+                        test_client,
+                        jid,
+                        admin_token_provider.get_headers,
+                        "deregister",
+                    )
         except Exception:  # noqa: BLE001 -- teardown is best-effort
             pass
         shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _refresh_once(
-    client: TestClient, headers: dict[str, str], alias: str, label: str
+    client: TestClient,
+    headers_fn: Callable[[], dict[str, str]],
+    alias: str,
+    label: str,
 ) -> None:
-    """Trigger a front-door refresh and wait for the job to complete."""
-    rr = client.post(f"/api/admin/golden-repos/{alias}/refresh", headers=headers)
+    """Trigger a front-door refresh and wait for the job to complete.
+
+    ``headers_fn`` is called immediately before each HTTP request so that the
+    token is always fresh, even across the multi-minute wait inside
+    ``_wait_for_job``.
+    """
+    rr = client.post(f"/api/admin/golden-repos/{alias}/refresh", headers=headers_fn())
     assert rr.status_code in (200, 202), (
         f"{label}: refresh returned HTTP {rr.status_code}: {rr.text[:300]}"
     )
     jid = rr.json().get("job_id", "")
     assert jid, f"{label}: refresh response missing job_id: {rr.json()}"
-    status = _wait_for_job(client, jid, headers, label)
+    status = _wait_for_job(client, jid, headers_fn, label)
     assert status.get("status") == "completed", (
         f"{label}: refresh job ended {status.get('status')!r}: {status.get('error')}"
     )
@@ -283,7 +314,8 @@ def test_keep_last_n_retention_prunes_oldest_snapshot(
     and the OLDEST snapshot (refresh #1) is pruned from disk (mutation check).
     """
     client = retention_repo["client"]
-    headers = retention_repo["headers"]
+    token_provider = retention_repo["token_provider"]
+    headers_fn = token_provider.get_headers
     alias = retention_repo["alias"]
     src = retention_repo["source"]
     sm = retention_repo["snapshot_manager"]
@@ -300,7 +332,7 @@ def test_keep_last_n_retention_prunes_oldest_snapshot(
     for i in range(1, _REFRESH_COUNT + 1):
         # Real git change pushed upstream so the refresh detects it and mints a snapshot.
         _commit_and_push_change(src, i)
-        _refresh_once(client, headers, alias, f"refresh{i}")
+        _refresh_once(client, headers_fn, alias, f"refresh{i}")
 
         # Allow the refcount-gated CleanupManager (check_interval ~1s) to settle.
         snaps = _wait_until_count_at_most(sm, alias, _KEEP_LAST_N)
@@ -384,7 +416,8 @@ def test_query_served_from_mutable_base_clone_after_retention(
     )
 
     client = retention_repo["client"]
-    headers = retention_repo["headers"]
+    token_provider = retention_repo["token_provider"]
+    headers_fn = token_provider.get_headers
     alias = retention_repo["alias"]
     src = retention_repo["source"]
     sm = retention_repo["snapshot_manager"]
@@ -394,10 +427,11 @@ def test_query_served_from_mutable_base_clone_after_retention(
     # Refresh beyond N so pruning has definitely occurred (mutation precondition).
     for i in range(1, _REFRESH_COUNT + 1):
         _commit_and_push_change(src, i)
-        _refresh_once(client, headers, alias, f"refresh{i}")
+        _refresh_once(client, headers_fn, alias, f"refresh{i}")
     _wait_until_count_at_most(sm, alias, _KEEP_LAST_N)
 
     # Front-door query against the globally-activated alias.
+    # Fetch fresh headers immediately before the request.
     q = client.post(
         "/api/query",
         json={
@@ -405,7 +439,7 @@ def test_query_served_from_mutable_base_clone_after_retention(
             "repository_alias": f"{alias}-global",
             "max_results": 5,
         },
-        headers=headers,
+        headers=headers_fn(),
     )
     assert q.status_code == 200, f"query returned HTTP {q.status_code}: {q.text[:300]}"
     body = q.json()
