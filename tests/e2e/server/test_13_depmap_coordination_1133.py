@@ -234,6 +234,33 @@ def _new_sentinel(client: TestClient):
     )
 
 
+def _wait_for_service_available(
+    client: TestClient, *, timeout_s: float = _JOB_DRAIN_TIMEOUT_S
+) -> bool:
+    """Bounded-wait until dep_map_service.is_available() returns True.
+
+    is_available() checks BOTH the SharedJobSentinel file AND the in-process
+    threading.Lock.  Waiting only for the sentinel file to disappear misses the
+    window where the prior worker's finally block has not yet called
+    self._lock.release() (which happens BEFORE _sentinel.release() in
+    run_full_analysis).  If the test's force-clear removed the sentinel file
+    while the prior worker still holds the lock, is_available() returns False
+    and both concurrent triggers in test_ac1_concurrent_triggers_single_winner
+    get 409 — the [409,409] failure.
+
+    Returns True when the service becomes available within timeout_s; False
+    when the deadline expires (caller decides whether to assert or proceed).
+    Bounded by timeout_s (Messi Rule #14).
+    """
+    dep_map_service = _dep_map_service(client)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if dep_map_service.is_available():
+            return True
+        time.sleep(_JOB_DRAIN_POLL_S)
+    return bool(dep_map_service.is_available())
+
+
 def _drain_jobs(client: TestClient, auth_headers: dict, job_ids: list[str]) -> None:
     """Bounded-wait until each given background job reaches a terminal state.
 
@@ -424,25 +451,25 @@ def test_ac1_release_then_trigger_is_accepted(
             sentinel.release(SENTINEL_OP_ANALYSIS, expected_job_id=seed_job_id)
         _drain_jobs(depmap_enabled_client, auth_headers, accepted_job_ids)
 
-        # Wait for the accepted worker's sentinel to clear before returning.
+        # Wait until dep_map_service.is_available() returns True before returning.
         #
-        # Race: run_full_analysis releases the sentinel BEFORE calling
-        # complete_job/fail_job in its finally block.  However, when the worker
-        # raises an exception the except block calls fail_job (marking the job
-        # terminal) and then raises — only then does the finally run
-        # sentinel.release.  So _drain_jobs above can return (job is terminal)
-        # while the finally block of the worker thread has not yet executed
-        # sentinel.release.  If this test returns in that window, the next test
-        # (test_ac1_concurrent_triggers_single_winner) finds an active sentinel
-        # and fails its zero-contention precheck.
+        # is_available() checks BOTH the sentinel file AND the in-process
+        # threading.Lock.  run_full_analysis.finally releases them in this order:
+        #   1. self._lock.release()       <- threading.Lock released first
+        #   2. _sentinel.release(...)     <- sentinel released second
+        # When the worker raises an exception the except block calls fail_job
+        # (marking the job terminal) and then raises; only then does the finally
+        # run.  _drain_jobs can therefore return (job terminal) while the finally
+        # block has not yet run at all, meaning the Lock AND the sentinel are
+        # still held.  Using sentinel-only wait is not sufficient because after
+        # the sentinel clears the lock is guaranteed free; but under full-phase
+        # load a force-clear in the next test's precheck can remove the sentinel
+        # file while the worker still holds the lock, leaving is_available()
+        # returning False and causing [409,409].
         #
-        # Fix: bounded-wait for the sentinel to clear after draining the job
-        # (Messi Rule #14: all loops must have provable termination bounds).
-        _sentinel_clear_deadline = time.monotonic() + _JOB_DRAIN_TIMEOUT_S
-        while time.monotonic() < _sentinel_clear_deadline:
-            if sentinel.read_active(SENTINEL_OP_ANALYSIS) is None:
-                break
-            time.sleep(_JOB_DRAIN_POLL_S)
+        # Waiting for is_available() covers both resources with one predicate
+        # (Messi Rule #14: bounded wait).
+        _wait_for_service_available(depmap_enabled_client)
 
 
 async def test_ac1_concurrent_triggers_single_winner(
@@ -467,25 +494,38 @@ async def test_ac1_concurrent_triggers_single_winner(
     before the second thread's request even starts, yielding two 202s.
     """
     # Order-independence: a prior test's accepted worker may still own an
-    # in-flight 'analysis' sentinel.  Bounded-wait for a clean slate so this test
-    # contends from zero and the single-winner result is deterministic.
+    # in-flight 'analysis' sentinel OR hold the in-process threading.Lock.
+    # We must wait for dep_map_service.is_available() — not just for the
+    # sentinel file to disappear — because is_available() checks BOTH:
+    #   (a) SharedJobSentinel file (cluster-wide)
+    #   (b) threading.Lock (in-process belt)
+    #
+    # Waiting only for the sentinel file and then force-clearing it creates the
+    # [409,409] failure: if force-clear removes the sentinel while the prior
+    # worker's finally block is between self._lock.release() and
+    # _sentinel.release(), is_available() returns False (lock still held) and
+    # both concurrent requests get a 409 from the pre-flight check.
+    #
+    # Strategy:
+    #   Phase 1 — bounded wait for is_available() (both sentinel + lock free).
+    #   Phase 2 — if service is still unavailable, force-clear ONLY the sentinel
+    #             file (to unblock a stale/leaked sentinel), then do a SHORT
+    #             bounded wait for is_available() to confirm the lock is also
+    #             free.  This preserves the legitimate test-setup purpose of the
+    #             force-clear while guaranteeing we never fire the concurrent pair
+    #             while the threading.Lock is held.
+    #
+    # (Messi Rule #14: all loops must have provable termination bounds.)
     precheck_sentinel = _new_sentinel(depmap_enabled_client)
-    clear_deadline = time.monotonic() + _JOB_DRAIN_TIMEOUT_S
-    while time.monotonic() < clear_deadline:
-        if precheck_sentinel.read_active(SENTINEL_OP_ANALYSIS) is None:
-            break
-        time.sleep(_JOB_DRAIN_POLL_S)
+    service_available = _wait_for_service_available(depmap_enabled_client)
 
-    # Force-clear fallback: under full-phase load the prior test's accepted worker
-    # can take longer than _JOB_DRAIN_TIMEOUT_S to release its sentinel.  At this
-    # point the only job that could hold the sentinel is a worker from a PRIOR test
-    # — not the concurrent pair this test is about to fire.  Clearing it here is
-    # legitimate test setup (establishing zero-contention baseline), NOT masking a
-    # real concurrent claim.  The actual single-winner guarantee is proved by the
-    # two coroutines we fire next; it does not depend on there being no prior
-    # sentinel at all — it depends on the sentinel being absent WHEN the two
-    # requests contend.
-    if precheck_sentinel.read_active(SENTINEL_OP_ANALYSIS) is not None:
+    if not service_available:
+        # Service still unavailable after the full wait.  The only residual holder
+        # at this point is a worker from a PRIOR test — not the concurrent pair
+        # we are about to fire.  Force-clear the sentinel file to unblock a
+        # stale/leaked lock file, then give the threading.Lock a short window to
+        # release (it should be nearly free since the lock releases BEFORE the
+        # sentinel in run_full_analysis.finally).
         sentinel_path = (
             precheck_sentinel._sentinel_dir / f"_active_{SENTINEL_OP_ANALYSIS}.lock"
         )
@@ -493,9 +533,18 @@ async def test_ac1_concurrent_triggers_single_winner(
             os.unlink(str(sentinel_path))
         except FileNotFoundError:
             pass  # Already cleared by a concurrent release — that's fine.
-    assert precheck_sentinel.read_active(SENTINEL_OP_ANALYSIS) is None, (
-        "analysis sentinel still present even after force-clear — "
-        "sentinel directory may be read-only or the path is wrong"
+
+        # SHORT bounded wait: after the sentinel file is gone, the threading.Lock
+        # should release imminently (lock.release() ran just before sentinel.release()
+        # so the lock is either already free or will be within milliseconds).
+        # We wait up to _JOB_DRAIN_TIMEOUT_S for is_available() rather than just
+        # checking the sentinel to avoid the race.
+        service_available = _wait_for_service_available(depmap_enabled_client)
+
+    assert service_available, (
+        "dep_map_service.is_available() still False after bounded wait and force-clear — "
+        "analysis sentinel or threading.Lock is stuck; cannot establish zero-contention "
+        "baseline for concurrent-triggers test"
     )
 
     # Extract the session cookie that _enable_dependency_map() set on the
