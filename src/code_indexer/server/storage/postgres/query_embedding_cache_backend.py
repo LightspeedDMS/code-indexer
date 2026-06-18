@@ -275,5 +275,12 @@ class QueryEmbeddingCachePostgresBackend:
         except Exception as exc:
             logger.warning("QueryEmbeddingCachePostgresBackend: clear failed: %s", exc)
 
+    def clear_all(self) -> None:
+        """Delete all rows from the cache table (AC3 named method).
+
+        Idempotent: clearing an already-empty table is a no-op success.
+        """
+        self.clear()
+
     def close(self) -> None:
         """No-op: pool lifecycle is managed externally."""

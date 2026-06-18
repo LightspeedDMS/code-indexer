@@ -8393,6 +8393,71 @@ async def update_cidx_meta_backup_config(
         )
 
 
+# NOTE: This specific route MUST come BEFORE /config/{section} to avoid being
+# caught by the parameterized route. FastAPI matches routes in order of definition.
+@web_router.post(
+    "/config/query-embedding-cache/clear",
+    response_class=HTMLResponse,
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+def clear_query_embedding_cache_table(
+    request: Request,
+):
+    """Truncate the query_embedding_cache table and return the updated count display (Story #1156).
+
+    Admin-only action: deletes all rows from the persisted query embedding cache
+    via the active backend (SQLite or PostgreSQL) and resets the in-process count
+    memo to 0.  Returns an HTML fragment suitable for HTMX outerHTML swap of
+    #display-query_embedding_cache so the count refreshes immediately to 0.
+
+    Clearing an already-empty cache is a no-op success (AC7).
+    Works in both solo (SQLite) and cluster (PostgreSQL) modes (AC6).
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    # HTMX sends CSRF token as X-CSRF-Token header (consistent with other HTMX
+    # endpoints in this file, e.g. the GitHub/GitLab API key delete handlers).
+    csrf_from_header = request.headers.get("X-CSRF-Token")
+    if not validate_login_csrf_token(request, csrf_from_header):
+        return HTMLResponse(content="Invalid CSRF token", status_code=403)
+
+    try:
+        from ..services.governed_call import get_query_embedding_cache
+
+        cache = get_query_embedding_cache()
+        if cache is not None:
+            cache.clear_all()
+        # Re-read the live count (should be 0 after clear_all).
+        new_count = _get_qec_total_entries()
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-046", f"Failed to clear query embedding cache: {e}"
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return HTMLResponse(
+            content=f"Failed to clear query embedding cache: {e}", status_code=500
+        )
+
+    # Return an HTML fragment that replaces #display-query_embedding_cache.
+    # This is the minimal display div so HTMX outerHTML swap refreshes the count.
+    config = _get_current_config()
+    # Inject the freshly cleared count so the template sees 0 immediately.
+    config["query_embedding_cache"]["total_cached_entries"] = new_count
+    csrf_token_new = generate_csrf_token()
+    return templates.TemplateResponse(
+        "partials/qec_display.html",
+        {
+            "request": request,
+            "config": config,
+            "csrf_token": csrf_token_new,
+        },
+    )
+
+
 @web_router.post(
     "/config/{section}",
     response_class=HTMLResponse,

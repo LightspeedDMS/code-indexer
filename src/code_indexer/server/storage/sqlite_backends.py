@@ -6906,3 +6906,10 @@ class QueryEmbeddingCacheSqliteBackend:
             conn.execute("DELETE FROM query_embedding_cache")
 
         self._conn_manager.execute_atomic(operation)
+
+    def clear_all(self) -> None:
+        """Delete all rows from the cache table (AC3 named method).
+
+        Idempotent: clearing an already-empty table is a no-op success.
+        """
+        self.clear()

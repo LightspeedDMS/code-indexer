@@ -610,3 +610,25 @@ class QueryEmbeddingCache:
                 exc_info=True,
             )
             return 0
+
+    def clear_all(self) -> None:
+        """Delete all rows from the persisted cache table and reset the in-process count memo.
+
+        Story #1156 (AC3): truncates the query_embedding_cache table via the active
+        backend (SQLite or PostgreSQL) and immediately resets _cached_total to 0 so
+        the ObservableGauge and the Web UI count readout are accurate without a
+        DB round-trip.  Fail-open: backend errors are logged as WARNING but not raised.
+
+        Distinct from the in-memory coalescer/registry clear
+        (governed_call.clear_query_embedding_cache) -- that clears the RAM-side
+        coalescer state; this clears the persisted embedding table.
+        """
+        try:
+            self._backend.clear_all()
+        except Exception:
+            logger.warning(
+                "query_embedding_cache: clear_all failed (fail-open)",
+                exc_info=True,
+            )
+        # Reset memo regardless of backend outcome so UI reflects the intent.
+        self._cached_total = 0
