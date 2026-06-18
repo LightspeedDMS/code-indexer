@@ -14,7 +14,15 @@
             <tr>
                 <td class="config-label">Total Cached Entries</td>
                 <td class="config-value">{{ config.query_embedding_cache.total_cached_entries }}</td>
-                <td class="config-note"><small>Current row count in the cache store (read-only)</small></td>
+                <td class="config-note">
+                    <small>Current row count in the cache store (read-only)</small>
+                    <button class="outline small danger"
+                            hx-post="/admin/config/query-embedding-cache/clear"
+                            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+                            hx-confirm="Clear the entire query embedding cache? This deletes all cached embeddings and cannot be undone."
+                            hx-target="#display-query_embedding_cache"
+                            hx-swap="outerHTML">Clear</button>
+                </td>
             </tr>
             <tr>
                 <td class="config-label">Voyage Mode</td>
@@ -50,11 +58,5 @@
     </table>
     <div class="section-actions">
         <button class="outline small" onclick="toggleEditMode('query_embedding_cache')">Edit</button>
-        <button class="outline small danger"
-                hx-post="/admin/config/query-embedding-cache/clear"
-                hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
-                hx-confirm="Clear the entire query embedding cache? This deletes all cached embeddings and cannot be undone."
-                hx-target="#display-query_embedding_cache"
-                hx-swap="outerHTML">Clear</button>
     </div>
 </div>
