@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import logging
+import tempfile
 import time
 import threading
 import uuid
@@ -1581,6 +1582,29 @@ class GoldenRepoManager:
         _popen_stdout: List[str] = []
         _popen_stderr: List[str] = []
 
+        # Load the registration-path index timeout from ScipConfig.
+        # registration_indexing_timeout_seconds (default 240s) is deliberately set
+        # below the 300s e2e poll deadline so a stuck registration job fails fast
+        # with a clear GitOperationError instead of an opaque 300s poller timeout.
+        # This is distinct from indexing_timeout_seconds (3600s, used by
+        # ActivatedRepoIndexManager for manual re-index operations).
+        _indexing_timeout: float = 240.0
+        try:
+            from ..services.config_service import get_config_service as _get_cfg
+
+            _cfg = _get_cfg().get_config()
+            if _cfg.scip_config is not None:
+                _indexing_timeout = float(
+                    _cfg.scip_config.registration_indexing_timeout_seconds
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to read ScipConfig.registration_indexing_timeout_seconds; "
+                "using default %.0fs: %s",
+                _indexing_timeout,
+                exc,
+            )
+
         def _run_popen(command: List[str], phase_name: str, error_label: str) -> None:
             """Run command with Popen progress, re-raising as GitOperationError on failure."""
             _popen_stdout.clear()
@@ -1595,6 +1619,7 @@ class GoldenRepoManager:
                     all_stderr=_popen_stderr,
                     cwd=clone_path,
                     error_label=error_label,
+                    timeout=_indexing_timeout,
                 )
             except IndexingSubprocessError as e:
                 # Check for "No files found" — acceptable for golden repo registration
@@ -1639,6 +1664,20 @@ class GoldenRepoManager:
                         raise GitOperationError(f"cidx init failed: {combined_output}")
 
                 logging.info(f"cidx init completed for {clone_path}")
+                _config_json_post_init = (
+                    Path(clone_path) / ".code-indexer" / "config.json"
+                )
+                if _config_json_post_init.exists():
+                    logger.warning(
+                        "[config-init-diag] post-init config.json present: path=%s mtime=%.6f",
+                        _config_json_post_init,
+                        _config_json_post_init.stat().st_mtime,
+                    )
+                else:
+                    logger.warning(
+                        "[config-init-diag] post-init config.json ABSENT: path=%s",
+                        _config_json_post_init,
+                    )
                 if progress_callback is not None:
                     progress_callback(
                         5,
@@ -1697,6 +1736,20 @@ class GoldenRepoManager:
                         )
 
             # Step 2: cidx index --fts --progress-json (semantic + FTS, Popen for real progress)
+            _config_json_pre_index = Path(clone_path) / ".code-indexer" / "config.json"
+            if _config_json_pre_index.exists():
+                logger.warning(
+                    "[config-init-diag] pre-index config.json present: path=%s mtime=%.6f cwd=%s",
+                    _config_json_pre_index,
+                    _config_json_pre_index.stat().st_mtime,
+                    clone_path,
+                )
+            else:
+                logger.warning(
+                    "[config-init-diag] pre-index config.json ABSENT: path=%s cwd=%s",
+                    _config_json_pre_index,
+                    clone_path,
+                )
             logging.info(f"Executing cidx index --fts for {clone_path}")
             _run_popen_with_telemetry(
                 ["cidx", "index", "--fts", "--progress-json"],
@@ -1764,8 +1817,25 @@ class GoldenRepoManager:
             with open(config_path) as f:
                 config_data = json.load(f)
             config_data["embedding_providers"] = providers
-            with open(config_path, "w") as f:
-                json.dump(config_data, f)
+
+            # Atomic write via tempfile.mkstemp + os.replace to avoid a truncation
+            # window.  A plain open("w") truncates config.json to 0 bytes before
+            # writing, so any concurrent reader (e.g. detect_current_mode() called
+            # by a cidx index subprocess) sees an empty file, gets JSONDecodeError,
+            # returns "uninitialized", and fails with "Command 'index' is not
+            # available in no configuration found" (Phase 3 registration race).
+            parent_dir = config_path.parent
+            tmp_fd, tmp_name = tempfile.mkstemp(dir=str(parent_dir), suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w") as tmp_f:
+                    json.dump(config_data, tmp_f)
+                os.replace(tmp_name, str(config_path))
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except Exception:
+                    pass
+                raise
 
             logging.info("Wrote embedding_providers=%s to %s", providers, config_path)
         except Exception as exc:

@@ -1,7 +1,7 @@
 """Unit tests for MCP re-indexing handlers."""
 
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, sentinel
 from code_indexer.server.auth.user_manager import User, UserRole
 import json
 
@@ -213,3 +213,132 @@ class TestGetIndexStatusHandler:
             assert data["fts"]["status"] == "not_indexed"
             assert data["temporal"]["status"] == "not_indexed"
             assert data["scip"]["status"] == "not_indexed"
+
+
+class TestMcpReindexInjection:
+    """Tests that verify background_job_manager is injected into ActivatedRepoIndexManager.
+
+    These tests would FAIL against the old code that called ActivatedRepoIndexManager()
+    with no kwargs, because the constructor would receive no background_job_manager.
+    """
+
+    def test_trigger_reindex_injects_background_job_manager(self, mock_user):
+        """trigger_reindex must pass the app's background_job_manager sentinel to
+        ActivatedRepoIndexManager so the job is visible to the job-status API."""
+        from code_indexer.server.mcp.handlers import trigger_reindex
+
+        sentinel_bjm = sentinel.background_job_manager
+        sentinel_arm = sentinel.activated_repo_manager
+
+        captured_kwargs: dict = {}
+
+        def capture_constructor(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_instance = Mock()
+            mock_instance.trigger_reindex.return_value = "job-injection-test"
+            return mock_instance
+
+        params = {
+            "repository_alias": "my-repo",
+            "index_types": ["semantic"],
+            "clear": False,
+        }
+
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
+            mock_app.background_job_manager = sentinel_bjm
+            mock_app.app.state.activated_repo_manager = sentinel_arm
+
+            with patch(
+                "code_indexer.server.services.activated_repo_index_manager.ActivatedRepoIndexManager",
+                side_effect=capture_constructor,
+            ):
+                result = trigger_reindex(params, mock_user)
+
+        data = json.loads(result["content"][0]["text"])
+        assert data["success"] is True, f"Expected success, got: {data}"
+
+        # This assertion FAILS against old code (no kwargs passed to constructor)
+        assert captured_kwargs.get("background_job_manager") is sentinel_bjm, (
+            "background_job_manager sentinel must be injected into ActivatedRepoIndexManager; "
+            f"got: {captured_kwargs}"
+        )
+
+    def test_trigger_reindex_returns_error_when_bjm_is_none(self, mock_user):
+        """trigger_reindex must return an error response when background_job_manager
+        is None (server not fully initialized)."""
+        from code_indexer.server.mcp.handlers import trigger_reindex
+
+        params = {
+            "repository_alias": "my-repo",
+            "index_types": ["semantic"],
+            "clear": False,
+        }
+
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
+            mock_app.background_job_manager = None
+
+            result = trigger_reindex(params, mock_user)
+
+        data = json.loads(result["content"][0]["text"])
+        assert data["success"] is False
+        assert "not fully initialized" in data["error"]
+        assert "background_job_manager" in data["error"]
+
+    def test_get_index_status_injects_background_job_manager(self, mock_user):
+        """get_index_status must pass the app's background_job_manager sentinel to
+        ActivatedRepoIndexManager for consistent path resolution."""
+        from code_indexer.server.mcp.handlers import get_index_status
+
+        sentinel_bjm = sentinel.background_job_manager
+        sentinel_arm = sentinel.activated_repo_manager
+
+        captured_kwargs: dict = {}
+
+        def capture_constructor(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_instance = Mock()
+            mock_instance.get_index_status.return_value = {
+                "semantic": {"status": "not_indexed"},
+                "fts": {"status": "not_indexed"},
+                "temporal": {"status": "not_indexed"},
+                "scip": {"status": "not_indexed"},
+            }
+            return mock_instance
+
+        params = {"repository_alias": "my-repo"}
+
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
+            mock_app.background_job_manager = sentinel_bjm
+            mock_app.app.state.activated_repo_manager = sentinel_arm
+
+            with patch(
+                "code_indexer.server.services.activated_repo_index_manager.ActivatedRepoIndexManager",
+                side_effect=capture_constructor,
+            ):
+                result = get_index_status(params, mock_user)
+
+        data = json.loads(result["content"][0]["text"])
+        assert data["success"] is True, f"Expected success, got: {data}"
+
+        # This assertion FAILS against old code (no kwargs passed to constructor)
+        assert captured_kwargs.get("background_job_manager") is sentinel_bjm, (
+            "background_job_manager sentinel must be injected into ActivatedRepoIndexManager; "
+            f"got: {captured_kwargs}"
+        )
+
+    def test_get_index_status_returns_error_when_bjm_is_none(self, mock_user):
+        """get_index_status must return an error response when background_job_manager
+        is None (server not fully initialized)."""
+        from code_indexer.server.mcp.handlers import get_index_status
+
+        params = {"repository_alias": "my-repo"}
+
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
+            mock_app.background_job_manager = None
+
+            result = get_index_status(params, mock_user)
+
+        data = json.loads(result["content"][0]["text"])
+        assert data["success"] is False
+        assert "not fully initialized" in data["error"]
+        assert "background_job_manager" in data["error"]

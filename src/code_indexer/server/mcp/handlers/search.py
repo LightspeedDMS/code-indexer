@@ -198,7 +198,7 @@ def _build_multi_search_request(
     """
     from ...multi.models import MultiSearchRequest
 
-    return MultiSearchRequest(  # type: ignore[arg-type]  # search_type validated to Literal values by _resolve_search_type
+    return MultiSearchRequest(  # type: ignore[arg-type, call-arg]  # search_type validated to Literal values by _resolve_search_type; precomputed_query_vector has default None but exclude=True confuses mypy
         repositories=repo_aliases,
         query=params.get("query_text", ""),
         search_type=search_type,  # type: ignore[arg-type]
@@ -335,6 +335,29 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     request = _build_multi_search_request(
         repo_aliases, params, search_type, effective_limit
     )
+
+    # Story #1148 PART 1: For semantic omni searches, compute the query embedding
+    # ONCE here (via the same VoyageAI chokepoint used by _search_activated_repo)
+    # and thread it into every per-repo call as precomputed_query_vector.
+    # Defect #1148 fix: _compute_shared_query_vector now returns (vector, digest).
+    # The digest is set on the request so _search_semantic_sync can verify that
+    # each repo's own embedding-service config matches before reusing the vector.
+    # Repos on a different provider config (e.g. Cohere embed-v4.0 vs Voyage 1024)
+    # receive precomputed_query_vector=None and embed via their own chokepoint.
+    # On failure: WARNING is logged by _compute_shared_query_vector (Messi #13);
+    # no precomputed vector is set so each repo embeds independently (explicit fallback).
+    if search_type == "semantic" and repo_aliases:
+        query_text = params.get("query_text", "") or ""
+        if query_text:
+            _omni_vec, _omni_digest = _compute_shared_query_vector(
+                str(query_text),
+                no_embedding_cache_shortcut=params.get(
+                    "no_embedding_cache_shortcut", False
+                ),
+            )
+            if _omni_vec:
+                request.precomputed_query_vector = _omni_vec
+                request.precomputed_query_vector_digest = _omni_digest
 
     config = MultiSearchConfig.from_config(get_config_service())
     service = MultiSearchService.get_instance(config)
@@ -540,10 +563,69 @@ def _compute_memory_query_vector(
         return []
 
 
-# Story #883 Phase C: shared alias so callers are explicit about the intent.
-# _compute_shared_query_vector is the single Voyage call per semantic request;
-# the resulting vector is reused by both code search and memory retrieval.
-_compute_shared_query_vector = _compute_memory_query_vector
+def _compute_shared_query_vector(
+    query_text: str,
+    no_embedding_cache_shortcut: bool = False,
+) -> tuple:
+    """Compute the shared pre-fan-out query vector for omni semantic searches.
+
+    Defect #1148 fix: unlike _compute_memory_query_vector (which returns [] on
+    any error for memory-retrieval callers), this function returns a 2-tuple
+    (vector: List[float], digest: str) so that the omni handler can propagate
+    the provider-config digest alongside the vector.  Per-repo searches in
+    _search_semantic_sync compare the digest against their own embedding-service
+    digest and only reuse the precomputed vector when they match — repos on a
+    different provider config embed via their own chokepoint (config-correct).
+
+    On failure: logs WARNING (Messi #13 anti-silent-failure) and returns
+    ([], "") so the caller can detect failure and fall back EXPLICITLY to
+    per-repo embedding (the fallback is observable in logs, not silent).
+
+    Returns:
+        (vector, digest) where vector is a non-empty List[float] and digest is
+        a non-empty str on success; ([], "") on any error.
+    """
+    try:
+        from code_indexer.config import VoyageAIConfig
+        from code_indexer.services.voyage_ai import VoyageAIClient
+        from code_indexer.server.services.search_service import _get_http_client_factory
+        from code_indexer.server.services.governed_call import (
+            coalesced_query_embedding,
+        )
+        from code_indexer.server.services.coalescer_registry import (
+            _digest_for_provider,
+        )
+
+        try:
+            _factory = _get_http_client_factory()
+        except AttributeError:
+            logger.warning(
+                "http_client_factory not available on app.state; "
+                "VoyageAIClient using default transport (fault injection inactive). "
+                "This is expected only in unit-test environments, not in production."
+            )
+            _factory = None
+
+        provider = VoyageAIClient(VoyageAIConfig(), http_client_factory=_factory)
+        digest = _digest_for_provider(provider)
+        vec = cast(
+            List[float],
+            coalesced_query_embedding(
+                provider,
+                query_text,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            ),
+        )
+        return (vec, digest)
+    except Exception as exc:
+        logger.warning(
+            "Omni search: could not compute shared query vector — %s. "
+            "Falling back to per-repo embedding (each repo will embed via its "
+            "own provider chokepoint). This is an explicit fallback, not a "
+            "silent failure.",
+            exc,
+        )
+        return ([], "")
 
 
 def _run_memory_retrieval(
@@ -906,12 +988,16 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
             # Story #1108 (S4): thread per-request cache bypass into the
             # shared embedding call so both code search and memory retrieval
             # honour the bypass flag without a second Voyage API call.
-            shared_query_vector = _compute_shared_query_vector(
+            # Defect #1148 fix: _compute_shared_query_vector now returns (vector, digest).
+            # The activated-repo path is single-repo (no mixed-config fan-out), so the
+            # digest is not needed here — only the vector is extracted.
+            _shared_vec, _ = _compute_shared_query_vector(
                 str(query_text),
                 no_embedding_cache_shortcut=params.get(
                     "no_embedding_cache_shortcut", False
                 ),
             )
+            shared_query_vector = _shared_vec if _shared_vec else None
 
     kwargs = _build_search_kwargs(params, user, [], effective_limit)
     # query_user_repositories uses repository_alias, not user_repos

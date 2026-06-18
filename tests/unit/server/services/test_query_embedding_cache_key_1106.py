@@ -1,7 +1,7 @@
 """Story #1106: Anchor-token normalization dial — unit tests (S2).
 
 Tests cover build_key(text, anchor_tokens):
-- first-N tokens in original order + sorted tail, CASE PRESERVED, SHA-256
+- first-N tokens in original order + sorted tail, CASE PRESERVED
 - anchor_tokens=0 -> sort ALL tokens
 - anchor_tokens >= token_count -> exact-match (== S1 exact key)
 - case differences NEVER collapse
@@ -15,15 +15,23 @@ Tests cover build_key(text, anchor_tokens):
 Tokenization pin:
   str.split() with no argument — collapses whitespace runs, strips leading/
   trailing whitespace, never lowercases, punctuation attached to its token.
+
+Story #1149 update: build_key now returns Optional[str] in the form
+``s:<config-digest>:<normalized-query>`` instead of a SHA-256 hex digest.
+Tests updated accordingly: assertions compare against the new readable key
+format.  Normalization behavior (which tokens are in order, which are sorted,
+case, duplicates, etc.) is unchanged.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from pathlib import Path
-from typing import cast
 from unittest.mock import MagicMock, patch
+
+# Test-only stable digest for normalization behavior tests.
+# This is NOT a secret; it is a stable sentinel used across these tests.
+_TEST_DIGEST = "test-digest"
 
 
 # ---------------------------------------------------------------------------
@@ -32,13 +40,17 @@ from unittest.mock import MagicMock, patch
 
 
 def _build_key(text: str, anchor_tokens: int = 2) -> str:
+    """Call build_key with the stable test-digest; return key or empty string on None."""
     from code_indexer.server.services.query_embedding_cache import build_key
 
-    return str(build_key(text, anchor_tokens))
+    result = build_key(text, anchor_tokens, config_digest=_TEST_DIGEST)
+    # Return empty string for None (over-cap) so callers can detect it
+    return str(result) if result is not None else ""
 
 
-def _expected_sha256(normalized: str) -> str:
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+def _expected_key(normalized: str) -> str:
+    """Return the expected new-format key for a given normalized string."""
+    return f"s:{_TEST_DIGEST}:{normalized}"
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +71,7 @@ class TestBuildKeyAnchorNormalization:
         text = "Customer Account Management Service Layer"
         key = _build_key(text, anchor_tokens=2)
         normalized = "Customer Account Layer Management Service"
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
     def test_anchor2_tail_reorder_same_key(self) -> None:
         """Two queries sharing first-2 tokens + same tail bag -> same key."""
@@ -126,7 +138,7 @@ class TestBuildKeyBoundaryValues:
         text = "Zebra Apple Mango"
         key = _build_key(text, 0)
         normalized = "Apple Mango Zebra"  # alphabetically sorted
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
     def test_anchor_gte_len_is_exact_match(self) -> None:
         """anchor >= token count -> key = SHA-256 of original text verbatim."""
@@ -135,7 +147,7 @@ class TestBuildKeyBoundaryValues:
         # Must equal SHA-256 of the normalized string "Hello World"
         # (all 2 tokens kept in order; no tail)
         normalized = "Hello World"
-        assert key_exact == _expected_sha256(normalized)
+        assert key_exact == _expected_key(normalized)
 
     def test_anchor_eq_len_is_exact(self) -> None:
         """anchor == token count -> key is exact-match."""
@@ -144,7 +156,7 @@ class TestBuildKeyBoundaryValues:
         key = _build_key(text, len(tokens))  # anchor == 3
         # All 3 tokens in original order, tail is empty -> same as exact
         normalized = "Alpha Beta Gamma"
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
     def test_anchor_gte_len_two_orderings_differ(self) -> None:
         """anchor >= len: different orderings produce different keys (exact-match behaviour)."""
@@ -166,19 +178,19 @@ class TestBuildKeyBoundaryValues:
         # S2 with anchor >= len
         key_s2_exact = _build_key(text, len(tokens))
         # Expected: SHA-256 of "Customer Account Management"
-        assert key_s2_exact == _expected_sha256("Customer Account Management")
+        assert key_s2_exact == _expected_key("Customer Account Management")
 
     def test_anchor_zero_single_token_still_works(self) -> None:
         """anchor=0 with single token: sorted([token]) = [token]."""
         text = "Hello"
         key = _build_key(text, 0)
-        assert key == _expected_sha256("Hello")
+        assert key == _expected_key("Hello")
 
     def test_anchor_large_single_token(self) -> None:
         """anchor >> len with single token: kept as-is."""
         text = "Hello"
         key = _build_key(text, 100)
-        assert key == _expected_sha256("Hello")
+        assert key == _expected_key("Hello")
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +216,7 @@ class TestBuildKeyCasePreservation:
         key = _build_key(text, 1)
         # anchor='anchor', tail sorted: ['Alpha', 'Beta'] (uppercase A < lowercase b)
         normalized = "anchor Alpha Beta"
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
     def test_case_preserved_anchor0(self) -> None:
         """anchor=0: case preserved in sorted output."""
@@ -212,7 +224,7 @@ class TestBuildKeyCasePreservation:
         key = _build_key(text, 0)
         # Lexicographic sort: 'Mango' < 'Zebra' < 'apple' (uppercase before lowercase)
         normalized = "Mango Zebra apple"
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
     def test_upper_lower_same_word_different_keys(self) -> None:
         """'HELLO WORLD' vs 'hello world' must differ."""
@@ -228,10 +240,15 @@ class TestBuildKeyEdgeCases:
     """Edge-case behavior: empty, single, duplicates, unicode, punctuation."""
 
     def test_empty_string_does_not_crash(self) -> None:
-        """Empty string -> empty token list -> stable, non-crashing key."""
+        """Empty string -> empty token list -> stable, non-crashing key.
+
+        Story #1149: normalized form of empty string is '' (0 chars <= 256),
+        so build_key returns 's:<digest>:' (not None).
+        """
         key = _build_key("", 2)
         assert isinstance(key, str)
-        assert len(key) == 64
+        # New format: 's:<digest>:<normalized>' where normalized is '' for empty input
+        assert key.startswith(f"s:{_TEST_DIGEST}:")
 
     def test_whitespace_only_string(self) -> None:
         """Whitespace-only string collapses to empty token list -> same as empty."""
@@ -241,7 +258,7 @@ class TestBuildKeyEdgeCases:
         """Single token: anchor is the token; tail is empty (no sort needed)."""
         key = _build_key("Hello", 2)
         # anchor=2 but len=1 -> anchor >= len -> exact
-        assert key == _expected_sha256("Hello")
+        assert key == _expected_key("Hello")
 
     def test_duplicate_tokens_kept_as_multiset(self) -> None:
         """Duplicate tokens are NOT de-duplicated; kept in sorted multiset."""
@@ -249,7 +266,7 @@ class TestBuildKeyEdgeCases:
         key = _build_key(text, 1)
         # anchor='find', tail sorted: ['find', 'handler']
         normalized = "find find handler"
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
     def test_duplicate_tokens_in_tail_sorted_multiset(self) -> None:
         """Tail with duplicates preserves count."""
@@ -257,7 +274,7 @@ class TestBuildKeyEdgeCases:
         key = _build_key(text, 1)
         # anchor='anchor', tail: ['apple', 'apple', 'banana']
         normalized = "anchor apple apple banana"
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
     def test_multi_space_collapsed(self) -> None:
         """Multiple spaces collapse (str.split() without arg)."""
@@ -291,7 +308,7 @@ class TestBuildKeyEdgeCases:
         # 'search,' is one token (comma is not whitespace)
         # anchor='search,', tail sorted: ['authentication', 'for']
         normalized = "search, authentication for"
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
     def test_determinism_same_output_every_call(self) -> None:
         """Same input always produces the same SHA-256."""
@@ -306,7 +323,7 @@ class TestBuildKeyEdgeCases:
         text = "Hello World"
         key = _build_key(text, 2)
         normalized = "Hello World"
-        assert key == _expected_sha256(normalized)
+        assert key == _expected_key(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -411,8 +428,12 @@ class TestPerProviderAnchorTokensLiveRead:
             q1 = "Zebra Apple Mango"
             q2 = "Apple Mango Zebra"
             # With anchor=0, both should produce the same key
-            key1 = cache.build_key_for_provider(q1, "voyage-ai")
-            key2 = cache.build_key_for_provider(q2, "voyage-ai")
+            key1 = cache.build_key_for_provider(
+                q1, "voyage-ai", config_digest=_TEST_DIGEST
+            )
+            key2 = cache.build_key_for_provider(
+                q2, "voyage-ai", config_digest=_TEST_DIGEST
+            )
             assert key1 == key2
 
 
@@ -538,47 +559,49 @@ class TestNamespaceChangeLog:
 
 
 class TestBuildKeyBackwardsCompat:
-    """The signature build_key(text, anchor_tokens=2) must be backwards-compatible.
+    """The signature build_key(text, anchor_tokens=2, *, config_digest) API.
 
-    S1 callers that used build_key(text) still work (anchor=2 by default).
-    The wrap tests import build_key from the module and call it with one arg.
+    Story #1149 update: config_digest is now a mandatory keyword argument.
+    anchor_tokens still defaults to 2.  Return type is Optional[str].
     """
 
-    def test_build_key_one_arg_still_works(self) -> None:
-        """build_key(text) with single arg must not raise — uses anchor=2 default."""
+    def test_build_key_with_config_digest_works(self) -> None:
+        """build_key(text, config_digest=...) returns 's:<digest>:<normalized>'."""
         from code_indexer.server.services.query_embedding_cache import build_key
 
-        key = build_key("hello world")
+        key = build_key("hello world", config_digest=_TEST_DIGEST)
         assert isinstance(key, str)
-        assert len(key) == 64
+        assert key.startswith(f"s:{_TEST_DIGEST}:")
 
-    def test_build_key_one_arg_equals_anchor2(self) -> None:
-        """build_key(text) == build_key(text, 2)."""
+    def test_build_key_anchor2_equals_explicit_anchor2(self) -> None:
+        """build_key(text, config_digest=d) == build_key(text, 2, config_digest=d)."""
         from code_indexer.server.services.query_embedding_cache import build_key
 
         text = "find authentication middleware"
-        assert build_key(text) == build_key(text, 2)
+        assert build_key(text, config_digest=_TEST_DIGEST) == build_key(
+            text, 2, config_digest=_TEST_DIGEST
+        )
 
-    def test_static_method_build_key_one_arg(self) -> None:
-        """QueryEmbeddingCache.build_key(text) static method still works with one arg."""
+    def test_static_method_build_key_with_digest(self) -> None:
+        """QueryEmbeddingCache.build_key(text, config_digest=...) returns Optional[str]."""
         from code_indexer.server.services.query_embedding_cache import (
             QueryEmbeddingCache,
         )
 
-        key = QueryEmbeddingCache.build_key("hello world")
+        key = QueryEmbeddingCache.build_key("hello world", config_digest=_TEST_DIGEST)
         assert isinstance(key, str)
-        assert len(key) == 64
+        assert key.startswith("s:")
 
     def test_static_method_with_anchor_tokens(self) -> None:
-        """QueryEmbeddingCache.build_key(text, anchor_tokens=N) works."""
+        """QueryEmbeddingCache.build_key(text, anchor_tokens=N, config_digest=...) works."""
         from code_indexer.server.services.query_embedding_cache import (
             QueryEmbeddingCache,
         )
 
         text = "Hello World Test"
-        assert QueryEmbeddingCache.build_key(text, 0) != QueryEmbeddingCache.build_key(
-            text, 99
-        )
+        assert QueryEmbeddingCache.build_key(
+            text, 0, config_digest=_TEST_DIGEST
+        ) != QueryEmbeddingCache.build_key(text, 99, config_digest=_TEST_DIGEST)
 
 
 # ---------------------------------------------------------------------------
@@ -634,10 +657,12 @@ class TestAnchorTokenCacheStoreIntegration:
 
 
 def build_anchor_key(text: str, anchor_tokens: int = 2) -> str:
-    """Thin wrapper calling the module-level build_key."""
+    """Thin wrapper calling the module-level build_key with the test digest."""
     from code_indexer.server.services.query_embedding_cache import build_key
 
-    return cast(str, build_key(text, anchor_tokens))
+    result = build_key(text, anchor_tokens, config_digest=_TEST_DIGEST)
+    assert result is not None, f"build_anchor_key: query too long for cap: {text!r}"
+    return result  # type: ignore[no-any-return]
 
 
 import pytest  # noqa: E402  (needed for approx inside class method)

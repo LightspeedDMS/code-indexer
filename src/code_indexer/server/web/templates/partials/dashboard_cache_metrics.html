@@ -21,6 +21,13 @@
         white-space: nowrap;
     }
     .cache-metrics-volatile-note { color: #d6a93a; font-weight: 600; }
+    .cosine-chart { font-size: 0.7rem; line-height: 1.8; overflow-x: hidden; }
+    .cosine-chart-empty { font-size: 0.75rem; color: #888; text-align: center; padding: 1rem 0; }
+    .cosine-row { display: flex; align-items: center; gap: 0.4rem; width: 100%; }
+    .cosine-label { flex: 0 0 9rem; font-family: monospace; white-space: nowrap; }
+    .cosine-track { flex: 1 1 0; background: rgba(255,255,255,0.07); border-radius: 2px; height: 0.65rem; overflow: hidden; }
+    .cosine-fill { height: 100%; background: #d6a93a; border-radius: 2px; min-width: 0; }
+    .cosine-count { flex: 0 0 3.5rem; text-align: right; font-family: monospace; color: #aaa; }
 </style>
 <div class="stats-grid">
     <article class="stat-card">
@@ -61,6 +68,62 @@
         </div>
         <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Median similarity between the cached and a freshly-computed embedding (1.0 = identical) &mdash; how accurate a cache hit would be</small></footer>
     </article>
+    <article class="stat-card">
+        <header><h3>Over-Cap Queries <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.long_key if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Queries skipped (not cached) because the normalized-query part exceeded the 256-character key cap &mdash; each counts as a cache miss</small></footer>
+    </article>
+    {% if histogram_bars %}
+    <article class="stat-card" style="grid-column: span 2;">
+        <header><h3>Shadow Cosine Distribution <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        {% set total = histogram_bars | sum(attribute='count') %}
+        <div class="cosine-chart" style="max-height: 14rem; overflow-y: auto;">
+        {% if total == 0 %}
+            <div class="cosine-chart-empty">No shadow cosine samples recorded yet</div>
+        {% else %}
+            {% for b in histogram_bars | reverse %}
+            <div class="cosine-row">
+                <span class="cosine-label">[{{ "%.2f"|format(b.lo) }}, {{ "%.2f"|format(b.hi) }})</span>
+                <div class="cosine-track"><div class="cosine-fill" style="width: {{ b.bar_pct }}%"></div></div>
+                <span class="cosine-count">{{ b.count }}</span>
+            </div>
+            {% endfor %}
+        {% endif %}
+        </div>
+        <footer>
+            <small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span>
+            Log&#x2081;&#x2080;-scaled bar chart (40 buckets, width 0.05, highest similarity first). Bar length = log&#x2081;&#x2080;(count+1) normalized to max bucket.
+            &mdash;
+            Min:
+            {% if cache_metrics.shadow_cosine_min is not none %}{{ "%.4f"|format(cache_metrics.shadow_cosine_min) }}{% else %}--{% endif %}
+            &mdash; P05:
+            {% if cache_metrics.shadow_cosine_p05 is not none %}{{ "%.4f"|format(cache_metrics.shadow_cosine_p05) }}{% else %}--{% endif %}
+            &mdash; P50:
+            {% if cache_metrics.shadow_cosine_p50 is not none %}{{ "%.4f"|format(cache_metrics.shadow_cosine_p50) }}{% else %}--{% endif %}
+            </small>
+        </footer>
+    </article>
+    {% endif %}
+    <article class="stat-card">
+        <header><h3>Provider Embed Calls <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.coalescer_provider_embed_calls if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Number of outbound HTTP embedding calls made to the provider &mdash; one per sealed coalesced batch (Story #1146)</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Texts Coalesced <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.coalescer_texts_coalesced if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Total texts submitted across all coalesced batches &mdash; divide by Provider Embed Calls to get average batch size</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Batches Dispatched <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.coalescer_batches_dispatched if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Number of coalesced batches dispatched through the governor to the embedding provider</small></footer>
+    </article>
+    <article class="stat-card">
+        <header><h3>Dedup Savings <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <div class="stat-value">{{ cache_metrics.coalescer_dedup_savings if cache_metrics else 0 }}</div>
+        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> Embed calls saved by same-key deduplication within a batch &mdash; requestors minus unique texts sent to the provider (Story #1146)</small></footer>
+    </article>
     {% if cache_metrics and cache_metrics.audit_total and cache_metrics.audit_total > 0 %}
     <article class="stat-card">
         <header><h3>Audit Samples</h3></header>
@@ -70,7 +133,11 @@
     <article class="stat-card">
         <header><h3>Audit Top-1 Match</h3></header>
         <div class="stat-value">
-            {{ "%.1f"|format(cache_metrics.audit_top1_matches / cache_metrics.audit_total * 100) }}%
+            {% if cache_metrics.audit_total %}
+                {{ "%.1f"|format(cache_metrics.audit_top1_matches / cache_metrics.audit_total * 100) }}%
+            {% else %}
+                --
+            {% endif %}
         </div>
         <footer><small>How often the cached vector's top search result matches the live vector's top result</small></footer>
     </article>
@@ -78,7 +145,7 @@
         <header><h3>Audit Avg Top-10 Overlap</h3></header>
         <div class="stat-value">
             {% if cache_metrics.audit_overlap_avg is not none %}
-                {{ "%.2f"|format(cache_metrics.audit_overlap_avg) }}
+                {{ "%.1f"|format(cache_metrics.audit_overlap_avg * 100) }}%
             {% else %}
                 --
             {% endif %}

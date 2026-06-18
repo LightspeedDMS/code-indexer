@@ -2381,12 +2381,13 @@ class FilesystemVectorStore:
         subdirectory: Optional[str] = None,
         parallel_executor: Optional["Executor"] = None,
         no_embedding_cache_shortcut: bool = False,
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         """Search for similar vectors using parallel execution of index loading and embedding generation.
 
         This method ALWAYS executes in parallel mode:
         - Thread 1: Load HNSW index + ID mapping
-        - Thread 2: Generate query embedding
+        - Thread 2: Generate query embedding (skipped when precomputed_query_vector is supplied)
         - Wait for both, then perform search
 
         Parallel execution reduces query latency by 350-467ms by overlapping I/O-bound
@@ -2410,6 +2411,12 @@ class FilesystemVectorStore:
                 on CPython's process-wide _global_shutdown_lock). CLI/SOLO/DAEMON PATH:
                 leave None — a per-call ThreadPoolExecutor(max_workers=2) is created and
                 cleaned up exactly as before (single-user, no concurrency/churn problem).
+            precomputed_query_vector: Optional pre-computed embedding vector.
+                When supplied (omni per-repo reuse path, Bug #1148), the
+                generate_embedding() step is skipped entirely: coalesced_query_embedding
+                is NOT called, no cache metric event fires, and no get_provider_name()
+                call is made on the embedding_provider.  The supplied vector is used
+                directly for the HNSW nearest-neighbour search.
 
         Returns:
             List of results with id, score, payload (including content), and staleness
@@ -2550,8 +2557,28 @@ class FilesystemVectorStore:
         # CLI PATH (parallel_executor is None): single-user, not concurrent — keep
         # the original per-call ThreadPoolExecutor(max_workers=2) context manager,
         # so CLI behaviour and the CLI startup import budget are unchanged.
+        #
+        # PRECOMPUTED PATH (Bug #1148 omni per-repo reuse): when precomputed_query_vector
+        # is supplied, generate_embedding() is skipped entirely.  Only load_index() runs
+        # (in the thread pool on the server path, or inline on the CLI path).
+        # coalesced_query_embedding is never called — no get_provider_name(), no second
+        # cache metric event, no AttributeError.
         parallel_start = time.time()
-        if parallel_executor is not None:
+        if precomputed_query_vector is not None:
+            # Precomputed path: skip generate_embedding(), use supplied vector directly.
+            if parallel_executor is not None:
+                hnsw_index, id_index, hnsw_load_ms, id_load_ms = (
+                    parallel_executor.submit(load_index).result()
+                )
+            else:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    hnsw_index, id_index, hnsw_load_ms, id_load_ms = executor.submit(
+                        load_index
+                    ).result()
+            query_vector: List[float] = precomputed_query_vector
+            embedding_ms: float = 0.0
+            audit_ctx: Dict[str, Any] = {}
+        elif parallel_executor is not None:
             index_future = parallel_executor.submit(load_index)
             embedding_future = parallel_executor.submit(generate_embedding)
             # .result() re-raises any sub-task exception in the caller's thread —

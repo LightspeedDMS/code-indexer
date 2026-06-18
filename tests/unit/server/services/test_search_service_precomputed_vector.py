@@ -129,17 +129,29 @@ class TestPrecomputedVectorBypass:
         embedding_service.get_embedding.assert_not_called()
 
     def test_precomputed_vector_passed_to_store_search(self, tmp_path):
-        """The precomputed vector must reach store.search() as the embedding provider's value.
+        """The precomputed vector must reach FSV.search() via precomputed_query_vector=.
 
-        We verify this by capturing what store.search() received as
-        `embedding_provider` and calling get_embedding on it — the result
-        must equal the precomputed vector.
+        NEW DESIGN (Bug #1148 fix): the vector is passed as a direct
+        `precomputed_query_vector=` kwarg to FilesystemVectorStore.search().
+        The REAL embedding_service is still the `embedding_provider` (required
+        for resolve_collection_name).  No _PrecomputedEmbeddingProvider wrapper
+        is used — that adaptor lacked get_provider_name() and caused AttributeError
+        on every omni per-repo call.
+
+        This test proves the bypass by asserting:
+          1. store.search() is called with precomputed_query_vector == precomputed.
+          2. store.search() receives the REAL embedding_service as embedding_provider
+             (not a wrapper), so the embedding API can be used for collection resolution.
+          3. coalesced_query_embedding is NOT called — no second API round-trip.
+
+        If the code regressed to omitting precomputed_query_vector= from the
+        store.search() call, assertion (1) would fail, proving the bypass is broken.
         """
         precomputed = [0.5, 0.6, 0.7, 0.8]
-        captured_provider = {}
+        captured_kwargs: dict = {}
 
         def capture_search(**kwargs):
-            captured_provider["provider"] = kwargs.get("embedding_provider")
+            captured_kwargs.update(kwargs)
             return [], {}
 
         store = _stub_filesystem_store()
@@ -160,6 +172,9 @@ class TestPrecomputedVectorBypass:
                 "code_indexer.server.app._server_hnsw_cache",
                 None,
             ),
+            patch(
+                "code_indexer.storage.filesystem_vector_store.coalesced_query_embedding",
+            ) as mock_coalesced,
         ):
             from code_indexer.server.services.search_service import (
                 SemanticSearchService,
@@ -174,12 +189,25 @@ class TestPrecomputedVectorBypass:
                 precomputed_query_vector=precomputed,
             )
 
-        provider = captured_provider.get("provider")
-        assert provider is not None, "store.search() must receive an embedding_provider"
-        returned_vector = provider.get_embedding(
-            "ignored-text", embedding_purpose="query"
+        # (1) The exact precomputed vector must arrive at store.search()
+        assert "precomputed_query_vector" in captured_kwargs, (
+            "store.search() must receive precomputed_query_vector= when bypass is active; "
+            "regression: the kwarg was dropped before reaching FSV.search()"
         )
-        assert returned_vector == precomputed
+        assert captured_kwargs["precomputed_query_vector"] == precomputed, (
+            f"store.search() received wrong vector: "
+            f"{captured_kwargs['precomputed_query_vector']} != {precomputed}"
+        )
+
+        # (2) The REAL embedding_service (not a _PrecomputedEmbeddingProvider wrapper)
+        #     must be the embedding_provider so collection resolution works.
+        assert captured_kwargs.get("embedding_provider") is embedding_service, (
+            "store.search() must receive the real embedding_service as embedding_provider; "
+            "regression: the provider was replaced with a wrapper"
+        )
+
+        # (3) coalesced_query_embedding must NOT be called — no second API round-trip.
+        mock_coalesced.assert_not_called()
 
     def test_without_precomputed_vector_passes_real_embedding_service_to_store(
         self, tmp_path

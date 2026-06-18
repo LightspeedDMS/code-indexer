@@ -8,6 +8,10 @@ NEVER modify files outside this project's working directory. For running tests u
 
 No emoji or decorative characters in `*.md` files (README, CLAUDE, CHANGELOG, docs). Plain-text headers only.
 
+## Memory Files
+
+Memory notes in `.claude-memory/` are committed to version control. Before staging and committing ANY memory file, sanitize it for disclosure: strip secrets and PII (passwords, tokens, API keys, emails, usernames) AND system internals (machine/host names, IP addresses, network topology, cluster node identifiers, ports). Memory must capture the lesson, never the environment specifics -- a versioned file leaks forever. See memory: `feedback_no_secrets_in_memory.md`.
+
 ---
 
 ## Credentials and Access
@@ -152,7 +156,11 @@ Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_A
 
 ### Post-E2E Log Audit (MANDATORY)
 
-After every E2E test, query the server log store for ERROR/WARNING entries. Use `sqlite3 ~/.cidx-server/logs.db` (solo) or `psql "$POSTGRES_DSN"` (cluster) to check `logs` table for `level IN ('ERROR','WARNING')`. Zero new entries attributable to your changes before declaring done.
+Story #1122 automated the log-audit gate for Phase 3 (server in-process) and Phase 4 (CLI remote / live server) as session-scoped autouse pytest fixtures. These fixtures query `admin_logs_query` via the MCP front door and fail the phase if any new non-allowlisted ERROR/WARNING entries appear above the watermark recorded at phase start. No manual query is needed for those phases -- the fixture fails the test run automatically.
+
+For Phases 1, 2, and 5 (which do not yet have automated gate fixtures), manually query the server log store: `sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 50"`. Zero new entries attributable to your changes before declaring done.
+
+Gate implementation: `tests/e2e/log_audit_gate.py` (core module), `tests/e2e/server/conftest.py` (Phase 3 fixtures), `tests/e2e/cli_remote/conftest.py` (Phase 4 fixtures). Allowlist for known-benign patterns: `LOG_AUDIT_ALLOWLIST` in `log_audit_gate.py`.
 
 ### Server E2E Testing -- Front Door Only (MANDATORY)
 
@@ -264,7 +272,7 @@ Persistent storage of reusable Rust evaluator patterns in cidx-meta under `xray-
 **Essential invariants** -- NEVER refactor these:
 - Three error codes exactly: `totp_setup_required` (403), `elevation_required` (403), `elevation_failed` (401).
 - Kill switch returns HTTP **503 NOT 403**.
-- Recovery codes (10, bcrypt-hashed) grant narrow `scope=totp_repair` only -- never full-scope.
+- Recovery codes (10, HMAC-SHA256-hashed) grant narrow `scope=totp_repair` only -- never full-scope.
 - TOTP replay prevention via atomic CAS on `last_used_otp_counter`.
 
 -> Full reference: `docs/totp-elevation.md`
@@ -315,7 +323,8 @@ Server-side cache of query embeddings on the query path, both providers (voyage-
 - NEVER lowercase the key. `build_key()` (`server/services/query_embedding_cache.py`) keeps case at every step (CamelCase identifier signal -- empirically top-1 flips ~34% under lowercase on a code index). Anchor-token normalization: first N tokens in order + sorted tail; default anchor depth 2; N>=token count == exact-match; N=0 == sort-all.
 - Composite PK `(cache_key, provider, model, dimension)`. NO repo/collection column (embedding is repo-independent). PK is the cross-provider/model/dimension isolation.
 - Synchronous DB-direct: sync SELECT on lookup, sync UPSERT on miss (+ `prune_to_max`), sync `last_used` touch on hit. NO RAM layer, NO async/batched writer (deliberate: ~500 searches/day, 30/sec ceiling; RAM layer is a clean additive future optimization). The shared count cap `max_entries` (default 10000, >=100 floor in `_resolve_max_entries`, single LRU bucket both providers) is the SINGLE true cluster-wide cap.
-- Table stores ONLY query-purpose embeddings -- NEVER document-purpose (different Cohere `input_type` semantics). SHA-256 cache_key collision accepted as negligible (no fallback). Cache value is ONLY query->vector, NEVER auth-bearing.
+- Table stores ONLY query-purpose embeddings -- NEVER document-purpose (different Cohere `input_type` semantics). Cache value is ONLY query->vector, NEVER auth-bearing.
+- Key format (Story #1149): `s:<config-digest>:<normalized-query>`. The `s:` prefix is provably disjoint from legacy 64-hex SHA-256 keys (passive LRU reset -- old rows age out via prune_to_max, no active clear needed). `config_digest` is the coalescer-registry digest (provider + endpoint + model) so cache identity == coalescer identity. `build_key()` returns None when the normalized-query part exceeds 256 chars -- callers treat None as a MISS and skip lookup/write.
 - Migration `028_query_embedding_cache.sql` is additive (`CREATE TABLE IF NOT EXISTS`). Both backends first-class: `QueryEmbeddingCacheSqliteBackend` (solo) + `QueryEmbeddingCachePostgresBackend` (cluster); float32-LE blob (BLOB/BYTEA). All cache ops are fail-open (WARNING + live path; never break a query).
 
 **Semantics**: per-provider mode off/shadow/on (default shadow). off = always live, no lookup/write. shadow = ALWAYS live (returns live), lookup + record cosine on hit / upsert on miss -- measures without changing results ("would-serve rate"). on = HIT returns cached (skips provider) / MISS computes + upserts ("serving rate"). Mode/enabled/anchor read LIVE from `QueryEmbeddingCacheConfig` each call (8 Web-UI settings; no restart).

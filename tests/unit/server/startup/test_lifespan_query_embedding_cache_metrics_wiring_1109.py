@@ -377,12 +377,12 @@ class TestGaugeCheapMemo:
         cache = QueryEmbeddingCache(backend, enabled=True, voyage_mode="shadow")
         assert cache.cached_total_entries() == 0
 
-        key = build_key("hello world")
+        key = build_key("hello world", config_digest="testdigest")
         q = CacheQualifier("voyage-ai", "voyage-code-3", 3)
         cache.record_miss_or_shadow(key, q, [0.1, 0.2, 0.3])
         assert cache.cached_total_entries() == 1
 
-        key2 = build_key("another query text")
+        key2 = build_key("another query text", config_digest="testdigest")
         cache.record_miss_or_shadow(key2, q, [0.4, 0.5, 0.6])
         assert cache.cached_total_entries() == 2
 

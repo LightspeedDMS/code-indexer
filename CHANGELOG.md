@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.141.0] - 2026-06-18
+
+### Fixed
+- **Audit cache-metric cards rendered inconsistently:** "Audit Top-1 Match" showed a percentage while "Audit Avg Top-10 Overlap" showed a bare decimal (0.97), though both are [0,1] proportions. Top-10 Overlap now renders as a percentage too. Also added a zero-guard to Top-1 Match (it divided by `audit_total` with no check — a `ZeroDivisionError` when no audit samples exist, e.g. just after a node restart); it now shows `--` like the other cards, so both are consistent in format and no-data handling.
+
+## [10.140.0] - 2026-06-18
+
+### Fixed
+- **Shadow Cosine Distribution chart appeared empty even when samples existed.** Cosine-audit similarities (cached vs freshly-computed embedding of the same query) cluster at ~1.0, so all samples land in the last bucket `[0.95, 1.00)` of the 40 ascending buckets — which was scrolled off the bottom of the `max-height: 28rem` container, so the chart looked all-zero. Now renders highest-similarity buckets first (reversed) with a compact `max-height: 14rem`, so the populated buckets are visible without scrolling. Full 40-bucket distribution retained (low-cosine outliers still show on scroll).
+
+## [10.139.0] - 2026-06-18
+
+### Fixed
+- **"Recent Activity" dashboard table rendered "N/A" under the Status header with the status badge floating unlabeled to its right.** The HTMX refresh partial (`dashboard_recent_jobs.html`) renders 5 columns (Repository, Job Type, Completed, User, Status) plus a conditional Providers column, but `dashboard_stats.html`'s `<thead>` (and its inline initial body) had only 4, so after a refresh the rows misaligned under the header. Fixed the `<thead>` to match (added "User" + a conditional "Providers" header) and replaced the inline initial body with `{% include "partials/dashboard_recent_jobs.html" %}` so initial render and HTMX refresh share one row source and can't drift. Regression guard: `test_dashboard_stats_thead_alignment.py`.
+
+## [10.138.0] - 2026-06-18
+
+### Fixed
+- **Query Embedding Cache "Clear" button now sits next to the "Total Cached Entries" count** on the admin config screen (it was previously in the section footer next to "Edit", ~9 rows below the count, so it read as missing). Moved in both `config_section.html` and the `qec_display.html` HTMX swap-target partial; HTMX behavior unchanged.
+- **Shadow Cosine Distribution dashboard card rendered as an unreadable single overflowing line** instead of a chart. The ASCII bar chart relied on Jinja whitespace-control that stripped the newlines between the 40 buckets, collapsing them onto one line that overflowed the card. Replaced with a contained CSS horizontal bar chart (bar width = the existing log-scaled `bar_pct`), with `overflow-x` hidden + a capped scrollable height, plus a "No shadow cosine samples recorded yet" empty state when no samples have been recorded.
+
+## [10.137.0] - 2026-06-18
+
+### Fixed
+- **Activated-repo reindex failed "not initialized" and timed out (server in-process path).** `ActivatedRepoIndexManager` constructed with no `data_dir` hardcoded `~/.cidx-server/data`, ignoring `CIDX_SERVER_DATA_DIR`, so the reindex worker shelled `cidx index` against the wrong directory and reported "no configuration found - project needs initialization." The constructor now reads `CIDX_SERVER_DATA_DIR` (mirroring `startup/lifespan.py`); behavior is unchanged when the env var is unset.
+- **Reindex job was invisible to the job-status API.** The four reindex / index-status handlers (`mcp/handlers/admin`, `routers/indexing`) constructed `ActivatedRepoIndexManager()` without injecting the app's shared `BackgroundJobManager`, so the job ran in a throwaway manager and `GET /api/jobs/{id}` never saw it (poll timeout) — and each call leaked a worker-thread pool. The handlers now inject `app.state.background_job_manager` (and `activated_repo_manager`), failing loud if unavailable.
+- **Finished background jobs could appear stuck RUNNING forever under SQLite contention.** `_execute_job` evicted a terminal job from memory even when its terminal-status persist silently failed, leaving the polled status stale. Memory eviction is now gated on a successful persist; on failure the job is retained in memory with its terminal status (anti-silent-failure).
+
+### Tests
+- e2e Phase 3 hardening: per-request admin-token refresh in the snapshot-retention test (long-running token expiry), disabled the inline registration lifecycle Claude call (registration latency), refreshed the log-audit allowlist (dropped the stale #1154 entry, added benign operational-warning patterns), strengthened the AC2 reindex assertion to require `completed`, and widened the `fake_popen_progress` mock to accept the registration-index `timeout` kwarg.
+
+## [10.136.0] - 2026-06-17
+
+### Fixed
+- **Omni multi-repo search re-embedded the query per repo and inflated the cache hit/miss metric (#1148, completion).** Building on the single-flight fix in 10.135.0, the per-config coalescer is now the single embedding chokepoint that records hit/miss EXACTLY ONCE per `(text, provider-config)` key-resolution per user query. An omni over K same-config repos embeds the query ONCE and reuses the vector across all K (cold omni -> 1 miss + 1 provider call; warm omni -> 1 hit, not K); a single-repo query reuses its one embedding across the primary search and the memory-retrieval pass. `_compute_shared_query_vector` returns `(vector, config-digest)` and `multi_search_service` reuses the precomputed vector for a repo only when the repo's own provider-config digest matches AND neither digest is the fail-open sentinel (`is_fallback_digest` guard) — a different-config repo (e.g. Cohere embed-v4.0 1536-dim vs Voyage 1024-dim) never receives a wrong-config vector and embeds via its own provider. When a precomputed vector is present, `FilesystemVectorStore.search` uses it directly and bypasses `coalesced_query_embedding` (no re-embed, no second metric). Over-cap queries count as exactly one miss + one `long_key` per query.
+
+### Added
+- **Shadow-cosine distribution histogram on the Database Health dashboard (#1152).** The single Shadow Cosine P50 (stuck at 1.0000 in production) is replaced by a full-range distribution histogram: 40 uniform buckets spanning [-1.0, 1.0] (width 0.05, named constants), bar lengths log10-scaled so the dominant ~1.0 spike and the thin sub-1.0 collision tail are both visible, with raw-count labels and a P50 / Min / P05 summary. Computed from the existing bounded shadow-cosine ring buffer under the existing lock — observability-only, no new persistence, schema, or behavior change. Bar lengths are precomputed in Python (no Jinja `log` filter, which previously 500'd the card on any populated bucket).
+
+## [10.135.0] - 2026-06-17
+
+### Fixed
+- **EmbeddingCoalescer single-flight registry leaked memory and zeroed the hit-rate metric (#1148).** The previous implementation (rejected in code review) used thread identity to track in-flight keys and retained done futures indefinitely — causing unbounded memory growth (O(total requests) instead of O(live concurrency)), suppressing hit-rate metrics for sequential same-key warm queries on different threads (hits=0 instead of the true hit count), and leaving a latent joiner hang when the owner path had no try/finally. Reimplemented using the correct standard single-flight pattern: key registered at MISS start, removed unconditionally in try/finally on owner completion (both dispatcher and non-dispatcher paths). Concurrent same-key joiners wait on the pending Future with a bounded 60-second timeout (Messi #14); later sequential same-key callers find no registry entry, perform a real cache lookup, and each record a genuine hit metric. Cache I/O (lookup, record_hit) is restored to outside `_inflight_lock` preserving the lock-free invariant. Registry is now O(live concurrency) with zero retained entries after resolution.
+
 ## [10.134.0] - 2026-06-15
 
 ### Fixed

@@ -9,9 +9,14 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, TypedDict, List
+from typing import Callable, Dict, Any, Optional, TypedDict, List
 
-from .base_client import CIDXRemoteAPIClient, APIClientError, AuthenticationError
+from .base_client import (
+    CIDXRemoteAPIClient,
+    APIClientError,
+    AuthenticationError,
+    _LoginTransportError,
+)
 from ..remote.credential_manager import (
     ProjectCredentialManager,
     store_encrypted_credentials,
@@ -75,6 +80,7 @@ class AuthAPIClient(CIDXRemoteAPIClient):
         server_url: str,
         project_root: Optional[Path] = None,
         credentials: Optional[Dict[str, Any]] = None,
+        totp_provider: Optional[Callable[[], str]] = None,
     ):
         """Initialize authentication API client.
 
@@ -82,10 +88,15 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             server_url: Base URL of the CIDX server
             project_root: Project root directory for credential storage
             credentials: Optional existing credentials dictionary
+            totp_provider: Optional callable that returns a TOTP code string.
+                Used when the server requires MFA on login.  For interactive
+                CLI use, wire ``lambda: click.prompt("Enter your TOTP code")``.
+                When None and MFA is required, AuthenticationError is raised
+                with an actionable message.
         """
         # Initialize with empty credentials if none provided
         creds = credentials or {}
-        super().__init__(server_url, creds, project_root)
+        super().__init__(server_url, creds, project_root, totp_provider=totp_provider)
 
         self.project_root = project_root
         self.credential_manager = ProjectCredentialManager()
@@ -106,65 +117,45 @@ class AuthAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         try:
-            # Make login request to server
-            auth_payload = {
+            outcome = self._perform_login_request(username, password)
+
+            # Store credentials securely if project root provided
+            if self.project_root:
+                self._store_credentials_securely(username, password)
+
+            # Update internal credentials for future API calls
+            self.credentials = {
                 "username": username,
                 "password": password,
             }
 
-            # Use session directly for login (no auth header needed)
-            auth_endpoint = f"{self.server_url}/auth/login"
-            response = self.session.post(auth_endpoint, json=auth_payload)
+            return AuthResponse(
+                access_token=outcome.access_token,
+                token_type=outcome.token_type,
+                user_id=outcome.user_id,
+            )
 
-            if response.status_code == 200:
-                auth_response = response.json()
-
-                # Validate response format
-                if not auth_response.get("access_token"):
-                    raise AuthenticationError("No access token in response")
-
-                # Store credentials securely if project root provided
-                if self.project_root:
-                    self._store_credentials_securely(username, password)
-
-                # Update internal credentials for future API calls
-                self.credentials = {
-                    "username": username,
-                    "password": password,
-                }
-
-                return AuthResponse(
-                    access_token=auth_response["access_token"],
-                    token_type=auth_response.get("token_type", "bearer"),
-                    user_id=auth_response.get("user_id"),
+        except _LoginTransportError as e:
+            if e.cause is not None:
+                # D3: network/timeout swallowed into AuthenticationError (zero-behavior-change)
+                raise AuthenticationError(f"Unexpected error during login: {e.cause}")
+            elif e.status_code == 401:
+                raise AuthenticationError(
+                    f"Authentication failed: {e.detail or 'Invalid username or password'}"
                 )
-
-            elif response.status_code == 401:
-                try:
-                    error_detail = response.json().get(
-                        "detail", "Invalid username or password"
-                    )
-                except json.JSONDecodeError:
-                    error_detail = "Invalid username or password"
-                raise AuthenticationError(f"Authentication failed: {error_detail}")
-
-            elif response.status_code == 429:
+            elif e.status_code == 429:
                 raise APIClientError(
                     "Too many login attempts. Please wait before trying again.",
-                    response.status_code,
+                    429,
                 )
-
+            elif e.status_code == 200:
+                # Malformed 200 (missing/non-str token)
+                raise AuthenticationError("No access token in response")
             else:
-                try:
-                    error_detail = response.json().get(
-                        "detail", f"HTTP {response.status_code}"
-                    )
-                except json.JSONDecodeError:
-                    error_detail = f"HTTP {response.status_code}"
                 raise APIClientError(
-                    f"Login failed: {error_detail}", response.status_code
+                    f"Login failed: {e.detail or f'HTTP {e.status_code}'}",
+                    e.status_code,
                 )
-
         except (AuthenticationError, APIClientError):
             raise
         except Exception as e:

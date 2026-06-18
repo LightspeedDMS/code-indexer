@@ -12,6 +12,7 @@ All handlers return MCP-compliant responses with content arrays:
 """
 
 import logging
+import os
 import sys
 import types
 from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
@@ -318,7 +319,14 @@ def _resolve_git_repo_path(
 
         return resolved, None
 
-    activated_repo_manager = ActivatedRepoManager()
+    # Bug #1151: derive data_dir from CIDX_SERVER_DATA_DIR (same as service_init.py:162-163/195)
+    # so non-default-data-dir deployments resolve activated repos correctly.
+    _server_data_dir = os.environ.get(
+        "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+    )
+    activated_repo_manager = ActivatedRepoManager(
+        data_dir=str(Path(_server_data_dir) / "data")
+    )
     repo_path = activated_repo_manager.get_activated_repo_path(
         username=username, user_alias=repository_alias
     )

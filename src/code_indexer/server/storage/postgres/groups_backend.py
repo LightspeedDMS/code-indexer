@@ -102,6 +102,26 @@ class GroupsPostgresBackend:
         """
         self._pool = pool
 
+    def bootstrap_default_groups(self) -> None:
+        """Idempotently seed the default groups (admins/powerusers/users). Bug #1143.
+
+        PG mode previously never seeded these (GroupAccessManager.__init__ returned
+        early), so is_admin_user('admin') was False and group-gated ops were denied.
+        INSERT ... ON CONFLICT (name) DO NOTHING — safe on every boot.
+        """
+        from code_indexer.server.services.group_access_manager import DEFAULT_GROUPS
+
+        now = datetime.now(timezone.utc)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for group_def in DEFAULT_GROUPS:
+                    cur.execute(
+                        "INSERT INTO groups (name, description, is_default, created_at) "
+                        "VALUES (%s, %s, TRUE, %s) ON CONFLICT (name) DO NOTHING",
+                        (group_def["name"], group_def["description"], now),
+                    )
+            conn.commit()
+
     def _conn(self) -> Any:
         """Borrow a connection from the pool (context manager)."""
         return self._pool.connection()
