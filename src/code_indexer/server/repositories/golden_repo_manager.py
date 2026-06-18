@@ -1581,6 +1581,25 @@ class GoldenRepoManager:
         _popen_stdout: List[str] = []
         _popen_stderr: List[str] = []
 
+        # Bug A fix: load indexing timeout so cidx index --fts cannot stall indefinitely.
+        # Under concurrent VoyageAI load the subprocess can hang; without a timeout the
+        # 300 s e2e poll deadline fires first.  Use ScipConfig.indexing_timeout_seconds
+        # (default 3600 s) to match the same budget used by ActivatedRepoIndexManager.
+        _indexing_timeout: float = 3600.0
+        try:
+            from ..services.config_service import get_config_service as _get_cfg
+
+            _cfg = _get_cfg().get_config()
+            if _cfg.scip_config is not None:
+                _indexing_timeout = float(_cfg.scip_config.indexing_timeout_seconds)
+        except Exception as exc:
+            logger.warning(
+                "Failed to read ScipConfig.indexing_timeout_seconds; "
+                "using default %.0fs: %s",
+                _indexing_timeout,
+                exc,
+            )
+
         def _run_popen(command: List[str], phase_name: str, error_label: str) -> None:
             """Run command with Popen progress, re-raising as GitOperationError on failure."""
             _popen_stdout.clear()
@@ -1595,6 +1614,7 @@ class GoldenRepoManager:
                     all_stderr=_popen_stderr,
                     cwd=clone_path,
                     error_label=error_label,
+                    timeout=_indexing_timeout,
                 )
             except IndexingSubprocessError as e:
                 # Check for "No files found" — acceptable for golden repo registration
