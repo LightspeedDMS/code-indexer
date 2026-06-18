@@ -32,6 +32,9 @@ Usage::
 """
 
 import logging
+import os
+import select
+import signal
 import subprocess
 import threading
 from pathlib import Path
@@ -207,6 +210,12 @@ def run_with_popen_progress(
         stderr=subprocess.PIPE,
         text=True,
         env=env,
+        # start_new_session places child (and any grandchildren it spawns) in a
+        # new process group / session.  Combined with the poll-aware read loop
+        # below, this prevents grandchildren that inherit the stdout PIPE
+        # write-end from blocking the parent indefinitely after the child exits.
+        start_new_session=True,
+        close_fds=True,
     )
 
     # Report phase start (coarse marker before any lines arrive)
@@ -219,15 +228,64 @@ def run_with_popen_progress(
             f"Failed to {error_label}: subprocess stdout pipe was not created"
         )
 
-    # Drain stderr in background thread to prevent deadlock if child
-    # writes >64KB to stderr while parent is blocked reading stdout.
+    # Shared constants and shutdown pipe for both stdout and stderr readers.
+    #
+    # Both reader threads select on their respective pipe fd AND shutdown_r.
+    # When the child exits, the main loop writes a byte to shutdown_w, which
+    # immediately unblocks both select() calls so both threads exit — without
+    # waiting for grandchildren that inherited the pipe write-ends to close them.
+    READ_BUFFER_SIZE = 4096
+    POLL_INTERVAL_SECONDS = 0.05
+
+    stdout_fd = process.stdout.fileno()
+    stderr_fd = process.stderr.fileno() if process.stderr else -1
+    shutdown_r, shutdown_w = os.pipe()
+
+    # Thread-safe queue: stdout reader puts decoded lines (str) or None (sentinel).
+    import queue as _queue_mod
+
+    line_queue: "_queue_mod.Queue[Optional[str]]" = _queue_mod.Queue()
+
+    # Stderr is accumulated in a plain list; the stderr reader thread is the
+    # only writer, so no lock is needed (main thread reads only after join).
     stderr_lines: List[str] = []
 
-    def _drain_stderr() -> None:
-        if process.stderr:
-            stderr_lines.extend(process.stderr.readlines())
+    def _stderr_reader() -> None:
+        """Read raw bytes from stderr_fd via select; accumulate in stderr_lines.
 
-    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        Exits when shutdown_r is signalled (child exited) or natural EOF.
+        A grandchild holding the stderr write-end is bypassed by the shutdown
+        signal — stderr content written before child exit is still captured.
+
+        C2 fix: check the DATA fd first so that when both stderr_fd and
+        shutdown_r are ready in the same select cycle, we drain the data
+        before honouring the shutdown — preventing dropped final error bytes.
+        """
+        if stderr_fd < 0:
+            return
+        buf = b""
+        try:
+            while True:
+                rlist, _, _ = select.select([stderr_fd, shutdown_r], [], [])
+                if stderr_fd in rlist:
+                    chunk = os.read(stderr_fd, READ_BUFFER_SIZE)
+                    if not chunk:
+                        break  # natural EOF
+                    buf += chunk
+                    continue  # re-select; drain before honouring shutdown
+                if shutdown_r in rlist:
+                    # Shutdown signalled — data fd not ready, safe to stop.
+                    break
+        except OSError as exc:
+            logger.warning(
+                "run_with_popen_progress: stderr reader OSError for %s: %s",
+                error_label,
+                exc,
+            )
+        if buf:
+            stderr_lines.append(buf.decode("utf-8", errors="replace"))
+
+    stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
     stderr_thread.start()
 
     # Watchdog thread enforces timeout independent of stdout line production.
@@ -238,18 +296,93 @@ def run_with_popen_progress(
 
         def _watchdog() -> None:
             if not timed_out.wait(timeout=timeout):
-                # Event was not set within timeout — process still running, kill it.
+                # Event was not set within timeout — process still running.
+                # Kill the entire process group (child + grandchildren) so any
+                # inherited pipe fds held by grandchildren are also closed.
                 timed_out.set()
-                process.kill()
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    # Process already exited between the check and the kill.
+                    pass
+                except OSError:
+                    # Fallback: kill just the direct child if getpgid fails.
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
 
         watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
         watchdog_thread.start()
     else:
         watchdog_thread = None
 
-    for line in process.stdout:
-        all_stdout.append(line)
-        parsed = parse_progress_line(line)
+    # Poll-aware read loop — the core fix for the grandchild fd-wedge problem.
+    #
+    # The old approach (`for line in process.stdout:`) blocks until the pipe's
+    # write-end is closed by ALL holders, including grandchildren that inherit
+    # the fd.  Even after the direct child exits, a grandchild sleeping with
+    # the write-end open keeps the pipe alive and the loop blocked.
+    #
+    # Fix: both the stdout and stderr reader threads use select.select() on
+    # their respective fd AND a shared shutdown notification pipe.  The main
+    # loop checks process.poll() every POLL_INTERVAL_SECONDS; when the child
+    # has exited it writes a byte to shutdown_w, which immediately unblocks
+    # both reader threads — without waiting for pipe EOF from a grandchild.
+    #
+    # start_new_session=True on the Popen places the child + grandchildren in a
+    # new process group so the watchdog can kill them all via os.killpg on
+    # timeout.  It does NOT prevent grandchildren from inheriting pipe fds;
+    # the shutdown-pipe signal is what makes termination fast.
+
+    def _stdout_reader() -> None:
+        """Read raw bytes from stdout_fd via select; put lines on line_queue.
+
+        Exits when a shutdown signal arrives on shutdown_r (main thread writes
+        after child exit) or when the stdout fd reaches natural EOF.
+        Always puts None as a sentinel when done so the main loop can detect
+        reader completion without polling thread liveness.
+
+        C2 fix: check the DATA fd first so that when both stdout_fd and
+        shutdown_r are ready in the same select cycle, we drain the data
+        before honouring the shutdown — preventing dropped final progress lines.
+        """
+        buf = b""
+        try:
+            while True:
+                rlist, _, _ = select.select([stdout_fd, shutdown_r], [], [])
+                if stdout_fd in rlist:
+                    chunk = os.read(stdout_fd, READ_BUFFER_SIZE)
+                    if not chunk:
+                        # EOF: all write-end holders have closed their copy.
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        raw, buf = buf.split(b"\n", 1)
+                        line_queue.put(raw.decode("utf-8", errors="replace") + "\n")
+                    continue  # re-select; drain before honouring shutdown
+                if shutdown_r in rlist:
+                    # Shutdown signalled — data fd not ready, safe to stop.
+                    break
+        except OSError as exc:
+            logger.warning(
+                "run_with_popen_progress: stdout reader OSError for %s: %s",
+                error_label,
+                exc,
+            )
+        # Flush any partial line remaining in the buffer.
+        if buf:
+            line_queue.put(buf.decode("utf-8", errors="replace"))
+        # Sentinel: signals main loop that no more lines are coming.
+        line_queue.put(None)
+
+    stdout_reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
+    stdout_reader_thread.start()
+
+    def _process_stdout_line(raw_line: str) -> None:
+        """Append line to all_stdout and forward any parsed progress event."""
+        all_stdout.append(raw_line)
+        parsed = parse_progress_line(raw_line)
         if parsed is not None:
             global_pct = int(
                 allocator.map_phase_progress(
@@ -257,12 +390,81 @@ def run_with_popen_progress(
                 )
             )
             _emit(global_pct, phase=phase_name, detail=parsed.get("info", ""))
-        # Non-JSON lines: already accumulated in all_stdout, skip parsing
+
+    def _drain_line_queue() -> bool:
+        """Drain all currently available lines from line_queue.
+
+        Returns True if the sentinel (None) was encountered, meaning the
+        reader thread has finished and no more lines will arrive.
+        """
+        while True:
+            try:
+                item = line_queue.get_nowait()
+            except _queue_mod.Empty:
+                return False
+            if item is None:
+                return True  # sentinel: reader thread is done
+            _process_stdout_line(item)
+
+    # Main loop: drain the queue and check process.poll() every
+    # POLL_INTERVAL_SECONDS.  When the child exits, signal the reader thread.
+    try:
+        while True:
+            if _drain_line_queue():
+                # Sentinel received — reader is done; exit the loop.
+                break
+
+            if process.poll() is not None:
+                # Child has exited — signal reader thread to stop immediately.
+                try:
+                    os.write(shutdown_w, b"x")
+                except OSError as exc:
+                    logger.warning(
+                        "run_with_popen_progress: could not signal shutdown "
+                        "pipe for %s: %s",
+                        error_label,
+                        exc,
+                    )
+                # Wait for reader to finish, then drain remaining lines.
+                stdout_reader_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+                _drain_line_queue()
+                break
+
+            # Brief sleep before next poll — bounded, not unbounded.
+            stdout_reader_thread.join(timeout=POLL_INTERVAL_SECONDS)
+            if not stdout_reader_thread.is_alive():
+                # Reader finished on its own (natural EOF before child exited).
+                _drain_line_queue()
+                break
+    finally:
+        # C1 fix: signal shutdown on EVERY exit path (natural EOF, poll-detected
+        # child exit, and exception).  Write the shutdown byte BEFORE closing
+        # the fds so both reader threads' select.select() calls are woken up.
+        # Idempotent: if the byte was already written by the poll branch above,
+        # this is a no-op (level-triggered select; both readers still wake).
+        try:
+            os.write(shutdown_w, b"x")
+        except OSError:
+            pass  # already closed or already written — both are fine
+        # Close the shutdown pipe fds to avoid fd leaks.
+        for _fd in (shutdown_r, shutdown_w):
+            try:
+                os.close(_fd)
+            except OSError as exc:
+                logger.warning(
+                    "run_with_popen_progress: could not close shutdown pipe "
+                    "fd %d for %s: %s",
+                    _fd,
+                    error_label,
+                    exc,
+                )
 
     # Signal watchdog that process finished normally (prevents spurious kill).
     timed_out.set()
 
     process.wait()
+    # Both reader threads exit promptly when shutdown_w is signalled (on child
+    # exit) — no need for a short timeout workaround here.
     stderr_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
     if watchdog_thread is not None:
         watchdog_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
