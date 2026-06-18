@@ -338,8 +338,23 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Inject app's shared background_job_manager so the job is visible
+        # to the job-status API (GET /api/jobs/{job_id}).
+        _bjm = _utils.app_module.background_job_manager
+        if _bjm is None:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {
+                    "success": False,
+                    "error": "Server not fully initialized: background_job_manager unavailable",
+                }
+            )
         # Create index manager and trigger reindex
-        index_manager = ActivatedRepoIndexManager()
+        index_manager = ActivatedRepoIndexManager(
+            background_job_manager=_bjm,
+            activated_repo_manager=getattr(
+                _utils.app_module.app.state, "activated_repo_manager", None
+            ),
+        )
         job_id = index_manager.trigger_reindex(
             repo_alias=repo_alias,
             index_types=index_types,
@@ -450,8 +465,23 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
+        # Inject app's shared managers for correct path resolution and
+        # consistency with the trigger_reindex handler.
+        _bjm = _utils.app_module.background_job_manager
+        if _bjm is None:
+            return _mcp_response(  # type: ignore[no-any-return]
+                {
+                    "success": False,
+                    "error": "Server not fully initialized: background_job_manager unavailable",
+                }
+            )
         # Create index manager and get status
-        index_manager = ActivatedRepoIndexManager()
+        index_manager = ActivatedRepoIndexManager(
+            background_job_manager=_bjm,
+            activated_repo_manager=getattr(
+                _utils.app_module.app.state, "activated_repo_manager", None
+            ),
+        )
         status_data = index_manager.get_index_status(
             repo_alias=repo_alias,
             username=user.username,

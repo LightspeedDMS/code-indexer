@@ -9,7 +9,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
 from typing import List, Optional, Dict, Any, cast
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from code_indexer.server.auth.dependencies import get_current_user
@@ -87,7 +87,10 @@ class GetIndexStatusResponse(BaseModel):
     description="Trigger a background re-indexing job for specified index types",
 )
 def trigger_reindex(
-    alias: str, request: TriggerReindexRequest, user: User = Depends(get_current_user)
+    alias: str,
+    request: TriggerReindexRequest,
+    http_request: Request,
+    user: User = Depends(get_current_user),
 ) -> TriggerReindexResponse:
     """Trigger re-indexing for specified index types."""
     try:
@@ -96,7 +99,18 @@ def trigger_reindex(
             ActivatedRepoIndexManager,
         )
 
-        service = ActivatedRepoIndexManager()
+        _bjm = getattr(http_request.app.state, "background_job_manager", None)
+        if _bjm is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Server not fully initialized: background_job_manager unavailable",
+            )
+        service = ActivatedRepoIndexManager(
+            background_job_manager=_bjm,
+            activated_repo_manager=getattr(
+                http_request.app.state, "activated_repo_manager", None
+            ),
+        )
         result = service.trigger_reindex(
             repo_alias=alias,
             index_types=request.index_types,
@@ -150,7 +164,9 @@ def trigger_reindex(
     description="Get the status of all index types for the repository",
 )
 def get_index_status(
-    alias: str, user: User = Depends(get_current_user)
+    alias: str,
+    http_request: Request,
+    user: User = Depends(get_current_user),
 ) -> GetIndexStatusResponse:
     """Get index status for all index types."""
     try:
@@ -159,7 +175,18 @@ def get_index_status(
             ActivatedRepoIndexManager,
         )
 
-        service = ActivatedRepoIndexManager()
+        _bjm = getattr(http_request.app.state, "background_job_manager", None)
+        if _bjm is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Server not fully initialized: background_job_manager unavailable",
+            )
+        service = ActivatedRepoIndexManager(
+            background_job_manager=_bjm,
+            activated_repo_manager=getattr(
+                http_request.app.state, "activated_repo_manager", None
+            ),
+        )
         result = service.get_index_status(repo_alias=alias, username=user.username)
 
         # Transform service output to match response model
