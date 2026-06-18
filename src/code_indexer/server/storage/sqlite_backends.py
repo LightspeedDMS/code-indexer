@@ -452,20 +452,53 @@ class UsersSqliteBackend:
         key_hash: str,
         key_prefix: str,
         name: Optional[str] = None,
+        key_sha256: Optional[str] = None,
     ) -> None:
-        """Add an API key for a user."""
+        """Add an API key for a user.
+
+        key_sha256: SHA-256 hex of the raw key for O(1) bearer-auth lookup
+            (Bug #1144). None for legacy callers that don't supply it.
+        """
         now = datetime.now(timezone.utc).isoformat()
 
         def operation(conn):
             conn.execute(
                 """INSERT INTO user_api_keys
-                   (key_id, username, key_hash, key_prefix, name, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (key_id, username, key_hash, key_prefix, name, now),
+                   (key_id, username, key_hash, key_prefix, name, created_at, key_sha256)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (key_id, username, key_hash, key_prefix, name, now, key_sha256),
             )
             return None
 
         self._conn_manager.execute_atomic(operation)
+
+    def get_api_key_by_sha256(self, sha256_hex: str) -> Optional[Dict[str, Any]]:
+        """Look up an API key record by its SHA-256 hex digest (Bug #1144).
+
+        Direct indexed SELECT — never scans all rows. Returns None when not found
+        (including legacy rows with NULL key_sha256).
+
+        Returns a dict with at minimum: key_id, username, key_hash.
+        NEVER cached — must be a live DB read so revocation takes effect immediately.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """SELECT key_id, username, key_hash, key_prefix, name, created_at
+               FROM user_api_keys
+               WHERE key_sha256 = ?""",
+            (sha256_hex,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "key_id": row[0],
+            "username": row[1],
+            "key_hash": row[2],
+            "key_prefix": row[3],
+            "name": row[4],
+            "created_at": row[5],
+        }
 
     def add_mcp_credential(
         self,
@@ -6822,6 +6855,50 @@ class QueryEmbeddingCacheSqliteBackend:
         row = conn.execute("SELECT COUNT(*) FROM query_embedding_cache").fetchone()
         return row[0] if row else 0
 
+    def select_recent(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return the most-recently-used rows as metadata dicts (NO embedding vectors).
+
+        Story #1149: admin cache-sample readout.  Returns recent rows ordered by
+        last_used DESC so callers can verify key shape without direct DB access.
+        NEVER includes the embedding column — no vectors, no secrets.
+
+        Args:
+            limit: Maximum number of rows to return (default 10).
+
+        Returns:
+            List of dicts with keys: cache_key, provider, model, dimension, key_length.
+            key_length is len(cache_key) computed DB-side for efficiency.
+            Empty list on any backend error (fail-open).
+        """
+        try:
+            conn = self._conn_manager.get_connection()
+            rows = conn.execute(
+                """
+                SELECT cache_key, provider, model, dimension,
+                       LENGTH(cache_key) AS key_length
+                FROM query_embedding_cache
+                ORDER BY last_used DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "cache_key": row[0],
+                    "provider": row[1],
+                    "model": row[2],
+                    "dimension": row[3],
+                    "key_length": row[4],
+                }
+                for row in rows
+            ]
+        except Exception:
+            logger.warning(
+                "QueryEmbeddingCacheSqliteBackend: select_recent failed (fail-open)",
+                exc_info=True,
+            )
+            return []
+
     def clear(self) -> None:
         """Delete all rows from the cache table."""
 
@@ -6829,3 +6906,10 @@ class QueryEmbeddingCacheSqliteBackend:
             conn.execute("DELETE FROM query_embedding_cache")
 
         self._conn_manager.execute_atomic(operation)
+
+    def clear_all(self) -> None:
+        """Delete all rows from the cache table (AC3 named method).
+
+        Idempotent: clearing an already-empty table is a no-op success.
+        """
+        self.clear()

@@ -7,7 +7,8 @@ or pytest parametrize infrastructure.
 
 from __future__ import annotations
 
-from typing import Union
+import json
+from typing import Any, Union
 
 import httpx
 from fastapi.testclient import TestClient
@@ -105,3 +106,44 @@ def call_mcp_tool(
         },
         headers=headers,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool-result decoder
+# ---------------------------------------------------------------------------
+
+
+def parse_mcp_result(resp_body: dict[str, Any]) -> dict[str, Any]:
+    """Extract the tool result dict from a JSON-RPC 2.0 response body.
+
+    Handles both observed MCP response shapes:
+      Shape A: {"result": {"content": [{"type": "text", "text": "<json>"}]}}
+      Shape B: {"result": [{"type": "text", "text": "<json>"}]}
+
+    The CIDX server wraps every tool response via ``_mcp_response`` as Shape A
+    (a content array whose single text item is the JSON-stringified payload).
+    Shape B is tolerated for forward compatibility with raw content-list
+    responses.
+
+    Args:
+        resp_body: The parsed JSON body of an MCP tools/call response.
+
+    Returns:
+        The first successfully decoded dict, or an empty dict if none found.
+    """
+    result = resp_body.get(FIELD_RESULT, [])
+    if isinstance(result, dict):
+        items = result.get("content", [])
+    elif isinstance(result, list):
+        items = result
+    else:
+        items = []
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            try:
+                decoded = json.loads(item["text"])
+                if isinstance(decoded, dict):
+                    return decoded
+            except json.JSONDecodeError:
+                continue
+    return {}

@@ -283,6 +283,10 @@ class ScipConfig:
 
     # AC9: Indexing timeout in seconds (default 3600s/1 hour, minimum 300s/5 min)
     indexing_timeout_seconds: int = 3600
+    # Registration-path index timeout (default 240s — deliberately below the 300s e2e
+    # poll deadline so a stuck registration job fails fast with a clear error instead of
+    # an opaque 300s timeout in the poller).  Must stay < e2e poll timeout (300s).
+    registration_indexing_timeout_seconds: int = 240
     # AC10: SCIP generation timeout in seconds (default 600s/10 min, minimum 60s/1 min)
     scip_generation_timeout_seconds: int = 600
     # AC11: Temporal staleness threshold in days (default 7 days, minimum 1 day)

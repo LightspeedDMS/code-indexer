@@ -1,0 +1,60 @@
+<div id="display-query_embedding_cache">
+    <table class="config-table">
+        <tbody>
+            <tr>
+                <td class="config-label">Enabled</td>
+                <td class="config-value">{{ 'Yes' if config.query_embedding_cache.query_embedding_cache_enabled else 'No' }}</td>
+                <td class="config-note"><small>Master kill switch</small></td>
+            </tr>
+            <tr>
+                <td class="config-label">Max Entries</td>
+                <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_max_entries }}</td>
+                <td class="config-note"><small>Shared LRU cap (minimum 100)</small></td>
+            </tr>
+            <tr>
+                <td class="config-label">Total Cached Entries</td>
+                <td class="config-value">{{ config.query_embedding_cache.total_cached_entries }}</td>
+                <td class="config-note"><small>Current row count in the cache store (read-only)</small></td>
+            </tr>
+            <tr>
+                <td class="config-label">Voyage Mode</td>
+                <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_voyage_mode }}</td>
+                <td class="config-note"><small>off / shadow / on</small></td>
+            </tr>
+            <tr>
+                <td class="config-label">Voyage Anchor Tokens</td>
+                <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_voyage_anchor_tokens }}</td>
+                <td class="config-note"><small>Leading tokens kept in order (0 = sort all)</small></td>
+            </tr>
+            <tr>
+                <td class="config-label">Voyage Audit Sample Rate</td>
+                <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_voyage_audit_sample_rate }}</td>
+                <td class="config-note"><small>Fraction of shadow hits to audit [0.0-1.0]</small></td>
+            </tr>
+            <tr>
+                <td class="config-label">Cohere Mode</td>
+                <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_cohere_mode }}</td>
+                <td class="config-note"><small>off / shadow / on</small></td>
+            </tr>
+            <tr>
+                <td class="config-label">Cohere Anchor Tokens</td>
+                <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_cohere_anchor_tokens }}</td>
+                <td class="config-note"><small>Leading tokens kept in order (0 = sort all)</small></td>
+            </tr>
+            <tr>
+                <td class="config-label">Cohere Audit Sample Rate</td>
+                <td class="config-value">{{ config.query_embedding_cache.query_embedding_cache_cohere_audit_sample_rate }}</td>
+                <td class="config-note"><small>Fraction of shadow hits to audit [0.0-1.0]</small></td>
+            </tr>
+        </tbody>
+    </table>
+    <div class="section-actions">
+        <button class="outline small" onclick="toggleEditMode('query_embedding_cache')">Edit</button>
+        <button class="outline small danger"
+                hx-post="/admin/config/query-embedding-cache/clear"
+                hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+                hx-confirm="Clear the entire query embedding cache? This deletes all cached embeddings and cannot be undone."
+                hx-target="#display-query_embedding_cache"
+                hx-swap="outerHTML">Clear</button>
+    </div>
+</div>

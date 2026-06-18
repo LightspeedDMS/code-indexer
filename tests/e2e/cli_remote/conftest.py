@@ -4,13 +4,18 @@ Shared pytest fixtures for CLI remote E2E tests (Phase 4).
 Session-scoped fixtures:
   registered_golden_repo  -- registers markupsafe golden repo via REST API
   authenticated_workspace -- tmp dir with cidx init --remote + cidx auth login
+
+Log-audit gate fixtures (Story #1122):
+  log_watermark_phase4    -- max log id at phase start (after stable-count poll)
+  _phase4_log_audit_gate  -- autouse session fixture; fails phase on new
+                             non-allowlisted ERROR/WARNING at teardown
 """
 
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Iterator
 
 import httpx
 import pytest
@@ -278,3 +283,80 @@ def activated_golden_repo(
         timeout=e2e_config.repo_activation_timeout,
     )
     return registered_golden_repo
+
+
+# ---------------------------------------------------------------------------
+# Log-audit gate fixtures (Story #1122)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def log_watermark_phase4(
+    e2e_http_client: httpx.Client,
+    e2e_admin_token: str,
+) -> int:
+    """Record the maximum log id BEFORE Phase 4 tests run (watermark).
+
+    Uses poll_until_stable_count to wait for the live server's async log
+    writer to drain before recording the watermark.  No flush() is available
+    for live subprocess servers (flush() is in-process only).
+
+    Any log entry at or below this id was emitted during server startup or
+    pre-phase setup and is excluded from the phase audit.
+    """
+    from tests.e2e.log_audit_gate import (
+        get_log_watermark,
+        poll_until_stable_count,
+        query_logs_via_mcp,
+    )
+
+    # Poll until log count stabilises (async writer drain, Bug #1078 mitigation)
+    poll_until_stable_count(
+        count_fn=lambda: len(query_logs_via_mcp(e2e_http_client, e2e_admin_token)),
+        max_attempts=10,
+        sleep_seconds=0.3,
+    )
+    return get_log_watermark(e2e_http_client, e2e_admin_token)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _phase4_log_audit_gate(
+    e2e_http_client: httpx.Client,
+    e2e_admin_token: str,
+    log_watermark_phase4: int,
+) -> Iterator[None]:
+    """Autouse session fixture: run the log-audit gate at Phase 4 teardown.
+
+    Yields first (tests run), then at teardown:
+      1. Poll until log count stabilises (async writer drain, Bug #1078).
+      2. Query admin_logs_query via MCP front door.
+      3. Diff against log_watermark_phase4 to find new entries.
+      4. Fail with detailed report if any new non-allowlisted ERROR/WARNING found.
+
+    Note: no flush() -- Phase 4 uses a live uvicorn subprocess; flush() is
+    in-process only.  poll_until_stable_count is the live-phase drain barrier.
+    """
+    from tests.e2e.log_audit_gate import (
+        poll_until_stable_count,
+        query_logs_via_mcp,
+        run_log_audit_gate,
+    )
+
+    yield  # Tests run here
+
+    # --- Teardown: audit phase logs ---
+    # Poll until stable to drain buffered entries (Bug #1078)
+    poll_until_stable_count(
+        count_fn=lambda: len(query_logs_via_mcp(e2e_http_client, e2e_admin_token)),
+        max_attempts=10,
+        sleep_seconds=0.3,
+    )
+
+    result = run_log_audit_gate(
+        e2e_http_client,
+        e2e_admin_token,
+        watermark_id=log_watermark_phase4,
+        phase_name="Phase 4 (CLI Remote / Live Server)",
+    )
+    if not result.passed:
+        raise AssertionError(result.failure_message())

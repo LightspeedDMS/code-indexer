@@ -87,6 +87,11 @@ class _FakeVoyageProvider:
     def get_model_info(self) -> dict:
         return {"dimensions": DIMENSION}
 
+    def get_embedding(
+        self, text: str, *, embedding_purpose: Optional[str] = None
+    ) -> List[float]:
+        return LIVE_VEC
+
 
 def _make_cache(
     *,
@@ -99,7 +104,11 @@ def _make_cache(
     cache.enabled_for.return_value = enabled
     cache.mode_for.return_value = voyage_mode
     cache.lookup.return_value = hit_bytes
-    cache.build_key_for_provider = lambda text, provider_name: build_key(text, 2)
+    cache.build_key_for_provider = (
+        lambda text, provider_name, *, config_digest="test-digest": build_key(
+            text, 2, config_digest=config_digest
+        )
+    )
     cache.qualifier.return_value = MagicMock(
         provider=PROVIDER_NAME, model=MODEL_NAME, dimension=DIMENSION
     )
@@ -210,16 +219,18 @@ class TestCoalescedQueryEmbeddingSignature:
         )
 
     def test_default_false_unchanged_behavior_no_cache(self, monkeypatch):
-        """Default False with no cache must call _compute_live (unchanged)."""
+        """Default False with no cache must call governed_query_embedding (unchanged)."""
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: None)
 
         live_calls: list = []
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose=None, acquire_timeout=30.0
+        ):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(governed_call, "governed_query_embedding", _fake_governed)
 
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
@@ -233,11 +244,13 @@ class TestCoalescedQueryEmbeddingSignature:
 
         live_calls: list = []
 
-        def _fake_live(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake_governed(
+            provider, text, *, embedding_purpose=None, acquire_timeout=30.0
+        ):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
+        monkeypatch.setattr(governed_call, "governed_query_embedding", _fake_governed)
 
         result = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT, no_embedding_cache_shortcut=True
@@ -334,11 +347,11 @@ class TestBypassWrapSemantics:
     def _fake_live_fn(self, monkeypatch):
         live_calls: list = []
 
-        def _fake(provider, text, embedding_purpose=None, acquire_timeout=30.0):
+        def _fake(provider, text, *, embedding_purpose=None, acquire_timeout=30.0):
             live_calls.append(text)
             return LIVE_VEC
 
-        monkeypatch.setattr(governed_call, "_compute_live", _fake)
+        monkeypatch.setattr(governed_call, "governed_query_embedding", _fake)
         return live_calls
 
     def test_bypass_true_mode_on_skips_lookup_computes_live_writes_cache(

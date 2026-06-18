@@ -241,7 +241,14 @@ class RecordingCoalescer:
     def __init__(self) -> None:
         self.calls: List[Dict[str, Any]] = []
 
-    def submit(self, text: str, embedding_purpose: str = "query") -> List[float]:
+    def submit(
+        self,
+        text: str,
+        embedding_purpose: str = "query",
+        *,
+        no_embedding_cache_shortcut: bool = False,
+        audit_ctx: Optional[Any] = None,
+    ) -> List[float]:
         self.calls.append({"text": text, "embedding_purpose": embedding_purpose})
         return [1.0, 2.0]
 

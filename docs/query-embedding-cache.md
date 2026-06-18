@@ -173,7 +173,8 @@ string resolves to `shadow`.
 
 ### 2.2 The anchor dial trade-off
 
-`build_key(text, anchor_tokens)` normalizes the query before hashing:
+`build_key(text, anchor_tokens, *, config_digest)` normalizes the query and
+returns a config-namespaced readable key (Story #1149):
 
 1. Tokenize with `text.split()` (any whitespace run; empty tokens dropped;
    punctuation NOT stripped, it stays attached to its token).
@@ -181,13 +182,21 @@ string resolves to `shadow`.
    prefix).
 3. Sort the remaining tokens alphabetically (case-aware lexicographic on the
    raw Unicode code points; duplicates kept as a sorted multiset).
-4. Join anchor prefix + sorted tail with single spaces.
-5. Return the SHA-256 hex of the UTF-8 bytes.
+4. Join anchor prefix + sorted tail with single spaces -> `normalized`.
+5. If `len(normalized) > 256`: return `None` (NEVER truncated; caller treats
+   None as a MISS and skips lookup and write).
+6. Else: return `f"s:{config_digest}:{normalized}"`.
+
+The `s:` prefix is provably disjoint from legacy 64-hex SHA-256 keys, enabling
+a passive LRU reset: old rows age out via prune_to_max without any active clear
+or destructive DDL. `config_digest` is the coalescer-registry digest (provider
++ endpoint + model) so cache identity == coalescer identity: two endpoints
+produce two digests = two keyspaces, closing the endpoint cross-serve gap.
 
 Boundary behaviours: `anchor_tokens == 0` sorts ALL tokens (no anchor prefix);
 `anchor_tokens >= token_count` keeps every token in original order, which is
-exact-match semantics; empty/whitespace input hashes the empty string (stable,
-non-crashing). Case is never lowercased at any step.
+exact-match semantics; empty/whitespace input normalizes to the empty string
+(key is `f"s:{config_digest}:"`). Case is never lowercased at any step.
 
 The dial trades cache collapse against fidelity. A higher anchor depth means
 fewer tail reorderings collapse to one key (fewer hits) but the served vector is
@@ -325,8 +334,12 @@ These are non-negotiable. They are enforced in code and verified against it.
 - The table stores ONLY query-purpose embeddings, NEVER document-purpose
   embeddings. The two have different Cohere `input_type` semantics
   (`search_query` vs `search_document`) and are not interchangeable.
-- SHA-256 cache_key collisions are accepted as negligible. There is no
-  collision-handling fallback path.
+- Key format (Story #1149): `s:<config-digest>:<normalized-query>`. The `s:`
+  prefix is provably disjoint from legacy 64-hex SHA-256 keys so both keyspaces
+  coexist and legacy rows age out via passive LRU (prune_to_max). `config_digest`
+  is the coalescer-registry digest (provider + endpoint + model). `build_key()`
+  returns `None` when the normalized-query part exceeds 256 chars; callers MUST
+  treat `None` as a MISS and skip lookup and write. The key is NEVER truncated.
 - The cache value is only query-string to vector. It NEVER stores auth-bearing
   data.
 - The migration is additive only (`CREATE TABLE IF NOT EXISTS`), rolling-restart

@@ -258,9 +258,15 @@ def test_zzz_mcp_create_and_remove_group(
     assert payload.get("name") == _DESTROY_GROUP, (
         f"create_group name mismatch: {payload.get('name')!r}"
     )
+    # create_group returns a numeric group_id; handle_get_group uses _validate_group_id
+    # which expects the numeric id (not the name) in the "group_id" argument.
+    created_group_id = payload.get("group_id")
+    assert created_group_id is not None, (
+        f"create_group did not return a group_id: {payload}"
+    )
 
     get_resp = call_mcp_tool(
-        test_client, "get_group", {"group_name": _DESTROY_GROUP}, auth_headers
+        test_client, "get_group", {"group_id": str(created_group_id)}, auth_headers
     )
     _assert_resp(get_resp, label="get_group E2E_DESTROY_grp")
     assert _mcp_result(get_resp).get("name") == _DESTROY_GROUP
@@ -400,7 +406,7 @@ def test_zzz_mcp_check_maintenance_cycle(
     test_client: TestClient,
     auth_headers: dict,
 ) -> None:
-    """Enter maintenance mode, verify in_maintenance=True, then exit.
+    """Placeholder: maintenance cycle not testable in Phase 3 in-process environment.
 
     Story #924: The MCP ``enter_maintenance_mode`` and ``exit_maintenance_mode``
     tools were removed.  Enter/exit maintenance is now restricted to localhost-only
@@ -410,14 +416,13 @@ def test_zzz_mcp_check_maintenance_cycle(
 
     FastAPI TestClient presents ``request.client.host == "testclient"`` which is
     not a valid loopback IP address, so it fails ``require_localhost`` with 403.
-    The maintenance cycle therefore cannot be exercised in the Phase 3 in-process
-    TestClient environment.  This scenario is covered by Phase 4 or Phase 5 tests
-    where a real subprocess server listens on localhost.
+    The maintenance cycle is not testable in the Phase 3 in-process TestClient
+    environment.  A real localhost maintenance test is tracked in S10/#1132.
     """
     pytest.skip(
-        "Maintenance enter/exit removed from MCP (Story #924) and restricted to "
-        "localhost-only REST endpoints; TestClient host='testclient' fails the "
-        "loopback check — not testable in the Phase 3 in-process environment."
+        "Maintenance localhost-only REST endpoints are not testable via FastAPI "
+        "TestClient (host='testclient' fails the loopback check). "
+        "A real maintenance test is planned in S10/#1132."
     )
 
 

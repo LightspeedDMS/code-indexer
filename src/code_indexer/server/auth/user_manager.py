@@ -690,6 +690,7 @@ class UserManager:
         key_prefix: str,
         name: Optional[str],
         created_at: str,
+        key_sha256: Optional[str] = None,
     ) -> bool:
         """
         Add an API key to user's api_keys array.
@@ -697,10 +698,12 @@ class UserManager:
         Args:
             username: Username
             key_id: Unique key ID
-            key_hash: Hashed API key
+            key_hash: Hashed API key (bcrypt)
             key_prefix: Key prefix for display (e.g., "cidx_sk_a1b2")
             name: Optional name for the key
             created_at: ISO format timestamp
+            key_sha256: SHA-256 hex of the raw key for O(1) bearer-auth lookup
+                (Bug #1144). None for legacy callers.
 
         Returns:
             True if added, False if user not found
@@ -717,6 +720,7 @@ class UserManager:
                 key_hash=key_hash,
                 key_prefix=key_prefix,
                 name=name,
+                key_sha256=key_sha256,
             )
             return True
         else:
@@ -726,17 +730,51 @@ class UserManager:
                 return False
             if "api_keys" not in users_data[username]:
                 users_data[username]["api_keys"] = []
-            users_data[username]["api_keys"].append(
-                {
-                    "key_id": key_id,
-                    "name": name,
-                    "hash": key_hash,
-                    "key_prefix": key_prefix,
-                    "created_at": created_at,
-                }
-            )
+            entry: Dict[str, Any] = {
+                "key_id": key_id,
+                "name": name,
+                "hash": key_hash,
+                "key_prefix": key_prefix,
+                "created_at": created_at,
+            }
+            if key_sha256 is not None:
+                entry["key_sha256"] = key_sha256
+            users_data[username]["api_keys"].append(entry)
             self._save_users(users_data)
             return True
+
+    def get_api_key_by_sha256(self, sha256_hex: str) -> Optional[Dict[str, Any]]:
+        """
+        Look up an API key record by its SHA-256 hex digest (Bug #1144).
+
+        Direct indexed lookup — no bcrypt scanning. Returns None when not found
+        (including legacy rows with no key_sha256).
+
+        NEVER cached — live DB read so revocation takes effect immediately.
+
+        Args:
+            sha256_hex: SHA-256 hex digest of the raw API key
+
+        Returns:
+            Dict with key_id, username, key_hash (and other metadata) or None.
+        """
+        if self._use_sqlite and self._sqlite_backend is not None:
+            return self._sqlite_backend.get_api_key_by_sha256(sha256_hex)  # type: ignore[no-any-return]
+
+        # JSON file storage (backward compatible) — iterate all users/keys
+        users_data = self._load_users()
+        for username, user_data in users_data.items():
+            for key_entry in user_data.get("api_keys", []):
+                if key_entry.get("key_sha256") == sha256_hex:
+                    return {
+                        "key_id": key_entry["key_id"],
+                        "username": username,
+                        "key_hash": key_entry.get("hash", ""),
+                        "key_prefix": key_entry.get("key_prefix", ""),
+                        "name": key_entry.get("name"),
+                        "created_at": key_entry.get("created_at", ""),
+                    }
+        return None
 
     def get_api_keys(self, username: str) -> List[Dict[str, Any]]:
         """

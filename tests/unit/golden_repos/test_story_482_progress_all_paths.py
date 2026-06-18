@@ -122,6 +122,7 @@ class TestPathAPostCloneWorkflowProgress:
                 all_stderr,
                 cwd,
                 error_label=None,
+                **kwargs,
             ):
                 if progress_callback is not None:
                     progress_callback(
@@ -228,6 +229,7 @@ class TestPathCIndexSourceProgress:
             all_stderr,
             cwd,
             error_label=None,
+            **kwargs,
         ):
             if progress_callback is not None:
                 progress_callback(

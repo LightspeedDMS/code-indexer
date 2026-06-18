@@ -313,6 +313,15 @@ class DatabaseSchema:
         ON user_api_keys(username)
     """
 
+    # Bug #1144: partial unique index on key_sha256 for O(1) bearer-auth lookup.
+    # WHERE clause excludes NULL rows (legacy keys without sha256) so the index
+    # does not need covering NULL values and stays lean.
+    CREATE_IDX_USER_API_KEYS_SHA256 = """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_user_api_keys_sha256
+        ON user_api_keys(key_sha256)
+        WHERE key_sha256 IS NOT NULL
+    """
+
     # user_mcp_credentials: looked up by username (listing) and client_id (auth)
     CREATE_IDX_USER_MCP_CREDENTIALS_USERNAME = """
         CREATE INDEX IF NOT EXISTS idx_user_mcp_credentials_username
@@ -758,6 +767,9 @@ class DatabaseSchema:
             # Bug #1072 Chunk 1: private_key column for cluster-aware SSH key storage
             # (mirrors PostgreSQL migration 027).
             self._migrate_ssh_keys_private_key(conn)
+            # Bug #1144: SHA-256 lookup column for API key bearer authentication
+            # (mirrors PostgreSQL migration 029).
+            self._migrate_user_api_keys_sha256(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -828,6 +840,41 @@ class DatabaseSchema:
             conn.execute("ALTER TABLE ssh_keys ADD COLUMN private_key TEXT")
             conn.commit()
             logger.info("Migrated ssh_keys schema: added private_key column")
+
+    def _migrate_user_api_keys_sha256(self, conn: sqlite3.Connection) -> None:
+        """
+        Add key_sha256 column to user_api_keys (Bug #1144).
+
+        key_sha256: deterministic SHA-256 hex of the raw key — enables O(1)
+            bearer-auth lookup without bcrypt-scanning all rows.
+
+        Also creates the partial unique index on key_sha256 for existing databases.
+
+        Idempotent: checks for existing column via PRAGMA table_info before adding.
+        Backward-compatible: column is nullable; existing rows get NULL.
+        Legacy keys (NULL key_sha256) simply will not authenticate via Bearer —
+        the path never worked before this migration.
+
+        Mirrors PostgreSQL migration 029.
+        """
+        cursor = conn.execute("PRAGMA table_info(user_api_keys)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations_applied = []
+        if "key_sha256" not in existing_columns:
+            conn.execute("ALTER TABLE user_api_keys ADD COLUMN key_sha256 TEXT")
+            migrations_applied.append("key_sha256")
+
+        # Idempotent partial unique index — CREATE UNIQUE INDEX IF NOT EXISTS
+        conn.execute(self.CREATE_IDX_USER_API_KEYS_SHA256)
+
+        if migrations_applied:
+            conn.commit()
+            logger.info(
+                f"Bug #1144: Migrated user_api_keys schema: added {migrations_applied}"
+            )
+        else:
+            conn.commit()
 
     def _migrate_user_git_credentials(self, conn: sqlite3.Connection) -> None:
         """

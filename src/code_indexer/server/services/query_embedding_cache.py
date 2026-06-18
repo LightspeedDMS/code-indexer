@@ -1,12 +1,18 @@
-"""Story #1105 / #1106: QueryEmbeddingCache service — anchor-token embedding cache.
+"""Story #1105 / #1106 / #1149: QueryEmbeddingCache service — anchor-token embedding cache.
 
 Provides:
-- build_key(text, anchor_tokens=2) -> SHA-256 hex (case-preserved, anchor-token
-  normalised).  Story #1106 generalises S1's exact-match key: the first
-  ``anchor_tokens`` tokens are kept in original order; the remaining tokens are
-  sorted alphabetically (duplicates kept as a sorted multiset).  anchor_tokens=0
-  sorts ALL tokens; anchor_tokens >= token count degenerates to exact-match.
-  CASE IS NEVER LOWERCASED at any step.
+- build_key(text, *, config_digest, anchor_tokens=2) -> Optional[str]
+  (Story #1149) Returns a config-namespaced readable string of the form
+  ``s:<config-digest>:<normalized-query>`` where normalized-query is the
+  anchor-token-normalised form of *text* (case-preserved, anchor-token
+  normalised, Story #1106).  Returns None when the normalized-query part
+  exceeds the 256-char cap — the form is NEVER truncated.  The ``s:`` prefix
+  makes new keys provably disjoint from legacy 64-hex SHA-256 keys so both
+  keyspaces can coexist and legacy rows age out via LRU (passive reset).
+  The ``config_digest`` is the SAME digest computed by the #1112 coalescer
+  registry (provider + endpoint + model) so cache identity == coalescer
+  identity: two endpoints produce two digests = two keyspaces, closing the
+  endpoint cross-serve gap.
 - CacheQualifier: named-tuple PK fields (provider, model, dimension)
 - QueryEmbeddingCache: service wrapping a QueryEmbeddingCacheBackend with
   per-provider mode gating (off / shadow / on) and fail-open error handling.
@@ -30,7 +36,6 @@ Namespace-change observability (Story #1106):
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from typing import Dict, List, NamedTuple, Optional, cast
@@ -56,42 +61,63 @@ _VALID_MODES = {_MODE_OFF, _MODE_SHADOW, _MODE_ON}
 _DEFAULT_ANCHOR_TOKENS = 2
 
 # ---------------------------------------------------------------------------
-# Key building
+# Key cap: the normalized-query part MUST NOT exceed this many characters.
+# Measured BEFORE the 's:' prefix and config-digest are prepended.
+# Over-cap -> build_key returns None (NEVER truncated).
+# ---------------------------------------------------------------------------
+
+_NORMALIZED_QUERY_CAP = 256
+
+# ---------------------------------------------------------------------------
+# Key building (Story #1149)
 # ---------------------------------------------------------------------------
 
 
-def build_key(text: str, anchor_tokens: int = _DEFAULT_ANCHOR_TOKENS) -> str:
-    """Return SHA-256 hex of the anchor-token-normalised representation of *text*.
+def build_key(
+    text: str,
+    anchor_tokens: int = _DEFAULT_ANCHOR_TOKENS,
+    *,
+    config_digest: str,
+) -> Optional[str]:
+    """Return a config-namespaced readable cache key, or None when over the cap.
 
-    Normalisation algorithm (Story #1106):
-    1. Tokenise: ``text.split()`` (no argument) — splits on any whitespace run,
-       strips leading/trailing whitespace, discards empty tokens automatically.
-       Punctuation is NOT stripped (attached to its token).
-    2. Take the first ``anchor_tokens`` tokens in ORIGINAL order (the anchor prefix).
-    3. Sort the REMAINING tokens ALPHABETICALLY (case-aware, i.e. lexicographic on
-       the raw Unicode code points — NEVER lowercased).  Duplicates are kept as a
-       sorted multiset.
+    Key format (Story #1149): ``s:<config-digest>:<normalized-query>``
+
+    The ``s:`` prefix is provably disjoint from legacy 64-hex SHA-256 keys
+    (which never start with 's:'), enabling a passive LRU reset: old keys age
+    out via prune_to_max without any active clear() or destructive DDL.
+
+    Normalisation algorithm (same as Story #1106):
+    1. Tokenise: ``text.split()`` — collapses whitespace runs, strips leading/
+       trailing whitespace, preserves punctuation (attached to token).
+    2. Take the first ``anchor_tokens`` tokens in ORIGINAL order (anchor prefix).
+    3. Sort REMAINING tokens ALPHABETICALLY (lexicographic on raw Unicode code
+       points — NEVER lowercased). Duplicates kept as sorted multiset.
     4. Normalised string = anchor prefix + sorted tail, joined by a single space.
-    5. Return SHA-256 hex of the normalised string encoded as UTF-8.
+    5. If len(normalised) > 256 -> return None (NEVER truncate).
+    6. Else -> return ``f"s:{config_digest}:{normalised}"``.
 
-    Boundary behaviours:
-    - ``anchor_tokens == 0`` -> sort ALL tokens (no anchor prefix).
-    - ``anchor_tokens >= token_count`` -> all tokens in original order; tail is
-      empty; key equals exact-match SHA-256 of the joined tokens.
-    - Empty / whitespace-only input -> empty token list -> SHA-256 of ``""``
-      (stable, non-crashing).
+    Cap behaviour:
+    - The cap (256 chars) is measured on the *normalised-query part ONLY*,
+      before the prefix and digest are prepended.
+    - An over-cap result MUST return None — the form is NEVER truncated.
+    - Callers MUST treat None as a MISS and skip lookup and write.
 
-    CASE PRESERVED throughout — never lowercased.  Two queries that differ only
-    in case produce different keys.
+    Case: NEVER lowercased at any step.
 
     Args:
         text: The raw query string (any length, including empty).
         anchor_tokens: Number of leading tokens to keep in original order.
-            Remaining tokens are sorted alphabetically.  Must be >= 0; negative
-            values are treated as 0.  Default: 2.
+            Remaining tokens are sorted alphabetically.  Negative values are
+            treated as 0 (sort-all).  Default: 2.
+        config_digest: The coalescer-registry digest for the provider config
+            (provider + endpoint + model). MUST be the value from
+            ``coalescer_registry._digest_for_provider(provider)`` — reused, not
+            recomputed here. Keyword-only to prevent positional accidents.
 
     Returns:
-        64-character lowercase hex string (SHA-256 digest).
+        ``f"s:{config_digest}:{normalised}"`` when normalised <= 256 chars,
+        or ``None`` when the normalised-query part exceeds the cap.
     """
     # Clamp to >= 0 defensively (negative is not meaningful)
     n = max(0, anchor_tokens)
@@ -105,7 +131,11 @@ def build_key(text: str, anchor_tokens: int = _DEFAULT_ANCHOR_TOKENS) -> str:
         tail = sorted(tokens[n:])  # lexicographic (case-aware); duplicates kept
         normalised = " ".join(anchor + tail)
 
-    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+    # Cap check: measured on the normalized-query part ONLY.
+    if len(normalised) > _NORMALIZED_QUERY_CAP:
+        return None
+
+    return f"s:{config_digest}:{normalised}"
 
 
 # ---------------------------------------------------------------------------
@@ -178,18 +208,29 @@ class QueryEmbeddingCache:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def build_key(text: str, anchor_tokens: int = _DEFAULT_ANCHOR_TOKENS) -> str:
+    def build_key(
+        text: str,
+        anchor_tokens: int = _DEFAULT_ANCHOR_TOKENS,
+        *,
+        config_digest: str,
+    ) -> Optional[str]:
         """Delegate to module-level :func:`build_key`.
+
+        Story #1149: returns the config-namespaced key
+        ``f"s:{config_digest}:{normalised}"`` or None when the normalised
+        query exceeds the 256-char cap.
 
         Args:
             text: The raw query string.
             anchor_tokens: Number of leading tokens to keep in original order.
                 Remaining tokens are sorted alphabetically.  Default: 2.
+            config_digest: Coalescer-registry digest for the provider config.
+                Keyword-only to prevent positional accidents.
 
         Returns:
-            64-character SHA-256 hex string.
+            ``f"s:{config_digest}:{normalised}"`` or None when over cap.
         """
-        return build_key(text, anchor_tokens)
+        return build_key(text, anchor_tokens, config_digest=config_digest)
 
     def qualifier(self, provider: object) -> CacheQualifier:
         """Extract a :class:`CacheQualifier` from a provider object.
@@ -366,8 +407,18 @@ class QueryEmbeddingCache:
 
         return effective
 
-    def build_key_for_provider(self, text: str, provider_name: str) -> str:
+    def build_key_for_provider(
+        self,
+        text: str,
+        provider_name: str,
+        *,
+        config_digest: str,
+    ) -> Optional[str]:
         """Build a cache key using the LIVE ``anchor_tokens`` for *provider_name*.
+
+        Story #1149: returns the config-namespaced key
+        ``f"s:{config_digest}:{normalised}"`` or None when the normalised query
+        exceeds the 256-char cap.
 
         Convenience method that combines :meth:`anchor_tokens_for` and
         :func:`build_key` in one call.  Used by the cache-wrap layer so the
@@ -376,11 +427,15 @@ class QueryEmbeddingCache:
         Args:
             text: The raw query string.
             provider_name: e.g. "voyage-ai" or "cohere".
+            config_digest: Coalescer-registry digest for the provider config.
+                Keyword-only to prevent positional accidents.
 
         Returns:
-            64-character SHA-256 hex string.
+            ``f"s:{config_digest}:{normalised}"`` or None when over cap.
         """
-        return build_key(text, self.anchor_tokens_for(provider_name))
+        return build_key(
+            text, self.anchor_tokens_for(provider_name), config_digest=config_digest
+        )
 
     # ------------------------------------------------------------------
     # Cache operations — all fail-open
@@ -394,7 +449,8 @@ class QueryEmbeddingCache:
         """Look up a cached embedding.  Fail-open on any backend error.
 
         Args:
-            cache_key: SHA-256 hex from :meth:`build_key`.
+            cache_key: String key of the form ``s:<config-digest>:<normalized-query>``
+                as returned by :meth:`build_key` (Story #1149).
             qualifier: Provider / model / dimension tuple.
 
         Returns:
@@ -458,7 +514,8 @@ class QueryEmbeddingCache:
         WARNING but does NOT roll back the write and does NOT raise.
 
         Args:
-            cache_key: SHA-256 hex from :meth:`build_key`.
+            cache_key: String key of the form ``s:<config-digest>:<normalized-query>``
+                as returned by :meth:`build_key` (Story #1149).
             qualifier: Provider / model / dimension tuple.
             embedding: List of floats (the live embedding result).
         """
@@ -521,7 +578,8 @@ class QueryEmbeddingCache:
         """Touch last_used timestamp for an existing cache row.  Fail-open.
 
         Args:
-            cache_key: SHA-256 hex from :meth:`build_key`.
+            cache_key: String key of the form ``s:<config-digest>:<normalized-query>``
+                as returned by :meth:`build_key` (Story #1149).
             qualifier: Provider / model / dimension tuple.
         """
         try:
@@ -552,3 +610,25 @@ class QueryEmbeddingCache:
                 exc_info=True,
             )
             return 0
+
+    def clear_all(self) -> None:
+        """Delete all rows from the persisted cache table and reset the in-process count memo.
+
+        Story #1156 (AC3): truncates the query_embedding_cache table via the active
+        backend (SQLite or PostgreSQL) and immediately resets _cached_total to 0 so
+        the ObservableGauge and the Web UI count readout are accurate without a
+        DB round-trip.  Fail-open: backend errors are logged as WARNING but not raised.
+
+        Distinct from the in-memory coalescer/registry clear
+        (governed_call.clear_query_embedding_cache) -- that clears the RAM-side
+        coalescer state; this clears the persisted embedding table.
+        """
+        try:
+            self._backend.clear_all()
+        except Exception:
+            logger.warning(
+                "query_embedding_cache: clear_all failed (fail-open)",
+                exc_info=True,
+            )
+        # Reset memo regardless of backend outcome so UI reflects the intent.
+        self._cached_total = 0

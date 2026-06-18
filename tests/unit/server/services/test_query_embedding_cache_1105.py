@@ -14,14 +14,40 @@ Tests cover:
 
 from __future__ import annotations
 
-import hashlib
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Global-state isolation fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_globals():
+    """Clear all process-global singletons before and after every test so
+    the suite is order-independent regardless of which other test file ran
+    first (e.g. a test that calls set_query_embedding_cache / set_coalescer_registry
+    without cleanup will not pollute us).  config_service is also reset so that
+    QueryEmbeddingCache.enabled_for() / _live_qec_cfg() sees a clean config."""
+    from code_indexer.server.services import governed_call
+    from code_indexer.server.services.coalescer_registry import clear_coalescer_registry
+    from code_indexer.server.services.config_service import reset_config_service
+
+    governed_call.clear_query_embedding_cache()
+    governed_call.clear_query_embedding_cache_metrics()
+    clear_coalescer_registry()
+    reset_config_service()
+    yield
+    governed_call.clear_query_embedding_cache()
+    governed_call.clear_query_embedding_cache_metrics()
+    clear_coalescer_registry()
+    reset_config_service()
 
 
 # ---------------------------------------------------------------------------
@@ -181,12 +207,14 @@ class TestQueryEmbeddingCacheSqliteBackend:
 
 
 class TestBuildKey:
-    """Tests for build_key (CASE PRESERVED, SHA-256)."""
+    """Tests for build_key (CASE PRESERVED, config-namespaced s:<digest>:<normalized>)."""
 
-    def _build_key(self, text: str) -> str:
+    _DIGEST = "testdigest"
+
+    def _build_key(self, text: str) -> Optional[str]:
         from code_indexer.server.services.query_embedding_cache import build_key
 
-        return str(build_key(text))
+        return build_key(text, config_digest=self._DIGEST)  # type: ignore[no-any-return]
 
     def test_case_preserved_not_lowercased(self) -> None:
         key_upper = self._build_key("CamelCase")
@@ -196,15 +224,17 @@ class TestBuildKey:
     def test_identical_text_same_key(self) -> None:
         assert self._build_key("hello world") == self._build_key("hello world")
 
-    def test_key_is_sha256_hex(self) -> None:
+    def test_key_has_config_namespaced_format(self) -> None:
         text = "search for authentication"
         key = self._build_key(text)
-        expected = hashlib.sha256(text.encode()).hexdigest()
-        assert key == expected
+        assert key is not None
+        assert key.startswith(f"s:{self._DIGEST}:"), (
+            f"Key must start with 's:<digest>:' prefix, got: {key}"
+        )
 
     def test_empty_string_has_key(self) -> None:
         key = self._build_key("")
-        assert isinstance(key, str) and len(key) == 64
+        assert isinstance(key, str) and key.startswith(f"s:{self._DIGEST}:")
 
     def test_unicode_preserved(self) -> None:
         k1 = self._build_key("résumé")
@@ -288,7 +318,7 @@ class TestQueryEmbeddingCacheService:
     def test_lookup_returns_none_when_miss(self, tmp_path: Path) -> None:
         cache = self._make_cache(tmp_path)
         provider = self._make_provider()
-        key = cache.build_key("hello")
+        key = cache.build_key("hello", config_digest="testdigest")
         qualifier = cache.qualifier(provider)
         result = cache.lookup(key, qualifier)
         assert result is None
@@ -297,7 +327,7 @@ class TestQueryEmbeddingCacheService:
         cache = self._make_cache(tmp_path, voyage_mode="shadow")
         provider = self._make_provider()
         vec = _make_vec(4, 1.0)
-        key = cache.build_key("hello world")
+        key = cache.build_key("hello world", config_digest="testdigest")
         qualifier = cache.qualifier(provider)
         cache.record_miss_or_shadow(key, qualifier, vec)
         # Now lookup should find it
@@ -310,7 +340,7 @@ class TestQueryEmbeddingCacheService:
         cache = self._make_cache(tmp_path, voyage_mode="shadow")
         provider = self._make_provider()
         vec = _make_vec(4, 1.0)
-        key = cache.build_key("hello")
+        key = cache.build_key("hello", config_digest="testdigest")
         qualifier = cache.qualifier(provider)
         cache.record_miss_or_shadow(key, qualifier, vec)
         # Should not raise
@@ -358,7 +388,7 @@ class TestQueryEmbeddingCacheFailOpen:
         provider_mock.get_current_model.return_value = "voyage-code-3"
         provider_mock.get_model_info.return_value = {"dimensions": 4}
 
-        key = cache.build_key("test query")
+        key = cache.build_key("test query", config_digest="testdigest")
         qualifier = cache.qualifier(provider_mock)
         result = cache.lookup(key, qualifier)
         assert result is None  # Fail open: None means caller should use live
@@ -383,7 +413,7 @@ class TestQueryEmbeddingCacheFailOpen:
         provider_mock.get_current_model.return_value = "voyage-code-3"
         provider_mock.get_model_info.return_value = {"dimensions": 4}
 
-        key = cache.build_key("test")
+        key = cache.build_key("test", config_digest="testdigest")
         qualifier = cache.qualifier(provider_mock)
         vec = _make_vec(4, 1.0)
         # Should not raise
