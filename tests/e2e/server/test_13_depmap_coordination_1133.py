@@ -59,14 +59,15 @@ app construction), so no golden repo / VOYAGE key is required.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
-import threading
 import time
 from pathlib import Path
 from typing import Iterator
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -444,7 +445,7 @@ def test_ac1_release_then_trigger_is_accepted(
             time.sleep(_JOB_DRAIN_POLL_S)
 
 
-def test_ac1_concurrent_triggers_single_winner(
+async def test_ac1_concurrent_triggers_single_winner(
     depmap_enabled_client: TestClient, auth_headers: dict
 ) -> None:
     """Two truly-concurrent REST triggers -> exactly ONE 202 + ONE 409.
@@ -452,6 +453,18 @@ def test_ac1_concurrent_triggers_single_winner(
     Directly exercises the synchronous-claim single-winner property: the sentinel
     O_CREAT|O_EXCL claim admits exactly one trigger; the loser is rejected with
     409.  No pre-seed — the contention is real and concurrent.
+
+    Concurrency approach: httpx.AsyncClient + ASGITransport(app) +
+    asyncio.gather().  Two coroutines land on the same event loop concurrently;
+    FastAPI dispatches sync routes (Form-based) to a ThreadPoolExecutor so both
+    route handlers run in parallel OS threads, creating real O_CREAT|O_EXCL
+    contention on the shared sentinel.
+
+    Why NOT threading.Barrier + shared TestClient: Starlette TestClient uses a
+    single anyio.BlockingPortal when entered as a context manager.  portal.call()
+    is synchronous and serialises on the portal's event loop, so the two threads
+    run sequentially — the first accepted trigger's worker can release its sentinel
+    before the second thread's request even starts, yielding two 202s.
     """
     # Order-independence: a prior test's accepted worker may still own an
     # in-flight 'analysis' sentinel.  Bounded-wait for a clean slate so this test
@@ -469,8 +482,9 @@ def test_ac1_concurrent_triggers_single_winner(
     # — not the concurrent pair this test is about to fire.  Clearing it here is
     # legitimate test setup (establishing zero-contention baseline), NOT masking a
     # real concurrent claim.  The actual single-winner guarantee is proved by the
-    # two threads we fire next; it does not depend on there being no prior sentinel
-    # at all — it depends on the sentinel being absent WHEN the two threads contend.
+    # two coroutines we fire next; it does not depend on there being no prior
+    # sentinel at all — it depends on the sentinel being absent WHEN the two
+    # requests contend.
     if precheck_sentinel.read_active(SENTINEL_OP_ANALYSIS) is not None:
         sentinel_path = (
             precheck_sentinel._sentinel_dir / f"_active_{SENTINEL_OP_ANALYSIS}.lock"
@@ -484,29 +498,30 @@ def test_ac1_concurrent_triggers_single_winner(
         "sentinel directory may be read-only or the path is wrong"
     )
 
-    statuses: list[int] = []
-    lock = threading.Lock()
-    barrier = threading.Barrier(2)
+    # Extract the session cookie that _enable_dependency_map() set on the
+    # TestClient (required by _require_admin_session on the REST trigger).
+    session_cookies = dict(depmap_enabled_client.cookies)
+    app = depmap_enabled_client.app
 
-    def _fire() -> None:
-        # Align both threads at the barrier so they contend on the claim together.
-        barrier.wait()
-        resp = depmap_enabled_client.post(REST_TRIGGER, data={"mode": "full"})
-        with lock:
-            statuses.append(resp.status_code)
-
-    threads = [threading.Thread(target=_fire) for _ in range(2)]
     accepted_job_ids: list[str] = []
     try:
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=_JOB_DRAIN_TIMEOUT_S)
-            assert not thread.is_alive(), "concurrent trigger thread did not finish"
+        # Two genuinely-concurrent POSTs via ASGITransport.  asyncio.gather()
+        # launches both coroutines before either awaits, so they contend on the
+        # sentinel claim in parallel FastAPI thread-pool workers.
+        async def _fire() -> int:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+                cookies=session_cookies,
+            ) as ac:
+                resp = await ac.post(REST_TRIGGER, data={"mode": "full"})
+                return resp.status_code
 
-        assert sorted(statuses) == [HTTP_ACCEPTED, HTTP_CONFLICT], (
-            f"concurrent triggers must yield exactly one 202 + one 409, "
-            f"got {sorted(statuses)}"
+        status_a, status_b = await asyncio.gather(_fire(), _fire())
+        statuses = sorted([status_a, status_b])
+
+        assert statuses == [HTTP_ACCEPTED, HTTP_CONFLICT], (
+            f"concurrent triggers must yield exactly one 202 + one 409, got {statuses}"
         )
     finally:
         # Drain whatever job the single winner spawned (best-effort): the winner's
