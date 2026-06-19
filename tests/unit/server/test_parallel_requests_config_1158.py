@@ -656,3 +656,65 @@ class TestVectorCalculationManagerSitesUnchanged:
         """Line 409: even with temporal=4, parallel_requests=8 is used."""
         cfg = self._make_config_with_temporal("cohere", parallel=8, temporal=4)
         assert self._compute_vector_thread_count_at_409_411(cfg) == 8
+
+
+# ---------------------------------------------------------------------------
+# Section 10: Rolling-upgrade backward-compatibility for IndexingConfig
+# ---------------------------------------------------------------------------
+
+
+class TestRollingUpgradeBackwardCompat:
+    """_dict_to_server_config must not crash when the DB blob contains
+    indexing_config keys unknown to the current IndexingConfig dataclass.
+
+    Scenario: a NEW node (post-Story #1158) saves voyage_ai_parallel_requests,
+    cohere_parallel_requests, temporal_parallel_requests to the DB.  An OLD node
+    (pre-#1158, without those fields) loads that blob and must not raise:
+        TypeError: __init__() got an unexpected keyword argument '...'
+
+    This is the rolling-upgrade invariant: old and new nodes share schema.
+    """
+
+    def _make_manager(self):
+        import tempfile
+        from code_indexer.server.utils.config_manager import ServerConfigManager
+
+        tmp = tempfile.mkdtemp()
+        return ServerConfigManager(server_dir_path=tmp)
+
+    def test_indexing_config_tolerates_unknown_keys_rolling_upgrade(self) -> None:
+        """Simulates an old node loading a new-node config blob.
+
+        Constructs a config dict whose indexing_config sub-dict contains the 3
+        Story #1158 fields PLUS 3 bogus extra keys that do not exist in ANY
+        version of IndexingConfig.  _dict_to_server_config must return a valid
+        ServerConfig without raising TypeError.
+        """
+        import dataclasses
+        from code_indexer.server.utils.config_manager import IndexingConfig
+
+        mgr = self._make_manager()
+
+        # Build a minimal indexing_config dict with all KNOWN fields plus 3
+        # unknown keys that simulate fields from a future/newer node.
+        idx_dict = {f.name: f.default for f in dataclasses.fields(IndexingConfig)
+                    if f.default is not dataclasses.MISSING}
+        # Add unknown keys that would come from a newer node
+        idx_dict["voyage_ai_parallel_requests_future"] = 16
+        idx_dict["cohere_parallel_requests_future"] = 16
+        idx_dict["temporal_parallel_requests_future"] = 4
+
+        # Build a minimal top-level config dict.
+        # server_dir is required by ServerConfig; _dict_to_server_config does NOT
+        # auto-inject it (only load_config() does), so supply it explicitly.
+        config_dict: dict = {
+            "server_dir": str(mgr.server_dir),
+            "indexing_config": idx_dict,
+        }
+
+        # Must NOT raise TypeError; the unknown keys must be stripped silently
+        result = mgr._dict_to_server_config(config_dict)
+
+        from code_indexer.server.utils.config_manager import ServerConfig
+        assert isinstance(result, ServerConfig)
+        assert isinstance(result.indexing_config, IndexingConfig)

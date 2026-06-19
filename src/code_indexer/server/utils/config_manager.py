@@ -1776,6 +1776,17 @@ class ServerConfigManager:
             idx_dict = config_dict["indexing_config"]
             idx_dict.pop("indexing_timeout_seconds", None)
             idx_dict.pop("temporal_stale_threshold_days", None)
+            # Rolling-upgrade safety: strip unknown keys so an old node loading a
+            # new blob (with Story #1158 fields) doesn't crash with TypeError.
+            from dataclasses import fields as dc_fields
+
+            known_idx_fields = {f.name for f in dc_fields(IndexingConfig)}
+            for unknown_key in [k for k in list(idx_dict) if k not in known_idx_fields]:
+                idx_dict.pop(unknown_key)
+                logger.warning(
+                    "Stripped unknown indexing_config key '%s' (not in IndexingConfig)",
+                    unknown_key,
+                )
             config_dict["indexing_config"] = IndexingConfig(**idx_dict)
 
         # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config
