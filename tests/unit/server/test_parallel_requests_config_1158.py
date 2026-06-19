@@ -9,10 +9,13 @@ Tests cover:
 - Lines 409/411 regression: those sites only read parallel_requests (not temporal)
 """
 
+import json as _json
 from typing import Optional
 
 import pytest
 from unittest.mock import MagicMock, patch
+
+from code_indexer.config import CohereConfig, VoyageAIConfig
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +488,49 @@ class TestTemporalIndexerGitDiffSites:
     def test_cohere_temporal_none_falls_back_to_parallel(self) -> None:
         cfg = self._make_config("cohere", parallel=5, temporal=None)
         assert self._compute_thread_count(cfg) == 5
+
+
+# ---------------------------------------------------------------------------
+# Section 8: Pydantic round-trip deserialization (regression for #1158 fix)
+# ---------------------------------------------------------------------------
+
+_PROVIDER_CLASSES = [
+    pytest.param(VoyageAIConfig, id="voyage_ai"),
+    pytest.param(CohereConfig, id="cohere"),
+]
+
+
+class TestProviderConfigPydanticRoundtrip:
+    """VoyageAIConfig and CohereConfig must preserve temporal_parallel_requests
+    through a JSON serialize/deserialize cycle.
+
+    Before the fix, the field was absent from the Pydantic model.  Pydantic v2
+    with extra="ignore" silently drops unknown keys on deserialization, so
+    config.json values were always lost — getattr(..., None) always returned
+    the getattr default, never the stored value.
+    """
+
+    @pytest.mark.parametrize("cls", _PROVIDER_CLASSES)
+    def test_temporal_none_survives_roundtrip(self, cls) -> None:
+        cfg = cls(temporal_parallel_requests=None)
+        data = _json.loads(cfg.model_dump_json())
+        restored = cls(**data)
+        assert restored.temporal_parallel_requests is None
+
+    @pytest.mark.parametrize("cls", _PROVIDER_CLASSES)
+    def test_temporal_int_survives_roundtrip(self, cls) -> None:
+        cfg = cls(temporal_parallel_requests=2)
+        data = _json.loads(cfg.model_dump_json())
+        restored = cls(**data)
+        assert restored.temporal_parallel_requests == 2
+
+    @pytest.mark.parametrize("cls", _PROVIDER_CLASSES)
+    def test_temporal_key_present_in_serialized_json_when_none(self, cls) -> None:
+        """The key must be present in JSON output (not absent), even when None."""
+        cfg = cls(temporal_parallel_requests=None)
+        data = _json.loads(cfg.model_dump_json())
+        assert "temporal_parallel_requests" in data
+        assert data["temporal_parallel_requests"] is None
 
 
 # ---------------------------------------------------------------------------

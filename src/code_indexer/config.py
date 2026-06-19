@@ -171,6 +171,10 @@ class VoyageAIConfig(BaseModel):
     parallel_requests: int = Field(
         default=8, description="Number of concurrent requests to VoyageAI API"
     )
+    temporal_parallel_requests: Optional[int] = Field(
+        default=None,
+        description="Number of concurrent git-diff subprocess threads (temporal indexing only). None falls back to parallel_requests.",
+    )
     batch_size: int = Field(
         default=128,
         description="Maximum number of texts to send in a single batch request",
@@ -227,6 +231,10 @@ class CohereConfig(BaseModel):
     # Parallel processing configuration (mirrors VoyageAIConfig)
     parallel_requests: int = Field(
         default=8, description="Number of concurrent requests to Cohere API"
+    )
+    temporal_parallel_requests: Optional[int] = Field(
+        default=None,
+        description="Number of concurrent git-diff subprocess threads (temporal indexing only). None falls back to parallel_requests.",
     )
     batch_size: int = Field(
         default=96,
