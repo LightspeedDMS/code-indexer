@@ -7622,7 +7622,10 @@ def discovery_all(
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-@web_router.post("/api/discovery/{platform}/start")
+@web_router.post(
+    "/api/discovery/{platform}/start",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
 async def discovery_start(
     request: Request,
     platform: str,
@@ -7700,9 +7703,10 @@ async def discovery_result(
     platform: str,
     job_id: str,
 ):
-    """Consume the discovery result for a completed job (Story #1157).
+    """Return the full discovery result for a completed job (Story #1157).
 
-    Read-once: second call returns 404. Auth required.
+    Result lives in PayloadCache (TTL-based, not read-once). Re-reads within TTL return 200.
+    Auth required.
     """
     session = _require_admin_session(request)
     if session is None:
@@ -7714,11 +7718,27 @@ async def discovery_result(
 
     cache_key = f"discovery:{job_id}"
     if not payload_cache.has_key(cache_key):
-        return JSONResponse(
-            {"error": "Result not found or already consumed"}, status_code=404
+        return JSONResponse({"error": "Result not found or expired"}, status_code=404)
+
+    # Accumulate all pages — PayloadCache.retrieve() returns one page at a time
+    chunks: list = []
+    page = 0
+    try:
+        while True:
+            cache_result = payload_cache.retrieve(cache_key, page=page)
+            chunks.append(cache_result.content)
+            if not cache_result.has_more:
+                break
+            page += 1
+    except Exception:
+        logger.error(
+            "Failed to retrieve discovery result for %s", cache_key, exc_info=True
         )
-    cache_result = payload_cache.retrieve(cache_key, page=0)
-    data = json.loads(cache_result.content)
+        return JSONResponse(
+            {"error": "Failed to retrieve discovery result"}, status_code=500
+        )
+
+    data = json.loads("".join(chunks))
     return JSONResponse(data)
 
 

@@ -21,6 +21,24 @@ Tests cover:
 import pytest
 from unittest.mock import MagicMock, patch
 
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, rtr):
+    """Override all require_elevation deps so functional tests can run without TOTP."""
+    from fastapi.routing import APIRoute
+
+    for route in rtr.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
+
 
 # ---------------------------------------------------------------------------
 # Helper: build a minimal DiscoveredRepository-like object
@@ -552,6 +570,7 @@ def app_and_client():
 
     app = FastAPI()
     app.include_router(web_router, prefix="/admin")
+    _bypass_elevation(app, web_router)
 
     mock_sm = MagicMock()
     mock_session = MagicMock()
@@ -575,6 +594,7 @@ def unauthenticated_client():
 
     app = FastAPI()
     app.include_router(web_router, prefix="/admin")
+    _bypass_elevation(app, web_router)
 
     mock_sm = MagicMock()
     mock_sm.get_session.return_value = None

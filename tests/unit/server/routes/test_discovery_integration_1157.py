@@ -15,6 +15,24 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+_ELEVATION_QUALNAME = "require_elevation.<locals>._check"
+
+
+def _bypass_elevation(app, rtr):
+    """Override all require_elevation deps so functional tests can run without TOTP."""
+    from fastapi.routing import APIRoute
+
+    for route in rtr.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in route.dependencies or []:
+            dep_callable = getattr(dep, "dependency", None)
+            if (
+                dep_callable
+                and getattr(dep_callable, "__qualname__", "") == _ELEVATION_QUALNAME
+            ):
+                app.dependency_overrides[dep_callable] = lambda: None
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -32,6 +50,7 @@ def admin_client_and_bgm():
 
     app = FastAPI()
     app.include_router(web_router, prefix="/admin")
+    _bypass_elevation(app, web_router)
 
     bgm = BackgroundJobManager()
 
@@ -56,21 +75,28 @@ def admin_client_and_bgm():
             yield client, bgm
 
 
-def _make_mock_provider(repos=None, total_source=3):
-    """Build a mock provider that returns canned data from discover_all_repositories."""
+def _make_mock_provider(repos=None, total_source=None):
+    """Build a mock provider that returns canned data from discover_all_repositories.
+
+    Default payload uses 30 repos to exceed PayloadCache's 5000-char page size,
+    ensuring multi-page retrieval is exercised in integration tests.
+    """
     if repos is None:
         repos = [
             {
                 "platform": "gitlab",
-                "name": "repo1",
-                "description": "",
-                "clone_url_https": "https://gitlab.com/group/repo1.git",
-                "clone_url_ssh": "git@gitlab.com:group/repo1.git",
+                "name": f"repo{i:03d}",
+                "description": f"Repository number {i:03d} for integration testing pagination",
+                "clone_url_https": f"https://gitlab.com/group/repo{i:03d}.git",
+                "clone_url_ssh": f"git@gitlab.com:group/repo{i:03d}.git",
                 "default_branch": "main",
                 "is_hidden": False,
                 "is_private": False,
             }
+            for i in range(1, 31)  # 30 repos > 5000 chars threshold
         ]
+    if total_source is None:
+        total_source = len(repos)
     provider = MagicMock()
     provider.is_configured.return_value = True
     provider._get_indexed_canonical_urls.return_value = set()
