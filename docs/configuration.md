@@ -84,8 +84,7 @@ CIDX supports multiple VoyageAI models:
 | Model | Dimensions | Use Case |
 |-------|------------|----------|
 | **voyage-code-3** | 1024 | Default, optimized for code |
-| **voyage-3-large** | 1024 | State-of-the-art general-purpose model |
-| **voyage-large-2-instruct** | 1536 | Instruction-tuned large model |
+| **voyage-large-2** | 1536 | General-purpose large model |
 
 **Model Selection**: User-selectable via `--voyage-model` flag during `cidx init`. Default is `voyage-code-3`.
 
@@ -172,7 +171,7 @@ To configure both VoyageAI and Cohere simultaneously, set both API keys (via env
 }
 ```
 
-With both `VOYAGE_API_KEY` and `CO_API_KEY` set in the environment, this configuration uses VoyageAI as the primary provider and Cohere as the secondary. Query strategy flags (`--strategy failover`, `--strategy parallel`) control how the secondary provider is used at query time.
+With both `VOYAGE_API_KEY` and `CO_API_KEY` set in the environment, this configuration uses VoyageAI as the primary provider and Cohere as the secondary. Provider selection and failover behavior are configuration-driven -- the secondary provider is used automatically when the primary is unavailable, with no query-time flags required.
 
 ## Configuration File
 
@@ -218,7 +217,7 @@ Created automatically by `cidx init` or first `cidx index`.
 **Important**: Extensions are specified WITHOUT dots (e.g., "py" not ".py"). The system adds dots automatically.
 
 **Customization**:
-```json
+```jsonc
 {
   "file_extensions": [
     "py", "js", "ts"  // Only Python and JavaScript/TypeScript
@@ -227,7 +226,7 @@ Created automatically by `cidx init` or first `cidx index`.
 ```
 
 **Add More Extensions**:
-```json
+```jsonc
 {
   "file_extensions": [
     "py", "js", "ts",
@@ -256,7 +255,7 @@ Created automatically by `cidx init` or first `cidx index`.
 - CIDX internal: .code-indexer
 
 **Customization**:
-```json
+```jsonc
 {
   "exclude_dirs": [
     "node_modules", ".git", "__pycache__",
@@ -268,7 +267,7 @@ Created automatically by `cidx init` or first `cidx index`.
 ```
 
 **Include More**:
-```json
+```jsonc
 {
   "exclude_dirs": [
     "node_modules", ".git",
@@ -297,7 +296,7 @@ Created automatically by `cidx init` or first `cidx index`.
 **Location**: Nested under "indexing" object in config.json
 
 **Customization**:
-```json
+```jsonc
 {
   "indexing": {
     "max_file_size": 2097152  // 2 MB
@@ -348,7 +347,7 @@ At least one embedding provider API key must be set.
 | Variable | Purpose | Default | Example |
 |----------|---------|---------|---------|
 | **CIDX_INDEX_CACHE_TTL_MINUTES** | Server cache TTL | 10 | `export CIDX_INDEX_CACHE_TTL_MINUTES=30` |
-| **CIDX_SERVER_PORT** | Server port | 8000 | `export CIDX_SERVER_PORT=9000` |
+| **CIDX_SERVER_PORT** | Server port | 8090 | `export CIDX_SERVER_PORT=9000` |
 | **CIDX_SERVER_HOST** | Server host | localhost | `export CIDX_SERVER_HOST=0.0.0.0` |
 
 For CLI/Daemon mode configuration, use `cidx config` commands instead (see Daemon Mode section).
@@ -442,7 +441,7 @@ cidx watch --fts
 
 Customize which languages to index by editing `file_extensions`:
 
-```json
+```jsonc
 {
   "file_extensions": [
     "py"              // Python only
@@ -528,7 +527,7 @@ cidx scip generate
 **Symptom**: Large files not indexed
 
 **Solution**:
-```json
+```jsonc
 {
   "max_file_size": 5242880  // Increase to 5 MB
 }
@@ -547,7 +546,7 @@ cidx index
 **Solution**:
 
 1. **Edit config.json**:
-   ```json
+   ```jsonc
    {
      "exclude_dirs": [
        "node_modules", ".git"  // Removed "__pycache__"
@@ -568,7 +567,7 @@ cidx index
 **Solution**:
 
 1. **Add extensions to config.json**:
-   ```json
+   ```jsonc
    {
      "file_extensions": [
        "py", "js", "ts",
@@ -630,14 +629,11 @@ cidx start
 
 1. **Verify API key is valid** for the failing provider.
 2. **Check provider status page** (VoyageAI or Cohere) for outages.
-3. **Use failover strategy** to automatically route around a failing provider:
-   ```bash
-   cidx query "search term" --strategy failover
-   ```
+3. **Failover is automatic** when both providers are configured -- if the primary provider fails, queries are routed to the secondary provider without any additional flags.
 
 ---
 
-## Runtime Settings (v9.x to v10.0)
+## Runtime Settings
 
 These settings are runtime-configurable via the Web UI Config Screen and persist via the runtime DB (SQLite solo / PostgreSQL cluster). Bootstrap-only settings (those that must live in `config.json` because they are needed before the DB is available) are noted explicitly.
 
@@ -647,25 +643,25 @@ These settings are runtime-configurable via the Web UI Config Screen and persist
 |---------|------|---------|-------------|
 | `ra_curl_allowed_cidrs` | List[str] | `[]` | Operator-configured CIDR allowlist for the `cidx-curl.sh` wrapper. Loopback (`127.0.0.0/8` + `::1/128`) is always appended automatically -- operators cannot disable loopback. Empty list = loopback only. Examples: `["10.5.0.0/24"]`, `["10.5.0.0/24", "192.168.100.0/24"]`. **Bootstrap-only** (`config.json` under `claude_integration_config`); restart cidx-server after change. |
 
-### Dep-Map Auto-Repair (Story #927)
+### Dep-Map Auto-Repair
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `dep_map_auto_repair_enabled` | bool | `false` | When true, scheduled delta and refinement jobs automatically run a repair pass once if anomalies are detected. Anomalies that don't resolve are retried on the next scheduled cycle. Operator opts in via Web UI. |
 
-### Memory Retrieval (Story #883)
+### Memory Retrieval
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `memory_retrieval_enabled` | bool | `true` | Kill switch for the memory retrieval pipeline. When false, `search_code` does NOT make a VoyageAI call for memory candidates and the `relevant_memories` field is absent from the response. Effective immediately, no restart required. |
 
-### TOTP Step-Up Elevation (Epic #922)
+### TOTP Step-Up Elevation
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `elevation_enforcement_enabled` | bool | `false` | When true, admin endpoints requiring elevation reject without an active elevation window (HTTP 403 `elevation_required`). When false, all elevation checks no-op (HTTP 503 -- feature administratively off). Hot-reload via 30s reload thread; no restart required. |
 
-### Server Memory Mitigations (Bug #897)
+### Server Memory Mitigations
 
 These are bootstrap-only flags in `config.json` (defaults ON since v9.23.3):
 
@@ -675,7 +671,7 @@ These are bootstrap-only flags in `config.json` (defaults ON since v9.23.3):
 | `enable_malloc_arena_max` | bool | `true` | Idempotently injects `MALLOC_ARENA_MAX=2` into cidx-server systemd unit file via auto-updater. |
 | `enable_graph_channel_repair` | bool | `true` | Phase 3.7 dep-map graph-channel repair (bootstrap-only). When false, `_run_phase37` returns immediately. |
 
-### Omni Search Caps (Bug #881, Bug #894)
+### Omni Search Caps
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -684,7 +680,7 @@ These are bootstrap-only flags in `config.json` (defaults ON since v9.23.3):
 | `index_cache_max_size_mb` | int | `4096` | HNSW cache size cap. |
 | `fts_cache_max_size_mb` | int | `4096` | FTS cache size cap. |
 
-### Codex CLI Integration (Epic #843)
+### Codex CLI Integration
 
 Bootstrap-only in `config.json`:
 
@@ -692,7 +688,7 @@ Bootstrap-only in `config.json`:
 |---------|------|---------|-------------|
 | `enable_codex_cli` | bool | `true` | Auto-install Codex CLI via npm at auto-updater run. Optional-feature semantics: missing npm logs WARNING but doesn't abort. |
 
-### Fault Injection Harness (Bug #864)
+### Fault Injection Harness
 
 Bootstrap-only in `config.json` (NEVER enable in production):
 

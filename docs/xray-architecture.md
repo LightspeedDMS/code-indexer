@@ -1,10 +1,10 @@
-# X-Ray Search Engine and MCP Tool (Epic #968 / Story #972)
+# X-Ray Search Engine and MCP Tool
 
 This document captures the X-Ray search engine architecture and MCP handler shim invariants extracted from project CLAUDE.md. It defines the two-phase orchestration (regex driver → sandboxed evaluator) and the async job submission pattern.
 
 ## Supported Languages
 
-The Rust xray-core engine supports 17 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp. The Python xray engine supports 12 (hcl conditional via `_hcl_available()`; c and cpp added in Story #1077).
+The Rust xray-core engine supports 17 mandatory languages: java, kotlin, go, python, typescript, javascript, bash, csharp, html, css, hcl/terraform, yaml, sql, xml, groovy, c, cpp. The Python xray engine supports 12 (hcl conditional via `_hcl_available()`; c and cpp added later).
 
 C and C++ extensions and verified node kinds (confirmed against tree-sitter-c 0.24.2 and tree-sitter-cpp 0.23.4):
 
@@ -42,7 +42,7 @@ C and C++ extensions and verified node kinds (confirmed against tree-sitter-c 0.
 
 - **`progress_callback(percent, phase_name, phase_detail)`** is called at 0%, 50%, and 100%.
 
-- **ThreadPoolExecutor parallelism (Story #978)**: Phase 2 evaluation runs across a configurable thread pool (`worker_threads`, default 2). Job-level wall-clock enforced via `_timed_out()` re-check between completions.
+- **ThreadPoolExecutor parallelism**: Phase 2 evaluation runs across a configurable thread pool (`worker_threads`, default 2). Job-level wall-clock enforced via `_timed_out()` re-check between completions.
 
 `src/code_indexer/server/mcp/handlers/xray.py` — `handle_xray_search` is a thin MCP handler shim:
 
@@ -72,7 +72,7 @@ Tool docs: `src/code_indexer/server/mcp/tool_docs/search/xray_search.md`, `src/c
 
 **Files**: `src/code_indexer/xray/search_engine.py`, `src/code_indexer/xray/sandbox.py`, `src/code_indexer/server/mcp/handlers/xray.py`. Tests: `tests/unit/xray/test_search_engine.py`, `tests/unit/xray/test_sandbox*.py`, `tests/unit/server/mcp/test_xray_search_handler.py`.
 
-## xray_search_batch MCP Tool (Story #1055)
+## xray_search_batch MCP Tool
 
 Cross-repo, multi-expression X-Ray sweep in ONE background job. Distinct from `xray_search` omni path: returns a single `job_id` (not `job_ids`), accepts N repo aliases x M scan bundles (matrix), and tags every match with `repository_alias`, `scan_index`, and `pattern_name`.
 

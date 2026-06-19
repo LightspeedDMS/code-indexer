@@ -198,3 +198,4 @@ coverage.json
 /.claude/worktrees
 /rust/xray-core/.claude/tdd-guard
 .tmp_token
+/tmp

@@ -23,17 +23,16 @@ CIDX server provides:
 - Linux/macOS/Windows (Linux recommended for production)
 
 ### Network Requirements
-- Port 8000 for HTTP API (configurable)
-- Port 8383 for MCP protocol (configurable)
-- Outbound HTTPS for VoyageAI API (embedding generation)
+- Port 8090 for HTTP API and MCP protocol (configurable; MCP is served on the same port as the HTTP API)
+- Outbound HTTPS for VoyageAI API or Cohere API (embedding generation)
 
 ## Installation
 
 ### Option 1: pipx (Recommended)
 
 ```bash
-# Install code-indexer
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+# Install the latest release (check https://github.com/LightspeedDMS/code-indexer/releases for the current tag)
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@<latest-tag>
 
 # Verify installation
 cidx --version
@@ -46,8 +45,8 @@ cidx --version
 python3 -m venv cidx-venv
 source cidx-venv/bin/activate
 
-# Install code-indexer
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+# Install the latest release (check https://github.com/LightspeedDMS/code-indexer/releases for the current tag)
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@<latest-tag>
 
 # Verify installation
 cidx --version
@@ -66,44 +65,44 @@ VOYAGE_API_KEY=your-voyage-api-key-here
 # Server Data Directory
 CIDX_SERVER_DATA_DIR=/var/lib/cidx-server  # Default: ~/.cidx-server
 
-# Server Ports
-CIDX_SERVER_PORT=8000     # HTTP API port
-CIDX_MCP_PORT=8383        # MCP protocol port
+# Server Port (HTTP API and MCP protocol share the same port)
+CIDX_SERVER_PORT=8090     # Default: 8090
 
-# Logging
+# Logging level
 CIDX_LOG_LEVEL=INFO       # DEBUG, INFO, WARNING, ERROR
-CIDX_LOG_FILE=/var/log/cidx-server/server.log
+# Note: server application logs are stored in ~/.cidx-server/logs.db (SQLite), not a log file.
 ```
 
 ### Configuration File
 
-Alternative to environment variables, create `~/.cidx-server/config.json`:
+Alternative to environment variables, create `~/.cidx-server/config.json`.
 
-Note: config.json uses flat bootstrap keys, not nested objects. The structure below is simplified for readability. The actual flat-key schema is defined in CLAUDE.md under "Config Bootstrap vs Runtime (Story #578)". Only bootstrap keys belong in config.json (host, port, server_dir, log_level, storage_mode, postgres_dsn, ontap, cluster.node_id). All runtime settings belong in the database via the Web UI Config Screen.
+`config.json` is for bootstrap-only settings that must be available before the database is
+accessible. All runtime settings (cache TTL, embedding config, etc.) belong in the database
+and are managed via the Web UI Config Screen.
+
+Bootstrap keys supported in `config.json`:
 
 ```json
 {
-  "server": {
-    "host": "0.0.0.0",
-    "port": 8000,
-    "data_dir": "/var/lib/cidx-server",
-    "log_level": "INFO"
-  },
-  "cache": {
-    "hnsw_index_ttl_seconds": 600,
-    "enable_auto_cleanup": true,
-    "cleanup_interval_seconds": 60
-  },
-  "embedding": {
-    "provider": "voyageai",
-    "model": "voyage-3",
-    "api_key_env": "VOYAGE_API_KEY"
-  },
-  "auth": {
-    "enabled": true,
-    "jwt_secret_key": "generate-with-openssl-rand-hex-32",
-    "token_expiry_minutes": 10
-  }
+  "host": "0.0.0.0",
+  "port": 8090,
+  "server_dir": "/var/lib/cidx-server",
+  "log_level": "INFO",
+  "storage_mode": "sqlite"
+}
+```
+
+For PostgreSQL cluster mode, add:
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8090,
+  "server_dir": "/var/lib/cidx-server",
+  "log_level": "INFO",
+  "storage_mode": "postgres",
+  "postgres_dsn": "postgresql://user:pass@db-host:5432/cidx"
 }
 ```
 
@@ -185,26 +184,24 @@ Automatic background thread removes expired cache entries:
 Query real-time cache statistics:
 
 ```bash
-curl http://localhost:8000/cache/stats
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats
 ```
 
 Response:
 ```json
 {
-  "total_hits": 1234,
-  "total_misses": 56,
+  "hit_count": 1234,
+  "miss_count": 56,
   "hit_ratio": 0.957,
-  "active_entries": 12,
-  "per_repository": {
+  "cached_repositories": 12,
+  "total_memory_mb": 480.5,
+  "eviction_count": 3,
+  "per_repository_stats": {
     "/path/to/repo1": {
-      "hits": 500,
-      "misses": 10,
-      "last_access": "2025-11-30T12:34:56Z"
-    },
-    "/path/to/repo2": {
-      "hits": 734,
-      "misses": 46,
-      "last_access": "2025-11-30T12:35:12Z"
+      "access_count": 510,
+      "last_accessed": "2025-11-30T12:34:56Z",
+      "created_at": "2025-11-30T10:00:00Z",
+      "ttl_remaining_seconds": 423
     }
   }
 }
@@ -213,9 +210,9 @@ Response:
 #### Key Metrics
 
 - **hit_ratio**: Percentage of queries served from cache (target: >80%)
-- **total_hits**: Number of cache hits (warm queries)
-- **total_misses**: Number of cache misses (cold queries)
-- **active_entries**: Number of repositories currently cached
+- **hit_count**: Number of cache hits (warm queries)
+- **miss_count**: Number of cache misses (cold queries)
+- **cached_repositories**: Number of repositories currently cached
 
 #### Performance Expectations
 
@@ -242,8 +239,8 @@ HNSW lookup is the in-process index-search component of a query. End-to-end quer
 PID=$(pgrep -f "code_indexer.server.app")
 
 # 3. Check cache stats endpoint
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/cache/stats
-# If "cached_repositories" is always 0, cache not working
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats
+# If "cached_repositories" is always 0, cache is not working
 ```
 
 **Solution**:
@@ -270,7 +267,7 @@ sudo systemctl restart cidx-server
 **Diagnosis**:
 ```bash
 # Check number of active cache entries
-curl http://localhost:8000/cache/stats | jq '.active_entries'
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats | jq '.cached_repositories'
 
 # Monitor memory usage
 ps aux | grep cidx-server
@@ -292,7 +289,7 @@ ps aux | grep cidx-server
 
 **Diagnosis**:
 ```bash
-curl http://localhost:8000/cache/stats | jq '.hit_ratio'
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/cache/stats | jq '.hit_ratio'
 ```
 
 **Possible Causes**:
@@ -411,7 +408,7 @@ Recommended production setup:
 ```bash
 # Run server behind reverse proxy (nginx/haproxy)
 # Terminate SSL at proxy level
-# Forward to CIDX server on localhost:8000
+# Forward to CIDX server on localhost:8090
 
 # Example nginx config
 server {
@@ -422,9 +419,11 @@ server {
     ssl_certificate_key /etc/ssl/private/cidx.key;
 
     location / {
-        proxy_pass http://localhost:8000;
+        proxy_pass http://localhost:8090;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
@@ -479,42 +478,50 @@ For large deployments:
 ### Health Check Endpoint
 
 ```bash
-# Check server health
-curl http://localhost:8000/health
+# Check server health (authentication required)
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8090/health
+```
 
-# Expected response
+Example response:
+```json
 {
   "status": "healthy",
-  "version": "10.34.0",
-  "cache": {
-    "enabled": true,
-    "active_entries": 12
-  }
+  "message": "Server is running normally",
+  "uptime": 3600.5,
+  "active_jobs": 2,
+  "job_queue": {
+    "active_jobs": 2,
+    "pending_jobs": 0,
+    "failed_jobs": 0
+  },
+  "started_at": "2025-11-30T10:00:00Z",
+  "maintenance_mode": false,
+  "version": "10.141.0"
 }
 ```
 
 ### Log Analysis
 
-Monitor server logs for issues:
+Server application logs are stored in `~/.cidx-server/logs.db` (SQLite). Monitor logs with:
 
 ```bash
-# View recent logs
-sudo tail -f /var/log/cidx-server/server.log
+# View recent error logs
+sqlite3 ~/.cidx-server/logs.db "SELECT timestamp, level, message FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY id DESC LIMIT 50"
 
 # Search for cache-related logs
-sudo grep -i "cache" /var/log/cidx-server/server.log
+sqlite3 ~/.cidx-server/logs.db "SELECT timestamp, message FROM logs WHERE message LIKE '%cache%' ORDER BY id DESC LIMIT 50"
 
-# Monitor error rate
-sudo grep -i "error" /var/log/cidx-server/error.log | wc -l
+# Count recent errors
+sqlite3 ~/.cidx-server/logs.db "SELECT COUNT(*) FROM logs WHERE level='ERROR'"
 ```
 
 ### Backup and Recovery
 
 Critical data to backup:
 
-1. **Repository indexes**: `/var/lib/cidx-server/repositories/`
-2. **Configuration**: `/etc/cidx-server/config.env`, `~/.cidx-server/config.json`
-3. **User data**: `/var/lib/cidx-server/users/`
+1. **Repository indexes**: `~/.cidx-server/golden-repos/`
+2. **Configuration**: `~/.cidx-server/config.json`
+3. **Database**: `~/.cidx-server/cidx_server.db` (users, settings, job history)
 
 Cache data (HNSW indexes) can be rebuilt, no backup needed.
 
@@ -538,7 +545,7 @@ sudo journalctl -u cidx-server -n 50
 
 ```bash
 # Check if cache is working
-curl http://localhost:8000/cache/stats
+curl http://localhost:8090/cache/stats
 
 # If hit_ratio is low:
 # 1. Increase TTL
@@ -558,7 +565,7 @@ ps aux | grep cidx-server
 # 3. Restart server to clear cache
 ```
 
-## Post-Generation Verification Pass (Story #724)
+## Post-Generation Verification Pass
 
 The cidx-server supports an optional post-generation verification pass that
 re-reads generated dependency-map artifacts and repo descriptions against
@@ -600,7 +607,7 @@ both with and without verification to confirm the corrections justify the cost.
   deployed code; the feature only corrects the generated markdown artifacts.
   Code-level bugs are filed as GitHub issues per the existing bug-report flow.
 
-## cidx-meta backup to remote git (Story #926)
+## cidx-meta backup to remote git
 
 The cidx-meta directory holds description files and metadata for every registered
 golden repository.  You can configure the server to keep a continuous git backup

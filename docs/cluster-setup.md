@@ -1,6 +1,6 @@
 # CIDX Server Cluster Setup and Operations Guide
 
-Epic #408: CIDX Clusterization
+CIDX Clusterization
 
 This guide covers installing and operating a CIDX Server cluster: fresh setup from scratch, converting an existing standalone server to cluster mode, adding nodes, HAProxy configuration, and troubleshooting. For the architecture explanation, see [Cluster Architecture Guide](cluster-architecture.md).
 
@@ -40,7 +40,7 @@ The binary distribution of psycopg includes the C extension and libpq. It is suf
 
 ### Load Balancer
 
-HAProxy or any HTTP load balancer that distributes requests across the node IP addresses on port 8000. Session affinity (sticky sessions) is recommended: the Research Assistant feature runs Claude CLI in a background thread on the node that received the request, and poll responses are only available from that same node until the result is persisted to the database. Use HAProxy cookie-based affinity (`cookie SERVERID insert indirect nocache`) to pin a browser session to one node.
+HAProxy or any HTTP load balancer that distributes requests across the node IP addresses on port 8090. Session affinity (sticky sessions) is recommended: the Research Assistant feature runs Claude CLI in a background thread on the node that received the request, and poll responses are only available from that same node until the result is persisted to the database. Use HAProxy cookie-based affinity (`cookie SERVERID insert indirect nocache`) to pin a browser session to one node.
 
 ### Shared Storage
 
@@ -99,9 +99,9 @@ Run the install script on the first node. The script is idempotent and handles R
 
 ```bash
 bash scripts/install-cidx-server.sh \
-  --branch epic/408-cidx-clusterization \
+  --branch master \
   --voyage-key your-voyage-api-key \
-  --port 8000
+  --port 8090
 ```
 
 What the script does:
@@ -131,7 +131,7 @@ Edit `~/.cidx-server/config.json` to set PostgreSQL mode and the node identity:
 ```json
 {
   "host": "0.0.0.0",
-  "port": 8000,
+  "port": 8090,
   "log_level": "INFO",
   "storage_mode": "postgres",
   "postgres_dsn": "postgresql://cidx:your-strong-password@db-host:5432/cidx_server",
@@ -160,13 +160,13 @@ PYTHONPATH=src python3 -m code_indexer.server.storage.postgres.migrations.runner
   --connection-string "postgresql://cidx:your-strong-password@db-host:5432/cidx_server"
 ```
 
-Expected output (example — the count increases with new versions; as of v10.34.0 there are 25 migrations):
+Expected output (example — the count increases with new versions; there are 29 migrations (001-029)):
 ```
 INFO Applied migration: 001_initial_schema.sql
 INFO Applied migration: 002_groups_access_schema.sql
 INFO Applied migration: 003_node_metrics.sql
 ...
-Applied 25 migration(s).
+Applied 29 migration(s).
 ```
 
 Check migration status at any time:
@@ -214,8 +214,8 @@ backend cidx_servers
     balance roundrobin
     option httpchk GET /docs
     cookie SERVERID insert indirect nocache
-    server node-1 192.168.1.11:8000 check cookie node1
-    server node-2 192.168.1.12:8000 check cookie node2
+    server node-1 192.168.1.11:8090 check cookie node1
+    server node-2 192.168.1.12:8090 check cookie node2
 
 frontend cidx_frontend
     bind *:80
@@ -318,9 +318,9 @@ Each additional node follows this procedure. The PostgreSQL database and migrati
 
 ```bash
 bash scripts/install-cidx-server.sh \
-  --branch epic/408-cidx-clusterization \
+  --branch master \
   --voyage-key your-voyage-api-key \
-  --port 8000
+  --port 8090
 ```
 
 Stop the server after installation to configure it before it starts:
@@ -336,7 +336,7 @@ Edit `~/.cidx-server/config.json` with the same `postgres_dsn` as the other node
 ```json
 {
   "host": "0.0.0.0",
-  "port": 8000,
+  "port": 8090,
   "log_level": "INFO",
   "storage_mode": "postgres",
   "postgres_dsn": "postgresql://cidx:your-strong-password@db-host:5432/cidx_server",
@@ -358,10 +358,10 @@ Note: The file `~/.cidx-server/.jwt_secret` may still exist on each node as a lo
 
 ### Step 2c: Open Firewall Port
 
-The CIDX server listens on port 8000. If the OS firewall is active (firewalld on Rocky Linux / RHEL), open the port:
+The CIDX server listens on port 8090. If the OS firewall is active (firewalld on Rocky Linux / RHEL), open the port:
 
 ```bash
-sudo firewall-cmd --add-port=8000/tcp --permanent
+sudo firewall-cmd --add-port=8090/tcp --permanent
 sudo firewall-cmd --reload
 ```
 
@@ -369,7 +369,7 @@ Without this, the load balancer health checks will fail and the node will not re
 
 ### Step 3: Mount Shared Storage
 
-Mount the NFS volume containing golden repositories at the same path as the other nodes, for example `/home/cidx/.cidx-server/data/golden-repos`. The exact mount path depends on your infrastructure; it must match the `index_path` and `clone_path` values stored in the PostgreSQL `global_repos` and `golden_repos_metadata` tables.
+Mount the NFS volume containing golden repositories at the same path as the other nodes, for example `/home/cidx/.cidx-server/data/golden-repos`. The exact mount path depends on your infrastructure; it must match the `target_path` and `clone_path` values stored in the PostgreSQL `global_repos` and `golden_repos_metadata` tables.
 
 ### Step 4: Start the Server
 
@@ -396,7 +396,7 @@ psql "postgresql://cidx:your-strong-password@db-host:5432/cidx_server" \
 Add a new `server` line to the HAProxy backend configuration and reload:
 
 ```
-server node-2 192.168.1.12:8000 check
+server node-2 192.168.1.12:8090 check
 ```
 
 ```bash
