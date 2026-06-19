@@ -64,6 +64,10 @@ UNASSIGNED_CATEGORY_PRIORITY = (
 # Discovery enrichment limit (Story #754): max clone_urls per enrich request
 MAX_ENRICH_CLONE_URLS = 50
 
+# Story #1157: Result cache for background discovery jobs.
+# Maps job_id -> result_holder dict. Consumed read-once via .pop().
+_discovery_result_cache: Dict[str, dict] = {}
+
 # Story #885 Phase 5b (A7b): minimum gap between outer and shell lifecycle timeouts.
 # outer_timeout_seconds must be >= shell_timeout_seconds + LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS
 # so the Python-level watchdog always outlives the shell kill budget.
@@ -7617,6 +7621,104 @@ def discovery_all(
             )
         )
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@web_router.post("/api/discovery/{platform}/start")
+async def discovery_start(
+    request: Request,
+    platform: str,
+):
+    """Start a background discovery job for the given platform (Story #1157).
+
+    Returns job_id immediately. Client polls GET /api/jobs/{job_id} for progress.
+    Deduplicates: if a PENDING or RUNNING job of the same type exists, returns it.
+    """
+    session = _require_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    provider, err = _resolve_provider(request, platform)
+    if err is not None:
+        return err
+    if not provider.is_configured():
+        return JSONResponse(
+            {"error": f"{platform.capitalize()} token not configured"}, status_code=422
+        )
+
+    bgm = _get_background_job_manager()
+    if bgm is None:
+        return JSONResponse(
+            {"error": "Background job manager unavailable"}, status_code=503
+        )
+
+    from code_indexer.server.repositories.background_jobs import JobStatus
+
+    op_type = f"{platform}_discovery"
+
+    # Manual dedup: repo_alias=None bypasses BGM atomic DB gate
+    with bgm._lock:
+        for job in bgm.jobs.values():
+            if job.operation_type == op_type and job.status in (
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+            ):
+                return JSONResponse({"job_id": job.job_id, "existing": True})
+
+    indexed_urls = provider._get_indexed_canonical_urls()
+    _, all_hidden = _load_hidden_ids(show_hidden=False)
+
+    result_holder: dict = {}
+
+    def _worker(progress_callback=None):  # type: ignore[misc]
+        result = provider.discover_all_repositories(
+            indexed_urls=indexed_urls,
+            hidden_identifiers=all_hidden,
+            progress_callback=progress_callback,
+        )
+        result_holder["data"] = result
+        return {
+            "total_source": result["total_source"],
+            "total_unregistered": result["total_unregistered"],
+            "result_ready": True,
+        }
+
+    job_id = bgm.submit_job(
+        op_type,
+        _worker,
+        submitter_username=session.username,
+        repo_alias=None,
+    )
+    _discovery_result_cache[job_id] = result_holder
+    return JSONResponse({"job_id": job_id, "existing": False})
+
+
+@web_router.get("/api/discovery/{platform}/result/{job_id}")
+async def discovery_result(
+    request: Request,
+    platform: str,
+    job_id: str,
+):
+    """Consume the discovery result for a completed job (Story #1157).
+
+    Read-once: second call returns 404. Auth required.
+    """
+    session = _require_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    holder = _discovery_result_cache.pop(
+        job_id, None
+    )  # atomic read+delete (CPython GIL)
+    if holder is None:
+        return JSONResponse(
+            {"error": "Result not found or already consumed"}, status_code=404
+        )
+    data = holder.get("data")
+    if data is None:
+        return JSONResponse(
+            {"error": "Job completed but result is missing"}, status_code=500
+        )
+    return JSONResponse(data)
 
 
 @web_router.post(

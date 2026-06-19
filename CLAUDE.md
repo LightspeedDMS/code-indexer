@@ -613,6 +613,18 @@ The single live description-producing path is the lifecycle-unified pipeline (`_
 
 Any new background job MUST: (1) Integrate with `BackgroundJobManager` + `JobTracker` for dashboard/admin UI visibility. (2) Confirm frontend reporting pattern with user before implementing.
 
+### Auto-Discovery Background Job Pattern (Story #1157)
+
+`POST /api/discovery/{platform}/start` and `GET /api/discovery/{platform}/result/{job_id}` in `src/code_indexer/server/web/routes.py`.
+
+**Key invariants -- NEVER violate:**
+
+- **result_holder closure ordering**: `submit_job()` generates `job_id` internally via `uuid4()`. Cannot be pre-generated. Create `result_holder = {}` BEFORE `submit_job`, worker writes `result_holder['data']`, then key `_discovery_result_cache[job_id] = result_holder` AFTER `submit_job` returns the id.
+- **Manual dedup required**: discovery jobs pass `repo_alias=None` which bypasses the BGM atomic DB dedup gate (`register_job_if_no_conflict` only fires when `repo_alias` is not None). Deduplication MUST scan `bgm.jobs.values()` under `bgm._lock` for PENDING/RUNNING jobs of matching `operation_type`.
+- **progress_callback auto-injection**: BGM inspects worker function signature. Worker MUST declare `progress_callback=None` as a parameter for BGM to inject it. Both GitLab `_fetch_all_pages_rest` and GitHub `_fetch_all_pages_graphql` accept `progress_callback=None` -- both providers must stay in sync or the shared route raises TypeError.
+- **Read-once result cache**: `_discovery_result_cache` (module-level `Dict[str, dict]` in `routes.py`) uses `.pop(job_id, None)` for atomic read+delete (CPython GIL). Second call returns None -> 404. No TTL or eviction currently -- a future improvement (code review finding #1157).
+- **BGM lifecycle guarantee**: `result_holder['data']` is populated BEFORE BGM sets `job.status = COMPLETED` (worker `result = func(...)` at line ~1193 precedes status update at line ~1214), so the frontend poll-then-GET-result path has no race condition.
+
 ---
 
 ## MCP Tool Documentation
