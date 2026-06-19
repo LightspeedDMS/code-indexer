@@ -1962,8 +1962,18 @@ class ConfigService:
         Raises:
             ValueError: If key is not recognized
         """
-        if key != "indexable_extensions":
-            raise ValueError(f"Unknown indexing setting: {key}")
+        # Story #1158: Bounds for parallel_requests fields (embedding + temporal).
+        _MIN_PARALLEL = 1
+        _MAX_PARALLEL = 32
+
+        def _clamp_parallel(raw: Any, field_name: str) -> int:
+            """Parse raw value and clamp to [_MIN_PARALLEL, _MAX_PARALLEL]."""
+            try:
+                return max(_MIN_PARALLEL, min(_MAX_PARALLEL, int(raw)))
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Invalid value for {field_name}: must be a valid integer"
+                )
 
         config = self.get_config()
         indexing = config.indexing_config
@@ -1972,6 +1982,35 @@ class ConfigService:
 
             indexing = IndexingConfig()
             config.indexing_config = indexing
+
+        # Story #1158 - AC1: Embedding API parallelism (required, clamped [1, 32])
+        if key in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
+            setattr(indexing, key, _clamp_parallel(value, key))
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.%s to %d",
+                key,
+                getattr(indexing, key),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1158 - AC2: Temporal git-diff parallelism (optional: None or clamped [1, 32])
+        if key == "temporal_parallel_requests":
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                indexing.temporal_parallel_requests = None
+            else:
+                indexing.temporal_parallel_requests = _clamp_parallel(value, key)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_parallel_requests to %s",
+                indexing.temporal_parallel_requests,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key != "indexable_extensions":
+            raise ValueError(f"Unknown indexing setting: {key}")
 
         if isinstance(value, list):
             parsed_list: List[str] = list(value)
@@ -2388,6 +2427,18 @@ def get_config_service() -> ConfigService:
     if _config_service is None:
         _config_service = ConfigService()
     return _config_service
+
+
+def set_config_service(svc: ConfigService) -> None:
+    """
+    Inject an existing ConfigService as the global singleton.
+
+    Intended for integration tests that need the real singleton wired to a
+    specific server directory without process-level mocking.  Always pair
+    with a ``reset_config_service()`` call in teardown.
+    """
+    global _config_service
+    _config_service = svc
 
 
 def reset_config_service() -> None:

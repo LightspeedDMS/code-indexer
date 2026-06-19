@@ -419,6 +419,12 @@ class IndexingConfig:
     old config files at load time.
     """
 
+    # Story #1158 - AC1: Configurable embedding API parallelism via Web UI.
+    voyage_ai_parallel_requests: int = 8
+    cohere_parallel_requests: int = 8
+    # Story #1158 - AC2: Configurable temporal git-diff parallelism (None = inherit from provider).
+    temporal_parallel_requests: Optional[int] = None
+
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(

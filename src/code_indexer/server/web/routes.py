@@ -6500,6 +6500,40 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Batch size must be a valid number"
 
+        # Story #1158 - AC1: Embedding API parallelism (required when present, range 1-32)
+        _PARALLEL_MIN = 1
+        _PARALLEL_MAX = 32
+        for field_name in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
+            if field_name not in data:
+                continue
+            raw = data[field_name]
+            if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                label = field_name.replace("_", " ").title()
+                return f"{label} is required"
+            try:
+                val_int = int(raw)
+                if val_int < _PARALLEL_MIN or val_int > _PARALLEL_MAX:
+                    label = field_name.replace("_", " ").title()
+                    return (
+                        f"{label} must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
+                    )
+            except (ValueError, TypeError):
+                label = field_name.replace("_", " ").title()
+                return f"{label} must be a valid number"
+
+        # Story #1158 - AC2: Temporal git-diff parallelism (optional, range 1-32 when provided)
+        if "temporal_parallel_requests" in data:
+            temporal_raw = data["temporal_parallel_requests"]
+            if temporal_raw is not None and not (
+                isinstance(temporal_raw, str) and temporal_raw.strip() == ""
+            ):
+                try:
+                    temporal_int = int(temporal_raw)
+                    if temporal_int < _PARALLEL_MIN or temporal_int > _PARALLEL_MAX:
+                        return f"Temporal Parallel Requests must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
+                except (ValueError, TypeError):
+                    return "Temporal Parallel Requests must be a valid number"
+
     elif section == "query":
         for field in ["default_limit", "max_limit", "timeout"]:
             value = data.get(field)
