@@ -628,6 +628,22 @@ class ConfigService:
                     if config.indexing_config is not None
                     else []
                 ),
+                # Story #1158: parallel requests display wiring
+                "voyage_ai_parallel_requests": (
+                    config.indexing_config.voyage_ai_parallel_requests
+                    if config.indexing_config is not None
+                    else 8
+                ),
+                "cohere_parallel_requests": (
+                    config.indexing_config.cohere_parallel_requests
+                    if config.indexing_config is not None
+                    else 8
+                ),
+                "temporal_parallel_requests": (
+                    config.indexing_config.temporal_parallel_requests
+                    if config.indexing_config is not None
+                    else None
+                ),
             },
             # Story #323 - Wiki metadata fields configuration
             # Story #325 - Configurable metadata display order

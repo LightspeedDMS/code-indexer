@@ -534,6 +534,80 @@ class TestProviderConfigPydanticRoundtrip:
 
 
 # ---------------------------------------------------------------------------
+# Section 9: get_all_settings() must include the 3 new parallel fields
+# ---------------------------------------------------------------------------
+
+
+class TestGetAllSettingsIncludesParallelRequests:
+    """get_all_settings() must emit voyage_ai_parallel_requests,
+    cohere_parallel_requests, and temporal_parallel_requests inside the
+    'indexing' dict.  Before the display fix these keys were absent, causing
+    the Jinja template to render blank cells.
+    """
+
+    def _make_service(self, tmp_path):
+        """Create a ConfigService instance backed by real SQLite via tmp_path."""
+        from code_indexer.server.services.config_service import ConfigService
+        from code_indexer.server.utils.config_manager import ServerConfigManager
+
+        mgr = ServerConfigManager(server_dir_path=str(tmp_path))
+        return ConfigService(config_manager=mgr)
+
+    def test_get_all_settings_includes_voyage_ai_parallel_requests(
+        self, tmp_path
+    ) -> None:
+        """voyage_ai_parallel_requests must appear in the 'indexing' sub-dict."""
+        svc = self._make_service(tmp_path)
+        settings = svc.get_all_settings()
+        indexing = settings.get("indexing", {})
+        assert "voyage_ai_parallel_requests" in indexing, (
+            "voyage_ai_parallel_requests missing from get_all_settings()['indexing']"
+        )
+
+    def test_get_all_settings_includes_cohere_parallel_requests(self, tmp_path) -> None:
+        """cohere_parallel_requests must appear in the 'indexing' sub-dict."""
+        svc = self._make_service(tmp_path)
+        settings = svc.get_all_settings()
+        indexing = settings.get("indexing", {})
+        assert "cohere_parallel_requests" in indexing, (
+            "cohere_parallel_requests missing from get_all_settings()['indexing']"
+        )
+
+    def test_get_all_settings_includes_temporal_parallel_requests(
+        self, tmp_path
+    ) -> None:
+        """temporal_parallel_requests must appear in the 'indexing' sub-dict."""
+        svc = self._make_service(tmp_path)
+        settings = svc.get_all_settings()
+        indexing = settings.get("indexing", {})
+        assert "temporal_parallel_requests" in indexing, (
+            "temporal_parallel_requests missing from get_all_settings()['indexing']"
+        )
+
+    def test_get_all_settings_returns_none_for_temporal_when_not_set(
+        self, tmp_path
+    ) -> None:
+        """temporal_parallel_requests must be None when not configured (fresh DB)."""
+        svc = self._make_service(tmp_path)
+        settings = svc.get_all_settings()
+        indexing = settings.get("indexing", {})
+        assert "temporal_parallel_requests" in indexing
+        assert indexing["temporal_parallel_requests"] is None
+
+    def test_get_all_settings_reflects_saved_values(self, tmp_path) -> None:
+        """After saving all 3 fields, get_all_settings returns the saved values."""
+        svc = self._make_service(tmp_path)
+        svc._update_indexing_setting("voyage_ai_parallel_requests", "16")
+        svc._update_indexing_setting("cohere_parallel_requests", "4")
+        svc._update_indexing_setting("temporal_parallel_requests", "2")
+        settings = svc.get_all_settings()
+        indexing = settings.get("indexing", {})
+        assert indexing.get("voyage_ai_parallel_requests") == 16
+        assert indexing.get("cohere_parallel_requests") == 4
+        assert indexing.get("temporal_parallel_requests") == 2
+
+
+# ---------------------------------------------------------------------------
 # Section 7: Lines 409/411 regression — those sites must NOT use temporal
 # ---------------------------------------------------------------------------
 
