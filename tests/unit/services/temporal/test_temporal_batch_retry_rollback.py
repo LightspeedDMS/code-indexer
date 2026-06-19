@@ -42,6 +42,7 @@ class TestBatchRetryLogic:
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = 1  # Single thread for predictable behavior
+        config.voyage_ai.temporal_parallel_requests = None
         config.voyage_ai.max_concurrent_batches_per_commit = 1
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-3"

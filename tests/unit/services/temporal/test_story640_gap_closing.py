@@ -171,7 +171,9 @@ def _run_indexer_and_capture_thread_count(
     mock_config = MagicMock()
     mock_config.embedding_provider = provider
     mock_config.cohere.parallel_requests = cohere_parallel
+    mock_config.cohere.temporal_parallel_requests = None
     mock_config.voyage_ai.parallel_requests = voyage_parallel
+    mock_config.voyage_ai.temporal_parallel_requests = None
     mock_config.voyage_ai.max_concurrent_batches_per_commit = 10
     mock_config.voyage_ai.model = "voyage-code-3"
     mock_config.cohere.model = "embed-v4.0"

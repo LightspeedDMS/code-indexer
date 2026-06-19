@@ -28,6 +28,7 @@ def test_retry_exhaustion_triggers_rollback_integration(tmp_path):
     config_manager = Mock()
     config = Mock()
     config.voyage_ai.parallel_requests = 1
+    config.voyage_ai.temporal_parallel_requests = None
     config.voyage_ai.max_concurrent_batches_per_commit = 2
     config.voyage_ai.batch_size = 10
     config.embedding_provider = "voyage-ai"

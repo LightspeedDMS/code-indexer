@@ -27,6 +27,7 @@ def mock_config_manager():
     config.embedding_provider = "voyage-ai"
     config.voyage_ai = Mock()
     config.voyage_ai.parallel_requests = 4
+    config.voyage_ai.temporal_parallel_requests = None
     config.voyage_ai.max_concurrent_batches_per_commit = 10
     config_manager.get_config.return_value = config
     return config_manager

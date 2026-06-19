@@ -22,6 +22,7 @@ class TestTemporalIndexerItemType:
         mock_config_manager = MagicMock()
         mock_config = MagicMock()
         mock_config.voyage_ai.parallel_requests = 4
+        mock_config.voyage_ai.temporal_parallel_requests = None
         mock_config.voyage_ai.max_concurrent_batches_per_commit = 10
         mock_config.voyage_ai.model = "voyage-3"
         mock_config.embedding_provider = "voyage-ai"
