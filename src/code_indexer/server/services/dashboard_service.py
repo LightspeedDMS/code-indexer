@@ -92,6 +92,8 @@ class RecentJob:
     job_type: str
     completion_time: str
     status: str
+    username: str = ""
+    actor_username: Optional[str] = None
 
 
 @dataclass
@@ -543,6 +545,8 @@ class DashboardService:
                         job_type=job.get("operation_type", "unknown"),
                         completion_time=job.get("completed_at", ""),
                         status=job.get("status", "unknown"),
+                        username=job.get("username") or "",
+                        actor_username=job.get("actor_username"),
                     )
                 )
 
