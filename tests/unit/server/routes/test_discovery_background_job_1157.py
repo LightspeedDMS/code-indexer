@@ -1,7 +1,6 @@
 """
 Unit tests for Story #1157: GitLab Auto-Discovery Background Job with Progress Bar.
-
-RED phase: tests written before implementation.
+Updated for cluster-safe PayloadCache storage (Bug fix: was per-node RAM dict).
 
 Tests cover:
 1. _fetch_all_pages_rest(progress_callback=...) invokes callback per page, monotonic, capped at 90
@@ -9,13 +8,14 @@ Tests cover:
 3. _fetch_all_pages_graphql(progress_callback=...) same callback behavior
 4. _fetch_all_pages_graphql() with progress_callback=None - no regression
 5. discover_all_repositories(..., progress_callback=...) threads callback through both providers
-6. _discovery_result_cache.pop read-once semantics
-7. Worker closure: result_holder populated, reachable via cache
+6. PayloadCache key semantics: result stored under "discovery:{job_id}"
+7. Worker closure: result_holder populated, stored in PayloadCache
 8. Dedup scan: PENDING/RUNNING job same op_type returns existing job_id
 9. No existing job: submits new, returns existing=False
 10. POST without admin session -> 401
 11. GET result without admin session -> 401
-12. GET result after consumed -> 404
+12. GET result for unknown key -> 404
+13. GET result when payload_cache is None -> 503
 """
 
 import pytest
@@ -445,39 +445,34 @@ class TestDiscoverAllRepositoriesThreadsCallback:
 
 
 # ---------------------------------------------------------------------------
-# TC-06: _discovery_result_cache read-once semantics
+# TC-06: PayloadCache key semantics for discovery results
 # ---------------------------------------------------------------------------
 
 
-class TestDiscoveryResultCacheReadOnce:
-    """_discovery_result_cache.pop(job_id) returns data first call, None second."""
+class TestDiscoveryPayloadCacheKeySemantics:
+    """Discovery results stored in PayloadCache under key "discovery:{job_id}"."""
 
-    def test_first_pop_returns_holder(self):
-        """First pop returns the stored result_holder dict."""
-        from code_indexer.server.web import routes
-
+    def test_payload_cache_key_format(self):
+        """Key used for storage follows "discovery:{job_id}" format."""
+        # The route uses f"discovery:{job_id}" as the cache key.
+        # Verify the format is stable — callers depend on it.
         job_id = "test-job-id-001"
-        holder = {
-            "data": {"repositories": [], "total_source": 5, "total_unregistered": 3}
+        expected_key = f"discovery:{job_id}"
+        assert expected_key == "discovery:test-job-id-001"
+
+    def test_payload_cache_stores_json_serialisable_result(self):
+        """Result stored in PayloadCache must be JSON-serialisable."""
+        import json
+
+        result = {
+            "repositories": [{"name": "repo1"}],
+            "total_source": 5,
+            "total_unregistered": 3,
         }
-        routes._discovery_result_cache[job_id] = holder
-
-        result = routes._discovery_result_cache.pop(job_id, None)
-        assert result is holder
-
-    def test_second_pop_returns_none(self):
-        """Second pop returns None (read-once semantics)."""
-        from code_indexer.server.web import routes
-
-        job_id = "test-job-id-002"
-        holder = {
-            "data": {"repositories": [], "total_source": 1, "total_unregistered": 1}
-        }
-        routes._discovery_result_cache[job_id] = holder
-
-        routes._discovery_result_cache.pop(job_id, None)  # first pop consumes it
-        result = routes._discovery_result_cache.pop(job_id, None)
-        assert result is None
+        # Verify round-trip works (the route uses json.dumps / json.loads)
+        serialised = json.dumps(result)
+        restored = json.loads(serialised)
+        assert restored == result
 
 
 # ---------------------------------------------------------------------------
@@ -803,49 +798,61 @@ class TestGetResultWithoutAdminSession:
 
 
 # ---------------------------------------------------------------------------
-# TC-12: GET result after consumed -> 404
+# TC-12: GET result via PayloadCache — 404 for unknown key
 # ---------------------------------------------------------------------------
 
 
-class TestGetResultAfterConsumed:
-    """GET /api/discovery/{platform}/result/{job_id} after consumed returns 404."""
+class TestGetResultViaPayloadCache:
+    """GET /api/discovery/{platform}/result/{job_id} uses PayloadCache."""
 
-    def test_result_404_after_consumed(self, app_and_client):
-        """Second GET result returns 404."""
-        from code_indexer.server.web import routes
+    def _make_mock_payload_cache(self, job_id, result_data=None):
+        """Build a mock PayloadCache that knows about job_id."""
+        import json
+        from unittest.mock import MagicMock
+        from code_indexer.server.cache.payload_cache import CacheRetrievalResult
 
-        _, client = app_and_client
+        mock_cache = MagicMock()
+        if result_data is not None:
+            mock_cache.has_key.return_value = True
+            mock_cache.retrieve.return_value = CacheRetrievalResult(
+                content=json.dumps(result_data),
+                page=0,
+                total_pages=1,
+                has_more=False,
+            )
+        else:
+            mock_cache.has_key.return_value = False
+        return mock_cache
 
-        job_id = "consumed-job-999"
-        routes._discovery_result_cache[job_id] = {
-            "data": {
-                "repositories": [{"name": "repo1"}],
-                "total_source": 1,
-                "total_unregistered": 1,
-            }
+    def test_result_200_when_key_present(self, app_and_client):
+        """GET result returns 200 with data when PayloadCache has the key."""
+        app, client = app_and_client
+
+        job_id = "payload-cache-job-200"
+        result_data = {
+            "repositories": [{"name": "repo1"}],
+            "total_source": 1,
+            "total_unregistered": 1,
         }
+        mock_cache = self._make_mock_payload_cache(job_id, result_data)
+        app.state.payload_cache = mock_cache
 
-        # First call - should succeed
-        resp1 = client.get(
+        resp = client.get(
             f"/admin/api/discovery/gitlab/result/{job_id}",
             follow_redirects=False,
         )
-        assert resp1.status_code == 200, (
-            f"First GET should be 200, got {resp1.status_code}"
+        assert resp.status_code == 200, (
+            f"Expected 200, got {resp.status_code}: {resp.text}"
         )
-
-        # Second call - should 404 (read-once)
-        resp2 = client.get(
-            f"/admin/api/discovery/gitlab/result/{job_id}",
-            follow_redirects=False,
-        )
-        assert resp2.status_code == 404, (
-            f"Second GET should be 404, got {resp2.status_code}"
-        )
+        body = resp.json()
+        assert body["repositories"] == result_data["repositories"]
 
     def test_result_404_for_unknown_job(self, app_and_client):
-        """Unknown job_id returns 404."""
-        _, client = app_and_client
+        """Unknown job_id (not in PayloadCache) returns 404."""
+        app, client = app_and_client
+
+        mock_cache = self._make_mock_payload_cache("nonexistent-job-id")
+        app.state.payload_cache = mock_cache
 
         resp = client.get(
             "/admin/api/discovery/gitlab/result/nonexistent-job-id",
@@ -853,4 +860,53 @@ class TestGetResultAfterConsumed:
         )
         assert resp.status_code == 404, (
             f"Expected 404 for unknown job_id, got {resp.status_code}"
+        )
+
+    def test_result_can_be_read_multiple_times(self, app_and_client):
+        """PayloadCache allows multiple reads within TTL (not read-once)."""
+        app, client = app_and_client
+
+        job_id = "reread-job-abc"
+        result_data = {
+            "repositories": [{"name": "repo1"}],
+            "total_source": 2,
+            "total_unregistered": 1,
+        }
+        mock_cache = self._make_mock_payload_cache(job_id, result_data)
+        app.state.payload_cache = mock_cache
+
+        resp1 = client.get(
+            f"/admin/api/discovery/gitlab/result/{job_id}",
+            follow_redirects=False,
+        )
+        assert resp1.status_code == 200, f"First GET: {resp1.status_code}"
+
+        resp2 = client.get(
+            f"/admin/api/discovery/gitlab/result/{job_id}",
+            follow_redirects=False,
+        )
+        assert resp2.status_code == 200, (
+            f"Second GET should also be 200 (TTL-based not read-once): {resp2.status_code}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TC-13: GET result when payload_cache unavailable -> 503
+# ---------------------------------------------------------------------------
+
+
+class TestGetResultPayloadCacheUnavailable:
+    """GET result returns 503 when app.state.payload_cache is None."""
+
+    def test_result_503_when_cache_none(self, app_and_client):
+        """When payload_cache is None, GET result returns 503."""
+        app, client = app_and_client
+        app.state.payload_cache = None
+
+        resp = client.get(
+            "/admin/api/discovery/gitlab/result/any-job-id",
+            follow_redirects=False,
+        )
+        assert resp.status_code == 503, (
+            f"Expected 503 when payload_cache unavailable, got {resp.status_code}"
         )

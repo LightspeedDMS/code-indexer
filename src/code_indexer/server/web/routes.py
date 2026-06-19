@@ -66,7 +66,6 @@ MAX_ENRICH_CLONE_URLS = 50
 
 # Story #1157: Result cache for background discovery jobs.
 # Maps job_id -> result_holder dict. Consumed read-once via .pop().
-_discovery_result_cache: Dict[str, dict] = {}
 
 # Story #885 Phase 5b (A7b): minimum gap between outer and shell lifecycle timeouts.
 # outer_timeout_seconds must be >= shell_timeout_seconds + LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS
@@ -7667,7 +7666,8 @@ async def discovery_start(
     indexed_urls = provider._get_indexed_canonical_urls()
     _, all_hidden = _load_hidden_ids(show_hidden=False)
 
-    result_holder: dict = {}
+    payload_cache = getattr(request.app.state, "payload_cache", None)
+    job_id_holder: dict = {}
 
     def _worker(progress_callback=None):  # type: ignore[misc]
         result = provider.discover_all_repositories(
@@ -7675,7 +7675,9 @@ async def discovery_start(
             hidden_identifiers=all_hidden,
             progress_callback=progress_callback,
         )
-        result_holder["data"] = result
+        jid = job_id_holder.get("job_id")
+        if jid and payload_cache is not None:
+            payload_cache.store_with_key(f"discovery:{jid}", json.dumps(result))
         return {
             "total_source": result["total_source"],
             "total_unregistered": result["total_unregistered"],
@@ -7688,7 +7690,7 @@ async def discovery_start(
         submitter_username=session.username,
         repo_alias=None,
     )
-    _discovery_result_cache[job_id] = result_holder
+    job_id_holder["job_id"] = job_id
     return JSONResponse({"job_id": job_id, "existing": False})
 
 
@@ -7706,18 +7708,17 @@ async def discovery_result(
     if session is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    holder = _discovery_result_cache.pop(
-        job_id, None
-    )  # atomic read+delete (CPython GIL)
-    if holder is None:
+    payload_cache = getattr(request.app.state, "payload_cache", None)
+    if payload_cache is None:
+        return JSONResponse({"error": "Payload cache unavailable"}, status_code=503)
+
+    cache_key = f"discovery:{job_id}"
+    if not payload_cache.has_key(cache_key):
         return JSONResponse(
             {"error": "Result not found or already consumed"}, status_code=404
         )
-    data = holder.get("data")
-    if data is None:
-        return JSONResponse(
-            {"error": "Job completed but result is missing"}, status_code=500
-        )
+    cache_result = payload_cache.retrieve(cache_key, page=0)
+    data = json.loads(cache_result.content)
     return JSONResponse(data)
 
 

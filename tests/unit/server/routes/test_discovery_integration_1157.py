@@ -2,14 +2,17 @@
 Integration tests for Story #1157: Discovery background job flow.
 
 Uses real BackgroundJobManager (in-memory, no DB) with mocked provider.
+Results stored in real PayloadCache (SQLite in-memory via tmp path).
 
 1. Full flow: POST start -> poll until completed -> GET result returns full repos list
-2. Read-once: second GET result returns 404
+2. PayloadCache allows re-reads within TTL (not read-once; TTL handles cleanup)
 3. Dedup: second POST while first PENDING returns same job_id
 """
 
 import time
+import tempfile
 import pytest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -20,29 +23,37 @@ from unittest.mock import MagicMock, patch
 
 @pytest.fixture
 def admin_client_and_bgm():
-    """TestClient with admin session + real BackgroundJobManager (in-memory)."""
+    """TestClient with admin session + real BackgroundJobManager + real PayloadCache."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from code_indexer.server.web.routes import web_router
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
+    from code_indexer.server.cache.payload_cache import PayloadCache, PayloadCacheConfig
 
     app = FastAPI()
     app.include_router(web_router, prefix="/admin")
 
     bgm = BackgroundJobManager()
 
-    mock_sm = MagicMock()
-    mock_session = MagicMock()
-    mock_session.role = "admin"
-    mock_session.username = "admin"
-    mock_sm.get_session.return_value = mock_session
+    # Wire a real PayloadCache backed by a temp SQLite file
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache_path = Path(tmpdir) / "test_payload_cache.db"
+        payload_cache = PayloadCache(cache_path, PayloadCacheConfig())
+        payload_cache.initialize()
+        app.state.payload_cache = payload_cache
 
-    # Patch the name as imported into routes module
-    with patch(
-        "code_indexer.server.web.routes.get_session_manager", return_value=mock_sm
-    ):
-        client = TestClient(app, raise_server_exceptions=False)
-        yield client, bgm
+        mock_sm = MagicMock()
+        mock_session = MagicMock()
+        mock_session.role = "admin"
+        mock_session.username = "admin"
+        mock_sm.get_session.return_value = mock_session
+
+        # Patch the name as imported into routes module
+        with patch(
+            "code_indexer.server.web.routes.get_session_manager", return_value=mock_sm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            yield client, bgm
 
 
 def _make_mock_provider(repos=None, total_source=3):
@@ -143,15 +154,15 @@ class TestFullDiscoveryFlow:
 
 
 # ---------------------------------------------------------------------------
-# IT-02: Read-once: second GET result returns 404
+# IT-02: PayloadCache allows re-reads within TTL (not read-once)
 # ---------------------------------------------------------------------------
 
 
-class TestReadOnceSemantics:
-    """Result can only be consumed once."""
+class TestPayloadCacheReads:
+    """Result stored in PayloadCache can be read multiple times within TTL."""
 
-    def test_second_get_result_404(self, admin_client_and_bgm):
-        """After consuming result once, second GET returns 404."""
+    def test_second_get_result_also_200(self, admin_client_and_bgm):
+        """After retrieving result once, second GET within TTL also returns 200."""
         client, bgm = admin_client_and_bgm
         mock_provider = _make_mock_provider()
 
@@ -198,12 +209,12 @@ class TestReadOnceSemantics:
                 f"First GET should be 200, got {r1.status_code}"
             )
 
-            # Second GET - must be 404
+            # Second GET - also 200 (PayloadCache is TTL-based, not read-once)
             r2 = client.get(
                 f"/admin/api/discovery/gitlab/result/{job_id}", follow_redirects=False
             )
-            assert r2.status_code == 404, (
-                f"Second GET should be 404 (read-once), got {r2.status_code}"
+            assert r2.status_code == 200, (
+                f"Second GET should also be 200 (TTL-based, not read-once), got {r2.status_code}"
             )
 
 

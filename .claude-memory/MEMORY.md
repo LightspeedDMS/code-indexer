@@ -11,6 +11,7 @@
 - [feedback_no_secrets_in_memory.md](feedback_no_secrets_in_memory.md) - NEVER write IPs, secrets, credentials, topology into memory files — they are versioned
 - [feedback_own_all_repo_changes.md](feedback_own_all_repo_changes.md) - NEVER revert other subagents' changes — own ALL changes found in repo
 - [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
+- [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - NEVER use module-level dicts or per-node RAM for cross-request state — use PayloadCache (app.state.payload_cache) or shared DB; HAProxy affinity is not a substitute
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
