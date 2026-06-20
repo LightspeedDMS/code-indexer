@@ -825,3 +825,100 @@ class TestWriteEmbedMetaToEventCtxDirect:
         assert ctx.voyage_cache_mode is None, (
             "cohere provider must not touch voyage fields"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: correlation_id Bug fix — inline_query.py must use correlation_bridge
+# ---------------------------------------------------------------------------
+
+
+class TestCorrelationIdInlineQueryImport:
+    """Regression guard for Bug 2: inline_query.py must import get_correlation_id
+    from the REGISTERED middleware (correlation_bridge), not from the UNREGISTERED
+    middleware (middleware.correlation) which always returns None.
+
+    The root cause: CorrelationContextMiddleware (middleware/correlation.py) is never
+    registered in app_wiring.py. Only CorrelationBridgeMiddleware (telemetry/
+    correlation_bridge.py) is registered. inline_query.py was importing from the wrong
+    module, so get_correlation_id() always returned None.
+
+    Tests:
+    1. Source-text check: inline_query.py must NOT import from middleware.correlation
+    2. Functional wiring check: the function aliased as get_correlation_id in
+       inline_query.py reads from _correlation_id_var (the bridge's ContextVar),
+       so setting that var propagates to the correlation_id in the SearchEventRecord.
+    """
+
+    def test_inline_query_does_not_import_from_middleware_correlation(self):
+        """Source-level regression guard: inline_query.py must not import from
+        ..middleware.correlation — that middleware is never registered with FastAPI
+        so its _correlation_id ContextVar is always None.
+
+        This test fails if the import is reverted to the wrong module.
+        """
+        from pathlib import Path
+
+        inline_query_path = (
+            Path(__file__).parent.parent.parent.parent.parent
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "routers"
+            / "inline_query.py"
+        )
+        source = inline_query_path.read_text()
+
+        assert (
+            "from ..middleware.correlation import get_correlation_id" not in source
+        ), (
+            "inline_query.py must NOT import get_correlation_id from ..middleware.correlation "
+            "(that middleware is never registered — its ContextVar is always None). "
+            "Must import from code_indexer.server.telemetry.correlation_bridge instead."
+        )
+
+    def test_get_correlation_id_alias_reads_from_bridge_contextvar(self):
+        """Functional wiring: the function imported as get_correlation_id in
+        inline_query.py (after the fix) must read from _correlation_id_var —
+        the ContextVar that CorrelationBridgeMiddleware sets on each request.
+
+        This is verified by:
+        1. Importing get_current_correlation_id from correlation_bridge directly
+           (the function that inline_query.py now aliases as get_correlation_id)
+        2. Setting _correlation_id_var to a known value
+        3. Asserting get_current_correlation_id() returns that value
+
+        If inline_query.py used the old import (middleware.correlation.get_correlation_id),
+        that function reads from a DIFFERENT ContextVar (_correlation_id, not _correlation_id_var)
+        and would return None when only _correlation_id_var is set.
+        """
+        from code_indexer.server.telemetry.correlation_bridge import (
+            _correlation_id_var,
+            get_current_correlation_id,
+        )
+
+        # Also verify the old middleware's ContextVar is separate — setting bridge var
+        # does NOT affect the old module's var
+        from code_indexer.server.middleware import correlation as old_corr_mod
+
+        token = _correlation_id_var.set("test-corr-id-123")
+        try:
+            # This is the function that inline_query.py now aliases as get_correlation_id
+            result = get_current_correlation_id()
+
+            # The old (wrong) function reads from a different ContextVar — always None here
+            old_result = old_corr_mod.get_correlation_id()
+        finally:
+            _correlation_id_var.reset(token)
+
+        assert result == "test-corr-id-123", (
+            "get_current_correlation_id() from correlation_bridge must return the value "
+            "set via _correlation_id_var (what CorrelationBridgeMiddleware sets). Got: {!r}".format(
+                result
+            )
+        )
+        assert old_result is None, (
+            "The OLD get_correlation_id() from middleware.correlation reads from a DIFFERENT "
+            "ContextVar that is never populated (middleware never registered). Got: {!r}".format(
+                old_result
+            )
+        )

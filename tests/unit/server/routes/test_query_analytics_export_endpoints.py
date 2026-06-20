@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from code_indexer.server.auth.dependencies import (
     get_current_admin_user,
+    get_current_admin_user_hybrid,
     get_current_user,
 )
 from code_indexer.server.auth.user_manager import UserRole
@@ -70,6 +71,7 @@ def app_with_export_service(export_service):
     admin_user = _make_admin_user()
     app.dependency_overrides[get_current_user] = lambda: admin_user
     app.dependency_overrides[get_current_admin_user] = lambda: admin_user
+    app.dependency_overrides[get_current_admin_user_hybrid] = lambda: admin_user
     app.state.query_analytics_export_service = export_service
     # Ensure search_event_log_writer is set (needed if search-events endpoint is loaded)
     if not hasattr(app.state, "search_event_log_writer"):
@@ -136,6 +138,7 @@ class TestPostExport:
         admin_user = _make_admin_user()
         app.dependency_overrides[get_current_user] = lambda: admin_user
         app.dependency_overrides[get_current_admin_user] = lambda: admin_user
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: admin_user
         app.state.query_analytics_export_service = None
 
         try:
@@ -417,6 +420,7 @@ class TestGetExports:
         admin_user = _make_admin_user()
         app.dependency_overrides[get_current_user] = lambda: admin_user
         app.dependency_overrides[get_current_admin_user] = lambda: admin_user
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: admin_user
         app.state.query_analytics_export_service = None
 
         try:
@@ -572,6 +576,7 @@ class TestDownloadExport:
         admin_user = _make_admin_user()
         app.dependency_overrides[get_current_user] = lambda: admin_user
         app.dependency_overrides[get_current_admin_user] = lambda: admin_user
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: admin_user
         app.state.query_analytics_export_service = None
 
         try:
