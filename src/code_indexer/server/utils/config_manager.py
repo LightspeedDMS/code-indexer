@@ -1367,6 +1367,11 @@ class ServerConfig:
     # tunable. Must be >= 1; values < 1 are treated as the default (90).
     search_event_log_retention_days: int = 90
 
+    # Issue #1160 — Export file retention (days). QueryAnalyticsExportService
+    # removes export files older than this many days. Runtime / Web-UI tunable.
+    # Must be in [1, 3650]; defaults to 30 days.
+    export_retention_days: int = 30
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

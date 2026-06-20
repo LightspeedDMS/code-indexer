@@ -631,6 +631,32 @@ class DatabaseSchema:
             ON search_event_log (username)
     """
 
+    # Issue #1160: Query analytics exports table
+    CREATE_QUERY_ANALYTICS_EXPORTS_TABLE = """
+        CREATE TABLE IF NOT EXISTS query_analytics_exports (
+            id              TEXT PRIMARY KEY,
+            initiated_by    TEXT NOT NULL,
+            created_at      REAL NOT NULL,
+            status          TEXT NOT NULL,
+            filter_summary  TEXT NOT NULL,
+            file_path       TEXT,
+            file_size_bytes INTEGER,
+            row_count       INTEGER,
+            error_message   TEXT,
+            retention_until REAL
+        )
+    """
+
+    CREATE_IDX_QAE_CREATED_AT = """
+        CREATE INDEX IF NOT EXISTS idx_qae_created_at
+            ON query_analytics_exports (created_at)
+    """
+
+    CREATE_IDX_QAE_INITIATED_BY = """
+        CREATE INDEX IF NOT EXISTS idx_qae_initiated_by
+            ON query_analytics_exports (initiated_by)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -756,6 +782,10 @@ class DatabaseSchema:
             conn.execute(self.CREATE_SEARCH_EVENT_LOG_TABLE)
             conn.execute(self.CREATE_IDX_SEL_TIMESTAMP)
             conn.execute(self.CREATE_IDX_SEL_USER)
+            # Issue #1160: Query analytics exports
+            conn.execute(self.CREATE_QUERY_ANALYTICS_EXPORTS_TABLE)
+            conn.execute(self.CREATE_IDX_QAE_CREATED_AT)
+            conn.execute(self.CREATE_IDX_QAE_INITIATED_BY)
 
             conn.commit()
 

@@ -246,6 +246,65 @@ class SearchEventLogSqliteBackend:
             logger.warning("SearchEventLogSqliteBackend: query failed: %s", exc)
             return [], 0
 
+    def query_for_export(self, filters: dict) -> List[dict]:
+        """Return all matching rows for export, ordered by timestamp ASC.
+
+        Unlike query(), this has no pagination and applies cache_hit_filter
+        directly in SQL. Intended for use by QueryAnalyticsExportService.
+        """
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        username = filters.get("user") or None
+        if username:
+            conditions.append("username = ?")
+            params.append(username)
+
+        repo_alias = filters.get("repo_alias") or None
+        if repo_alias:
+            conditions.append("repo_alias = ?")
+            params.append(repo_alias)
+
+        search_type = filters.get("search_type")
+        if search_type and search_type != "all":
+            conditions.append("search_type = ?")
+            params.append(search_type)
+
+        from_ts = filters.get("from_timestamp")
+        if from_ts is not None:
+            conditions.append("timestamp >= ?")
+            params.append(from_ts)
+
+        to_ts = filters.get("to_timestamp")
+        if to_ts is not None:
+            conditions.append("timestamp < ?")
+            params.append(to_ts)
+
+        cache_hit_filter = filters.get("cache_hit_filter", "all")
+        if cache_hit_filter == "hits_only":
+            conditions.append("(voyage_cache_hit = 1 OR cohere_cache_hit = 1)")
+        elif cache_hit_filter == "misses_only":
+            conditions.append(
+                "(voyage_cache_hit IS NULL OR voyage_cache_hit = 0)"
+                " AND (cohere_cache_hit IS NULL OR cohere_cache_hit = 0)"
+            )
+
+        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        sql = f"SELECT * FROM search_event_log {where_clause} ORDER BY timestamp ASC"
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=30)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(sql, params).fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(
+                "SearchEventLogSqliteBackend: query_for_export failed: %s", exc
+            )
+            return []
+
 
 # ---------------------------------------------------------------------------
 # PostgreSQL backend
@@ -410,6 +469,61 @@ class SearchEventLogPostgresBackend:
         except Exception as exc:
             logger.warning("SearchEventLogPostgresBackend: query failed: %s", exc)
             return [], 0
+
+    def query_for_export(self, filters: dict) -> List[dict]:
+        """Return all matching rows for export, ordered by timestamp ASC.
+
+        Unlike query(), this has no pagination and applies cache_hit_filter
+        directly in SQL. Intended for use by QueryAnalyticsExportService.
+        """
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        username = filters.get("user") or None
+        if username:
+            conditions.append("username = %s")
+            params.append(username)
+
+        repo_alias = filters.get("repo_alias") or None
+        if repo_alias:
+            conditions.append("repo_alias = %s")
+            params.append(repo_alias)
+
+        search_type = filters.get("search_type")
+        if search_type and search_type != "all":
+            conditions.append("search_type = %s")
+            params.append(search_type)
+
+        from_ts = filters.get("from_timestamp")
+        if from_ts is not None:
+            conditions.append("timestamp >= %s")
+            params.append(from_ts)
+
+        to_ts = filters.get("to_timestamp")
+        if to_ts is not None:
+            conditions.append("timestamp < %s")
+            params.append(to_ts)
+
+        cache_hit_filter = filters.get("cache_hit_filter", "all")
+        if cache_hit_filter == "hits_only":
+            conditions.append("(voyage_cache_hit = TRUE OR cohere_cache_hit = TRUE)")
+        elif cache_hit_filter == "misses_only":
+            conditions.append(
+                "(voyage_cache_hit IS NULL OR voyage_cache_hit = FALSE)"
+                " AND (cohere_cache_hit IS NULL OR cohere_cache_hit = FALSE)"
+            )
+
+        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        sql = f"SELECT * FROM search_event_log {where_clause} ORDER BY timestamp ASC"
+        try:
+            with self._pool.connection() as conn:
+                rows = conn.execute(sql, params).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as exc:
+            logger.warning(
+                "SearchEventLogPostgresBackend: query_for_export failed: %s", exc
+            )
+            return []
 
 
 # ---------------------------------------------------------------------------

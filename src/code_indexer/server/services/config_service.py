@@ -678,6 +678,10 @@ class ConfigService:
             "search_event_log": {
                 "search_event_log_retention_days": config.search_event_log_retention_days,
             },
+            # Issue #1160 — Export retention settings
+            "export": {
+                "export_retention_days": config.export_retention_days,
+            },
         }
 
         # Reranking settings (Story #652)
@@ -866,6 +870,9 @@ class ConfigService:
         # Issue #1159 - Search event log retention
         elif category == "search_event_log":
             self._update_search_event_log_setting(config, key, value)
+        # Issue #1160 - Export retention
+        elif category == "export":
+            self._update_export_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1677,6 +1684,24 @@ class ConfigService:
             config.search_event_log_retention_days = days
         else:
             raise ValueError(f"Unknown search_event_log setting: {key}")
+
+    def _update_export_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update export runtime settings (Issue #1160).
+
+        Validation rules:
+        - export_retention_days: integer in [1, 3650].
+        """
+        if key == "export_retention_days":
+            days = int(value)
+            if not (1 <= days <= 3650):
+                raise ValueError(
+                    f"export_retention_days must be between 1 and 3650, got {days}."
+                )
+            config.export_retention_days = days
+        else:
+            raise ValueError(f"Unknown export setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any

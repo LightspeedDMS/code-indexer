@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.144.0] - 2026-06-20
+
+### Added
+- **Query Analytics Export UI (Story #1160):** New admin page at `/admin/analytics-export` allows admins to filter search event data and export it to Excel. Filter panel supports: UTC epoch date range (`from_timestamp`/`to_timestamp`), username, repository alias, search type (semantic/fts/hybrid/temporal/regex/xray), and embedding cache hit filter (hits_only/misses_only). Export runs as a background job (`POST /api/admin/search-events/export` returns `job_id`); the page polls `GET /api/jobs/{job_id}` and updates status in real time. Export history table (`GET /api/admin/search-events/exports`) shows all exports with created time, initiator, filter summary, row count, file size, status, and a Download link for completed exports. Downloads served at `GET /api/admin/search-events/exports/{id}/download` with `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` MIME type. Excel files contain 15 canonical columns per search event. Export retention configurable via Web UI `export_retention_days` (default 30, range [1, 3650]); old files are evicted automatically. Dual-backend storage: `QueryAnalyticsExportSqliteBackend` (solo) and `QueryAnalyticsExportPostgresBackend` (cluster). SQL migration `031_query_analytics_exports.sql` is additive-only. "Analytics" nav link added between Logs and Self-Monitoring. `ExportFiltersRequest` Pydantic model enforces JSON-body binding (not query params) with correct key names aligned to the service contract.
+
 ## [10.143.0] - 2026-06-20
 
 ### Added

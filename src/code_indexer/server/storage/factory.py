@@ -102,6 +102,9 @@ class BackendRegistry:
     # Story #1159: Search event log backend — SQLite in solo mode, PostgreSQL in
     # cluster mode so all nodes share one search_event_log table.
     search_event_log: Any = field(default=None)
+    # Issue #1160: Query analytics exports backend — SQLite in solo mode, PostgreSQL
+    # in cluster mode so all nodes share one query_analytics_exports table.
+    query_analytics_exports: Any = field(default=None)
     # Optional: the shared ConnectionPool instance (PostgreSQL mode only).
     # None in SQLite mode. Exposed here so lifespan.py cluster services can
     # reuse the factory pool instead of creating a second one.
@@ -196,6 +199,9 @@ class StorageFactory:
         from code_indexer.server.services.search_event_log_writer import (
             SearchEventLogSqliteBackend,
         )
+        from code_indexer.server.services.query_analytics_export_service import (
+            QueryAnalyticsExportSqliteBackend,
+        )
 
         # Main database: all backends except groups/audit share the same DB.
         db_path = str(Path(data_dir) / "cidx_server.db")
@@ -242,6 +248,7 @@ class StorageFactory:
                 db_path=str(Path(data_dir) / "query_embedding_cache.db")
             ),
             search_event_log=SearchEventLogSqliteBackend(db_path=db_path),
+            query_analytics_exports=QueryAnalyticsExportSqliteBackend(db_path=db_path),
         )
 
     # ------------------------------------------------------------------
@@ -349,6 +356,9 @@ class StorageFactory:
         from code_indexer.server.services.search_event_log_writer import (
             SearchEventLogPostgresBackend,
         )
+        from code_indexer.server.services.query_analytics_export_service import (
+            QueryAnalyticsExportPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
@@ -401,6 +411,7 @@ class StorageFactory:
             maintenance=MaintenancePostgresBackend(pool),
             query_embedding_cache=QueryEmbeddingCachePostgresBackend(pool),
             search_event_log=SearchEventLogPostgresBackend(pool),
+            query_analytics_exports=QueryAnalyticsExportPostgresBackend(pool),
             connection_pool=pool,
             critical_connection_pool=critical_pool,
         )

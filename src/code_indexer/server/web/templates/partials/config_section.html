@@ -2426,6 +2426,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.search_event_log.search_event_log_retention_days | default(90) }}</td>
                         <td class="config-note"><small>1-3650 days. Events older than this are pruned automatically once per day.</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Export File Retention (days)</td>
+                        <td class="config-value">{{ config.search_event_log.export_retention_days | default(30) }}</td>
+                        <td class="config-note"><small>1-3650 days. Export files older than this are deleted automatically.</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -2445,6 +2450,13 @@ function saveLlmCredsConfig() {
                         value="{{ config.search_event_log.search_event_log_retention_days | default(90) }}"
                         min="1" max="3650">
                     <small>1-3650 days. Events older than this are pruned automatically once per day.</small>
+                </label>
+                <label for="export-retention-days">
+                    Export File Retention (days)
+                    <input type="number" id="export-retention-days" name="export_retention_days"
+                        value="{{ config.search_event_log.export_retention_days | default(30) }}"
+                        min="1" max="3650">
+                    <small>1-3650 days. Export files older than this are deleted automatically.</small>
                 </label>
             </div>
             <div class="form-actions">
