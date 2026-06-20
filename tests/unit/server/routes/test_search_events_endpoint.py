@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from code_indexer.server.auth.dependencies import (
     get_current_admin_user,
+    get_current_admin_user_hybrid,
     get_current_user,
 )
 from code_indexer.server.auth.user_manager import UserRole
@@ -133,6 +134,7 @@ def app_with_writer():
 
     app.dependency_overrides[get_current_user] = lambda: admin_user
     app.dependency_overrides[get_current_admin_user] = lambda: admin_user
+    app.dependency_overrides[get_current_admin_user_hybrid] = lambda: admin_user
     app.state.search_event_log_writer = writer
 
     yield app, writer
@@ -363,6 +365,7 @@ class TestRealWriterBackendAttribute:
         admin_user = _make_admin_user()
         app.dependency_overrides[get_current_user] = lambda: admin_user
         app.dependency_overrides[get_current_admin_user] = lambda: admin_user
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: admin_user
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = os.path.join(tmp_dir, "test_events.db")
@@ -394,6 +397,7 @@ class TestSearchEventsWriterAbsent:
         admin_user = _make_admin_user()
         app.dependency_overrides[get_current_user] = lambda: admin_user
         app.dependency_overrides[get_current_admin_user] = lambda: admin_user
+        app.dependency_overrides[get_current_admin_user_hybrid] = lambda: admin_user
         app.state.search_event_log_writer = None
 
         try:

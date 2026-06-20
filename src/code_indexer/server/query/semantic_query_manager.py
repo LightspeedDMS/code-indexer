@@ -8,6 +8,7 @@ background job integration, and proper resource management.
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 
+import contextvars
 import json
 import logging
 import re
@@ -1331,11 +1332,12 @@ class SemanticQueryManager:
             # on timeout — the `with` form always calls shutdown(wait=True) which
             # blocks until all threads finish, defeating the timeout.
             executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=2)
+            _provider_ctx = contextvars.copy_context()
             try:
                 futures = {}
                 for name, fn in provider_tasks.items():
                     _t0 = time.monotonic()
-                    fut = executor.submit(fn)
+                    fut = executor.submit(_provider_ctx.run, fn)
                     futures[fut] = name
                     _future_start[fut] = _t0
                 try:

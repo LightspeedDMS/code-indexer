@@ -24,7 +24,9 @@ from ..models.api_models import QueryResultItem
 from ..query.semantic_query_manager import SemanticQueryError
 from ..auth import dependencies
 from ..logging_utils import format_error_log
-from ..middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from ..app_helpers import (
     _apply_rest_semantic_truncation,
     _apply_rest_fts_truncation,

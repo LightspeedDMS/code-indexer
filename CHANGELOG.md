@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.145.0] - 2026-06-20
+
+### Fixed
+- **Search event embedding metrics always NULL (Stories #1159/#1160):** Three root causes corrected: (1) `semantic_query_manager.py` now calls `contextvars.copy_context()` before the `ThreadPoolExecutor.submit()` loop so `_search_event_ctx` is visible inside worker threads (Python 3.9 does not propagate ContextVars across `submit()`); (2) `inline_query.py` now imports `get_current_correlation_id` from `telemetry.correlation_bridge` (the registered middleware) instead of `middleware.correlation` (unregistered, always returned None), fixing `correlation_id` always being NULL; (3) `GET /api/admin/search-events` and analytics export endpoints now use `get_current_admin_user_hybrid` so they are accessible from the Web UI session cookie, and test fixtures updated accordingly.
+
 ## [10.144.0] - 2026-06-20
 
 ### Added

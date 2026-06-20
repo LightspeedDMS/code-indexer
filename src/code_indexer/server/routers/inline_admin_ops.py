@@ -880,7 +880,9 @@ def register_admin_ops_routes(
     def trigger_query_analytics_export(
         request: Request,
         body: ExportFiltersRequest = Body(default=ExportFiltersRequest()),
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(
+            dependencies.get_current_admin_user_hybrid
+        ),
     ) -> Dict[str, Any]:
         """Trigger a background export of query analytics to Excel (Issue #1160)."""
         import uuid as _uuid
@@ -932,7 +934,9 @@ def register_admin_ops_routes(
     @app.get("/api/admin/search-events/exports")
     def list_query_analytics_exports(
         request: Request,
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(
+            dependencies.get_current_admin_user_hybrid
+        ),
     ) -> Dict[str, Any]:
         """List all query analytics exports with download links (Issue #1160)."""
         export_svc = getattr(request.app.state, "query_analytics_export_service", None)
@@ -972,7 +976,9 @@ def register_admin_ops_routes(
     def download_query_analytics_export(
         request: Request,
         export_id: str,
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(
+            dependencies.get_current_admin_user_hybrid
+        ),
     ):
         """Download a completed query analytics export as an Excel file (Issue #1160)."""
         from fastapi.responses import FileResponse
@@ -1024,7 +1030,9 @@ def register_admin_ops_routes(
         to_ts: Optional[float] = None,
         limit: int = 100,
         offset: int = 0,
-        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+        current_user: dependencies.User = Depends(
+            dependencies.get_current_admin_user_hybrid
+        ),
     ) -> Dict[str, Any]:
         """
         Query per-request search event log (Issue #1159).
