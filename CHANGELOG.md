@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.150.0] - 2026-06-20
+
+### Added
+- **Background startup migration of monolithic temporal indexes to quarterly shards (Story #1172):** When the server starts up, `submit_temporal_migration_jobs()` (wired in `lifespan.py` after BGM initialization, before `yield`) scans all activated and golden repos for unsharded temporal collections. Detection via `_needs_temporal_migration(index_path)`: a collection qualifies if it passes `is_temporal_collection()`, fails `is_sharded_temporal_collection()`, has no `migration_complete.marker`, and has a `hnsw_index.bin` file. One BGM job (`operation_type="temporal_index_migration"`) is submitted per repo; `DuplicateJobError` is caught and skipped (DEBUG log) for cluster-aware dedup via the `idx_active_job_per_repo` PG partial unique index. The migration job: (1) loads the monolithic HNSW via `hnswlib.Index`, (2) reads `label→point_id` from `collection_meta.json` `hnsw_index.id_mapping`, (3) batch-fetches commit timestamps from git via `git log --no-walk --format=%H %cI` (`%cI` = ISO 8601 strict, Python 3.9 compatible), (4) groups vectors by quarter, (5) writes each quarterly shard atomically via `{shard_name}.migrating` → `os.replace()`, (6) writes `migration_complete.marker`, (7) deletes monolithic `hnsw_index.bin`, `id_index.bin`, and JSON payload files, (8) calls `del monolithic_index; gc.collect()` in a `finally` block to free C++-managed HNSW memory. Stale `.migrating` dirs from prior crashed runs are cleaned at job start. Fully idempotent on restart. Both providers discovered (all unsharded temporal collections, no provider filter). Progress reported via `progress_callback` after each shard. Non-fatal: startup scan failures log WARNING and continue.
+
 ## [10.149.0] - 2026-06-20
 
 ### Added
