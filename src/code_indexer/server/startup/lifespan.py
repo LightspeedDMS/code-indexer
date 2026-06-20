@@ -3258,6 +3258,33 @@ def make_lifespan(
                 )
             )
 
+        # Story #1172: Background startup migration — monolithic temporal indexes to quarterly shards.
+        # Scan all golden repos for unsharded temporal HNSW collections and submit BGM jobs.
+        # Non-fatal: log WARNING on any failure, never block startup.
+        try:
+            from code_indexer.services.temporal.temporal_migration_service import (
+                submit_temporal_migration_jobs as _submit_temporal_migrations,
+            )
+
+            _temporal_repos = (
+                golden_repo_manager.list_golden_repos()
+                if golden_repo_manager is not None
+                else []
+            )
+            _submit_temporal_migrations(background_job_manager, _temporal_repos)
+            logger.info(
+                "Story #1172: temporal index migration scan complete (%d repos checked)",
+                len(_temporal_repos),
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as _tmig_exc:
+            logger.warning(
+                "Story #1172: temporal index migration scan failed (non-fatal): %s",
+                _tmig_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         yield  # Server is now running
 
         # Story #1083: close the pooled production httpx client owned by the
