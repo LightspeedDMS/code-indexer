@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.149.0] - 2026-06-20
+
+### Added
+- **Quarterly temporal index sharding (Story #1171):** Temporal commit indexes now write into quarterly shard collections (`code-indexer-temporal-{model_slug}-{YYYY}Q{N}`) instead of a single monolithic collection. `TemporalIndexer.index_commits()` groups commits by quarter, creates each shard collection before first write, and processes shards sequentially to bound peak RAM. On the query path, `execute_temporal_query_with_fusion()` calls `get_overlapping_shards()` per configured provider to discover only the quarterly shards whose date range overlaps the query `time_range`, skipping non-overlapping shards entirely. Each shard HNSW index is evicted from the server-mode cache immediately after its query completes (`hnsw_index_cache.invalidate()` in a `finally` block), ensuring peak RAM is bounded to one shard per concurrent provider rather than accumulating all shard indexes in memory. A single `fuse_rrf_multi` pass merges results from all shards across all providers (no double-RRF). Legacy monolithic collections are included when present on disk for backward compatibility.
+
 ## [10.148.0] - 2026-06-20
 
 ### Fixed
