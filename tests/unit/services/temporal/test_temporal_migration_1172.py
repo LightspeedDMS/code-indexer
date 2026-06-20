@@ -715,7 +715,9 @@ def _build_monolithic_collection_empty_json(
     dim = vectors.shape[1]
 
     hnsw_idx = hnswlib.Index(space=space, dim=dim)
-    hnsw_idx.init_index(max_elements=n, M=16, ef_construction=200, allow_replace_deleted=True)
+    hnsw_idx.init_index(
+        max_elements=n, M=16, ef_construction=200, allow_replace_deleted=True
+    )
     hnsw_idx.add_items(vectors, np.arange(n))
     hnsw_idx.save_index(str(coll_dir / "hnsw_index.bin"))
 
@@ -811,7 +813,9 @@ class TestMigrationWithEmptyJsonFilesUsesGit:
             f"got {[d.name for d in quarterly_shards]}"
         )
 
-    def test_migration_repo_path_derived_from_index_path_when_not_provided(self, tmp_path):
+    def test_migration_repo_path_derived_from_index_path_when_not_provided(
+        self, tmp_path
+    ):
         """When repo_path not given, derived as index_path/../../ (standard layout)."""
         from code_indexer.services.temporal.temporal_migration_service import (
             run_temporal_migration,
