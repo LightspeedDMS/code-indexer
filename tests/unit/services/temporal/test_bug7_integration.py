@@ -29,8 +29,9 @@ class TestBug7Integration(unittest.TestCase):
         mock_config = MagicMock()
         mock_config.embedding_provider = "voyage-ai"
         mock_config.voyage_ai = MagicMock(
-            parallel_requests=1, max_concurrent_batches_per_commit=10,
-            temporal_parallel_requests=None
+            parallel_requests=1,
+            max_concurrent_batches_per_commit=10,
+            temporal_parallel_requests=None,
         )  # Use 1 thread for simplicity
         config_manager.get_config.return_value = mock_config
 

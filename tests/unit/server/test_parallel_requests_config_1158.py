@@ -697,8 +697,11 @@ class TestRollingUpgradeBackwardCompat:
 
         # Build a minimal indexing_config dict with all KNOWN fields plus 3
         # unknown keys that simulate fields from a future/newer node.
-        idx_dict = {f.name: f.default for f in dataclasses.fields(IndexingConfig)
-                    if f.default is not dataclasses.MISSING}
+        idx_dict = {
+            f.name: f.default
+            for f in dataclasses.fields(IndexingConfig)
+            if f.default is not dataclasses.MISSING
+        }
         # Add unknown keys that would come from a newer node
         idx_dict["voyage_ai_parallel_requests_future"] = 16
         idx_dict["cohere_parallel_requests_future"] = 16
@@ -716,5 +719,6 @@ class TestRollingUpgradeBackwardCompat:
         result = mgr._dict_to_server_config(config_dict)
 
         from code_indexer.server.utils.config_manager import ServerConfig
+
         assert isinstance(result, ServerConfig)
         assert isinstance(result.indexing_config, IndexingConfig)

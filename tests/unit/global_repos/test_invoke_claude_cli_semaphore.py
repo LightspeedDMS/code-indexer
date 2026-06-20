@@ -23,6 +23,8 @@ from code_indexer.global_repos.dependency_map_analyzer import (
     _VERIFICATION_SEMAPHORE_STATE,
     _get_verification_semaphore,
 )
+from code_indexer.server.services.claude_invoker import ClaudeInvoker
+from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 _SYNC_TIMEOUT: float = 5.0
 _JOIN_TIMEOUT: float = 10.0
@@ -261,6 +263,13 @@ class TestCliVerificationShared(_Base):
         the semaphore; it proceeds immediately after CLI releases."""
         cap = 1
         analyzer = _make_analyzer(self._tmp_path)
+        # Inject a real CliDispatcher so invoke_verification_pass routes through
+        # ClaudeInvoker.invoke -> subprocess.run (which is patched below) instead
+        # of trying to build a dispatcher via _build_shared_dispatcher ->
+        # get_config_service -> config_service -> fastapi (unavailable under
+        # Python 3.11).  _get_cached_dispatcher checks _cli_dispatcher first and
+        # short-circuits the build path when it is not None.
+        analyzer._cli_dispatcher = CliDispatcher(ClaudeInvoker(analysis_model="opus"))
         doc_path = self._tmp_path / "ver_doc.md"
         doc_path.write_text("# Test\n\nContent for verification.\n")
         sem = _get_verification_semaphore(cap)
@@ -276,10 +285,17 @@ class TestCliVerificationShared(_Base):
         config_mock = MagicMock()
         config_mock.get_config.return_value.claude_integration_config.max_concurrent_claude_cli = cap
 
+        # _invoke_claude_cli does a LOCAL import of config_service inside the function
+        # body, bypassing any module-level patch.  Inject a mock module into sys.modules
+        # so the local `from code_indexer.server.services.config_service import
+        # get_config_service` resolves to our mock.
+        mock_cs_module = MagicMock()
+        mock_cs_module.get_config_service.return_value = config_mock
+
         with (
-            patch(
-                "code_indexer.server.services.config_service.get_config_service",
-                return_value=config_mock,
+            patch.dict(
+                "sys.modules",
+                {"code_indexer.server.services.config_service": mock_cs_module},
             ),
             patch(
                 "subprocess.run",
@@ -371,10 +387,17 @@ class TestColdStartSemaphoreCompatibility(_Base):
                 args=[], returncode=0, stdout="verification done", stderr=""
             )
 
+        # _invoke_claude_cli does a LOCAL import of config_service inside the function
+        # body, bypassing any module-level patch.  Inject a mock module into sys.modules
+        # so the local `from code_indexer.server.services.config_service import
+        # get_config_service` resolves to our mock.
+        mock_cs_module = MagicMock()
+        mock_cs_module.get_config_service.return_value = config_mock
+
         with (
-            patch(
-                "code_indexer.server.services.config_service.get_config_service",
-                return_value=config_mock,
+            patch.dict(
+                "sys.modules",
+                {"code_indexer.server.services.config_service": mock_cs_module},
             ),
             patch("subprocess.run", side_effect=_fake_run),
         ):
