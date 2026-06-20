@@ -224,6 +224,8 @@ _VALID_CONFIG_SECTIONS = (
     "pace_maker",
     # Story #1107 S3 - Query embedding cache LRU cap + Web UI config section
     "query_embedding_cache",
+    # Story #1159 - Search event log data retention config
+    "search_event_log",
 )
 
 
@@ -7382,6 +7384,17 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 return f"{anchor_field} must be a valid integer"
             if anchor_int < 0:
                 return f"{anchor_field} must be >= 0"
+
+    elif section == "search_event_log":
+        # Story #1159: Search event log data retention configuration.
+        retention_days_val = data.get("search_event_log_retention_days")
+        if retention_days_val is not None:
+            try:
+                retention_days_int = int(retention_days_val)
+            except (ValueError, TypeError):
+                return "search_event_log_retention_days must be a valid integer"
+            if retention_days_int < 1 or retention_days_int > 3650:
+                return "search_event_log_retention_days must be between 1 and 3650"
 
     return None
 

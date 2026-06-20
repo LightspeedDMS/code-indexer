@@ -436,12 +436,39 @@ class TemporalSearchService:
                 coalesced_query_embedding,
             )
 
-            query_embedding = coalesced_query_embedding(
+            query_embedding, _embed_meta = coalesced_query_embedding(
                 self.embedding_provider,
                 query,
                 embedding_purpose="query",
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
+            # Story #1159: write embedding-cache metadata to the active
+            # SearchEventContext so cache fields are recorded for temporal queries.
+            try:
+                from code_indexer.server.services.search_event_context import (
+                    _search_event_ctx,
+                )
+
+                _temporal_event_ctx = _search_event_ctx.get(None)
+                if _temporal_event_ctx is not None:
+                    _pname = self.embedding_provider.get_provider_name().lower()
+                    if "cohere" in _pname:
+                        _temporal_event_ctx.cohere_cache_hit = _embed_meta.key_found
+                        _temporal_event_ctx.cohere_cache_mode = _embed_meta.cache_mode
+                        _temporal_event_ctx.cohere_latency_ms = (
+                            _embed_meta.provider_latency_ms
+                        )
+                    else:
+                        _temporal_event_ctx.voyage_cache_hit = _embed_meta.key_found
+                        _temporal_event_ctx.voyage_cache_mode = _embed_meta.cache_mode
+                        _temporal_event_ctx.voyage_latency_ms = (
+                            _embed_meta.provider_latency_ms
+                        )
+            except Exception as _tsc_exc:  # noqa: BLE001
+                logger.warning(
+                    "search_event_log: temporal path failed to write embed_meta to ctx: %s",
+                    _tsc_exc,
+                )
             raw_results = self.vector_store_client.search(
                 query_vector=query_embedding,
                 filter_conditions=filter_conditions,  # Apply user-specified filters (language, path, etc.)

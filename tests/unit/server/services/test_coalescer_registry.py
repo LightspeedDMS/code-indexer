@@ -116,7 +116,7 @@ class TestRegistryCoalescesRealSubmits:
         reg = CoalescerRegistry(coalescers={VOYAGE_EMBED: v})
         coalescer = reg.get(VOYAGE_EMBED)
         assert coalescer is not None
-        vec = coalescer.submit("abcd")
+        vec, _ = coalescer.submit("abcd")
         assert vec == [4.0, 0.0]
 
 

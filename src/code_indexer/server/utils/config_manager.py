@@ -1362,6 +1362,11 @@ class ServerConfig:
     # Web-UI tunable. 0 (or negative) disables the sweep entirely.
     research_session_retention_days: int = 7
 
+    # Issue #1159 — Search event log retention (days). SearchEventLogWriter
+    # prunes rows older than this many days once per day. Runtime / Web-UI
+    # tunable. Must be >= 1; values < 1 are treated as the default (90).
+    search_event_log_retention_days: int = 90
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

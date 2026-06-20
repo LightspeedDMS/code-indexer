@@ -232,7 +232,7 @@ class TestCoalescedQueryEmbeddingSignature:
 
         monkeypatch.setattr(governed_call, "governed_query_embedding", _fake_governed)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
@@ -252,7 +252,7 @@ class TestCoalescedQueryEmbeddingSignature:
 
         monkeypatch.setattr(governed_call, "governed_query_embedding", _fake_governed)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT, no_embedding_cache_shortcut=True
         )
         assert result == LIVE_VEC
@@ -367,7 +367,7 @@ class TestBypassWrapSemantics:
         self._install_cache(monkeypatch, cache)
         live_calls = self._fake_live_fn(monkeypatch)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT, no_embedding_cache_shortcut=True
         )
 
@@ -384,7 +384,7 @@ class TestBypassWrapSemantics:
         self._install_cache(monkeypatch, cache)
         live_calls = self._fake_live_fn(monkeypatch)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT, no_embedding_cache_shortcut=False
         )
 
@@ -407,7 +407,7 @@ class TestBypassWrapSemantics:
         self._install_cache(monkeypatch, cache)
         live_calls = self._fake_live_fn(monkeypatch)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT, no_embedding_cache_shortcut=True
         )
 
@@ -428,7 +428,7 @@ class TestBypassWrapSemantics:
         self._install_cache(monkeypatch, cache)
         live_calls = self._fake_live_fn(monkeypatch)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
 
@@ -446,7 +446,7 @@ class TestBypassWrapSemantics:
         self._install_cache(monkeypatch, cache)
         live_calls = self._fake_live_fn(monkeypatch)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT, no_embedding_cache_shortcut=True
         )
 

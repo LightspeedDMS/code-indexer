@@ -152,6 +152,12 @@ def _run_saturated_submits(
     """Submit ``texts`` concurrently against a fully saturated lane so they coalesce."""
     import time
 
+    # Pre-warm governed_call so the deferred import in submit() is a cache hit.
+    # Cold import takes ~500ms; the accumulate window is only 0.3s — without this,
+    # all threads block on the import lock past the gate-open and each dispatches
+    # its own single-entry batch instead of coalescing.
+    import code_indexer.server.services.governed_call  # noqa: F401
+
     hold = threading.Event()
     blockers = _saturate(governor, lane, hold)
     outcome = _Outcome()
@@ -161,7 +167,8 @@ def _run_saturated_submits(
     def _submit(i: int) -> None:
         start.wait()
         try:
-            outcome.results[i] = coalescer.submit(texts[i])
+            vec, _meta = coalescer.submit(texts[i])
+            outcome.results[i] = vec
         except BaseException as ex:  # noqa: BLE001
             outcome.errors[i] = ex
 

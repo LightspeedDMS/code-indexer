@@ -674,6 +674,10 @@ class ConfigService:
                     else ""
                 ),
             },
+            # Issue #1159 — Search event log settings
+            "search_event_log": {
+                "search_event_log_retention_days": config.search_event_log_retention_days,
+            },
         }
 
         # Reranking settings (Story #652)
@@ -859,6 +863,9 @@ class ConfigService:
         # Story #1107 S3 - Query embedding cache runtime configuration
         elif category == "query_embedding_cache":
             self._update_query_embedding_cache_setting(config, key, value)
+        # Issue #1159 - Search event log retention
+        elif category == "search_event_log":
+            self._update_search_event_log_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1652,6 +1659,24 @@ class ConfigService:
             config.pace_maker_mode = str_val
         else:
             raise ValueError(f"Unknown pace_maker setting: {key}")
+
+    def _update_search_event_log_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update search event log runtime settings (Issue #1159).
+
+        Validation rules:
+        - search_event_log_retention_days: integer in [1, 3650].
+        """
+        if key == "search_event_log_retention_days":
+            days = int(value)
+            if not (1 <= days <= 3650):
+                raise ValueError(
+                    f"search_event_log_retention_days must be between 1 and 3650, got {days}."
+                )
+            config.search_event_log_retention_days = days
+        else:
+            raise ValueError(f"Unknown search_event_log setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any
