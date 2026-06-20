@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.147.0] - 2026-06-20
+
+### Fixed
+- **psycopg3 TupleRow dict conversion in QueryAnalyticsExportPostgresBackend.list_exports():** `list_exports()` called `dict(row)` on psycopg3 `TupleRow` objects returned by `fetchall()`. psycopg3 does not return dict-like rows by default, so `dict(row)` raised `ValueError: dictionary update sequence element #0 has length 36; 2 is required` (UUID string has length 36), causing HTTP 500 on all cluster nodes when listing or downloading query analytics exports. Fixed by mapping columns by explicit positional index matching the `query_analytics_exports` CREATE TABLE column order.
+
 ## [10.146.0] - 2026-06-20
 
 ### Fixed
