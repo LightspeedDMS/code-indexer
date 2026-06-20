@@ -2,7 +2,7 @@
 
 ## Historical Context
 
-This is a historical migration guide for upgrading from v7.x to v8.x. At the time this guide was written, the current stable version was v8.13.0. The project has since evolved significantly — the current version is 10.34.0. The core migration steps remain accurate for transitioning from v7.x to any v8.x version.
+This is a historical migration guide for upgrading from v7.x to v8.x. At the time this guide was written, the current stable version was v8.13.0. The project has since evolved significantly. The core migration steps remain accurate for transitioning from v7.x to any v8.x version.
 
 ## Overview
 
@@ -24,7 +24,7 @@ Version 8.0.0 represented a major architectural simplification of code-indexer, 
 
 #### 3. Ollama Embedding Provider (Removed)
 - Ollama local embeddings provider has been removed
-- VoyageAI is the only supported embedding provider in v8.0+
+- At the time of v8.0, VoyageAI was the only supported embedding provider. Cohere was added as an alternative in v9.8.
 - Focus on production-quality cloud-based embeddings
 
 ### Impact Summary
@@ -100,7 +100,7 @@ Your configuration should now only specify:
   "project_root": "/path/to/your/project",
   "embedding_provider": {
     "provider_type": "voyage-ai",
-    "model": "voyage-3"
+    "model": "voyage-code-3"
   },
   "vector_store": {
     "provider": "filesystem"
@@ -203,7 +203,7 @@ cidx query "test query"
   "project_root": "/home/user/myproject",
   "embedding_provider": {
     "provider_type": "voyage-ai",
-    "model": "voyage-3"
+    "model": "voyage-code-3"
   },
   "vector_store": {
     "provider": "qdrant",
@@ -229,7 +229,7 @@ cidx query "test query"
   "project_root": "/home/user/myproject",
   "embedding_provider": {
     "provider_type": "voyage-ai",
-    "model": "voyage-3"
+    "model": "voyage-code-3"
   },
   "vector_store": {
     "provider": "filesystem"
@@ -267,7 +267,7 @@ Or even simpler (relies on defaults):
   "project_root": "/home/user/myproject",
   "embedding_provider": {
     "provider_type": "voyage-ai",
-    "model": "voyage-3"
+    "model": "voyage-code-3"
   },
   "vector_store": {
     "provider": "filesystem"
@@ -441,7 +441,7 @@ No, Qdrant support has been completely removed in v8.x. The filesystem backend i
 
 ### Can I use local embeddings instead of VoyageAI?
 
-No, Ollama local embeddings have been removed. VoyageAI is the only supported embedding provider in v8.x. VoyageAI provides production-quality embeddings with excellent performance.
+No, Ollama local embeddings have been removed in v8.x. VoyageAI (voyage-code-3, voyage-large-2) is the default embedding provider. Cohere (embed-v4.0) has been supported as an alternative provider since v9.8. Both provide production-quality embeddings.
 
 ### Will container support be added back in the future?
 

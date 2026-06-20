@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
+from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -623,7 +624,7 @@ class TestFSVSearchAuditIntegration:
                 audit_ctx["provider"] = "voyage-ai"
                 audit_ctx["cached_blob"] = _enc(query_vec)
                 audit_ctx["live_vec"] = query_vec
-            return query_vec
+            return query_vec, EmbeddingCacheMetadata()
 
         with (
             patch(
@@ -659,7 +660,7 @@ class TestFSVSearchAuditIntegration:
             provider, text, *, no_embedding_cache_shortcut=False, audit_ctx=None
         ):
             # leave audit_ctx untouched (empty dict)
-            return query_vec
+            return query_vec, EmbeddingCacheMetadata()
 
         with (
             patch(
@@ -697,7 +698,7 @@ class TestFSVSearchAuditIntegration:
                 audit_ctx["mode"] = "on"
                 audit_ctx["provider"] = "voyage-ai"
                 audit_ctx["cached_blob"] = _enc(query_vec)
-            return query_vec
+            return query_vec, EmbeddingCacheMetadata()
 
         with (
             patch(

@@ -744,7 +744,7 @@ class TestAC2OmniPrecomputedVectorReuse:
         coalescer, provider, metrics, _gov = _make_harness(monkeypatch, "on")
 
         # Step 1: pre-fan-out embed (one cache resolution: MISS).
-        vec = coalescer.submit(text)
+        vec, _meta = coalescer.submit(text)
         snap_pre = metrics.snapshot()["on"]
         assert snap_pre["misses"] == 1, (
             f"Pre-fan-out embed must record 1 miss, got {snap_pre['misses']}"
@@ -786,7 +786,7 @@ class TestAC2OmniPrecomputedVectorReuse:
         )
 
         # Step 1: pre-fan-out embed (one cache resolution: HIT, no provider call).
-        vec = coalescer.submit(text)
+        vec, _meta = coalescer.submit(text)
         snap_pre = metrics.snapshot()["on"]
         assert snap_pre["hits"] == 1, (
             f"Pre-fan-out embed (warm) must record 1 hit, got {snap_pre['hits']}"
@@ -864,7 +864,7 @@ class TestEmbedOnceReuse:
         coalescer, provider, metrics, _gov = _make_harness(monkeypatch, "on")
 
         # Step 1: "shared vector" embed call (simulates _compute_shared_query_vector).
-        vec = coalescer.submit(text)
+        vec, _meta = coalescer.submit(text)
 
         snap_after_miss = metrics.snapshot()["on"]
         assert snap_after_miss["misses"] == 1, (
@@ -909,7 +909,7 @@ class TestEmbedOnceReuse:
         )
 
         # Step 1: "shared vector" embed call (warm HIT).
-        vec = coalescer.submit(text)
+        vec, _meta = coalescer.submit(text)
         snap_after_hit = metrics.snapshot()["on"]
         assert snap_after_hit["hits"] == 1 and snap_after_hit["misses"] == 0
 
@@ -948,7 +948,7 @@ class TestEmbedOnceReuse:
         coalescer, provider, metrics, _gov = _make_harness(monkeypatch, "on")
 
         # Call A: shared vector embed (MISS, writes cache).
-        vec_a = coalescer.submit(text)
+        vec_a, _meta = coalescer.submit(text)
         snap_a = metrics.snapshot()["on"]
         assert snap_a["misses"] == 1 and snap_a["hits"] == 0
 
@@ -1012,7 +1012,7 @@ class TestSingleFlightRegressions:
         lock = threading.Lock()
 
         def warm_submit() -> None:
-            vec = coalescer.submit(text)
+            vec, _meta = coalescer.submit(text)
             with lock:
                 results.append(vec)
 
@@ -1598,7 +1598,7 @@ class TestJoinerAuditSemantics:
 
         # Warm submit (HIT) — registry registers then immediately resolves.
         # Pre-seeded vector is CACHED_VEC (not LIVE_VEC); HIT returns cached value.
-        vec = coalescer.submit(text)
+        vec, _meta = coalescer.submit(text)
         assert vec == CACHED_VEC, "Warm HIT must return the pre-seeded CACHED_VEC"
 
         # Registry must be empty (HIT owner popped the key).

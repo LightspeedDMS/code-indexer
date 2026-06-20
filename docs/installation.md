@@ -21,7 +21,7 @@ Complete installation guide for Code Indexer (CIDX) across all platforms and sce
 
 ### System Requirements
 
-- **Python**: Version 3.9 or higher
+- **Python**: Version 3.9 to 3.12 (Python 3.13 is not yet supported)
 - **C++ compiler**: Required at install time to build the HNSW vector index library from source
   - Ubuntu/Debian: `sudo apt install gcc g++ python3-dev`
   - RHEL/Rocky/Fedora: `sudo dnf install gcc gcc-c++ python3-devel`
@@ -70,7 +70,7 @@ Best for most users - provides isolated environment with global command access:
 
 ```bash
 # Install the package
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
 
 # Verify installation
 cidx --version
@@ -103,7 +103,7 @@ source code-indexer-env/bin/activate  # Linux/macOS
 code-indexer-env\Scripts\activate     # Windows
 
 # Install CIDX
-pip install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+pip install git+https://github.com/LightspeedDMS/code-indexer.git@latest
 
 # Verify installation
 cidx --version
@@ -139,7 +139,7 @@ cidx --version
 **Development dependencies include**:
 - pytest (testing framework)
 - ruff (linter and formatter — `ruff format` is used instead of black)
-- black (listed as dev dependency but superseded by `ruff format`)
+- black (listed as dev dependency; `ruff format` is used for formatting in this project)
 - mypy (type checker)
 
 ## Environment Setup
@@ -206,7 +206,7 @@ The `~/.code-indexer/` directory is still used by CIDX server mode for storing g
 ```bash
 # 1. Check version
 cidx --version
-# Output: code-indexer, version 10.34.0
+# Output: code-indexer, version X.Y.Z
 
 # 2. Check help
 cidx --help
@@ -291,7 +291,7 @@ python -m pipx ensurepath
 # Restart terminal
 
 # Install CIDX
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
 ```
 
 **Path issues**: If `cidx` not found:
@@ -329,10 +329,10 @@ pip install --upgrade git+https://github.com/LightspeedDMS/code-indexer.git@mast
 
 ```bash
 # pipx
-pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@latest
 
 # pip
-pip install --force-reinstall git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+pip install --force-reinstall git+https://github.com/LightspeedDMS/code-indexer.git@latest
 ```
 
 ### Post-Upgrade Steps
@@ -373,7 +373,7 @@ cidx index
 3. **Reinstall**:
    ```bash
    pipx uninstall code-indexer
-   pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+   pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
    ```
 
 ### Python Version Too Old
@@ -398,7 +398,7 @@ cidx index
 
 3. **Use specific Python version**:
    ```bash
-   python3.11 -m pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+   python3.11 -m pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
    ```
 
 ### VoyageAI API Key Not Found
@@ -418,11 +418,8 @@ cidx index
    source ~/.bashrc
    ```
 
-3. **Use .env file** (MCP bridge only):
-   ```bash
-   echo 'VOYAGE_API_KEY=your-key-here' > .env.local
-   ```
-   Note: .env.local only works with CIDX MCP bridge, not with CLI commands.
+3. **Note on .env files**: CIDX does NOT automatically load `.env` or `.env.local` files.
+   Set `VOYAGE_API_KEY` via your shell profile (`.bashrc`, `.zshrc`) as shown in option 2 above.
 
 ### Permission Denied Errors
 

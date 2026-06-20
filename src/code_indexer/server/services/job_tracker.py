@@ -53,6 +53,7 @@ class TrackedJob:
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    actor_username: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +177,7 @@ def _row_to_tracked_job(row) -> TrackedJob:
         repo_alias,
         progress_info,
         metadata_json,
+        actor_username,
     ) = row
     return TrackedJob(
         job_id=job_id,
@@ -191,6 +193,7 @@ def _row_to_tracked_job(row) -> TrackedJob:
         completed_at=_iso_to_dt(completed_at_str),
         error=error,
         result=json.loads(result_json) if result_json else None,
+        actor_username=actor_username,
     )
 
 
@@ -210,6 +213,7 @@ def _tracked_job_to_dict(job: TrackedJob) -> Dict[str, Any]:
         "completed_at": _dt_to_iso(job.completed_at),
         "error": job.error,
         "result": job.result,
+        "actor_username": job.actor_username,
     }
 
 
@@ -242,7 +246,8 @@ def _status_priority_sort_key(job_dict: Dict[str, Any]):
 # Columns fetched by all SELECT queries — keeps column index mapping single-source.
 _SELECT_COLUMNS = (
     "job_id, operation_type, status, created_at, started_at, completed_at, "
-    "result, error, progress, username, repo_alias, progress_info, metadata"
+    "result, error, progress, username, repo_alias, progress_info, metadata, "
+    "actor_username"
 )
 
 # Upper bound for backend list_jobs when enumerating candidates for bulk deletion.

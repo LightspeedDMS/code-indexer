@@ -189,6 +189,25 @@ Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `devel
 
 ## Critical Architecture Invariants
 
+### Cluster-Aware State — ABSOLUTE RULE
+
+**NEVER use module-level dicts, class-level dicts, or any per-node RAM for state that must be visible to another HTTP request in a cluster.** In a multi-node deployment (HAProxy round-robin), a request that writes to `mydict: Dict = {}` in `routes.py` stores data ONLY on the node that handled that request. A subsequent request routed to a different node sees nothing. This has caused production bugs and is unacceptable.
+
+**Correct storage by state lifetime:**
+
+| State type | Correct store | WRONG |
+|------------|--------------|-------|
+| Cross-request ephemeral payload (search snippets, job results) | `app.state.payload_cache` (`PayloadCache` — SQLite solo, PostgreSQL cluster) | module-level dict |
+| Job coordination / dedup | BGM `JobTracker` (PostgreSQL in cluster) | `bgm.jobs.values()` scan (per-node) |
+| Long-lived config / metadata | `get_config_service().get_config()` (DB-backed) | env vars, module vars |
+| Shared sentinel / coordination lock | `SharedJobSentinel` on cidx-meta NFS | per-node file or dict |
+
+**`PayloadCache` is the designated system for ephemeral cross-node data** (job results, large search payloads, delegation results). It is wired at `app.state.payload_cache` (lifespan). PostgreSQL backend in cluster mode (`payload_cache` table, shared across all nodes). TTL-evicted (default 900s, Web UI configurable). Key methods: `store_with_key(key, content)`, `has_key(key)`, `retrieve(key)`. See `src/code_indexer/server/cache/payload_cache.py` and `src/code_indexer/server/storage/postgres/payload_cache_backend.py`.
+
+**HAProxy affinity is NOT a substitute for cluster-aware code.** Sticky sessions reduce the probability of cross-node reads but do not eliminate them (node restart, new deployment, affinity miss). Code correctness must not depend on proxy configuration.
+
+This rule applies to ALL contexts: main context, subagents, tdd-engineer, code-reviewer. A code reviewer who approves a module-level dict used as cross-request server state has missed a critical cluster bug.
+
 ### Query Is Everything
 
 Query capability is the core product value. NEVER remove or break: query functionality, git-awareness, branch-processing optimization, relationship tracking, deduplication of indexing. If refactoring removes any of these, STOP. See memory: `project_query_is_everything.md`.
@@ -612,6 +631,19 @@ The single live description-producing path is the lifecycle-unified pipeline (`_
 ## Background Jobs (MANDATORY Checklist)
 
 Any new background job MUST: (1) Integrate with `BackgroundJobManager` + `JobTracker` for dashboard/admin UI visibility. (2) Confirm frontend reporting pattern with user before implementing.
+
+### Auto-Discovery Background Job Pattern (Story #1157)
+
+`POST /api/discovery/{platform}/start` and `GET /api/discovery/{platform}/result/{job_id}` in `src/code_indexer/server/web/routes.py`.
+
+**Key invariants -- NEVER violate:**
+
+- **Result storage MUST use PayloadCache, NOT a module-level dict**: `app.state.payload_cache` is the cluster-aware store (`PayloadCachePostgresBackend` in cluster mode, SQLite in solo). Worker captures `payload_cache = request.app.state.payload_cache` in closure. Use `store_with_key(f"discovery:{job_id}", json.dumps(result))`. GET /result uses `has_key()` + `retrieve()`. NEVER use a `Dict[str, dict]` module-level variable -- it is per-node RAM invisible to other cluster nodes.
+- **job_id_holder trick for passing job_id into worker**: `job_id` is generated inside `submit_job()` and cannot be pre-generated. Use a second mutable container `job_id_holder = {}` captured by the worker closure. After `submit_job()` returns, write `job_id_holder['job_id'] = job_id`. The worker reads it when it executes (which for long-running discovery is always after the main thread sets it). This is safe in practice because discovery takes seconds to minutes, not microseconds.
+- **Manual dedup required**: discovery jobs pass `repo_alias=None` which bypasses the BGM atomic DB dedup gate (`register_job_if_no_conflict` only fires when `repo_alias` is not None). Deduplication MUST scan `bgm.jobs.values()` under `bgm._lock` for PENDING/RUNNING jobs of matching `operation_type`.
+- **progress_callback auto-injection**: BGM inspects worker function signature. Worker MUST declare `progress_callback=None` as a parameter for BGM to inject it. Both GitLab `_fetch_all_pages_rest` and GitHub `_fetch_all_pages_graphql` accept `progress_callback=None` -- both providers must stay in sync or the shared route raises TypeError.
+- **BGM lifecycle guarantee**: worker body executes fully BEFORE BGM sets `job.status = COMPLETED` (line ~1193 precedes ~1214). By the time the frontend polls and sees `completed`, the result is already written to PayloadCache.
+- **PayloadCache access**: `request.app.state.payload_cache` (set in lifespan, `None` if init failed). Always null-check. TTL default 900s (15 min), configurable via Web UI. `store_with_key` / `has_key` / `retrieve` are the relevant methods. See `src/code_indexer/server/cache/payload_cache.py`.
 
 ---
 

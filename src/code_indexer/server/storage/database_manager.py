@@ -599,6 +599,38 @@ class DatabaseSchema:
         ON dependency_latency_samples(dependency_name, timestamp)
     """
 
+    # Issue #1159: Search event log table
+    CREATE_SEARCH_EVENT_LOG_TABLE = """
+        CREATE TABLE IF NOT EXISTS search_event_log (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp           REAL NOT NULL,
+            username            TEXT NOT NULL,
+            repo_alias          TEXT,
+            search_type         TEXT NOT NULL,
+            query_text          TEXT NOT NULL,
+            voyage_cache_hit    INTEGER,
+            voyage_cache_mode   TEXT,
+            voyage_latency_ms   INTEGER,
+            cohere_cache_hit    INTEGER,
+            cohere_cache_mode   TEXT,
+            cohere_latency_ms   INTEGER,
+            total_latency_ms    INTEGER NOT NULL,
+            result_count        INTEGER NOT NULL,
+            node_id             TEXT NOT NULL,
+            correlation_id      TEXT
+        )
+    """
+
+    CREATE_IDX_SEL_TIMESTAMP = """
+        CREATE INDEX IF NOT EXISTS idx_sel_timestamp
+            ON search_event_log (timestamp)
+    """
+
+    CREATE_IDX_SEL_USER = """
+        CREATE INDEX IF NOT EXISTS idx_sel_user
+            ON search_event_log (username)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -720,6 +752,10 @@ class DatabaseSchema:
             conn.execute(self.CREATE_IDX_DEPENDENCY_LATENCY_DEP_TIMESTAMP)
             # Story #719: Hide Repositories from Auto-Discovery View
             conn.execute(self.CREATE_HIDDEN_DISCOVERY_REPOS_TABLE)
+            # Issue #1159: Search event log
+            conn.execute(self.CREATE_SEARCH_EVENT_LOG_TABLE)
+            conn.execute(self.CREATE_IDX_SEL_TIMESTAMP)
+            conn.execute(self.CREATE_IDX_SEL_USER)
 
             conn.commit()
 

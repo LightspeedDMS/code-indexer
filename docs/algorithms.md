@@ -2,16 +2,12 @@
 
 ## DEPRECATION NOTICE
 
-**This document describes the old v7.x architecture (BranchAwareIndexer + Qdrant) which was removed in v8.0.**
+**This document describes the legacy v7 architecture. For current implementation details, see [INDEXING_ALGORITHM.md](INDEXING_ALGORITHM.md). The content below is preserved for historical reference.**
 
 The architecture described in this document no longer exists in the codebase:
-- `BranchAwareIndexer` class was removed
-- Qdrant vector database was replaced with `FilesystemVectorStore`
+- `BranchAwareIndexer` class was removed in v8.0
+- Qdrant vector database was replaced with `FilesystemVectorStore` in v8.0
 - Git-aware branch processing was simplified
-
-**For current v8.x architecture, see:** [INDEXING_ALGORITHM.md](INDEXING_ALGORITHM.md)
-
-This document is preserved for historical reference only.
 
 ---
 

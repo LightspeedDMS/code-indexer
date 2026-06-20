@@ -46,6 +46,40 @@ try:
 except ImportError:  # pragma: no cover
     _run_deep_fidelity_audit = None  # type: ignore[assignment]
 
+
+def _write_embed_meta_to_event_ctx(embed_meta: "Any", provider_name: str = "") -> None:
+    """Story #1159: write embedding-cache metadata to the active SearchEventContext.
+
+    Must be called from the MAIN REQUEST THREAD (not from a ThreadPoolExecutor
+    worker) because Python 3.9 does not propagate ContextVar state into threads.
+    Logs a warning on failure so query results are never blocked by telemetry.
+
+    Args:
+        embed_meta: EmbeddingCacheMetadata returned by coalesced_query_embedding.
+        provider_name: Provider name string (e.g. "voyage-ai" or "cohere").
+            Used to select the correct ctx field set (cohere_* vs voyage_*).
+    """
+    try:
+        from code_indexer.server.services.search_event_context import _search_event_ctx
+
+        event_ctx = _search_event_ctx.get(None)
+        if event_ctx is not None:
+            if "cohere" in provider_name.lower():
+                event_ctx.cohere_cache_hit = embed_meta.key_found
+                event_ctx.cohere_cache_mode = embed_meta.cache_mode
+                event_ctx.cohere_latency_ms = embed_meta.provider_latency_ms
+            else:
+                event_ctx.voyage_cache_hit = embed_meta.key_found
+                event_ctx.voyage_cache_mode = embed_meta.cache_mode
+                event_ctx.voyage_latency_ms = embed_meta.provider_latency_ms
+    except Exception as _exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "search_event_log: failed to write embed_meta to ctx: %s", _exc
+        )
+
+
 # Minimum and default timeout (seconds) for git subprocess calls.
 # GIT_TIMEOUT_SECONDS env var overrides the default; values below the minimum are clamped.
 _DEFAULT_GIT_TIMEOUT_SECONDS = 5
@@ -2534,14 +2568,18 @@ class FilesystemVectorStore:
             """
             _audit_ctx: Dict[str, Any] = {}
             t0 = time.time()
-            embedding = coalesced_query_embedding(
+            embedding, _embed_meta = coalesced_query_embedding(
                 embedding_provider,
                 query,
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 audit_ctx=_audit_ctx,
             )
             embedding_time_ms = (time.time() - t0) * 1000
-            return embedding, embedding_time_ms, _audit_ctx
+            # Story #1159: return _embed_meta so the MAIN THREAD can write to
+            # _search_event_ctx.  ContextVar is not visible inside worker threads
+            # (Python 3.9 ThreadPoolExecutor does not propagate context), so the
+            # write must happen in the calling thread after the future resolves.
+            return embedding, embedding_time_ms, _audit_ctx, _embed_meta
 
         # Execute both operations in parallel.
         #
@@ -2584,7 +2622,14 @@ class FilesystemVectorStore:
             # .result() re-raises any sub-task exception in the caller's thread —
             # identical exception propagation to the `with` form below.
             hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
-            query_vector, embedding_ms, audit_ctx = embedding_future.result()
+            query_vector, embedding_ms, audit_ctx, _embed_meta = (
+                embedding_future.result()
+            )
+            # Story #1159: write embed metadata in main thread — ContextVar is not
+            # propagated into ThreadPoolExecutor workers (Python 3.9).
+            _write_embed_meta_to_event_ctx(
+                _embed_meta, embedding_provider.get_provider_name()
+            )
         else:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 # Submit both tasks
@@ -2593,7 +2638,13 @@ class FilesystemVectorStore:
 
                 # Wait for both to complete and gather results
                 hnsw_index, id_index, hnsw_load_ms, id_load_ms = index_future.result()
-                query_vector, embedding_ms, audit_ctx = embedding_future.result()
+                query_vector, embedding_ms, audit_ctx, _embed_meta = (
+                    embedding_future.result()
+                )
+            # Story #1159: write embed metadata in main thread.
+            _write_embed_meta_to_event_ctx(
+                _embed_meta, embedding_provider.get_provider_name()
+            )
 
         # Calculate actual parallel execution time (wall clock)
         parallel_load_ms = (time.time() - parallel_start) * 1000

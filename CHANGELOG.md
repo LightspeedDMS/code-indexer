@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.143.0] - 2026-06-20
+
+### Added
+- **Search Event Logging (Story #1159):** Every semantic/hybrid search now records operational statistics to a `search_event_log` table. Fields captured per query: `query_text`, `repository_alias`, `search_type`, `result_count`, `total_latency_ms`, `username`, `node_id`, and embedding-cache telemetry (`provider_name`, `embedding_cache_mode`, `embedding_cache_hit`, `provider_latency_ms`, `cohere_*`/`voyage_*` fields). The writer uses an async fire-and-forget queue (maxsize=5000, 5s drain, 500 events/batch) so telemetry never blocks a query. Both backends wired: `SearchEventLogSqliteBackend` (solo) and `SearchEventLogPostgresBackend` (cluster/PG). SQL migration `030_search_event_log.sql` is additive-only (`CREATE TABLE IF NOT EXISTS`). `EmbeddingCacheMetadata` dataclass propagates cache hit/miss and provider latency from `EmbeddingCoalescer.submit()` through `coalesced_query_embedding()` to the per-request `SearchEventContext` ContextVar. Admin endpoint: `GET /api/admin/search-events?limit=N` returns paginated events (max 1000). Retention configurable via Web UI `search_event_log_retention_days` (default 90, range [1, 3650]).
+
+## [10.142.0] - 2026-06-19
+
+### Added
+- **GitLab/GitHub auto-discovery background job (Story #1157):** `POST /api/discovery/{platform}/start` now runs discovery asynchronously via `BackgroundJobManager`, returning a `job_id` immediately. The client polls `GET /api/jobs/{job_id}` for live progress (0-90% during page fetching, 100% on completion). Results are stored in `PayloadCache` (cluster-safe: PostgreSQL in cluster mode, SQLite in solo) under key `discovery:{job_id}` and retrieved via `GET /api/discovery/{platform}/result/{job_id}` with automatic multi-page reassembly. Duplicate jobs (same platform, PENDING or RUNNING) return the existing `job_id` with `existing=true`.
+
+### Fixed
+- **Discovery start endpoint security:** Added `require_elevation()` dependency to `POST /api/discovery/{platform}/start` — previously missing, now enforces TOTP step-up for all admin mutation callers.
+- **Discovery result retrieval for large payloads:** `GET /api/discovery/{platform}/result/{job_id}` now accumulates all `PayloadCache` pages (each max 5000 chars) before deserializing JSON, preventing 500 errors on real-sized repository lists that span multiple pages.
+
 ## [10.141.0] - 2026-06-18
 
 ### Fixed

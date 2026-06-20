@@ -419,6 +419,12 @@ class IndexingConfig:
     old config files at load time.
     """
 
+    # Story #1158 - AC1: Configurable embedding API parallelism via Web UI.
+    voyage_ai_parallel_requests: int = 8
+    cohere_parallel_requests: int = 8
+    # Story #1158 - AC2: Configurable temporal git-diff parallelism (None = inherit from provider).
+    temporal_parallel_requests: Optional[int] = None
+
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(
@@ -1356,6 +1362,11 @@ class ServerConfig:
     # Web-UI tunable. 0 (or negative) disables the sweep entirely.
     research_session_retention_days: int = 7
 
+    # Issue #1159 — Search event log retention (days). SearchEventLogWriter
+    # prunes rows older than this many days once per day. Runtime / Web-UI
+    # tunable. Must be >= 1; values < 1 are treated as the default (90).
+    search_event_log_retention_days: int = 90
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:
@@ -1770,6 +1781,17 @@ class ServerConfigManager:
             idx_dict = config_dict["indexing_config"]
             idx_dict.pop("indexing_timeout_seconds", None)
             idx_dict.pop("temporal_stale_threshold_days", None)
+            # Rolling-upgrade safety: strip unknown keys so an old node loading a
+            # new blob (with Story #1158 fields) doesn't crash with TypeError.
+            from dataclasses import fields as dc_fields
+
+            known_idx_fields = {f.name for f in dc_fields(IndexingConfig)}
+            for unknown_key in [k for k in list(idx_dict) if k not in known_idx_fields]:
+                idx_dict.pop(unknown_key)
+                logger.warning(
+                    "Stripped unknown indexing_config key '%s' (not in IndexingConfig)",
+                    unknown_key,
+                )
             config_dict["indexing_config"] = IndexingConfig(**idx_dict)
 
         # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config

@@ -27,7 +27,7 @@ the 3c rewire coalesced_query_embedding is a thin shim:
 
 import struct
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -38,6 +38,7 @@ from code_indexer.server.services.coalescer_registry import (
     set_coalescer_registry,
 )
 from code_indexer.server.services.embedding_coalescer import EmbeddingCoalescer
+from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
 from code_indexer.server.services.provider_concurrency_governor import (
     ProviderConcurrencyGovernor,
 )
@@ -67,9 +68,9 @@ class _FakeCoalescer:
         *,
         no_embedding_cache_shortcut: bool = False,
         audit_ctx: Optional[Dict[str, Any]] = None,
-    ) -> List[float]:
+    ) -> Tuple[List[float], EmbeddingCacheMetadata]:
         self.submitted.append(text)
-        return COALESCED_VEC
+        return COALESCED_VEC, EmbeddingCacheMetadata()
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +265,7 @@ class TestNoRegistryDelegates:
         calls = _patch_governed(monkeypatch)
         # No registry set, and config service must NOT even be needed.
         prov = _FakeVoyageProvider()
-        out = governed_call.coalesced_query_embedding(prov, "hello")
+        out, _meta = governed_call.coalesced_query_embedding(prov, "hello")
         assert out == SENTINEL_VEC
         assert calls["provider"] is prov
         assert calls["text"] == "hello"
@@ -282,7 +283,9 @@ class TestKillSwitchDelegates:
         reg = governed_call.get_coalescer_registry()
         monkeypatch.setattr(reg, "get", lambda lane: coalescer, raising=False)
 
-        out = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), "hi")
+        out, _meta = governed_call.coalesced_query_embedding(
+            _FakeVoyageProvider(), "hi"
+        )
         assert out == SENTINEL_VEC  # delegated, not coalesced
         assert coalescer.submitted == []  # coalescer never used
 
@@ -312,7 +315,9 @@ class TestEnabledUsesCoalescer:
 
         monkeypatch.setattr(reg, "get_or_create", _get_or_create, raising=False)
 
-        out = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), "abc")
+        out, _meta = governed_call.coalesced_query_embedding(
+            _FakeVoyageProvider(), "abc"
+        )
         assert out == COALESCED_VEC
         assert coalescer.submitted == ["abc"]
         assert captured["lane"] == VOYAGE_EMBED
@@ -345,7 +350,7 @@ class TestEnabledUsesCoalescer:
         monkeypatch.setattr(
             cohere_embedding, "CohereEmbeddingProvider", _FakeCohereProvider
         )
-        out = governed_call.coalesced_query_embedding(_FakeCohereProvider(), "z")
+        out, _meta = governed_call.coalesced_query_embedding(_FakeCohereProvider(), "z")
         assert out == COALESCED_VEC
         assert captured["lane"] == COHERE_EMBED
 
@@ -377,14 +382,14 @@ class TestHotReload:
 
         prov = _FakeVoyageProvider()
         # First call: disabled -> delegates.
-        out1 = governed_call.coalesced_query_embedding(prov, "first")
+        out1, _meta1 = governed_call.coalesced_query_embedding(prov, "first")
         assert out1 == SENTINEL_VEC
         assert coalescer.submitted == []
         assert calls["text"] == "first"
 
         # Flip the LIVE config; no restart, no re-registration.
         cfg.coalesce_enabled = True
-        out2 = governed_call.coalesced_query_embedding(prov, "second")
+        out2, _meta2 = governed_call.coalesced_query_embedding(prov, "second")
         assert out2 == COALESCED_VEC
         assert coalescer.submitted == ["second"]
 
@@ -398,7 +403,7 @@ class TestEnabledButLaneAbsentDelegates:
         reg = governed_call.get_coalescer_registry()
         monkeypatch.setattr(reg, "get", lambda lane: None, raising=False)
 
-        out = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), "q")
+        out, _meta = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), "q")
         assert out == SENTINEL_VEC
         assert calls["text"] == "q"
 
@@ -417,7 +422,7 @@ class TestConfigReadFailureDelegates:
 
         monkeypatch.setattr(governed_call, "get_config_service", _boom, raising=False)
 
-        out = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), "x")
+        out, _meta = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), "x")
         assert out == SENTINEL_VEC  # delegated (fail toward direct call)
         assert coalescer.submitted == []  # coalescer never used
         assert calls["text"] == "x"
@@ -627,7 +632,7 @@ class TestCQEThinShim3c:
         provider = _FakeVoyageProvider3c()
         _wire_real_coalescer(monkeypatch, provider)
 
-        result = governed_call.coalesced_query_embedding(provider, text)
+        result, _meta = governed_call.coalesced_query_embedding(provider, text)
 
         # Shadow: always embeds live
         assert provider.call_count == 1, (
@@ -692,7 +697,7 @@ class TestCQEThinShim3c:
             def get_model_info(self):
                 return {"dimensions": _3C_DIM}
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _MinimalProvider(), "direct fallback 3c no coalescer"
         )
 
@@ -761,7 +766,9 @@ class TestCQEThinShim3c:
             def get_model_info(self):
                 return {"dimensions": _3C_DIM}
 
-        result = governed_call.coalesced_query_embedding(_MinimalProvider(), text)
+        result, _meta = governed_call.coalesced_query_embedding(
+            _MinimalProvider(), text
+        )
 
         assert governed_calls[0] == 0, (
             f"Direct fallback on-mode HIT must skip governed_query_embedding, "

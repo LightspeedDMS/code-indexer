@@ -499,6 +499,39 @@ def make_lifespan(
                 )
             )
 
+        # Issue #1159: Initialize SearchEventLogWriter (per-query operational stats).
+        # Mirrors ApiMetricsService pattern: background drain thread, non-fatal on failure.
+        try:
+            from code_indexer.server.services.search_event_log_writer import (
+                SearchEventLogSqliteBackend,
+                SearchEventLogWriter,
+            )
+
+            if backend_registry is not None and hasattr(
+                backend_registry, "search_event_log"
+            ):
+                _sel_backend = backend_registry.search_event_log
+            else:
+                sel_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _sel_backend = SearchEventLogSqliteBackend(str(sel_db_path))
+
+            app.state.search_event_log_writer = SearchEventLogWriter(_sel_backend)
+            app.state.search_event_log_writer.start()
+
+            logger.info(
+                "SearchEventLogWriter started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _sel_exc:
+            logger.error(
+                "Failed to initialize SearchEventLogWriter: %s",
+                _sel_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.search_event_log_writer = None
+
         # Startup: cidx-meta migration and bootstrap moved to after main GoldenRepoManager initialization
         # (See lines after GoldenRepoManager creation below)
 
@@ -3227,6 +3260,17 @@ def make_lifespan(
             logger.warning(
                 "Story #1083: failed to drain api-metrics writer during shutdown: %s",
                 _metrics_stop_exc,
+            )
+
+        # Issue #1159: drain the search-event-log writer on shutdown.
+        try:
+            _sel_writer = getattr(app.state, "search_event_log_writer", None)
+            if _sel_writer is not None:
+                _sel_writer.stop()
+        except Exception as _sel_stop_exc:
+            logger.warning(
+                "Issue #1159: failed to drain search-event-log writer during shutdown: %s",
+                _sel_stop_exc,
             )
 
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging

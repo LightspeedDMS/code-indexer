@@ -628,6 +628,22 @@ class ConfigService:
                     if config.indexing_config is not None
                     else []
                 ),
+                # Story #1158: parallel requests display wiring
+                "voyage_ai_parallel_requests": (
+                    config.indexing_config.voyage_ai_parallel_requests
+                    if config.indexing_config is not None
+                    else 8
+                ),
+                "cohere_parallel_requests": (
+                    config.indexing_config.cohere_parallel_requests
+                    if config.indexing_config is not None
+                    else 8
+                ),
+                "temporal_parallel_requests": (
+                    config.indexing_config.temporal_parallel_requests
+                    if config.indexing_config is not None
+                    else None
+                ),
             },
             # Story #323 - Wiki metadata fields configuration
             # Story #325 - Configurable metadata display order
@@ -657,6 +673,10 @@ class ConfigService:
                     if config.wiki_config is not None
                     else ""
                 ),
+            },
+            # Issue #1159 — Search event log settings
+            "search_event_log": {
+                "search_event_log_retention_days": config.search_event_log_retention_days,
             },
         }
 
@@ -843,6 +863,9 @@ class ConfigService:
         # Story #1107 S3 - Query embedding cache runtime configuration
         elif category == "query_embedding_cache":
             self._update_query_embedding_cache_setting(config, key, value)
+        # Issue #1159 - Search event log retention
+        elif category == "search_event_log":
+            self._update_search_event_log_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1637,6 +1660,24 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown pace_maker setting: {key}")
 
+    def _update_search_event_log_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update search event log runtime settings (Issue #1159).
+
+        Validation rules:
+        - search_event_log_retention_days: integer in [1, 3650].
+        """
+        if key == "search_event_log_retention_days":
+            days = int(value)
+            if not (1 <= days <= 3650):
+                raise ValueError(
+                    f"search_event_log_retention_days must be between 1 and 3650, got {days}."
+                )
+            config.search_event_log_retention_days = days
+        else:
+            raise ValueError(f"Unknown search_event_log setting: {key}")
+
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
@@ -1962,8 +2003,18 @@ class ConfigService:
         Raises:
             ValueError: If key is not recognized
         """
-        if key != "indexable_extensions":
-            raise ValueError(f"Unknown indexing setting: {key}")
+        # Story #1158: Bounds for parallel_requests fields (embedding + temporal).
+        _MIN_PARALLEL = 1
+        _MAX_PARALLEL = 32
+
+        def _clamp_parallel(raw: Any, field_name: str) -> int:
+            """Parse raw value and clamp to [_MIN_PARALLEL, _MAX_PARALLEL]."""
+            try:
+                return max(_MIN_PARALLEL, min(_MAX_PARALLEL, int(raw)))
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Invalid value for {field_name}: must be a valid integer"
+                )
 
         config = self.get_config()
         indexing = config.indexing_config
@@ -1972,6 +2023,35 @@ class ConfigService:
 
             indexing = IndexingConfig()
             config.indexing_config = indexing
+
+        # Story #1158 - AC1: Embedding API parallelism (required, clamped [1, 32])
+        if key in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
+            setattr(indexing, key, _clamp_parallel(value, key))
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.%s to %d",
+                key,
+                getattr(indexing, key),
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        # Story #1158 - AC2: Temporal git-diff parallelism (optional: None or clamped [1, 32])
+        if key == "temporal_parallel_requests":
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                indexing.temporal_parallel_requests = None
+            else:
+                indexing.temporal_parallel_requests = _clamp_parallel(value, key)
+            self.save_config(config)
+            logger.info(
+                "Updated indexing.temporal_parallel_requests to %s",
+                indexing.temporal_parallel_requests,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return
+
+        if key != "indexable_extensions":
+            raise ValueError(f"Unknown indexing setting: {key}")
 
         if isinstance(value, list):
             parsed_list: List[str] = list(value)
@@ -2388,6 +2468,18 @@ def get_config_service() -> ConfigService:
     if _config_service is None:
         _config_service = ConfigService()
     return _config_service
+
+
+def set_config_service(svc: ConfigService) -> None:
+    """
+    Inject an existing ConfigService as the global singleton.
+
+    Intended for integration tests that need the real singleton wired to a
+    specific server directory without process-level mocking.  Always pair
+    with a ``reset_config_service()`` call in teardown.
+    """
+    global _config_service
+    _config_service = svc
 
 
 def reset_config_service() -> None:

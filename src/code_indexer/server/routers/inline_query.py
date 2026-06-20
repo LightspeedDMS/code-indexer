@@ -72,10 +72,30 @@ def register_query_routes(
         Raises:
             HTTPException: If query fails, index missing, or invalid parameters
         """
+        import socket
         import time
         from pathlib import Path as PathLib
+        from code_indexer.server.services.search_event_context import (
+            SearchEventContext,
+            _search_event_ctx,
+        )
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventRecord,
+        )
+        from code_indexer.server.services.config_service import get_config_service
 
         start_time = time.time()
+
+        # Issue #1159: install per-request search event context.
+        _search_type = request.search_mode or "semantic"
+        _event_ctx = SearchEventContext(
+            username=current_user.username,
+            repo_alias=request.repository_alias,
+            search_type=_search_type,
+            query_text=(request.query_text or "")[:500],
+        )
+        _ctx_token = _search_event_ctx.set(_event_ctx)
+        _result_count = 0
 
         try:
             # Handle background job submission (semantic mode only)
@@ -390,6 +410,7 @@ def register_query_routes(
                 # Return as JSONResponse to support truncated fields
                 from fastapi.responses import JSONResponse
 
+                _result_count = len(truncated_fts) + len(truncated_semantic)
                 return JSONResponse(
                     content={
                         "search_mode": search_mode_actual,
@@ -456,6 +477,7 @@ def register_query_routes(
             # Return as JSONResponse to support truncated fields
             from fastapi.responses import JSONResponse
 
+            _result_count = len(truncated_results)
             return JSONResponse(
                 content={
                     "results": truncated_results,
@@ -514,3 +536,48 @@ def register_query_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal search error: {str(e)}",
             )
+        finally:
+            # Issue #1159: reset ctx and enqueue search event record.
+            _search_event_ctx.reset(_ctx_token)
+            _writer = getattr(
+                getattr(app, "state", None), "search_event_log_writer", None
+            )
+            if _writer is not None:
+                try:
+                    _total_ms = int((time.time() - start_time) * 1000)
+                    _cfg_svc = get_config_service()
+                    _cfg_get = getattr(_cfg_svc, "get_config", None)
+                    _cfg_obj = _cfg_get() if callable(_cfg_get) else None
+                    _node_id = str(getattr(_cfg_obj, "node_id", "") or "")
+                    if not _node_id:
+                        try:
+                            _node_id = socket.gethostname()
+                        except OSError as _hn_exc:
+                            logger.debug(
+                                "inline_query: socket.gethostname() failed, using 'unknown': %s",
+                                _hn_exc,
+                            )
+                            _node_id = "unknown"
+                    _record = SearchEventRecord(
+                        timestamp=time.time(),
+                        username=current_user.username,
+                        repo_alias=_event_ctx.repo_alias,
+                        search_type=_event_ctx.search_type,
+                        query_text=_event_ctx.query_text,
+                        voyage_cache_hit=_event_ctx.voyage_cache_hit,
+                        voyage_cache_mode=_event_ctx.voyage_cache_mode,
+                        voyage_latency_ms=_event_ctx.voyage_latency_ms,
+                        cohere_cache_hit=_event_ctx.cohere_cache_hit,
+                        cohere_cache_mode=_event_ctx.cohere_cache_mode,
+                        cohere_latency_ms=_event_ctx.cohere_latency_ms,
+                        total_latency_ms=_total_ms,
+                        result_count=_result_count,
+                        node_id=_node_id,
+                        correlation_id=get_correlation_id(),
+                    )
+                    _writer.enqueue(_record)
+                except Exception as _enq_exc:  # noqa: BLE001
+                    logger.debug(
+                        "inline_query: failed to enqueue search event record: %s",
+                        _enq_exc,
+                    )

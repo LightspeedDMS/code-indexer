@@ -837,3 +837,79 @@ def register_admin_ops_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=detail_message,
             )
+
+    @app.get("/api/admin/search-events")
+    def get_search_events(
+        request: Request,
+        username: Optional[str] = None,
+        search_type: Optional[str] = None,
+        repo_alias: Optional[str] = None,
+        from_ts: Optional[float] = None,
+        to_ts: Optional[float] = None,
+        limit: int = 100,
+        offset: int = 0,
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ) -> Dict[str, Any]:
+        """
+        Query per-request search event log (Issue #1159).
+
+        Returns paginated search events with optional filtering by username,
+        search_type, repo_alias, and time range. Reads from
+        app.state.search_event_log_writer.backend.query().
+
+        Args:
+            request: FastAPI Request (for app.state access)
+            username: Optional filter by username
+            search_type: Optional filter by search type (semantic, fts, etc.)
+            repo_alias: Optional filter by repository alias
+            from_ts: Optional lower bound (inclusive) on event timestamp
+            to_ts: Optional upper bound (exclusive) on event timestamp
+            limit: Maximum number of events to return (default 100)
+            offset: Number of events to skip for pagination (default 0)
+            current_user: Must be an admin user
+
+        Returns:
+            {"events": [...], "total": int}
+
+        Raises:
+            HTTPException 400: When limit > 1000
+            HTTPException 503: When SearchEventLogWriter is not initialized
+        """
+        if limit > 1000:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="limit must not exceed 1000",
+            )
+
+        writer = getattr(request.app.state, "search_event_log_writer", None)
+        if writer is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Search event log writer is not initialized",
+            )
+
+        try:
+            events, total = writer.backend.query(
+                username=username,
+                search_type=search_type,
+                repo_alias=repo_alias,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                limit=limit,
+                offset=offset,
+            )
+            return {"events": events, "total": total}
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "APP-SEL-001",
+                    f"Failed to query search event log: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to query search event log: {str(e)}",
+            )

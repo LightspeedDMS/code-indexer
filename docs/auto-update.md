@@ -1,7 +1,5 @@
 # CIDX Server Auto-Update Documentation
 
-Story #734: Job-Aware Auto-Update with Graceful Drain Mode
-
 ## Overview
 
 The CIDX Server includes an auto-update feature that automatically deploys updates when changes are detected in the master branch of the configured git repository. This feature includes job-aware graceful drain mode to prevent orphan jobs and data corruption during restarts.
@@ -102,7 +100,7 @@ Auto-Update Triggered
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `server_url` | `http://localhost:8000` | CIDX server URL for maintenance API |
+| `server_url` | `http://localhost:8090` | CIDX server URL for maintenance API |
 | `drain_timeout` | `300` (5 min) | Maximum seconds to wait for drain |
 | `drain_poll_interval` | `10` | Seconds between drain status checks |
 
@@ -119,7 +117,7 @@ After=network.target cidx-server.service
 Type=simple
 User=cidx
 WorkingDirectory=/opt/cidx
-ExecStart=/usr/bin/python3 -m code_indexer.server.auto_update.cli
+ExecStart=/usr/bin/python3 -m code_indexer.server.auto_update.run_once
 Restart=always
 RestartSec=30
 Environment=CIDX_REPO_PATH=/opt/cidx
@@ -140,7 +138,7 @@ All endpoints are under `/api/admin/maintenance/`.
 Note: `POST /enter` and `POST /exit` endpoints are additionally restricted to localhost callers via `require_localhost`. Requests from non-loopback addresses will be rejected regardless of authentication.
 
 ```bash
-curl -X POST http://localhost:8000/api/admin/maintenance/enter \
+curl -X POST http://localhost:8090/api/admin/maintenance/enter \
   -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
 ```
 
@@ -272,8 +270,8 @@ This ensures the server recovers cleanly from crashes or forced restarts.
 
 If the server is stuck in maintenance mode:
 
-1. Check current status: `curl http://localhost:8000/api/admin/maintenance/status`
-2. Manually exit: `curl -X POST http://localhost:8000/api/admin/maintenance/exit`
+1. Check current status: `curl http://localhost:8090/api/admin/maintenance/status`
+2. Manually exit: `curl -X POST http://localhost:8090/api/admin/maintenance/exit`
 3. Or restart the server (maintenance state is cleared on restart)
 
 ### Auto-update not working

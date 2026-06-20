@@ -57,6 +57,10 @@ class IndexingResult:
     commits_per_branch: dict
 
 
+# Story #1158: Default parallelism for git-diff ThreadPoolExecutor sites.
+_DEFAULT_PARALLEL_REQUESTS = 8
+
+
 class TemporalIndexer:
     """Orchestrates git history indexing with commit-based change tracking.
 
@@ -312,6 +316,31 @@ class TemporalIndexer:
         # Fallback: Rough estimate (4 chars ≈ 1 token for English text)
         # This is conservative and works for batching purposes
         return len(text) // 4
+
+    def _get_temporal_thread_count(self) -> int:
+        """Return the thread count for git-diff ThreadPoolExecutor sites.
+
+        Story #1158: git-diff sites use temporal_parallel_requests when configured,
+        falling back to the provider's parallel_requests. Embedding sites
+        (VectorCalculationManager, lines 408-413) read only parallel_requests
+        and must NOT call this method.
+        """
+        if getattr(self.config, "embedding_provider", None) == "cohere" and hasattr(
+            self.config, "cohere"
+        ):
+            base = self.config.cohere.parallel_requests
+            temporal = getattr(self.config.cohere, "temporal_parallel_requests", None)
+        elif hasattr(self.config, "voyage_ai"):
+            base = getattr(
+                self.config.voyage_ai, "parallel_requests", _DEFAULT_PARALLEL_REQUESTS
+            )
+            temporal = getattr(
+                self.config.voyage_ai, "temporal_parallel_requests", None
+            )
+        else:
+            base = _DEFAULT_PARALLEL_REQUESTS
+            temporal = None
+        return temporal if temporal is not None else base
 
     def index_commits(
         self,
@@ -611,12 +640,8 @@ class TemporalIndexer:
             f"Loaded {len(existing_ids)} existing temporal points to avoid re-indexing"
         )
 
-        # Get thread count from config
-        thread_count = (
-            getattr(self.config.voyage_ai, "parallel_requests", 8)
-            if hasattr(self.config, "voyage_ai")
-            else 8
-        )
+        # Get thread count — Story #1158: temporal override takes precedence at git-diff sites
+        thread_count = self._get_temporal_thread_count()
 
         # Create slot tracker with max_slots = thread_count (not thread_count + 2)
         commit_slot_tracker = CleanSlotTracker(max_slots=thread_count)
@@ -1167,12 +1192,8 @@ class TemporalIndexer:
                         )
                         pct = (100 * current) // total
 
-                        # Get thread count
-                        thread_count = (
-                            getattr(self.config.voyage_ai, "parallel_requests", 8)
-                            if hasattr(self.config, "voyage_ai")
-                            else 8
-                        )
+                        # Get thread count — Story #1158: temporal override at git-diff sites
+                        thread_count = self._get_temporal_thread_count()
 
                         # Use shared state for display (100ms lag acceptable per spec)
                         commit_hash = (
@@ -1223,12 +1244,8 @@ class TemporalIndexer:
 
                 commit_queue.task_done()
 
-        # Get thread count from config (default 8)
-        thread_count = (
-            getattr(self.config.voyage_ai, "parallel_requests", 8)
-            if hasattr(self.config, "voyage_ai")
-            else 8
-        )
+        # Get thread count — Story #1158: temporal override at git-diff sites
+        thread_count = self._get_temporal_thread_count()
 
         # FIX Issue 3: Add proper KeyboardInterrupt handling for graceful shutdown
         # Use ThreadPoolExecutor for parallel processing with multiple workers

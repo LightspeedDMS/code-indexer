@@ -1,8 +1,5 @@
 # Resumable Delta Dep-Map Analysis Architecture
 
-Status: implemented in Story #1053 (v10.91.15+)
-Spec: https://github.com/LightspeedDMS/code-indexer/issues/1053
-
 ## Problem this design solves
 
 `run_delta_analysis` invokes the `claude` CLI once per affected domain plus one monolithic Claude call for new-repo discovery. On a large change set (e.g. 33 affected domains + 12 new repos) the total wall-clock and token cost is multi-hour. If the cidx-server process dies mid-flight — auto-updater `systemctl restart`, OOM, `pkill -KILL`, manual restart, machine reboot — the prior naive implementation re-ran from scratch on the next trigger, throwing away every domain Claude had already finished.
@@ -162,10 +159,10 @@ These were considered and explicitly rejected. Re-introducing any of them is a r
 
 | Layer | Location |
 |---|---|
-| Unit + integration tests (40 tests, all 16 AC scenarios) | `tests/unit/server/services/test_dep_map_1053_delta_journal.py` |
+| Unit + integration tests (40 tests) | `tests/unit/server/services/test_dep_map_1053_delta_journal.py` |
 | Multi-domain delta fixture provisioner (`--dry-run` capable) | `tests/e2e/manual/provision_delta_fixture.sh` |
 | Cidx-server process-tree audit (matches `claude .*--print`, optional `--port` narrowing) | `tests/e2e/manual/audit_processes.sh` |
-| Manual E2E with SIGKILL (Scenario 16) | Story #1053 spec: trigger delta, wait for "Delta: domain 2/N complete", `sudo systemctl kill -s KILL cidx-server`, verify ALL DOWN, restart, re-trigger, assert wall-clock reduction + skip log lines + frontmatter fingerprint correctness |
+| Manual E2E with SIGKILL (Scenario 16) | Trigger delta, wait for "Delta: domain 2/N complete", `sudo systemctl kill -s KILL cidx-server`, verify ALL DOWN, restart, re-trigger, assert wall-clock reduction + skip log lines + frontmatter fingerprint correctness |
 
 ## How a resumed run is observed in production
 

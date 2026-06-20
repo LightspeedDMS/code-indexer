@@ -1410,6 +1410,27 @@ function saveLlmCredsConfig() {
             <table class="config-table">
                 <tbody>
                     <tr>
+                        <td class="config-label">VoyageAI Embedding Parallel Requests</td>
+                        <td class="config-value">{{ config.indexing.voyage_ai_parallel_requests }}</td>
+                        <td class="config-note"><small>Concurrent embedding API calls for VoyageAI (range 1-32, default 8)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cohere Embedding Parallel Requests</td>
+                        <td class="config-value">{{ config.indexing.cohere_parallel_requests }}</td>
+                        <td class="config-note"><small>Concurrent embedding API calls for Cohere (range 1-32, default 8)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Temporal Git-Diff Parallel Requests</td>
+                        <td class="config-value">
+                            {% if config.indexing.temporal_parallel_requests is not none %}
+                                {{ config.indexing.temporal_parallel_requests }}
+                            {% else %}
+                                Inherit from provider
+                            {% endif %}
+                        </td>
+                        <td class="config-note"><small>Thread count for git-diff analysis (1-32, blank = inherit from provider)</small></td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Indexable File Extensions</td>
                         <td class="config-value">
                             <span style="word-break: break-all;">{{ config.indexing.indexable_extensions | join(', ') }}</span>
@@ -1429,6 +1450,23 @@ function saveLlmCredsConfig() {
             <div class="validation-error">{{ validation_errors.indexing }}</div>
             {% endif %}
             <div class="form-grid">
+                <label for="indexing-voyage-parallel">
+                    VoyageAI Embedding Parallel Requests
+                    <input type="number" id="indexing-voyage-parallel" name="voyage_ai_parallel_requests" value="{{ config.indexing.voyage_ai_parallel_requests }}" min="1" max="32">
+                    <small>Range: 1-32 (default 8). Concurrent embedding API calls sent to VoyageAI during indexing.</small>
+                </label>
+                <label for="indexing-cohere-parallel">
+                    Cohere Embedding Parallel Requests
+                    <input type="number" id="indexing-cohere-parallel" name="cohere_parallel_requests" value="{{ config.indexing.cohere_parallel_requests }}" min="1" max="32">
+                    <small>Range: 1-32 (default 8). Concurrent embedding API calls sent to Cohere during indexing.</small>
+                </label>
+                <label for="indexing-temporal-parallel">
+                    Temporal Git-Diff Parallel Requests
+                    <input type="number" id="indexing-temporal-parallel" name="temporal_parallel_requests"
+                           value="{{ config.indexing.temporal_parallel_requests if config.indexing.temporal_parallel_requests is not none else '' }}"
+                           min="1" max="32" placeholder="Leave blank to inherit from provider">
+                    <small>Range: 1-32. Thread count for parallel git-diff analysis. Leave blank to inherit from the active provider setting.</small>
+                </label>
                 <label for="indexing-extensions">
                     Indexable File Extensions
                     <textarea id="indexing-extensions" name="indexable_extensions" rows="4" style="font-family: monospace; font-size: 0.85em;">{{ config.indexing.indexable_extensions | join(', ') }}</textarea>
@@ -2364,6 +2402,54 @@ function saveLlmCredsConfig() {
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('pace_maker')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Issue #1159: Search event log retention settings -->
+<details class="config-section" id="section-search_event_log">
+    <summary>
+        <h2>Operational Logging</h2>
+    </summary>
+    <p class="section-description">
+        Controls retention of search event logs used for usage analytics and auditing.
+        Events older than the retention window are pruned automatically once per day.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-search_event_log">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Retention Period (days)</td>
+                        <td class="config-value">{{ config.search_event_log.search_event_log_retention_days | default(90) }}</td>
+                        <td class="config-note"><small>1-3650 days. Events older than this are pruned automatically once per day.</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('search_event_log')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-search_event_log" method="post" action="/admin/config/search_event_log" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.search_event_log %}
+            <div class="validation-error">{{ validation_errors.search_event_log }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="search-event-log-retention-days">
+                    Retention Period (days)
+                    <input type="number" id="search-event-log-retention-days" name="search_event_log_retention_days"
+                        value="{{ config.search_event_log.search_event_log_retention_days | default(90) }}"
+                        min="1" max="3650">
+                    <small>1-3650 days. Events older than this are pruned automatically once per day.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('search_event_log')">Cancel</button>
             </div>
         </form>
     </article>

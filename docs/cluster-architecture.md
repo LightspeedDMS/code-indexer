@@ -1,6 +1,6 @@
 # CIDX Server Cluster Architecture
 
-Epic #408: CIDX Clusterization
+CIDX Clusterization
 
 This document describes the architecture of CIDX Server when running in cluster mode (multiple nodes sharing a PostgreSQL database). For setup and operational procedures, see [Cluster Setup Guide](cluster-setup.md).
 
@@ -33,7 +33,7 @@ Each node runs independently and handles requests without inter-node communicati
                        +-----------------------+
                        |     Load Balancer     |
                        |      (HAProxy)        |
-                       | roundrobin+sticky:8000|
+                       | roundrobin+sticky:8090|
                        +-----+-----+----------+
                              |     |
                 +------------+     +------------+
@@ -41,9 +41,9 @@ Each node runs independently and handles requests without inter-node communicati
                 v                               v
      +-------------------+           +-------------------+
      |   CIDX Node 1     |           |   CIDX Node 2     |
-     |   (192.168.68.9)  |           |  (192.168.68.21)  |
+     |   (<node-1-ip>)   |           |   (<node-2-ip>)   |
      |                   |           |                   |
-     |  uvicorn :8000    |           |  uvicorn :8000    |
+     |  uvicorn :8090    |           |  uvicorn :8090    |
      |  Leader Election  |           |  Leader Election  |
      |  Heartbeat        |           |  Heartbeat        |
      |  Metrics Writer   |           |  Metrics Writer   |
@@ -58,7 +58,7 @@ Each node runs independently and handles requests without inter-node communicati
                v                              v
     +--------------------+       +------------------------+
     |    PostgreSQL       |       |    Shared Storage      |
-    |  (192.168.68.43)   |       |    (NFS / ONTAP)       |
+    |  (<postgres-host>) |       |    (NFS / ONTAP)       |
     |                    |       |                        |
     |  - users           |       |  golden-repos/         |
     |  - sessions        |       |  .versioned/           |
@@ -77,7 +77,7 @@ Each node runs independently and handles requests without inter-node communicati
     Client Request
          |
          v
-    HAProxy (:8000)
+    HAProxy (:8090)
          |  session-affinity with health check (GET /docs, 5s interval)
          |
     +----+----+
@@ -220,7 +220,7 @@ The leader election service is stored in `app.state.leader_election` so other pa
 
 On graceful shutdown, `stop_monitoring()` calls `release_leadership()`, which closes the dedicated connection and triggers PostgreSQL to release the advisory lock. The next node to attempt `pg_try_advisory_lock` will succeed.
 
-### Auto-Repair Decision Lock (Story #927)
+### Auto-Repair Decision Lock
 
 Separate from leader-election, the auto-repair feature uses **transaction-level** PostgreSQL advisory locks for short-lived atomic claim windows on each scheduler tick. Function: `pg_try_advisory_xact_lock(stable_int_hash("dep_map_scheduler_<key>"))`.
 
@@ -244,7 +244,7 @@ The `cluster_nodes` table schema (defined in `001_initial_schema.sql`):
 CREATE TABLE IF NOT EXISTS cluster_nodes (
     node_id         TEXT        PRIMARY KEY,
     hostname        TEXT        NOT NULL,
-    port            INTEGER     NOT NULL DEFAULT 8000,
+    port            INTEGER     NOT NULL DEFAULT 8090,
     status          TEXT        NOT NULL DEFAULT 'active',
     role            TEXT        NOT NULL DEFAULT 'worker',
     last_heartbeat  TIMESTAMPTZ,
@@ -325,7 +325,7 @@ Current migrations:
 - `002_groups_access_schema.sql`: Replaces the groups tables from migration 001 with the full GroupAccessManager schema (groups, user_group_membership, repo_group_access, audit_logs with admin_id/action_type/target_type/target_id columns)
 - `003_node_metrics.sql`: Creates the `node_metrics` table used by `NodeMetricsWriterService`
 
-Note: As of v10.34.0, there are 25 migrations (001-025). Only the first 3 are shown here. See `src/code_indexer/server/storage/postgres/migrations/sql/` for the complete list.
+Note: There are 29 migrations (001-029). Only the first 3 are shown here. See `src/code_indexer/server/storage/postgres/migrations/sql/` for the complete list.
 
 ### node_metrics Table
 
@@ -359,7 +359,7 @@ Indexes: `(node_id, timestamp DESC)` for per-node latest query; `(timestamp)` fo
 CREATE TABLE IF NOT EXISTS cluster_nodes (
     node_id         TEXT        PRIMARY KEY,
     hostname        TEXT        NOT NULL,
-    port            INTEGER     NOT NULL DEFAULT 8000,
+    port            INTEGER     NOT NULL DEFAULT 8090,
     status          TEXT        NOT NULL DEFAULT 'active',
     role            TEXT        NOT NULL DEFAULT 'worker',
     last_heartbeat  TIMESTAMPTZ,

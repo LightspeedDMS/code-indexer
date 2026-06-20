@@ -1,4 +1,4 @@
-# X-Ray Sandbox Security Boundary (Epic #968 / Story #970, v10.4.0)
+# X-Ray Sandbox Security Boundary (v10.4.0)
 
 This document captures the X-Ray sandbox security boundary invariants extracted from project CLAUDE.md. It defines how the AST evaluator subprocess is locked down so caller-supplied Python code cannot escape the sandbox.
 
@@ -37,7 +37,7 @@ This document captures the X-Ray sandbox security boundary invariants extracted 
 
 **v10.4.0 file-as-unit dict-return contract**: The sandbox accepts any return value (including `None`); shape validation is done at the engine layer, not in the sandbox. Evaluators MUST return `{"matches": [...], "value": <any>}`. Bool returns (legacy v10.3.x contract) are rejected by the engine with `InvalidEvaluatorReturn`. The sandbox passes `match_positions` (list of dicts, one per Phase 1 hit) as a global so evaluators can scope their analysis to the regex-matched positions when desired.
 
-**Dunder access is BLOCKED at validation time** (Story #970 security patch — confirmed exploit closed):
+**Dunder access is BLOCKED at validation time**:
 - `DUNDER_ATTR_BLOCKLIST` (frozenset, 39 names — original 24 plus security-audit extensions for info-leak vectors) covers: `__class__`, `__bases__`, `__base__`, `__mro__`, `__subclasses__`, `__init__`, `__init_subclass__`, `__new__`, `__globals__`, `__builtins__`, `__import__`, `__dict__`, `__getattribute__`, `__setattr__`, `__delattr__`, `__reduce__`, `__reduce_ex__`, `__call__`, `__code__`, `__closure__`, `__func__`, `__module__`, `__name__`, `__qualname__`, plus info-leak vectors `__loader__`, `__spec__`, `__file__`, `__path__`, `__package__`, `__cached__`, `__defaults__`, `__kwdefaults__`, `__annotations__`, `__type_params__`, `__set_name__`, `__instancecheck__`, `__subclasscheck__`, `__prepare__`, `__weakref__`.
 - Any `ast.Attribute` node whose `.attr` is in the blocklist → `validation_failed`.
 - Any `ast.Subscript` node whose slice is a string `Constant` starting with `__` → `validation_failed`.

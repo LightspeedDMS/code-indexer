@@ -380,3 +380,188 @@ class TestDashboardRecentJobsWithTracker:
 
         # When tracker is available, the BGM's method should NOT be called
         mock_mgr.get_recent_jobs_with_filter.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# RecentJob username and actor_username fields (display bug fix)
+# ---------------------------------------------------------------------------
+
+
+class TestRecentJobUsernameFields:
+    """RecentJob must expose username and actor_username fields."""
+
+    def test_recent_job_has_username_field(self):
+        """
+        RecentJob dataclass has a username field.
+
+        Given the RecentJob dataclass definition
+        When checking for username attribute
+        Then the field exists and defaults to empty string
+        """
+        from code_indexer.server.services.dashboard_service import RecentJob
+
+        job = RecentJob(
+            job_id="j1",
+            repo_name="repo",
+            job_type="refresh",
+            completion_time="2024-01-01T00:00:00",
+            status="completed",
+        )
+        assert hasattr(job, "username")
+        assert job.username == ""
+
+    def test_recent_job_has_actor_username_field(self):
+        """
+        RecentJob dataclass has an actor_username field.
+
+        Given the RecentJob dataclass definition
+        When checking for actor_username attribute
+        Then the field exists and defaults to None
+        """
+        from code_indexer.server.services.dashboard_service import RecentJob
+
+        job = RecentJob(
+            job_id="j1",
+            repo_name="repo",
+            job_type="refresh",
+            completion_time="2024-01-01T00:00:00",
+            status="completed",
+        )
+        assert hasattr(job, "actor_username")
+        assert job.actor_username is None
+
+    def test_get_recent_jobs_populates_username_from_job_dict(
+        self, dashboard_service, tracker
+    ):
+        """
+        _get_recent_jobs populates username from the job dict.
+
+        Given a JobTracker with a job registered as username='system'
+        When _get_recent_jobs retrieves it
+        Then the resulting RecentJob has username='system'
+        """
+        tracker.register_job(
+            "dash-user-001",
+            "global_repo_refresh",
+            "system",
+            repo_alias="some-repo",
+        )
+        tracker.update_status("dash-user-001", status="running")
+        tracker.complete_job("dash-user-001")
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_recent_jobs_with_filter.return_value = []
+
+        with patch.object(
+            dashboard_service, "_get_background_job_manager", return_value=mock_mgr
+        ):
+            with patch.object(
+                dashboard_service, "_get_job_tracker", return_value=tracker
+            ):
+                recent = dashboard_service._get_recent_jobs("admin", "30d")
+
+        matching = [r for r in recent if r.job_id == "dash-user-001"]
+        assert len(matching) == 1
+        assert matching[0].username == "system"
+
+    def test_get_recent_jobs_populates_actor_username_when_present(
+        self, dashboard_service, tracker, db_path
+    ):
+        """
+        _get_recent_jobs populates actor_username when the job dict has one.
+
+        Given a JobTracker with a job that has an actor_username set
+        When _get_recent_jobs retrieves it
+        Then the resulting RecentJob has the correct actor_username
+        """
+        import sqlite3
+
+        # Insert a job with actor_username directly since register_job may not
+        # expose that field in its API.
+        conn = sqlite3.connect(db_path)
+        from datetime import datetime, timezone
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT INTO background_jobs
+               (job_id, operation_type, status, created_at, started_at,
+                completed_at, result, error, progress, username, is_admin,
+                cancelled, repo_alias, resolution_attempts, claude_actions,
+                failure_reason, extended_error, language_resolution_status,
+                progress_info, metadata, actor_username)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "dash-actor-001",
+                "refresh_golden_repo",
+                "completed",
+                now_iso,
+                now_iso,
+                now_iso,
+                None,
+                None,
+                100,
+                "admin",
+                1,
+                0,
+                "actor-repo",
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "alice",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_recent_jobs_with_filter.return_value = []
+
+        with patch.object(
+            dashboard_service, "_get_background_job_manager", return_value=mock_mgr
+        ):
+            with patch.object(
+                dashboard_service, "_get_job_tracker", return_value=tracker
+            ):
+                recent = dashboard_service._get_recent_jobs("admin", "30d")
+
+        matching = [r for r in recent if r.job_id == "dash-actor-001"]
+        assert len(matching) == 1
+        assert matching[0].actor_username == "alice"
+
+    def test_get_recent_jobs_actor_username_is_none_when_absent(
+        self, dashboard_service, tracker
+    ):
+        """
+        _get_recent_jobs leaves actor_username=None when job dict lacks it.
+
+        Given a job with no actor_username value
+        When _get_recent_jobs retrieves it
+        Then the resulting RecentJob has actor_username=None
+        """
+        tracker.register_job(
+            "dash-noactor-001",
+            "dep_map_analysis",
+            "admin",
+            repo_alias="no-actor-repo",
+        )
+        tracker.update_status("dash-noactor-001", status="running")
+        tracker.complete_job("dash-noactor-001")
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_recent_jobs_with_filter.return_value = []
+
+        with patch.object(
+            dashboard_service, "_get_background_job_manager", return_value=mock_mgr
+        ):
+            with patch.object(
+                dashboard_service, "_get_job_tracker", return_value=tracker
+            ):
+                recent = dashboard_service._get_recent_jobs("admin", "30d")
+
+        matching = [r for r in recent if r.job_id == "dash-noactor-001"]
+        assert len(matching) == 1
+        assert matching[0].actor_username is None

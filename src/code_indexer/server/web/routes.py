@@ -64,6 +64,9 @@ UNASSIGNED_CATEGORY_PRIORITY = (
 # Discovery enrichment limit (Story #754): max clone_urls per enrich request
 MAX_ENRICH_CLONE_URLS = 50
 
+# Story #1157: Result cache for background discovery jobs.
+# Maps job_id -> result_holder dict. Consumed read-once via .pop().
+
 # Story #885 Phase 5b (A7b): minimum gap between outer and shell lifecycle timeouts.
 # outer_timeout_seconds must be >= shell_timeout_seconds + LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS
 # so the Python-level watchdog always outlives the shell kill budget.
@@ -221,6 +224,8 @@ _VALID_CONFIG_SECTIONS = (
     "pace_maker",
     # Story #1107 S3 - Query embedding cache LRU cap + Web UI config section
     "query_embedding_cache",
+    # Story #1159 - Search event log data retention config
+    "search_event_log",
 )
 
 
@@ -6497,6 +6502,40 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Batch size must be a valid number"
 
+        # Story #1158 - AC1: Embedding API parallelism (required when present, range 1-32)
+        _PARALLEL_MIN = 1
+        _PARALLEL_MAX = 32
+        for field_name in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
+            if field_name not in data:
+                continue
+            raw = data[field_name]
+            if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                label = field_name.replace("_", " ").title()
+                return f"{label} is required"
+            try:
+                val_int = int(raw)
+                if val_int < _PARALLEL_MIN or val_int > _PARALLEL_MAX:
+                    label = field_name.replace("_", " ").title()
+                    return (
+                        f"{label} must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
+                    )
+            except (ValueError, TypeError):
+                label = field_name.replace("_", " ").title()
+                return f"{label} must be a valid number"
+
+        # Story #1158 - AC2: Temporal git-diff parallelism (optional, range 1-32 when provided)
+        if "temporal_parallel_requests" in data:
+            temporal_raw = data["temporal_parallel_requests"]
+            if temporal_raw is not None and not (
+                isinstance(temporal_raw, str) and temporal_raw.strip() == ""
+            ):
+                try:
+                    temporal_int = int(temporal_raw)
+                    if temporal_int < _PARALLEL_MIN or temporal_int > _PARALLEL_MAX:
+                        return f"Temporal Parallel Requests must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
+                except (ValueError, TypeError):
+                    return "Temporal Parallel Requests must be a valid number"
+
     elif section == "query":
         for field in ["default_limit", "max_limit", "timeout"]:
             value = data.get(field)
@@ -7346,6 +7385,17 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             if anchor_int < 0:
                 return f"{anchor_field} must be >= 0"
 
+    elif section == "search_event_log":
+        # Story #1159: Search event log data retention configuration.
+        retention_days_val = data.get("search_event_log_retention_days")
+        if retention_days_val is not None:
+            try:
+                retention_days_int = int(retention_days_val)
+            except (ValueError, TypeError):
+                return "search_event_log_retention_days must be a valid integer"
+            if retention_days_int < 1 or retention_days_int > 3650:
+                return "search_event_log_retention_days must be between 1 and 3650"
+
     return None
 
 
@@ -7617,6 +7667,126 @@ def discovery_all(
             )
         )
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@web_router.post(
+    "/api/discovery/{platform}/start",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+async def discovery_start(
+    request: Request,
+    platform: str,
+):
+    """Start a background discovery job for the given platform (Story #1157).
+
+    Returns job_id immediately. Client polls GET /api/jobs/{job_id} for progress.
+    Deduplicates: if a PENDING or RUNNING job of the same type exists, returns it.
+    """
+    session = _require_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    provider, err = _resolve_provider(request, platform)
+    if err is not None:
+        return err
+    if not provider.is_configured():
+        return JSONResponse(
+            {"error": f"{platform.capitalize()} token not configured"}, status_code=422
+        )
+
+    bgm = _get_background_job_manager()
+    if bgm is None:
+        return JSONResponse(
+            {"error": "Background job manager unavailable"}, status_code=503
+        )
+
+    from code_indexer.server.repositories.background_jobs import JobStatus
+
+    op_type = f"{platform}_discovery"
+
+    # Manual dedup: repo_alias=None bypasses BGM atomic DB gate
+    with bgm._lock:
+        for job in bgm.jobs.values():
+            if job.operation_type == op_type and job.status in (
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+            ):
+                return JSONResponse({"job_id": job.job_id, "existing": True})
+
+    indexed_urls = provider._get_indexed_canonical_urls()
+    _, all_hidden = _load_hidden_ids(show_hidden=False)
+
+    payload_cache = getattr(request.app.state, "payload_cache", None)
+    job_id_holder: dict = {}
+
+    def _worker(progress_callback=None):  # type: ignore[misc]
+        result = provider.discover_all_repositories(
+            indexed_urls=indexed_urls,
+            hidden_identifiers=all_hidden,
+            progress_callback=progress_callback,
+        )
+        jid = job_id_holder.get("job_id")
+        if jid and payload_cache is not None:
+            payload_cache.store_with_key(f"discovery:{jid}", json.dumps(result))
+        return {
+            "total_source": result["total_source"],
+            "total_unregistered": result["total_unregistered"],
+            "result_ready": True,
+        }
+
+    job_id = bgm.submit_job(
+        op_type,
+        _worker,
+        submitter_username=session.username,
+        repo_alias=None,
+    )
+    job_id_holder["job_id"] = job_id
+    return JSONResponse({"job_id": job_id, "existing": False})
+
+
+@web_router.get("/api/discovery/{platform}/result/{job_id}")
+async def discovery_result(
+    request: Request,
+    platform: str,
+    job_id: str,
+):
+    """Return the full discovery result for a completed job (Story #1157).
+
+    Result lives in PayloadCache (TTL-based, not read-once). Re-reads within TTL return 200.
+    Auth required.
+    """
+    session = _require_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    payload_cache = getattr(request.app.state, "payload_cache", None)
+    if payload_cache is None:
+        return JSONResponse({"error": "Payload cache unavailable"}, status_code=503)
+
+    cache_key = f"discovery:{job_id}"
+    if not payload_cache.has_key(cache_key):
+        return JSONResponse({"error": "Result not found or expired"}, status_code=404)
+
+    # Accumulate all pages — PayloadCache.retrieve() returns one page at a time
+    chunks: list = []
+    page = 0
+    try:
+        while True:
+            cache_result = payload_cache.retrieve(cache_key, page=page)
+            chunks.append(cache_result.content)
+            if not cache_result.has_more:
+                break
+            page += 1
+    except Exception:
+        logger.error(
+            "Failed to retrieve discovery result for %s", cache_key, exc_info=True
+        )
+        return JSONResponse(
+            {"error": "Failed to retrieve discovery result"}, status_code=500
+        )
+
+    data = json.loads("".join(chunks))
+    return JSONResponse(data)
 
 
 @web_router.post(
