@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.146.0] - 2026-06-20
+
+### Fixed
+- **psycopg3 TupleRow dict conversion in SearchEventLogPostgresBackend (Bug #5):** `query()` and `query_for_export()` called `dict(row)` on psycopg3 `TupleRow` objects returned by `fetchall()`. psycopg3 does not return dict-like rows by default, so `dict(row)` raised `ValueError: cannot convert dictionary update sequence element #0 to a sequence`, which the `except` clause swallowed silently — making all search event reads return `[], 0` on PostgreSQL. Both methods now map columns by explicit positional index matching the `030_search_event_log.sql` CREATE TABLE column order.
+- **Context.run() re-entrancy on parallel Voyage+Cohere execution (Bug #4):** `semantic_query_manager.py` called `contextvars.copy_context()` once before the `ThreadPoolExecutor.submit()` loop and reused the same `Context` object across both provider threads. Since a `Context` can only be entered once at a time, the second thread raised `RuntimeError: Context.run() already entered`. Fixed by moving `copy_context()` inside the provider loop so each submitted thread gets its own independent context copy.
+
 ## [10.145.0] - 2026-06-20
 
 ### Fixed

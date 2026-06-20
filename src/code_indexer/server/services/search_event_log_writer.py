@@ -464,7 +464,27 @@ class SearchEventLogPostgresBackend:
                     f"ORDER BY timestamp DESC LIMIT %s OFFSET %s"
                 )
                 rows = conn.execute(data_sql, params + [limit, offset]).fetchall()
-                events = [dict(row) for row in rows]
+                events = [
+                    {
+                        "id": row[0],
+                        "timestamp": row[1],
+                        "username": row[2],
+                        "repo_alias": row[3],
+                        "search_type": row[4],
+                        "query_text": row[5],
+                        "voyage_cache_hit": row[6],
+                        "voyage_cache_mode": row[7],
+                        "voyage_latency_ms": row[8],
+                        "cohere_cache_hit": row[9],
+                        "cohere_cache_mode": row[10],
+                        "cohere_latency_ms": row[11],
+                        "total_latency_ms": row[12],
+                        "result_count": row[13],
+                        "node_id": row[14],
+                        "correlation_id": row[15],
+                    }
+                    for row in rows
+                ]
                 return events, total_count
         except Exception as exc:
             logger.warning("SearchEventLogPostgresBackend: query failed: %s", exc)
@@ -518,7 +538,27 @@ class SearchEventLogPostgresBackend:
         try:
             with self._pool.connection() as conn:
                 rows = conn.execute(sql, params).fetchall()
-                return [dict(row) for row in rows]
+                return [
+                    {
+                        "id": row[0],
+                        "timestamp": row[1],
+                        "username": row[2],
+                        "repo_alias": row[3],
+                        "search_type": row[4],
+                        "query_text": row[5],
+                        "voyage_cache_hit": row[6],
+                        "voyage_cache_mode": row[7],
+                        "voyage_latency_ms": row[8],
+                        "cohere_cache_hit": row[9],
+                        "cohere_cache_mode": row[10],
+                        "cohere_latency_ms": row[11],
+                        "total_latency_ms": row[12],
+                        "result_count": row[13],
+                        "node_id": row[14],
+                        "correlation_id": row[15],
+                    }
+                    for row in rows
+                ]
         except Exception as exc:
             logger.warning(
                 "SearchEventLogPostgresBackend: query_for_export failed: %s", exc

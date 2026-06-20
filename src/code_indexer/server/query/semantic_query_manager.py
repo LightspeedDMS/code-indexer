@@ -1332,11 +1332,11 @@ class SemanticQueryManager:
             # on timeout — the `with` form always calls shutdown(wait=True) which
             # blocks until all threads finish, defeating the timeout.
             executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=2)
-            _provider_ctx = contextvars.copy_context()
             try:
                 futures = {}
                 for name, fn in provider_tasks.items():
                     _t0 = time.monotonic()
+                    _provider_ctx = contextvars.copy_context()
                     fut = executor.submit(_provider_ctx.run, fn)
                     futures[fut] = name
                     _future_start[fut] = _t0
