@@ -115,6 +115,22 @@ def test_is_temporal_collection(collection_name, expected):
     assert is_temporal_collection(collection_name) is expected
 
 
+def test_is_temporal_collection_returns_true_for_sharded_names():
+    """Regression guard: is_temporal_collection() returns True for sharded collection names.
+
+    Story #1171: Sharded names like 'code-indexer-temporal-voyage_code_3-2024Q3'
+    start with TEMPORAL_COLLECTION_PREFIX so is_temporal_collection() must return True.
+    This is required so sharded collections are enumerated by get_temporal_collections().
+    """
+    from code_indexer.services.temporal.temporal_collection_naming import (
+        is_temporal_collection,
+    )
+
+    assert is_temporal_collection("code-indexer-temporal-voyage_code_3-2024Q3") is True
+    assert is_temporal_collection("code-indexer-temporal-embed_v4_0-2023Q1") is True
+    assert is_temporal_collection("code-indexer-temporal-voyage_code_3-2025Q4") is True
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

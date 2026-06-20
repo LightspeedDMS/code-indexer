@@ -416,15 +416,12 @@ class TemporalIndexer:
         # (Bug #8, #9 behavior maintained - verified by test_bug8_progressive_resume.py
         # and test_temporal_indexer_list_bounds.py)
 
-        # Initialize incremental HNSW tracking for the temporal collection
-        # This enables change tracking for efficient HNSW index updates
-        self.vector_store.begin_indexing(self.collection_name)
-
         current_branch = self._get_current_branch()
 
         # Step 2: Process commits with parallel workers
         total_blobs_processed = 0
         total_vectors_created = 0
+        commits_processed = 0
 
         # Import embedding provider
         from ...services.embedding_factory import EmbeddingProviderFactory
@@ -444,20 +441,72 @@ class TemporalIndexer:
         # Get config_dir for debug logging
         config_dir = self.config_manager.config_path.parent
 
-        with VectorCalculationManager(
-            embedding_provider, vector_thread_count, config_dir=config_dir
-        ) as vector_manager:
-            # Use parallel processing instead of sequential loop
-            # Returns: (commits_processed_count, total_blobs_processed, total_vectors_created)
-            commits_processed, total_blobs_processed, total_vectors_created = (
-                self._process_commits_parallel(
-                    commits_from_git,
-                    embedding_provider,
-                    vector_manager,
-                    progress_callback,
-                    reconcile,
-                )
+        # Story #1171: Group commits by quarterly shard to bound peak RAM.
+        # Each shard is processed sequentially so only one shard is in RAM at a time.
+        from collections import defaultdict
+        from .temporal_collection_naming import (
+            get_shard_collection_name,
+            get_model_name_for_provider,
+        )
+
+        from datetime import timezone as _tz
+
+        try:
+            _model_name = get_model_name_for_provider(
+                self.config.embedding_provider, self.config
             )
+            shard_commit_map: dict = defaultdict(list)
+            for _commit in commits_from_git:
+                _shard = get_shard_collection_name(
+                    _model_name,
+                    datetime.fromtimestamp(_commit.timestamp, tz=_tz.utc),
+                )
+                shard_commit_map[_shard].append(_commit)
+        except (ValueError, AttributeError):
+            # Unknown or non-standard provider (e.g. MagicMock in tests).
+            # Fall back to treating all commits as a single group under the current collection.
+            logger.debug(
+                "Could not determine provider for shard routing; "
+                "processing all commits under collection '%s'.",
+                self.collection_name,
+            )
+            shard_commit_map = defaultdict(list)
+            shard_commit_map[self.collection_name].extend(commits_from_git)
+
+        sorted_shards = sorted(
+            shard_commit_map.keys()
+        )  # Chronological (lex = chron for YYYYQN)
+
+        # Track shards processed so close() can call end_indexing per shard
+        self._processed_shards: list = []
+
+        _original_collection_name = self.collection_name
+        try:
+            with VectorCalculationManager(
+                embedding_provider, vector_thread_count, config_dir=config_dir
+            ) as vector_manager:
+                for _shard_name in sorted_shards:
+                    self.collection_name = _shard_name
+                    # Initialize incremental HNSW tracking for this shard
+                    self.vector_store.begin_indexing(_shard_name)
+
+                    _shard_commits = shard_commit_map[_shard_name]
+                    _c, _b, _v = self._process_commits_parallel(
+                        _shard_commits,
+                        embedding_provider,
+                        vector_manager,
+                        progress_callback,
+                        reconcile,
+                    )
+                    commits_processed += _c
+                    total_blobs_processed += _b
+                    total_vectors_created += _v
+
+                    # Rebuild HNSW for this shard after processing completes
+                    self.vector_store.end_indexing(collection_name=_shard_name)
+                    self._processed_shards.append(_shard_name)
+        finally:
+            self.collection_name = _original_collection_name
 
         # Early return if no commits were processed (all filtered out)
         if total_blobs_processed == 0 and total_vectors_created == 0:
@@ -1382,9 +1431,23 @@ class TemporalIndexer:
             json.dump(metadata, f, indent=2)
 
     def close(self):
-        """Clean up resources and finalize HNSW index."""
-        # Build HNSW index for temporal collection
-        logger.info("Building HNSW index for temporal collection...")
-        self.vector_store.end_indexing(collection_name=self.collection_name)
+        """Clean up resources and finalize HNSW index.
+
+        Story #1171: When sharded indexing was used, end_indexing is already called
+        per-shard inside index_commits(). We skip the base-collection call in that case
+        to avoid a ValueError on a non-existent collection directory.
+        """
+        # Story #1171: Sharded indexing already called end_indexing per shard inside
+        # index_commits(). Only call end_indexing here for the legacy (non-sharded) path.
+        processed_shards = getattr(self, "_processed_shards", [])
+        if processed_shards:
+            logger.info(
+                "Sharded indexing complete — HNSW indexes already built per shard (%d shards).",
+                len(processed_shards),
+            )
+        else:
+            # Legacy non-sharded path or reconcile fast-exit: build HNSW index now.
+            logger.info("Building HNSW index for temporal collection...")
+            self.vector_store.end_indexing(collection_name=self.collection_name)
 
         # Temporal indexing cleanup complete

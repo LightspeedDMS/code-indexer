@@ -412,9 +412,13 @@ def _create_embedding_provider_for_collection(config: Any, collection_name: str)
     """
     from ..embedding_factory import EmbeddingProviderFactory
 
+    import re as _re
+
     slug = ""
     if collection_name.startswith(TEMPORAL_COLLECTION_PREFIX):
         slug = collection_name[len(TEMPORAL_COLLECTION_PREFIX) :]
+        # Strip quarterly shard suffix -YYYYQN before matching provider slug
+        slug = _re.sub(r"-\d{4}Q[1-4]$", "", slug)
 
     configured = EmbeddingProviderFactory.get_configured_providers(config)
     for provider_name in configured:
