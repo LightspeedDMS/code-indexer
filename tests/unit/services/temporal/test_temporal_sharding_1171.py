@@ -501,3 +501,116 @@ class TestQueryShardOrder:
             assert call_kwargs[1].get("provider_name") == "voyage-ai" or (
                 len(call_kwargs[0]) > 1 and call_kwargs[0][1] == "voyage-ai"
             )
+
+
+# ---------------------------------------------------------------------------
+# Sequential shard dispatch (AC3)
+# ---------------------------------------------------------------------------
+
+
+class TestSequentialShardDispatch:
+    """Verify that same-provider shards are queried sequentially, not in parallel."""
+
+    def test_same_provider_shards_queried_sequentially(self):
+        """When multiple shards exist for one provider, query calls are sequential."""
+        from code_indexer.services.temporal.temporal_fusion_dispatch import (
+            _query_provider_shards_sequentially,
+        )
+        from unittest.mock import patch, MagicMock
+        import threading
+
+        config = MagicMock()
+        vector_store = MagicMock()
+        vector_store.project_root = "/fake/root"
+
+        shard_names = [
+            "code-indexer-temporal-voyage_code_3-2024Q1",
+            "code-indexer-temporal-voyage_code_3-2024Q2",
+            "code-indexer-temporal-voyage_code_3-2024Q3",
+        ]
+
+        call_log: list = []
+        active_calls = [0]
+        lock = threading.Lock()
+        max_concurrent = [0]
+
+        def fake_single_provider(config, vs, coll_name, *args, **kwargs):
+            with lock:
+                active_calls[0] += 1
+                if active_calls[0] > max_concurrent[0]:
+                    max_concurrent[0] = active_calls[0]
+            call_log.append(coll_name)
+            # Simulate brief work
+            from code_indexer.services.temporal.temporal_search_service import (
+                TemporalSearchResults,
+            )
+
+            result = TemporalSearchResults(
+                results=[], query="test", filter_type="none", filter_value=None
+            )
+            with lock:
+                active_calls[0] -= 1
+            return result
+
+        with patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._query_single_provider",
+            side_effect=fake_single_provider,
+        ):
+            _query_provider_shards_sequentially(
+                config,
+                vector_store,
+                shard_names,
+                "test query",
+                10,
+                None,
+                None,
+            )
+
+        # All three shards were queried
+        assert call_log == shard_names, f"Expected sequential order, got {call_log}"
+        # Never more than 1 active at once (sequential proof)
+        assert max_concurrent[0] == 1, (
+            f"Expected max 1 concurrent shard, got {max_concurrent[0]}"
+        )
+
+    def test_group_collections_by_provider_groups_shards(self):
+        """Shards for the same provider are grouped together."""
+        from code_indexer.services.temporal.temporal_fusion_dispatch import (
+            _group_collections_by_provider,
+        )
+
+        collections = [
+            ("code-indexer-temporal-voyage_code_3-2024Q1", None),
+            ("code-indexer-temporal-voyage_code_3-2024Q3", None),
+            ("code-indexer-temporal-voyage_code_3-2024Q2", None),
+        ]
+
+        groups = _group_collections_by_provider(collections)
+
+        assert len(groups) == 1, "All voyage shards should form one provider group"
+        base_name, shards = groups[0]
+        assert base_name == "code-indexer-temporal-voyage_code_3"
+        # Shards in chronological order
+        assert shards == [
+            "code-indexer-temporal-voyage_code_3-2024Q1",
+            "code-indexer-temporal-voyage_code_3-2024Q2",
+            "code-indexer-temporal-voyage_code_3-2024Q3",
+        ]
+
+    def test_group_collections_by_provider_separates_providers(self):
+        """Shards from different providers form separate groups."""
+        from code_indexer.services.temporal.temporal_fusion_dispatch import (
+            _group_collections_by_provider,
+        )
+
+        collections = [
+            ("code-indexer-temporal-voyage_code_3-2024Q1", None),
+            ("code-indexer-temporal-embed_v4_0-2024Q1", None),
+        ]
+
+        groups = _group_collections_by_provider(collections)
+
+        assert len(groups) == 2
+        base_names = {g[0] for g in groups}
+        assert "code-indexer-temporal-voyage_code_3" in base_names
+        assert "code-indexer-temporal-embed_v4_0" in base_names
