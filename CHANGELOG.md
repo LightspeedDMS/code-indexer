@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.149.0] - 2026-06-20
+
+### Added
+- **Quarterly temporal index sharding (Story #1171):** Temporal commit indexes now write into quarterly shard collections (`code-indexer-temporal-{model_slug}-{YYYY}Q{N}`) instead of a single monolithic collection. `TemporalIndexer.index_commits()` groups commits by quarter, creates each shard collection before first write, and processes shards sequentially to bound peak RAM. On the query path, `execute_temporal_query_with_fusion()` calls `get_overlapping_shards()` per configured provider to discover only the quarterly shards whose date range overlaps the query `time_range`, skipping non-overlapping shards entirely. Each shard HNSW index is evicted from the server-mode cache immediately after its query completes (`hnsw_index_cache.invalidate()` in a `finally` block), ensuring peak RAM is bounded to one shard per concurrent provider rather than accumulating all shard indexes in memory. A single `fuse_rrf_multi` pass merges results from all shards across all providers (no double-RRF). Legacy monolithic collections are included when present on disk for backward compatibility.
+
+## [10.148.0] - 2026-06-20
+
+### Fixed
+- **Temporal query path — cache injection + shared executor + subprocess timeout (Story #1170):** Three performance and reliability fixes on the temporal search path. (1) `MultiSearchService._search_temporal_sync()` now builds `FilesystemVectorStore` with `hnsw_index_cache` and `id_index_cache` (guarded on `self.hnsw_index_cache is not None`), mirroring the injection pattern already used by `FilesystemBackend.get_vector_store_client()` on the regular semantic path. (2) `MultiSearchService.__init__()` and `get_instance()` accept a new `hnsw_index_cache: Optional[Any] = None` parameter; `_search_temporal_sync()` forwards `parallel_executor=self.thread_executor` to `execute_temporal_query_with_fusion()`, which propagates it through `_query_single_provider()` and `_query_multi_provider_fusion()` into `TemporalSearchService`. `TemporalSearchService.__init__()` stores it as `self.parallel_executor` and passes it to `FilesystemVectorStore.search()` on the `FilesystemVectorStore` branch. (3) `TemporalSearchService._reconstruct_temporal_content()` now passes `timeout=30` to `subprocess.run()`; on `subprocess.TimeoutExpired` it logs a WARNING and returns `"[Content unavailable - git reconstruction timed out]"` instead of hanging. All new parameters default to `None` — no behavioral change for CLI/daemon mode.
+
 ## [10.147.0] - 2026-06-20
 
 ### Fixed

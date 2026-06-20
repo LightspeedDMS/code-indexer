@@ -978,6 +978,7 @@ class TestTemporalEntryPointValueFlow:
             max_results_per_repo = 50
 
         service.config = _FakeMSSConfig()
+        service.hnsw_index_cache = None  # attribute read at multi_search_service.py:538
 
         def _fake_get_repo_path(repo_id):
             return str(tmp_path)
@@ -1083,9 +1084,11 @@ class TestValueFlowTemporalDispatch:
             f"_query_single_provider, but captured: {captured}"
         )
 
-    def test_multi_provider_forwards_flag(self, monkeypatch):
-        """query_provider closure in _query_multi_provider_fusion must pass
-        no_embedding_cache_shortcut=True to query_temporal.
+    def test_multi_provider_forwards_flag(self, monkeypatch, tmp_path):
+        """no_embedding_cache_shortcut=True must reach query_temporal for all providers
+        in the multi-provider parallel path of execute_temporal_query_with_fusion.
+
+        Migrated from _query_multi_provider_fusion (deleted, Story #1171 C3).
         """
         import code_indexer.services.temporal.temporal_fusion_dispatch as dispatch_mod
         from code_indexer.services.temporal.temporal_search_service import (
@@ -1120,19 +1123,37 @@ class TestValueFlowTemporalDispatch:
             lambda config: _FakeConfigManager(),
         )
 
+        # Two provider groups to trigger the multi-provider parallel path.
+        two_providers = [
+            ("temporal-voyage-code-3", ["temporal-voyage-code-3"]),
+            ("temporal-cohere-embed-v4.0", ["temporal-cohere-embed-v4.0"]),
+        ]
+        monkeypatch.setattr(
+            dispatch_mod,
+            "_discover_provider_shards_with_pruning",
+            lambda *a, **kw: two_providers,
+        )
+        monkeypatch.setattr(
+            dispatch_mod,
+            "filter_healthy_temporal_providers",
+            lambda cols: (cols, []),
+        )
+
+        import code_indexer.services.temporal.temporal_migration as _tm_mod
+
+        monkeypatch.setattr(
+            _tm_mod,
+            "migrate_legacy_temporal_collection",
+            lambda *a, **kw: None,
+        )
+
         class _FakeVectorStore:
             project_root = "/fake/root"
 
-        # Two collections to trigger the multi-provider path.
-        collections = [
-            ("temporal-voyage-code-3", "/fake/path/voyage"),
-            ("temporal-cohere-embed-v4.0", "/fake/path/cohere"),
-        ]
-
-        dispatch_mod._query_multi_provider_fusion(
+        dispatch_mod.execute_temporal_query_with_fusion(
             config=object(),
+            index_path=tmp_path,
             vector_store=_FakeVectorStore(),
-            collections=collections,
             query_text="find auth",
             limit=5,
             time_range=None,
@@ -1143,7 +1164,7 @@ class TestValueFlowTemporalDispatch:
         assert captured, "_spy_query_temporal was never called in multi-provider path."
         assert all(v is True for v in captured), (
             f"no_embedding_cache_shortcut=True must reach query_temporal for ALL providers "
-            f"in _query_multi_provider_fusion, but captured: {captured}"
+            f"in execute_temporal_query_with_fusion, but captured: {captured}"
         )
 
 

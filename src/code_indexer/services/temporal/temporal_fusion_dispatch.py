@@ -21,7 +21,6 @@ from .temporal_fusion import (
     make_temporal_dedup_key,
 )
 from .temporal_collection_naming import (
-    get_temporal_collections,
     TEMPORAL_COLLECTION_PREFIX,
     sanitize_model_name,
     get_model_name_for_provider,
@@ -94,12 +93,21 @@ def execute_temporal_query_with_fusion(
 
     migrate_legacy_temporal_collection(index_path, config)
 
-    collections = _discover_queryable_collections(config, index_path, provider_filter)
+    # C1/C2 fix (Story #1171): use shard-pruning discovery that calls get_overlapping_shards
+    # so only shards overlapping time_range are queried.
+    provider_groups_raw = _discover_provider_shards_with_pruning(
+        config, index_path, time_range, provider_filter
+    )
 
-    # Health-gate: filter to healthy providers only
-    collections, _skipped = filter_healthy_temporal_providers(collections)
+    # Health-gate: filter out unhealthy shards per provider
+    provider_groups: List[Tuple[str, List[str]]] = []
+    for base_name, shards in provider_groups_raw:
+        healthy, _ = filter_healthy_temporal_providers([(s, None) for s in shards])
+        healthy_shards = [s for s, _ in healthy]
+        if healthy_shards:
+            provider_groups.append((base_name, healthy_shards))
 
-    if not collections:
+    if not provider_groups:
         logger.warning("No temporal indexes available for query")
         return TemporalSearchResults(
             results=[],
@@ -112,14 +120,59 @@ def execute_temporal_query_with_fusion(
             ),
         )
 
-    if len(collections) == 1:
-        coll_name, _ = collections[0]
-        return _query_single_provider(
+    if len(provider_groups) == 1:
+        # Single provider: query its shards sequentially, merge with RRF
+        base_name, shards = provider_groups[0]
+        results_by_shard = _query_shards_raw(
             config,
             vector_store,
-            coll_name,
+            shards,
             query_text,
-            limit,
+            limit * TEMPORAL_OVERFETCH_MULTIPLIER,
+            time_range,
+            file_path_filter,
+            language=language,
+            exclude_language=exclude_language,
+            exclude_path=exclude_path,
+            diff_types=diff_types,
+            author=author,
+            chunk_type=chunk_type,
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+        )
+        if not results_by_shard:
+            return TemporalSearchResults(
+                results=[],
+                query=query_text,
+                filter_type="time_range" if time_range else "none",
+                filter_value=time_range,
+            )
+        fused = fuse_rrf_multi(
+            results_by_provider=results_by_shard,
+            dedup_key=make_temporal_dedup_key,
+            limit=limit,
+        )
+        return TemporalSearchResults(
+            results=fused,
+            query=query_text,
+            filter_type="time_range" if time_range else "none",
+            filter_value=time_range,
+            total_found=len(fused),
+        )
+
+    # Multiple providers: providers run in parallel, each provider's shards are
+    # queried sequentially within the provider. Single RRF pass over ALL shard
+    # results from ALL providers (H1 fix: eliminates double-RRF).
+    all_results_by_shard: Dict[str, list] = {}
+    warnings_multi: List[str] = []
+    failed_providers: List[str] = []
+
+    def _run_provider(base_name: str, shards: List[str]) -> Dict[str, list]:
+        return _query_shards_raw(
+            config,
+            vector_store,
+            shards,
+            query_text,
+            limit * TEMPORAL_OVERFETCH_MULTIPLIER,
             time_range,
             file_path_filter,
             language=language,
@@ -131,42 +184,230 @@ def execute_temporal_query_with_fusion(
             no_embedding_cache_shortcut=no_embedding_cache_shortcut,
         )
 
-    return _query_multi_provider_fusion(
-        config,
-        vector_store,
-        collections,
-        query_text,
-        limit,
-        time_range,
-        file_path_filter,
-        language=language,
-        exclude_language=exclude_language,
-        exclude_path=exclude_path,
-        diff_types=diff_types,
-        author=author,
-        chunk_type=chunk_type,
-        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+    from .temporal_collection_naming import collection_display_name
+
+    executor = ThreadPoolExecutor(max_workers=len(provider_groups))
+    try:
+        future_to_base: Dict[Future, str] = {
+            executor.submit(_run_provider, base_name, shards): base_name
+            for base_name, shards in provider_groups
+        }
+        try:
+            for future in as_completed(
+                future_to_base, timeout=TEMPORAL_QUERY_TIMEOUT_SECONDS
+            ):
+                base_name = future_to_base[future]
+                try:
+                    per_shard = future.result()
+                    all_results_by_shard.update(per_shard)
+                    record_temporal_success(base_name, _UNKNOWN_LATENCY_MS)
+                except Exception as e:
+                    record_temporal_failure(base_name, _UNKNOWN_LATENCY_MS)
+                    failed_providers.append(base_name)
+                    display = collection_display_name(base_name)
+                    logger.warning("Temporal provider %s failed: %s", display, e)
+                    warnings_multi.append(f"Provider {display} failed: {e}")
+        except FuturesTimeoutError:
+            for future, base_name in future_to_base.items():
+                if not future.done():
+                    future.cancel()
+                    record_temporal_failure(base_name, _UNKNOWN_LATENCY_MS)
+                    failed_providers.append(base_name)
+                    display = collection_display_name(base_name)
+                    logger.warning(
+                        "Temporal provider %s timed out after %ss",
+                        display,
+                        TEMPORAL_QUERY_TIMEOUT_SECONDS,
+                    )
+                    warnings_multi.append(
+                        f"Provider {display} timed out after "
+                        f"{TEMPORAL_QUERY_TIMEOUT_SECONDS}s"
+                    )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    if not all_results_by_shard:
+        if failed_providers:
+            warning_msg = (
+                "; ".join(warnings_multi) if warnings_multi else "All providers failed"
+            )
+        else:
+            warning_msg = None
+        return TemporalSearchResults(
+            results=[],
+            query=query_text,
+            filter_type="time_range" if time_range else "none",
+            filter_value=time_range,
+            warning=warning_msg,
+        )
+
+    fused = fuse_rrf_multi(
+        results_by_provider=all_results_by_shard,
+        dedup_key=make_temporal_dedup_key,
+        limit=limit,
+    )
+    warning_str = "; ".join(warnings_multi) if warnings_multi else None
+    return TemporalSearchResults(
+        results=fused,
+        query=query_text,
+        filter_type="time_range" if time_range else "none",
+        filter_value=time_range,
+        total_found=len(fused),
+        warning=warning_str,
     )
 
 
-def _discover_queryable_collections(
+def _discover_provider_shards_with_pruning(
     config: Any,
     index_path: Path,
+    time_range: Optional[Tuple[str, str]],
     provider_filter: Optional[str] = None,
-) -> List[Tuple[str, Any]]:
-    """Find temporal collections available for querying.
+) -> List[Tuple[str, List[str]]]:
+    """Discover per-provider overlapping shards, pruned to the query's time_range.
 
-    Returns list of (collection_name, path) tuples.
+    For each configured embedding provider, calls get_overlapping_shards() to
+    find only shard directories whose date range overlaps [time_range start, time_range end].
+    Legacy monolithic collections are included when they exist on disk (AC4).
+
+    Returns:
+        List of (provider_base_name, [shard_names_in_ascending_chrono_order]).
+        Providers with no overlapping shards are excluded.
     """
+    from datetime import datetime, timezone
+    from ..embedding_factory import EmbeddingProviderFactory
+    from .temporal_collection_naming import (
+        get_overlapping_shards,
+        sanitize_model_name as _sanitize,
+        is_sharded_temporal_collection,
+    )
+    from .temporal_search_service import ALL_TIME_RANGE
+
     index_path = Path(index_path)
-    raw = get_temporal_collections(config, index_path)
 
-    result: List[Tuple[str, Any]] = [(name, path) for name, path in raw]
+    # Parse time_range strings to datetimes; treat ALL_TIME_RANGE sentinels as None (open-ended)
+    if time_range is None:
+        dt_start: Optional[datetime] = None
+        dt_end: Optional[datetime] = None
+    else:
+        s, e = time_range
+        dt_start = (
+            None
+            if s == ALL_TIME_RANGE[0]
+            else datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        )
+        dt_end = (
+            None
+            if e == ALL_TIME_RANGE[1]
+            else datetime.strptime(e, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        )
 
-    if provider_filter:
-        result = [(name, path) for name, path in result if provider_filter in name]
+    configured = EmbeddingProviderFactory.get_configured_providers(config)
+    result: List[Tuple[str, List[str]]] = []
+
+    for provider_name in configured:
+        if provider_filter and provider_filter not in provider_name:
+            continue
+        try:
+            model_name = get_model_name_for_provider(provider_name, config)
+        except ValueError:
+            logger.debug("Skipping provider %s (unknown model)", provider_name)
+            continue
+
+        shards = get_overlapping_shards(model_name, index_path, dt_start, dt_end)
+        if shards:
+            base_name = f"{TEMPORAL_COLLECTION_PREFIX}{_sanitize(model_name)}"
+            # Log each shard at DEBUG, distinguishing sharded vs legacy (C2 call site)
+            for shard in shards:
+                if is_sharded_temporal_collection(shard):
+                    logger.debug(
+                        "Provider %s: including shard %s", provider_name, shard
+                    )
+                else:
+                    logger.debug(
+                        "Provider %s: including legacy collection %s",
+                        provider_name,
+                        shard,
+                    )
+            result.append((base_name, shards))
 
     return result
+
+
+def _query_shards_raw(
+    config: Any,
+    vector_store: Any,
+    shard_names: List[str],
+    query_text: str,
+    overfetch_limit: int,
+    time_range: Optional[Tuple[str, str]],
+    file_path_filter: Optional[str],
+    language: Optional[str] = None,
+    exclude_language: Optional[str] = None,
+    exclude_path: Optional[str] = None,
+    diff_types: Optional[List[str]] = None,
+    author: Optional[str] = None,
+    chunk_type: Optional[str] = None,
+    no_embedding_cache_shortcut: bool = False,
+) -> Dict[str, list]:
+    """Query shards SEQUENTIALLY and return raw per-shard result lists (no fusion).
+
+    Shards are loaded one at a time to bound peak RAM usage. Returns a dict
+    keyed by shard display name so the caller can do a single RRF pass over
+    all results from all providers (H1 fix: no intermediate fusion here).
+
+    Args:
+        shard_names: Collection names in ascending chronological order.
+        overfetch_limit: Per-shard limit (caller multiplies by OVERFETCH_MULTIPLIER).
+
+    Returns:
+        Dict mapping shard display name -> list of TemporalSearchResult.
+        Empty dict when all shards return zero results.
+    """
+    import time as _time
+    from .temporal_collection_naming import collection_display_name
+
+    results_by_shard: Dict[str, list] = {}
+
+    for shard_name in shard_names:  # SEQUENTIAL — never parallel
+        _t0 = _time.time()
+        try:
+            result = _query_single_provider(
+                config,
+                vector_store,
+                shard_name,
+                query_text,
+                overfetch_limit,
+                time_range,
+                file_path_filter,
+                language=language,
+                exclude_language=exclude_language,
+                exclude_path=exclude_path,
+                diff_types=diff_types,
+                author=author,
+                chunk_type=chunk_type,
+                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            )
+            if result.results:
+                results_by_shard[collection_display_name(shard_name)] = result.results
+            record_temporal_success(shard_name, (_time.time() - _t0) * 1000)
+        except Exception as e:
+            record_temporal_failure(shard_name, (_time.time() - _t0) * 1000)
+            logger.warning("Temporal shard query failed for %s: %s", shard_name, e)
+        finally:
+            # Bug #1171: Evict this shard's HNSW index from the server-mode cache so
+            # peak RAM is bounded to one shard at a time during a sequential scan.
+            # Eviction runs unconditionally (success OR failure): the HNSW may have
+            # been loaded before a query exception, so we must release it regardless
+            # of outcome to guarantee the RAM bound.
+            # CLI/standalone mode has hnsw_index_cache=None — skip eviction there.
+            # Cache key matches FilesystemVectorStore.search():
+            #   str(collection_path.resolve()) where collection_path = base_path / name.
+            _hnsw_cache = getattr(vector_store, "hnsw_index_cache", None)
+            if _hnsw_cache is not None:
+                _shard_path = Path(vector_store.base_path) / shard_name
+                _hnsw_cache.invalidate(str(_shard_path.resolve()))
+
+    return results_by_shard
 
 
 def _query_single_provider(
@@ -235,167 +476,6 @@ def _query_single_provider(
     return results
 
 
-def _collect_provider_results(
-    future_to_coll: Dict[Future, str],
-    results_by_provider: Dict[str, list],
-    warnings: List[str],
-    failed_providers: List[str],
-) -> None:
-    """Drain completed futures from as_completed, collecting results and warnings.
-
-    Catches FuturesTimeoutError at the loop level (Bug #669). On timeout,
-    all unfinished futures are cancelled and record_temporal_failure is called
-    for each timed-out collection so the health monitor can gate them out.
-
-    Args:
-        future_to_coll: Mapping of Future -> collection name (all futures already submitted).
-        results_by_provider: Mutable dict populated with provider display-name -> result list.
-        warnings: Mutable list populated with failure/timeout warning strings.
-        failed_providers: Mutable list of collection names that failed or timed out.
-    """
-    from .temporal_collection_naming import collection_display_name
-
-    try:
-        for future in as_completed(
-            future_to_coll, timeout=TEMPORAL_QUERY_TIMEOUT_SECONDS
-        ):
-            coll_name = future_to_coll[future]
-            _display = collection_display_name(coll_name)
-            try:
-                result = future.result()
-                if result.results:
-                    results_by_provider[_display] = result.results
-                record_temporal_success(coll_name, _UNKNOWN_LATENCY_MS)
-            except Exception as e:
-                record_temporal_failure(coll_name, _UNKNOWN_LATENCY_MS)
-                failed_providers.append(coll_name)
-                logger.warning("Temporal query failed for %s: %s", coll_name, e)
-                warnings.append(
-                    f"Provider {collection_display_name(coll_name)} failed: {e}"
-                )
-    except FuturesTimeoutError:
-        # Cancel unfinished futures. record_temporal_failure is called for each
-        # so the health monitor can gate them out on future queries.
-        for future, coll_name in future_to_coll.items():
-            if not future.done():
-                future.cancel()
-                record_temporal_failure(coll_name, _UNKNOWN_LATENCY_MS)
-                failed_providers.append(coll_name)
-                _display = collection_display_name(coll_name)
-                logger.warning(
-                    "Temporal provider %s timed out after %ss",
-                    _display,
-                    TEMPORAL_QUERY_TIMEOUT_SECONDS,
-                )
-                warnings.append(
-                    f"Provider {_display} timed out after "
-                    f"{TEMPORAL_QUERY_TIMEOUT_SECONDS}s"
-                )
-
-
-def _query_multi_provider_fusion(
-    config: Any,
-    vector_store: Any,
-    collections: List[Tuple[str, Any]],
-    query_text: str,
-    limit: int,
-    time_range: Optional[Tuple[str, str]],
-    file_path_filter: Optional[str],
-    language: Optional[str] = None,
-    exclude_language: Optional[str] = None,
-    exclude_path: Optional[str] = None,
-    diff_types: Optional[List[str]] = None,
-    author: Optional[str] = None,
-    chunk_type: Optional[str] = None,
-    # Story #1108: per-request cache bypass flag
-    no_embedding_cache_shortcut: bool = False,
-) -> Any:
-    """Query multiple providers in parallel and fuse results.
-
-    Delegates parallel execution and timeout handling to _collect_provider_results.
-    Returns partial results with a warning if providers time out (Bug #669).
-    Never raises an exception to the caller.
-    """
-    from .temporal_search_service import TemporalSearchResults, ALL_TIME_RANGE
-    from .temporal_search_service import TemporalSearchService
-
-    overfetch_limit = limit * TEMPORAL_OVERFETCH_MULTIPLIER
-    results_by_provider: Dict[str, list] = {}
-    warnings: List[str] = []
-    failed_providers: List[str] = []
-
-    resolved_range = time_range if time_range is not None else ALL_TIME_RANGE
-    path_filter = [file_path_filter] if file_path_filter else None
-
-    def query_provider(coll_name: str) -> Any:
-        provider = _create_embedding_provider_for_collection(config, coll_name)
-        service = TemporalSearchService(
-            config_manager=_make_config_manager(config),
-            project_root=vector_store.project_root,
-            vector_store_client=vector_store,
-            embedding_provider=provider,
-            collection_name=coll_name,
-        )
-        return service.query_temporal(
-            query=query_text,
-            time_range=resolved_range,
-            limit=overfetch_limit,
-            path_filter=path_filter,
-            language=[language] if language else None,
-            exclude_language=[exclude_language] if exclude_language else None,
-            exclude_path=parse_exclude_patterns(exclude_path) or None,
-            diff_types=diff_types,
-            author=author,
-            chunk_type=chunk_type,
-            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-        )
-
-    # Use explicit lifecycle instead of context manager so shutdown(wait=False)
-    # prevents blocking on in-flight embedding API calls after a timeout (Bug #669).
-    executor = ThreadPoolExecutor(max_workers=len(collections))
-    try:
-        future_to_coll: Dict[Future, str] = {
-            executor.submit(query_provider, coll_name): coll_name
-            for coll_name, _ in collections
-        }
-        _collect_provider_results(
-            future_to_coll, results_by_provider, warnings, failed_providers
-        )
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-
-    if not results_by_provider:
-        # Only warn "All providers failed" when providers actually failed or timed out.
-        # Empty results from healthy providers are not a failure.
-        if failed_providers:
-            warning_msg = "; ".join(warnings) if warnings else "All providers failed"
-        else:
-            warning_msg = None
-        return TemporalSearchResults(
-            results=[],
-            query=query_text,
-            filter_type="time_range" if time_range else "none",
-            filter_value=time_range,
-            warning=warning_msg,
-        )
-
-    fused = fuse_rrf_multi(
-        results_by_provider=results_by_provider,
-        dedup_key=make_temporal_dedup_key,
-        limit=limit,
-    )
-
-    warning_str = "; ".join(warnings) if warnings else None
-    return TemporalSearchResults(
-        results=fused,
-        query=query_text,
-        filter_type="time_range" if time_range else "none",
-        filter_value=time_range,
-        total_found=len(fused),
-        warning=warning_str,
-    )
-
-
 def _create_embedding_provider_for_collection(config: Any, collection_name: str) -> Any:
     """Create the correct embedding provider for a temporal collection.
 
@@ -412,9 +492,13 @@ def _create_embedding_provider_for_collection(config: Any, collection_name: str)
     """
     from ..embedding_factory import EmbeddingProviderFactory
 
+    import re as _re
+
     slug = ""
     if collection_name.startswith(TEMPORAL_COLLECTION_PREFIX):
         slug = collection_name[len(TEMPORAL_COLLECTION_PREFIX) :]
+        # Strip quarterly shard suffix -YYYYQN before matching provider slug
+        slug = _re.sub(r"-\d{4}Q[1-4]$", "", slug)
 
     configured = EmbeddingProviderFactory.get_configured_providers(config)
     for provider_name in configured:

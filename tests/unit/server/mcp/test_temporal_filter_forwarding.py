@@ -52,18 +52,23 @@ def _enter_fusion_patches(
             ".migrate_legacy_temporal_collection"
         )
     )
+    # Build provider_groups shape: List[Tuple[base_name, [shard_names]]]
+    # Each (name, path) collection tuple maps to a provider group with one shard.
+    provider_groups = [(name, [name]) for name, _ in collections]
     stack.enter_context(
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch"
-            "._discover_queryable_collections",
-            return_value=collections,
+            "._discover_provider_shards_with_pruning",
+            return_value=provider_groups,
         )
     )
+    # filter_healthy_temporal_providers is called with [(shard_name, None)] tuples.
+    # Return all shards as healthy (pass-through).
     stack.enter_context(
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch"
             ".filter_healthy_temporal_providers",
-            return_value=(collections, []),
+            side_effect=lambda cols: (cols, []),
         )
     )
     stack.enter_context(

@@ -229,14 +229,25 @@ class TemporalSearchService:
             return ""
 
         # Execute git show
-        result_proc = subprocess.run(
-            cmd,
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            check=False,
-        )
+        # Story #1170: add timeout=30 to prevent hung git processes from blocking
+        # the server thread indefinitely.
+        try:
+            result_proc = subprocess.run(
+                cmd,
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "git reconstruction timed out after 30s for path=%s diff_type=%s",
+                metadata.get("path") or metadata.get("file_path", "unknown"),
+                metadata.get("diff_type", "unknown"),
+            )
+            return "[Content unavailable - git reconstruction timed out]"
 
         if result_proc.returncode == 0:
             return result_proc.stdout

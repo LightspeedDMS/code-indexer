@@ -80,7 +80,11 @@ def get_multi_search_service() -> MultiSearchService:
 
         config_service = get_config_service()
         config = MultiSearchConfig.from_config(config_service)
-        _multi_search_service = MultiSearchService(config)
+        from ..app import _server_hnsw_cache
+
+        _multi_search_service = MultiSearchService(
+            config, hnsw_index_cache=_server_hnsw_cache
+        )
     return _multi_search_service
 
 

@@ -1012,12 +1012,25 @@ def register_admin_ops_routes(
                 detail="Export completed but file path is missing",
             )
 
+        from datetime import datetime as _dt
+
+        _created_at = row.get("created_at", "")
+        try:
+            _ts = _dt.fromtimestamp(float(_created_at)).strftime("%Y%m%d_%H%M%S")
+        except (ValueError, TypeError):
+            logger.warning(
+                "download_query_analytics_export: could not parse created_at=%r for"
+                " export_id=%s; falling back to current UTC time in filename",
+                _created_at,
+                export_id,
+            )
+            _ts = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
         return FileResponse(
             path=file_path,
             media_type=(
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             ),
-            filename=f"query-analytics-{export_id}.xlsx",
+            filename=f"query-analytics-{_ts}.xlsx",
         )
 
     @app.get("/api/admin/search-events")
