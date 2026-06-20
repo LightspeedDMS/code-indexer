@@ -16,11 +16,13 @@ import gc
 import json
 import logging
 import os
+import re
 import shutil
 import struct
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -80,6 +82,94 @@ def _needs_temporal_migration(index_path: Path) -> bool:
         if (entry / "hnsw_index.bin").exists():
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Git-based timestamp helpers (production correctness)
+# ---------------------------------------------------------------------------
+
+# Regex matching a valid 40-character lowercase hex SHA-1.
+_SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _extract_sha_from_point_id(point_id: str) -> Optional[str]:
+    """Extract the commit SHA from a real-format point_id.
+
+    Real point_id formats:
+        {repo}:commit:{sha40}:{idx}
+        {repo}:diff:{sha40}:{file_path}:{chunk_idx}
+
+    The SHA is always the 3rd colon-separated field (index 2).
+
+    Returns:
+        40-char lowercase hex SHA string, or None if the point_id is
+        synthetic (test data), too short, or the field is not a valid SHA-1.
+    """
+    if not point_id:
+        return None
+    parts = point_id.split(":")
+    if len(parts) < 4:
+        return None
+    candidate = parts[2]
+    if not _SHA1_RE.match(candidate):
+        return None
+    return candidate
+
+
+def _batch_get_commit_timestamps(
+    repo_path: Path,
+    shas: Set[str],
+) -> Dict[str, datetime]:
+    """Return a mapping of {sha: UTC datetime} for the given set of SHAs.
+
+    Uses a single ``git log`` subprocess call for all SHAs.  Any SHAs that
+    git does not recognise (e.g. not in the repo, or a fake SHA) are silently
+    omitted from the result.
+
+    Args:
+        repo_path: Path to the git repository root.
+        shas: Set of 40-char SHA strings to look up.
+
+    Returns:
+        Dict mapping each found SHA to its author datetime in UTC.
+        Returns empty dict on any error (non-fatal).
+    """
+    if not shas or not repo_path or not repo_path.exists():
+        return {}
+
+    # git log --no-walk accepts multiple SHA arguments; output one line per SHA.
+    # Use %cI (strict ISO 8601 with T separator, e.g. "2024-03-15T10:22:44+00:00")
+    # NOT %ci (space format rejected by datetime.fromisoformat on Python 3.9).
+    result: Dict[str, datetime] = {}
+    try:
+        proc = subprocess.run(
+            ["git", "log", "--no-walk", "--format=%H %cI"] + sorted(shas),
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if proc.returncode != 0 and not proc.stdout:
+            # git returned error and produced no output (e.g. repo not initialised)
+            return {}
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Expected format: "<40-char-sha> <ISO-8601-strict>"
+            # e.g.  "2421d586942eb5c4eca700fbf6bfc0c99af679ef 2024-03-15T10:22:44+00:00"
+            space_idx = line.index(" ")
+            sha = line[:space_idx]
+            ts_str = line[space_idx + 1 :]
+            dt = datetime.fromisoformat(ts_str).astimezone(timezone.utc)
+            result[sha] = dt
+    except Exception as exc:
+        logger.warning(
+            "Migration: git log failed for %s: %s — timestamps unavailable",
+            repo_path,
+            exc,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +324,28 @@ def _build_quarter_buckets(
     collection_path: Path,
     label_to_point_id: Dict[int, str],
     point_id_to_rel_path: Dict[str, str],
+    sha_timestamps: Optional[Dict[str, datetime]] = None,
 ) -> Dict[str, List[Tuple[int, str, Path]]]:
-    """Group vectors into quarterly buckets based on commit_timestamp.
+    """Group vectors into quarterly buckets based on commit timestamp.
+
+    Timestamp resolution strategy (primary → fallback):
+    1. sha_timestamps dict keyed by commit SHA (from git log) — production path.
+    2. commit_timestamp field inside the JSON payload file — backward-compat path.
+
+    Args:
+        collection_path: Monolithic collection directory.
+        label_to_point_id: {int_label: point_id} from collection_meta.json.
+        point_id_to_rel_path: {point_id: rel_json_path} from id_index.bin.
+        sha_timestamps: Optional pre-built {sha: datetime_utc} from git log.
+            When provided, used as the primary timestamp source before opening
+            each JSON file.
 
     Returns:
         Dict mapping quarter_str (e.g. "2024Q3") to list of
         (label, point_id, src_json_path) tuples.
     """
     buckets: Dict[str, List[Tuple[int, str, Path]]] = {}
+    _sha_ts = sha_timestamps or {}
 
     for label, point_id in label_to_point_id.items():
         rel_path = point_id_to_rel_path.get(point_id)
@@ -263,20 +367,32 @@ def _build_quarter_buckets(
             continue
 
         try:
-            with open(src_json) as f:
-                payload_data = json.load(f)
-            commit_ts = payload_data.get("payload", {}).get("commit_timestamp")
-            if commit_ts is None:
-                commit_ts = payload_data.get("commit_timestamp")
-            if commit_ts is None:
-                logger.warning(
-                    "Migration: no commit_timestamp in %s — skipping", src_json
-                )
-                continue
-            dt = datetime.fromtimestamp(int(commit_ts), tz=timezone.utc)
+            # Primary: use git-derived timestamps (production data has empty JSON).
+            sha = _extract_sha_from_point_id(point_id)
+            dt: Optional[datetime] = _sha_ts.get(sha) if sha else None
+
+            if dt is None:
+                # Fallback: read commit_timestamp from JSON payload (test data).
+                with open(src_json) as f:
+                    payload_data = json.load(f)
+                commit_ts = payload_data.get("payload", {}).get("commit_timestamp")
+                if commit_ts is None:
+                    commit_ts = payload_data.get("commit_timestamp")
+                if commit_ts is None:
+                    logger.warning(
+                        "Migration: no commit_timestamp in %s and no git timestamp "
+                        "for point %s — skipping",
+                        src_json,
+                        point_id,
+                    )
+                    continue
+                dt = datetime.fromtimestamp(int(commit_ts), tz=timezone.utc)
+
             q = quarter_suffix(dt)
         except Exception as exc:
-            logger.warning("Migration: error reading %s: %s — skipping", src_json, exc)
+            logger.warning(
+                "Migration: error processing %s: %s — skipping", src_json, exc
+            )
             continue
 
         buckets.setdefault(q, []).append((label, point_id, src_json))
@@ -396,6 +512,7 @@ def _migrate_one_collection(
     collection_path: Path,
     index_path: Path,
     progress_callback: Optional[Callable[[str], None]],
+    repo_path: Optional[Path] = None,
 ) -> None:
     """Migrate a single monolithic temporal HNSW collection to quarterly shards.
 
@@ -403,6 +520,10 @@ def _migrate_one_collection(
         collection_path: Monolithic collection directory (e.g. index/code-indexer-temporal-X/).
         index_path: Parent index directory.
         progress_callback: Optional callable(str) for progress reporting.
+        repo_path: Optional git repository root for timestamp lookup via git log.
+            When provided, commit SHAs are extracted from all point_ids and their
+            timestamps are fetched from git in one batch call before bucketing.
+            Falls back to JSON payload timestamps when repo_path is None or git fails.
     """
     import hnswlib
 
@@ -419,8 +540,29 @@ def _migrate_one_collection(
         label_to_point_id = _load_id_mapping_from_meta(collection_path)
         point_id_to_rel_path = _load_id_index_bin(collection_path)
 
+        # Build sha_timestamps: extract all unique SHAs from point_ids, then
+        # batch-fetch their timestamps from git (one subprocess call).
+        sha_timestamps: Dict[str, datetime] = {}
+        if repo_path is not None:
+            unique_shas: Set[str] = set()
+            for pid in label_to_point_id.values():
+                sha = _extract_sha_from_point_id(pid)
+                if sha:
+                    unique_shas.add(sha)
+            if unique_shas:
+                sha_timestamps = _batch_get_commit_timestamps(repo_path, unique_shas)
+                logger.debug(
+                    "Migration: fetched %d/%d SHA timestamps from git for %s",
+                    len(sha_timestamps),
+                    len(unique_shas),
+                    collection_name,
+                )
+
         quarter_buckets = _build_quarter_buckets(
-            collection_path, label_to_point_id, point_id_to_rel_path
+            collection_path,
+            label_to_point_id,
+            point_id_to_rel_path,
+            sha_timestamps=sha_timestamps,
         )
 
         total_shards = len(quarter_buckets)
@@ -469,6 +611,7 @@ def run_temporal_migration(
     index_path: Path,
     repo_alias: str,
     progress_callback: Optional[Callable[[str], None]] = None,
+    repo_path: Optional[Path] = None,
 ) -> None:
     """Run temporal index migration for a single repo's index directory.
 
@@ -483,6 +626,11 @@ def run_temporal_migration(
         index_path: Path to the .code-indexer/index/ directory.
         repo_alias: Repository alias (used only for logging).
         progress_callback: Optional callable(str) for progress reporting.
+        repo_path: Optional git repository root used for commit timestamp lookup
+            via ``git log``.  When None, derived as ``index_path.parent.parent``
+            (standard layout: {repo_root}/.code-indexer/index/).  If the
+            derived path is not a git repo, git lookup fails gracefully and the
+            JSON payload fallback is used automatically.
     """
     if not index_path or not index_path.exists():
         logger.warning(
@@ -491,6 +639,12 @@ def run_temporal_migration(
             repo_alias,
         )
         return
+
+    # Derive repo_path from index_path when not explicitly provided.
+    # Standard layout: {repo_root}/.code-indexer/index/
+    effective_repo_path: Path = (
+        repo_path if repo_path is not None else index_path.parent.parent
+    )
 
     # AC4: Clean up stale .migrating dirs from previous incomplete runs.
     for entry in list(index_path.iterdir()):
@@ -536,6 +690,7 @@ def run_temporal_migration(
             collection_path=entry,
             index_path=index_path,
             progress_callback=progress_callback,
+            repo_path=effective_repo_path,
         )
 
 
@@ -584,12 +739,13 @@ def submit_temporal_migration_jobs(
             "Migration: submitting temporal_index_migration job for repo %s", alias
         )
 
-        def _make_migration_fn(path: Path, repo_alias: str) -> Callable:
+        def _make_migration_fn(path: Path, repo_alias: str, git_root: Path) -> Callable:
             def migration_fn(progress_callback: Optional[Callable] = None) -> Dict:
                 run_temporal_migration(
                     index_path=path,
                     repo_alias=repo_alias,
                     progress_callback=progress_callback,
+                    repo_path=git_root,
                 )
                 return {"status": "completed", "repo_alias": repo_alias}
 
@@ -598,7 +754,7 @@ def submit_temporal_migration_jobs(
         try:
             background_job_manager.submit_job(  # type: ignore[union-attr]
                 operation_type="temporal_index_migration",
-                func=_make_migration_fn(index_path, alias),
+                func=_make_migration_fn(index_path, alias, Path(clone_path)),
                 submitter_username="system",
                 is_admin=True,
                 repo_alias=alias,
