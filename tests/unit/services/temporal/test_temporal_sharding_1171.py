@@ -573,48 +573,6 @@ class TestSequentialShardDispatch:
             f"Expected max 1 concurrent shard, got {max_concurrent[0]}"
         )
 
-    def test_group_collections_by_provider_groups_shards(self):
-        """Shards for the same provider are grouped together."""
-        from code_indexer.services.temporal.temporal_fusion_dispatch import (
-            _group_collections_by_provider,
-        )
-
-        collections = [
-            ("code-indexer-temporal-voyage_code_3-2024Q1", None),
-            ("code-indexer-temporal-voyage_code_3-2024Q3", None),
-            ("code-indexer-temporal-voyage_code_3-2024Q2", None),
-        ]
-
-        groups = _group_collections_by_provider(collections)
-
-        assert len(groups) == 1, "All voyage shards should form one provider group"
-        base_name, shards = groups[0]
-        assert base_name == "code-indexer-temporal-voyage_code_3"
-        # Shards in chronological order
-        assert shards == [
-            "code-indexer-temporal-voyage_code_3-2024Q1",
-            "code-indexer-temporal-voyage_code_3-2024Q2",
-            "code-indexer-temporal-voyage_code_3-2024Q3",
-        ]
-
-    def test_group_collections_by_provider_separates_providers(self):
-        """Shards from different providers form separate groups."""
-        from code_indexer.services.temporal.temporal_fusion_dispatch import (
-            _group_collections_by_provider,
-        )
-
-        collections = [
-            ("code-indexer-temporal-voyage_code_3-2024Q1", None),
-            ("code-indexer-temporal-embed_v4_0-2024Q1", None),
-        ]
-
-        groups = _group_collections_by_provider(collections)
-
-        assert len(groups) == 2
-        base_names = {g[0] for g in groups}
-        assert "code-indexer-temporal-voyage_code_3" in base_names
-        assert "code-indexer-temporal-embed_v4_0" in base_names
-
 
 # ---------------------------------------------------------------------------
 # Shard pruning in the live query path (AC7)

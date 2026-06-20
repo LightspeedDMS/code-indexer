@@ -2,9 +2,8 @@
 
 Covers:
 - execute_temporal_query_with_fusion() with no collections, single, and multi-provider
-- _discover_queryable_collections() collection discovery and provider_filter
 - _query_single_provider() attribution fields populated
-- _query_multi_provider_fusion() fuse_rrf_multi wired correctly
+- fuse_rrf_multi wired correctly for multi-provider path
 - TEMPORAL_QUERY_TIMEOUT_SECONDS constant value
 - _make_config_manager() shim wraps config correctly
 """
@@ -14,7 +13,6 @@ from unittest.mock import MagicMock, patch
 
 from code_indexer.services.temporal.temporal_fusion_dispatch import (
     TEMPORAL_QUERY_TIMEOUT_SECONDS,
-    _discover_queryable_collections,
     _make_config_manager,
     execute_temporal_query_with_fusion,
 )
@@ -82,71 +80,6 @@ def test_make_config_manager_shim():
     config = _make_mock_config()
     manager = _make_config_manager(config)
     assert manager.get_config() is config
-
-
-# ---------------------------------------------------------------------------
-# test_discover_queryable_collections_finds_provider_dirs
-# ---------------------------------------------------------------------------
-
-
-def test_discover_queryable_collections_finds_provider_dirs(tmp_path):
-    """Temporal collection dirs on disk are discovered and returned."""
-    coll_dir = tmp_path / "code-indexer-temporal-voyage_code_3"
-    coll_dir.mkdir()
-
-    config = _make_mock_config()
-    collections = _discover_queryable_collections(config, tmp_path)
-
-    assert len(collections) == 1
-    coll_name, _ = collections[0]
-    assert coll_name == "code-indexer-temporal-voyage_code_3"
-
-
-def test_discover_queryable_collections_finds_legacy_collection(tmp_path):
-    """Legacy 'code-indexer-temporal' dir is also discovered."""
-    legacy_dir = tmp_path / "code-indexer-temporal"
-    legacy_dir.mkdir()
-
-    config = _make_mock_config()
-    collections = _discover_queryable_collections(config, tmp_path)
-
-    assert len(collections) == 1
-    coll_name, _ = collections[0]
-    assert coll_name == "code-indexer-temporal"
-
-
-def test_discover_queryable_collections_finds_multiple_collections(tmp_path):
-    """Multiple temporal collection dirs are all discovered."""
-    (tmp_path / "code-indexer-temporal-voyage_code_3").mkdir()
-    (tmp_path / "code-indexer-temporal-embed_v4_0").mkdir()
-
-    config = _make_mock_config()
-    collections = _discover_queryable_collections(config, tmp_path)
-
-    assert len(collections) == 2
-    names = {c[0] for c in collections}
-    assert "code-indexer-temporal-voyage_code_3" in names
-    assert "code-indexer-temporal-embed_v4_0" in names
-
-
-# ---------------------------------------------------------------------------
-# test_discover_queryable_collections_applies_provider_filter
-# ---------------------------------------------------------------------------
-
-
-def test_discover_queryable_collections_applies_provider_filter(tmp_path):
-    """provider_filter narrows results to matching collection names only."""
-    (tmp_path / "code-indexer-temporal-voyage_code_3").mkdir()
-    (tmp_path / "code-indexer-temporal-embed_v4_0").mkdir()
-
-    config = _make_mock_config()
-    collections = _discover_queryable_collections(
-        config, tmp_path, provider_filter="voyage"
-    )
-
-    assert len(collections) == 1
-    coll_name, _ = collections[0]
-    assert "voyage" in coll_name
 
 
 # ---------------------------------------------------------------------------

@@ -21,7 +21,6 @@ from .temporal_fusion import (
     make_temporal_dedup_key,
 )
 from .temporal_collection_naming import (
-    get_temporal_collections,
     TEMPORAL_COLLECTION_PREFIX,
     sanitize_model_name,
     get_model_name_for_provider,
@@ -258,26 +257,6 @@ def execute_temporal_query_with_fusion(
     )
 
 
-def _discover_queryable_collections(
-    config: Any,
-    index_path: Path,
-    provider_filter: Optional[str] = None,
-) -> List[Tuple[str, Any]]:
-    """Find temporal collections available for querying.
-
-    Returns list of (collection_name, path) tuples.
-    """
-    index_path = Path(index_path)
-    raw = get_temporal_collections(config, index_path)
-
-    result: List[Tuple[str, Any]] = [(name, path) for name, path in raw]
-
-    if provider_filter:
-        result = [(name, path) for name, path in result if provider_filter in name]
-
-    return result
-
-
 def _discover_provider_shards_with_pruning(
     config: Any,
     index_path: Path,
@@ -354,53 +333,6 @@ def _discover_provider_shards_with_pruning(
     return result
 
 
-def _group_collections_by_provider(
-    collections: List[Tuple[str, Any]],
-) -> List[Tuple[str, List[str]]]:
-    """Group temporal collection names by provider base slug.
-
-    Strips quarterly shard suffix (-YYYYQN) to identify the provider, then
-    groups shards belonging to the same provider. Within each group, shards
-    are sorted in ascending chronological order (lexicographic on YYYYQN suffix).
-    Legacy monolithic collections (no quarter suffix) are sorted last within
-    their provider group.
-
-    Returns:
-        List of (provider_base_name, [shard_names]) tuples, one per provider.
-        provider_base_name is e.g. 'code-indexer-temporal-voyage_code_3'.
-    """
-    import re
-    from collections import defaultdict
-
-    provider_to_shards: Dict[str, List[str]] = defaultdict(list)
-
-    for coll_name, _ in collections:
-        if coll_name.startswith(TEMPORAL_COLLECTION_PREFIX):
-            slug = coll_name[len(TEMPORAL_COLLECTION_PREFIX) :]
-            base_slug = re.sub(r"-\d{4}Q[1-4]$", "", slug)
-            base_name = f"{TEMPORAL_COLLECTION_PREFIX}{base_slug}"
-        else:
-            base_name = coll_name
-
-        provider_to_shards[base_name].append(coll_name)
-
-    result = []
-    for base_name, shards in provider_to_shards.items():
-        # Sort: quarterly shards lexicographically (YYYYQN = chronological), legacy last
-        def _sort_key(name: str) -> tuple:
-            import re as _re
-
-            m = _re.search(r"-(\d{4})Q([1-4])$", name)
-            if m:
-                return (int(m.group(1)), int(m.group(2)))
-            return (9999, 99)  # legacy/monolithic sorts last
-
-        shards_sorted = sorted(shards, key=_sort_key)
-        result.append((base_name, shards_sorted))
-
-    return result
-
-
 def _query_shards_raw(
     config: Any,
     vector_store: Any,
@@ -463,76 +395,6 @@ def _query_shards_raw(
             logger.warning("Temporal shard query failed for %s: %s", shard_name, e)
 
     return results_by_shard
-
-
-def _query_provider_shards_sequentially(
-    config: Any,
-    vector_store: Any,
-    shard_names: List[str],
-    query_text: str,
-    limit: int,
-    time_range: Optional[Tuple[str, str]],
-    file_path_filter: Optional[str],
-    language: Optional[str] = None,
-    exclude_language: Optional[str] = None,
-    exclude_path: Optional[str] = None,
-    diff_types: Optional[List[str]] = None,
-    author: Optional[str] = None,
-    chunk_type: Optional[str] = None,
-    no_embedding_cache_shortcut: bool = False,
-) -> Any:
-    """Query a single provider's shards sequentially and merge results with RRF.
-
-    Shards are loaded one at a time (never in parallel) to bound peak RAM usage.
-    Each shard's HNSW index is loaded, searched, and can be evicted before the
-    next shard is opened.
-
-    Args:
-        shard_names: Collection names in ascending chronological order.
-
-    Returns:
-        TemporalSearchResults with RRF-fused results from all shards.
-    """
-    from .temporal_search_service import TemporalSearchResults
-
-    overfetch_limit = limit * TEMPORAL_OVERFETCH_MULTIPLIER
-    results_by_shard = _query_shards_raw(
-        config,
-        vector_store,
-        shard_names,
-        query_text,
-        overfetch_limit,
-        time_range,
-        file_path_filter,
-        language=language,
-        exclude_language=exclude_language,
-        exclude_path=exclude_path,
-        diff_types=diff_types,
-        author=author,
-        chunk_type=chunk_type,
-        no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-    )
-
-    if not results_by_shard:
-        return TemporalSearchResults(
-            results=[],
-            query=query_text,
-            filter_type="time_range" if time_range else "none",
-            filter_value=time_range,
-        )
-
-    fused = fuse_rrf_multi(
-        results_by_provider=results_by_shard,
-        dedup_key=make_temporal_dedup_key,
-        limit=limit,
-    )
-    return TemporalSearchResults(
-        results=fused,
-        query=query_text,
-        filter_type="time_range" if time_range else "none",
-        filter_value=time_range,
-        total_found=len(fused),
-    )
 
 
 def _query_single_provider(

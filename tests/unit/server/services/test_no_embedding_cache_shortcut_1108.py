@@ -978,6 +978,7 @@ class TestTemporalEntryPointValueFlow:
             max_results_per_repo = 50
 
         service.config = _FakeMSSConfig()
+        service.hnsw_index_cache = None  # attribute read at multi_search_service.py:538
 
         def _fake_get_repo_path(repo_id):
             return str(tmp_path)
