@@ -727,3 +727,243 @@ class TestShardPruningLiveQueryPath:
         assert f"{base}-2024Q1" in queried_shards
         assert f"{base}-2024Q2" in queried_shards
         assert f"{base}-2024Q3" in queried_shards
+
+
+# ---------------------------------------------------------------------------
+# Bug #1: New shard collections must be created before first write (Story #1171)
+# ---------------------------------------------------------------------------
+
+_FACTORY_PATCH = "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+
+
+def _make_indexer_mocks(tmp_path: Path, collection_exists: bool = False):
+    """Return (config_manager_mock, vector_store_mock) for TemporalIndexer tests.
+
+    Only external collaborators are mocked:
+    - vector_store: filesystem storage boundary
+    - config_manager: configuration provider (no real config file required)
+    Internal TemporalIndexer methods are NOT mocked.
+    """
+    mock_config = Mock()
+    mock_config.voyage_ai = Mock()
+    mock_config.voyage_ai.model = "voyage-code-3"
+    mock_config.voyage_ai.parallel_requests = 4
+    mock_config.voyage_ai.temporal_parallel_requests = None
+    mock_config.voyage_ai.max_concurrent_batches_per_commit = 10
+    mock_config.cohere = Mock()
+    mock_config.cohere.parallel_requests = 4
+    mock_config.cohere.temporal_parallel_requests = None
+    mock_config.embedding_provider = "voyage-ai"
+    mock_config.temporal = Mock()
+    mock_config.temporal.diff_context_lines = 3
+    mock_config.file_extensions = []
+    mock_config.override_config = None
+    mock_config.codebase_dir = tmp_path
+
+    mock_config_manager = Mock()
+    mock_config_manager.get_config.return_value = mock_config
+    cfg_dir = tmp_path / ".code-indexer"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    mock_config_manager.config_path = cfg_dir / "config.json"
+
+    index_dir = tmp_path / ".code-indexer" / "index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+
+    mock_vector_store = Mock()
+    mock_vector_store.project_root = tmp_path
+    mock_vector_store.base_path = index_dir
+    mock_vector_store.collection_exists.return_value = collection_exists
+    mock_vector_store.create_collection.return_value = True
+    mock_vector_store.load_id_index.return_value = set()
+    mock_vector_store.begin_indexing.return_value = None
+    mock_vector_store.end_indexing.return_value = {"status": "ok"}
+    mock_vector_store.upsert_points.return_value = None
+
+    return mock_config_manager, mock_vector_store
+
+
+def _run_index_commits(indexer, commits):
+    """Drive indexer.index_commits() mocking only external subprocess/service boundaries.
+
+    Mocked external boundaries:
+    - _get_commit_history: calls subprocess.run(git log) — external process
+    - _get_current_branch: calls subprocess.run(git branch) — external process
+    - EmbeddingProviderFactory: external API service
+    - VectorCalculationManager: external embedding computation service
+
+    NOT mocked: any internal TemporalIndexer logic including _save_temporal_metadata,
+    which writes to indexer.temporal_dir (under tmp_path via the mock vector_store).
+
+    cancellation_event returns True so workers exit immediately without real API calls.
+    """
+    mock_vcm_instance = Mock()
+    mock_vcm_instance.cancellation_event = Mock()
+    mock_vcm_instance.cancellation_event.is_set.return_value = True
+
+    with patch.object(indexer, "_get_commit_history", return_value=commits):
+        with patch.object(indexer, "_get_current_branch", return_value="main"):
+            with patch(_FACTORY_PATCH) as mock_factory:
+                mock_factory.create.return_value = Mock()
+                mock_factory.get_provider_model_info.return_value = {"dimensions": 1024}
+                with patch(
+                    "code_indexer.services.temporal.temporal_indexer.VectorCalculationManager"
+                ) as mock_vcm:
+                    mock_vcm.return_value.__enter__ = Mock(
+                        return_value=mock_vcm_instance
+                    )
+                    mock_vcm.return_value.__exit__ = Mock(return_value=False)
+                    indexer.index_commits()
+
+
+class TestShardCollectionCreation:
+    """Verify index_commits() creates each new shard collection before begin_indexing().
+
+    Bug #1: upsert_points() raises ValueError('Collection does not exist') on the
+    first write to a new quarterly shard because begin_indexing() does NOT create
+    the collection. The fix must call create_collection() before begin_indexing()
+    whenever collection_exists() returns False for a shard.
+    """
+
+    def test_new_shard_gets_create_collection_before_begin_indexing(self, tmp_path):
+        """create_collection() must appear BEFORE begin_indexing() for a new shard."""
+        from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
+
+        mock_config_manager, mock_vector_store = _make_indexer_mocks(
+            tmp_path, collection_exists=False
+        )
+        indexer = TemporalIndexer(
+            mock_config_manager,
+            mock_vector_store,
+            collection_name="code-indexer-temporal-voyage_code_3",
+        )
+
+        call_order: list = []
+
+        def _track_create(n, *a, **k):
+            call_order.append(("create_collection", n))
+            return True
+
+        def _track_begin(n, *a, **k):
+            call_order.append(("begin_indexing", n))
+
+        mock_vector_store.create_collection.side_effect = _track_create
+        mock_vector_store.begin_indexing.side_effect = _track_begin
+
+        shard = "code-indexer-temporal-voyage_code_3-2024Q2"
+        _run_index_commits(indexer, [_make_commit("aaa111", 2024, 5, 15)])
+
+        creates = [
+            i for i, op in enumerate(call_order) if op == ("create_collection", shard)
+        ]
+        begins = [
+            i for i, op in enumerate(call_order) if op == ("begin_indexing", shard)
+        ]
+
+        assert creates, f"create_collection not called for {shard}. order={call_order}"
+        assert begins, f"begin_indexing not called for {shard}. order={call_order}"
+        assert creates[0] < begins[0], (
+            f"create_collection must precede begin_indexing for {shard}. "
+            f"create@{creates[0]}, begin@{begins[0]}. order={call_order}"
+        )
+
+    def test_existing_shard_skips_create_collection(self, tmp_path):
+        """When the shard already exists, create_collection must NOT be called for it."""
+        from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
+
+        mock_config_manager, mock_vector_store = _make_indexer_mocks(
+            tmp_path, collection_exists=True
+        )
+        indexer = TemporalIndexer(
+            mock_config_manager,
+            mock_vector_store,
+            collection_name="code-indexer-temporal-voyage_code_3",
+        )
+        mock_vector_store.create_collection.reset_mock()
+
+        _run_index_commits(indexer, [_make_commit("bbb222", 2024, 5, 15)])
+
+        mock_vector_store.create_collection.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Bug #2: HNSW cache must be evicted after each shard query (Story #1171)
+# ---------------------------------------------------------------------------
+
+
+def _run_query_shards(shard_names, vector_store):
+    """Drive _query_shards_raw() with faked shard results.
+
+    _query_single_provider is the external network/embedding boundary and is mocked.
+    The hnsw_index_cache attribute on vector_store is the cache object under test.
+    No internal _query_shards_raw logic is mocked.
+    """
+    from code_indexer.services.temporal.temporal_fusion_dispatch import (
+        _query_shards_raw,
+    )
+    from unittest.mock import MagicMock
+
+    config = MagicMock()
+
+    def fake_single(cfg, vs, coll_name, *args, **kwargs):
+        from code_indexer.services.temporal.temporal_search_service import (
+            TemporalSearchResults,
+        )
+
+        return TemporalSearchResults(
+            results=[], query="test", filter_type="none", filter_value=None
+        )
+
+    with patch(
+        "code_indexer.services.temporal.temporal_fusion_dispatch._query_single_provider",
+        side_effect=fake_single,
+    ):
+        return _query_shards_raw(config, vector_store, shard_names, "q", 10, None, None)
+
+
+class TestHNSWCacheEvictionAfterShard:
+    """Verify _query_shards_raw() evicts the HNSW cache entry after each shard.
+
+    Bug #2: hnsw_index_cache.get_or_load() keeps every shard HNSW resident in RAM
+    as subsequent shards load. The fix must call
+    vector_store.hnsw_index_cache.invalidate() after each shard so peak RAM is
+    bounded to one HNSW index at a time (server mode only — CLI has no cache).
+    """
+
+    def test_cache_invalidated_once_per_shard(self, tmp_path):
+        """N shard queries must produce exactly N hnsw_index_cache.invalidate() calls."""
+        base_path = tmp_path / ".code-indexer" / "index"
+        base_path.mkdir(parents=True)
+
+        vector_store = Mock()
+        vector_store.base_path = base_path
+        vector_store.hnsw_index_cache = Mock()
+        invalidated: list = []
+        vector_store.hnsw_index_cache.invalidate.side_effect = (
+            lambda k: invalidated.append(k)
+        )
+
+        shard_names = [
+            "code-indexer-temporal-voyage_code_3-2024Q1",
+            "code-indexer-temporal-voyage_code_3-2024Q2",
+            "code-indexer-temporal-voyage_code_3-2024Q3",
+        ]
+        _run_query_shards(shard_names, vector_store)
+
+        assert len(invalidated) == 3, (
+            f"Expected 3 cache invalidations (one per shard), got {len(invalidated)}: "
+            f"{invalidated}"
+        )
+
+    def test_no_error_when_cache_is_none(self, tmp_path):
+        """CLI mode: hnsw_index_cache=None must not raise during shard queries."""
+        from unittest.mock import MagicMock
+
+        base_path = tmp_path / ".code-indexer" / "index"
+        base_path.mkdir(parents=True)
+
+        vector_store = MagicMock()
+        vector_store.base_path = base_path
+        vector_store.hnsw_index_cache = None  # CLI/standalone — no cache
+
+        # Must not raise AttributeError or TypeError
+        _run_query_shards(["code-indexer-temporal-voyage_code_3-2024Q1"], vector_store)

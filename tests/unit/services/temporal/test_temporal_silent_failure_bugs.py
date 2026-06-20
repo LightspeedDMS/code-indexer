@@ -66,11 +66,11 @@ class TestBug2NoExceptionHandling:
         with open(source_file, "r") as f:
             source_lines = f.readlines()
 
-        # Find the worker function (around line 529)
+        # Find the worker function (around line 529-800; upper bound widened for growth)
         worker_start_line = None
         for i, line in enumerate(source_lines):
             # More flexible search - look for def worker() near expected location
-            if "def worker():" in line and i > 500 and i < 760:
+            if "def worker():" in line and i > 500 and i < 900:
                 # Verify next few lines have worker-related content
                 next_lines = "".join(source_lines[i : i + 10])
                 if (

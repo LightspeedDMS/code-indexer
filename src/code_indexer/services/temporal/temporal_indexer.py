@@ -482,6 +482,22 @@ class TemporalIndexer:
         # Track shards processed so close() can call end_indexing per shard
         self._processed_shards: list = []
 
+        # Determine vector size once for shard collection creation (Bug #1171 fix).
+        # Uses same defensive pattern as _ensure_temporal_collection(): default to 1024
+        # when provider info cannot be retrieved (e.g. unknown provider, missing config).
+        from ...services.embedding_factory import EmbeddingProviderFactory as _EPF
+
+        try:
+            _provider_info = _EPF.get_provider_model_info(self.config)
+            _shard_vector_size = _provider_info.get("dimensions", 1024)
+        except Exception as _e:
+            logger.warning(
+                "Could not determine provider dimensions for shard creation (%s); "
+                "defaulting to 1024. Check provider configuration.",
+                _e,
+            )
+            _shard_vector_size = 1024  # Voyage-code-3 / voyage-large-2 default
+
         _original_collection_name = self.collection_name
         try:
             with VectorCalculationManager(
@@ -489,6 +505,18 @@ class TemporalIndexer:
             ) as vector_manager:
                 for _shard_name in sorted_shards:
                     self.collection_name = _shard_name
+                    # Bug #1171: Create shard collection before begin_indexing so
+                    # the first upsert_points() does not raise
+                    # ValueError('Collection does not exist').
+                    if not self.vector_store.collection_exists(_shard_name):
+                        logger.info(
+                            "Creating temporal shard collection '%s' with dimension=%d",
+                            _shard_name,
+                            _shard_vector_size,
+                        )
+                        self.vector_store.create_collection(
+                            _shard_name, _shard_vector_size
+                        )
                     # Initialize incremental HNSW tracking for this shard
                     self.vector_store.begin_indexing(_shard_name)
 

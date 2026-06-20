@@ -393,6 +393,19 @@ def _query_shards_raw(
         except Exception as e:
             record_temporal_failure(shard_name, (_time.time() - _t0) * 1000)
             logger.warning("Temporal shard query failed for %s: %s", shard_name, e)
+        finally:
+            # Bug #1171: Evict this shard's HNSW index from the server-mode cache so
+            # peak RAM is bounded to one shard at a time during a sequential scan.
+            # Eviction runs unconditionally (success OR failure): the HNSW may have
+            # been loaded before a query exception, so we must release it regardless
+            # of outcome to guarantee the RAM bound.
+            # CLI/standalone mode has hnsw_index_cache=None — skip eviction there.
+            # Cache key matches FilesystemVectorStore.search():
+            #   str(collection_path.resolve()) where collection_path = base_path / name.
+            _hnsw_cache = getattr(vector_store, "hnsw_index_cache", None)
+            if _hnsw_cache is not None:
+                _shard_path = Path(vector_store.base_path) / shard_name
+                _hnsw_cache.invalidate(str(_shard_path.resolve()))
 
     return results_by_shard
 
