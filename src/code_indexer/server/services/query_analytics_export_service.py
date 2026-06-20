@@ -316,7 +316,21 @@ class QueryAnalyticsExportPostgresBackend:
                 rows = conn.execute(
                     "SELECT * FROM query_analytics_exports ORDER BY created_at DESC"
                 ).fetchall()
-            return [dict(row) for row in rows]
+            return [
+                {
+                    "id": row[0],
+                    "initiated_by": row[1],
+                    "created_at": row[2],
+                    "status": row[3],
+                    "filter_summary": row[4],
+                    "file_path": row[5],
+                    "file_size_bytes": row[6],
+                    "row_count": row[7],
+                    "error_message": row[8],
+                    "retention_until": row[9],
+                }
+                for row in rows
+            ]
 
     def evict_old_exports(self, now_ts: float) -> int:
         with self._pool.connection() as conn:
