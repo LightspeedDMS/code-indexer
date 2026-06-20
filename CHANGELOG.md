@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.148.0] - 2026-06-20
+
+### Fixed
+- **Temporal query path — cache injection + shared executor + subprocess timeout (Story #1170):** Three performance and reliability fixes on the temporal search path. (1) `MultiSearchService._search_temporal_sync()` now builds `FilesystemVectorStore` with `hnsw_index_cache` and `id_index_cache` (guarded on `self.hnsw_index_cache is not None`), mirroring the injection pattern already used by `FilesystemBackend.get_vector_store_client()` on the regular semantic path. (2) `MultiSearchService.__init__()` and `get_instance()` accept a new `hnsw_index_cache: Optional[Any] = None` parameter; `_search_temporal_sync()` forwards `parallel_executor=self.thread_executor` to `execute_temporal_query_with_fusion()`, which propagates it through `_query_single_provider()` and `_query_multi_provider_fusion()` into `TemporalSearchService`. `TemporalSearchService.__init__()` stores it as `self.parallel_executor` and passes it to `FilesystemVectorStore.search()` on the `FilesystemVectorStore` branch. (3) `TemporalSearchService._reconstruct_temporal_content()` now passes `timeout=30` to `subprocess.run()`; on `subprocess.TimeoutExpired` it logs a WARNING and returns `"[Content unavailable - git reconstruction timed out]"` instead of hanging. All new parameters default to `None` — no behavioral change for CLI/daemon mode.
+
 ## [10.147.0] - 2026-06-20
 
 ### Fixed

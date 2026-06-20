@@ -389,7 +389,9 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 request.precomputed_query_vector_digest = _omni_digest
 
     config = MultiSearchConfig.from_config(get_config_service())
-    service = MultiSearchService.get_instance(config)
+    from ...app import _server_hnsw_cache as _hnsw_cache
+
+    service = MultiSearchService.get_instance(config, hnsw_index_cache=_hnsw_cache)
     try:
         response = service.search(request)
     except Exception as e:

@@ -71,7 +71,11 @@ class MultiSearchService:
     """
 
     @classmethod
-    def get_instance(cls, config: MultiSearchConfig) -> "MultiSearchService":
+    def get_instance(
+        cls,
+        config: MultiSearchConfig,
+        hnsw_index_cache: Optional[Any] = None,
+    ) -> "MultiSearchService":
         """Return the module-level singleton, creating it on first call (Story #1009).
 
         Thread-safe via double-checked locking. Reuses the internal
@@ -81,7 +85,7 @@ class MultiSearchService:
         if _singleton_instance is None:
             with _singleton_lock:
                 if _singleton_instance is None:
-                    _singleton_instance = cls(config)
+                    _singleton_instance = cls(config, hnsw_index_cache=hnsw_index_cache)
         return _singleton_instance
 
     @classmethod
@@ -97,14 +101,23 @@ class MultiSearchService:
                 _singleton_instance.thread_executor.shutdown(wait=False)
             _singleton_instance = None
 
-    def __init__(self, config: MultiSearchConfig):
+    def __init__(
+        self,
+        config: MultiSearchConfig,
+        hnsw_index_cache: Optional[Any] = None,
+    ):
         """
         Initialize multi-search service.
 
         Args:
             config: Multi-search configuration
+            hnsw_index_cache: Optional HNSW index cache for server-side performance
+                              (Story #1170). When set, temporal searches build
+                              FilesystemVectorStore with cache injection (mirroring
+                              the regular semantic search path). None for CLI mode.
         """
         self.config = config
+        self.hnsw_index_cache = hnsw_index_cache
         self.thread_executor = ThreadPoolExecutor(max_workers=config.max_workers)
         self._shutdown = False
 
@@ -516,13 +529,29 @@ class MultiSearchService:
             config_manager = ConfigManager.create_with_backtrack(repo_path)
             config = config_manager.get_config()
 
-            # Initialize vector store for temporal search
+            # Initialize vector store for temporal search.
+            # Story #1170: mirror filesystem_backend.py get_vector_store_client()
+            # pattern so the temporal path benefits from the same HNSW/ID cache
+            # injection that the regular semantic search path already uses.
             index_dir = repo_path / ".code-indexer" / "index"
+            id_index_cache = None
+            if self.hnsw_index_cache is not None:
+                from ...server.cache.id_index_cache import get_global_id_index_cache
+
+                id_index_cache = get_global_id_index_cache()
             vector_store_client = FilesystemVectorStore(
-                base_path=index_dir, project_root=repo_path
+                base_path=index_dir,
+                project_root=repo_path,
+                hnsw_index_cache=self.hnsw_index_cache,
+                id_index_cache=id_index_cache,
             )
 
-            # Execute temporal query via fusion dispatch (Story #640)
+            # Execute temporal query via fusion dispatch (Story #640).
+            # NOTE: the shared thread pool (self.thread_executor) is intentionally NOT
+            # forwarded as parallel_executor here.  Outer per-repo tasks already run on
+            # that bounded pool.  If inner search tasks were also submitted to it, all
+            # pool slots would be occupied by outer tasks waiting for inner tasks that
+            # can never start => permanent deadlock with >= max_workers repos in flight.
             temporal_results = execute_temporal_query_with_fusion(
                 config=config,
                 index_path=index_dir,
