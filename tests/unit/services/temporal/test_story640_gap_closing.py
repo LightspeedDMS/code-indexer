@@ -10,8 +10,6 @@ Covers:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from code_indexer.services.temporal.temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
     sanitize_model_name,
@@ -104,6 +102,7 @@ def _assert_success_recorded(
             "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
         ) as mock_factory,
     ):
+        mock_factory.get_configured_providers.return_value = ["voyage-ai"]
         mock_factory.create.return_value = MagicMock()
         mock_svc = MagicMock()
         mock_svc.query_temporal.return_value = mock_results
@@ -136,18 +135,20 @@ def _assert_failure_recorded(
             "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
         ) as mock_factory,
     ):
+        mock_factory.get_configured_providers.return_value = ["voyage-ai"]
         mock_factory.create.return_value = MagicMock()
         mock_svc = MagicMock()
         mock_svc.query_temporal.side_effect = RuntimeError("embedding unavailable")
         mock_svc_cls.return_value = mock_svc
-        with pytest.raises(RuntimeError, match="embedding unavailable"):
-            execute_temporal_query_with_fusion(
-                config=config,
-                index_path=index_path,
-                vector_store=mock_vector_store,
-                query_text="search",
-                limit=5,
-            )
+        # Story #1171: dispatch fault-tolerates per-shard failures (catch + record + continue)
+        # rather than re-raising. Call without pytest.raises — failure IS recorded in monitor.
+        execute_temporal_query_with_fusion(
+            config=config,
+            index_path=index_path,
+            vector_store=mock_vector_store,
+            query_text="search",
+            limit=5,
+        )
     status = monitor.get_health(health_key).get(health_key)
     assert status is not None, (
         "record_temporal_failure NOT called: no health data after failed query"
@@ -404,6 +405,7 @@ def test_filter_healthy_wired_in_dispatch(tmp_path):
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
             ) as mock_factory,
         ):
+            mock_factory.get_configured_providers.return_value = ["voyage-ai"]
             mock_factory.create.return_value = MagicMock()
             execute_temporal_query_with_fusion(
                 config=config,
