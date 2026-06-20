@@ -462,12 +462,14 @@ class TemporalIndexer:
                     datetime.fromtimestamp(_commit.timestamp, tz=_tz.utc),
                 )
                 shard_commit_map[_shard].append(_commit)
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError) as e:
             # Unknown or non-standard provider (e.g. MagicMock in tests).
             # Fall back to treating all commits as a single group under the current collection.
-            logger.debug(
-                "Could not determine provider for shard routing; "
-                "processing all commits under collection '%s'.",
+            logger.warning(
+                "Could not determine shard collection name for provider '%s' (%s); "
+                "falling back to base collection '%s'. Check provider configuration.",
+                getattr(self.config, "embedding_provider", "unknown"),
+                e,
                 self.collection_name,
             )
             shard_commit_map = defaultdict(list)

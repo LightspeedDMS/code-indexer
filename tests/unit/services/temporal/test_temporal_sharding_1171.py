@@ -514,7 +514,7 @@ class TestSequentialShardDispatch:
     def test_same_provider_shards_queried_sequentially(self):
         """When multiple shards exist for one provider, query calls are sequential."""
         from code_indexer.services.temporal.temporal_fusion_dispatch import (
-            _query_provider_shards_sequentially,
+            _query_shards_raw,
         )
         from unittest.mock import patch, MagicMock
         import threading
@@ -556,7 +556,7 @@ class TestSequentialShardDispatch:
             "code_indexer.services.temporal.temporal_fusion_dispatch._query_single_provider",
             side_effect=fake_single_provider,
         ):
-            _query_provider_shards_sequentially(
+            _query_shards_raw(
                 config,
                 vector_store,
                 shard_names,
@@ -614,3 +614,158 @@ class TestSequentialShardDispatch:
         base_names = {g[0] for g in groups}
         assert "code-indexer-temporal-voyage_code_3" in base_names
         assert "code-indexer-temporal-embed_v4_0" in base_names
+
+
+# ---------------------------------------------------------------------------
+# Shard pruning in the live query path (AC7)
+# ---------------------------------------------------------------------------
+
+
+class TestShardPruningLiveQueryPath:
+    """Verify execute_temporal_query_with_fusion prunes shards by time_range."""
+
+    def test_bounded_time_range_queries_only_overlapping_shards(self, tmp_path):
+        """A Q2-only time_range must NOT open Q1 or Q3 shards."""
+        from code_indexer.services.temporal.temporal_fusion_dispatch import (
+            execute_temporal_query_with_fusion,
+        )
+        from unittest.mock import patch, MagicMock
+
+        index_path = tmp_path / ".code-indexer" / "index"
+        index_path.mkdir(parents=True)
+
+        base = "code-indexer-temporal-voyage_code_3"
+        # Create Q1, Q2, Q3 shard directories on disk
+        for suffix in ["2024Q1", "2024Q2", "2024Q3"]:
+            (index_path / f"{base}-{suffix}").mkdir()
+
+        config = MagicMock()
+        config.voyage_ai = MagicMock()
+        config.voyage_ai.model = "voyage-code-3"
+        config.cohere = MagicMock()
+        config.cohere.model = "embed-v4.0"
+        config.embedding_provider = "voyage-ai"
+
+        vector_store = MagicMock()
+        vector_store.project_root = str(tmp_path)
+
+        queried_shards: list = []
+
+        def fake_query_single(cfg, vs, coll_name, *args, **kwargs):
+            queried_shards.append(coll_name)
+            from code_indexer.services.temporal.temporal_search_service import (
+                TemporalSearchResults,
+            )
+
+            return TemporalSearchResults(
+                results=[], query="test", filter_type="time_range", filter_value=None
+            )
+
+        with (
+            patch(
+                "code_indexer.services.temporal.temporal_fusion_dispatch._query_single_provider",
+                side_effect=fake_query_single,
+            ),
+            patch(
+                "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+                side_effect=lambda cols: (cols, []),
+            ),
+            patch(
+                "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+            ),
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ) as mock_factory,
+        ):
+            mock_factory.get_configured_providers.return_value = ["voyage-ai"]
+
+            # Q2-only query: 2024-04-01 to 2024-06-30
+            execute_temporal_query_with_fusion(
+                config=config,
+                index_path=index_path,
+                vector_store=vector_store,
+                query_text="test",
+                limit=10,
+                time_range=("2024-04-01", "2024-06-30"),
+            )
+
+        # Only Q2 shard should have been queried
+        assert len(queried_shards) == 1, f"Expected 1 shard, got {queried_shards}"
+        assert queried_shards[0] == f"{base}-2024Q2", (
+            f"Expected Q2, got {queried_shards[0]}"
+        )
+        # Q1 and Q3 must NOT have been opened
+        assert f"{base}-2024Q1" not in queried_shards
+        assert f"{base}-2024Q3" not in queried_shards
+
+    def test_all_time_query_includes_all_shards(self, tmp_path):
+        """ALL_TIME_RANGE (None start/end) queries all available shards."""
+        from code_indexer.services.temporal.temporal_fusion_dispatch import (
+            execute_temporal_query_with_fusion,
+        )
+        from code_indexer.services.temporal.temporal_search_service import (
+            ALL_TIME_RANGE,
+        )
+        from unittest.mock import patch, MagicMock
+
+        index_path = tmp_path / ".code-indexer" / "index"
+        index_path.mkdir(parents=True)
+
+        base = "code-indexer-temporal-voyage_code_3"
+        for suffix in ["2024Q1", "2024Q2", "2024Q3"]:
+            (index_path / f"{base}-{suffix}").mkdir()
+
+        config = MagicMock()
+        config.voyage_ai = MagicMock()
+        config.voyage_ai.model = "voyage-code-3"
+        config.cohere = MagicMock()
+        config.cohere.model = "embed-v4.0"
+        config.embedding_provider = "voyage-ai"
+
+        vector_store = MagicMock()
+        vector_store.project_root = str(tmp_path)
+
+        queried_shards: list = []
+
+        def fake_query_single(cfg, vs, coll_name, *args, **kwargs):
+            queried_shards.append(coll_name)
+            from code_indexer.services.temporal.temporal_search_service import (
+                TemporalSearchResults,
+            )
+
+            return TemporalSearchResults(
+                results=[], query="test", filter_type="none", filter_value=None
+            )
+
+        with (
+            patch(
+                "code_indexer.services.temporal.temporal_fusion_dispatch._query_single_provider",
+                side_effect=fake_query_single,
+            ),
+            patch(
+                "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+                side_effect=lambda cols: (cols, []),
+            ),
+            patch(
+                "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+            ),
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ) as mock_factory,
+        ):
+            mock_factory.get_configured_providers.return_value = ["voyage-ai"]
+
+            execute_temporal_query_with_fusion(
+                config=config,
+                index_path=index_path,
+                vector_store=vector_store,
+                query_text="test",
+                limit=10,
+                time_range=ALL_TIME_RANGE,
+            )
+
+        # All three shards queried
+        assert len(queried_shards) == 3, f"Expected 3 shards, got {queried_shards}"
+        assert f"{base}-2024Q1" in queried_shards
+        assert f"{base}-2024Q2" in queried_shards
+        assert f"{base}-2024Q3" in queried_shards
