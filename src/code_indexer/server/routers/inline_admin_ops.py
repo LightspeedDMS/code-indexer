@@ -28,8 +28,10 @@ from fastapi import (
     Depends,
     Response,
     Request,
+    Body,
 )
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from ..models.repos import (
     AddGoldenRepoRequest,
@@ -56,8 +58,22 @@ GOLDEN_REPO_REFRESH_OPERATION = "refresh_golden_repo"
 JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
 
+# Issue #1160: Default export file retention when config is unavailable.
+_DEFAULT_EXPORT_RETENTION_DAYS: int = 30
+
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+
+class ExportFiltersRequest(BaseModel):
+    """Request body for POST /api/admin/search-events/export (Issue #1160)."""
+
+    user: Optional[str] = None
+    search_type: Optional[str] = None
+    repo_alias: Optional[str] = None
+    from_timestamp: Optional[float] = None
+    to_timestamp: Optional[float] = None
+    cache_hit_filter: Optional[str] = None
 
 
 def register_admin_ops_routes(
@@ -837,6 +853,166 @@ def register_admin_ops_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=detail_message,
             )
+
+    # -------------------------------------------------------------------------
+    # Issue #1160: Query Analytics Export endpoints
+    # -------------------------------------------------------------------------
+
+    def _get_export_retention_days() -> int:
+        """Return export_retention_days from live config, falling back to the module constant."""
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            _cfg_svc = get_config_service()
+            if _cfg_svc is not None:
+                _cfg = _cfg_svc.get_config()
+                if hasattr(_cfg, "export_retention_days"):
+                    return int(_cfg.export_retention_days)
+        except Exception as _exc:
+            logger.warning(
+                "Could not read export_retention_days from config, using default %d: %s",
+                _DEFAULT_EXPORT_RETENTION_DAYS,
+                _exc,
+            )
+        return _DEFAULT_EXPORT_RETENTION_DAYS
+
+    @app.post("/api/admin/search-events/export", status_code=202)
+    def trigger_query_analytics_export(
+        request: Request,
+        body: ExportFiltersRequest = Body(default=ExportFiltersRequest()),
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ) -> Dict[str, Any]:
+        """Trigger a background export of query analytics to Excel (Issue #1160)."""
+        import uuid as _uuid
+
+        export_svc = getattr(request.app.state, "query_analytics_export_service", None)
+        if export_svc is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Query analytics export service is not initialized",
+            )
+
+        export_id = str(_uuid.uuid4())
+        initiated_by = current_user.username
+        filters = {
+            "user": body.user,
+            "search_type": body.search_type,
+            "repo_alias": body.repo_alias,
+            "from_timestamp": body.from_timestamp,
+            "to_timestamp": body.to_timestamp,
+            "cache_hit_filter": body.cache_hit_filter or "all",
+        }
+
+        # job_id_holder pattern: job_id generated inside submit_job,
+        # worker reads it via closure after submit_job returns.
+        job_id_holder: dict = {}
+
+        def _export_worker(progress_callback=None):  # type: ignore[misc]
+            retention_days = _get_export_retention_days()
+            sel_writer = getattr(request.app.state, "search_event_log_writer", None)
+            sel_backend = sel_writer.backend if sel_writer is not None else None
+            export_svc.run_export(
+                export_id=export_id,
+                filters=filters,
+                initiated_by=initiated_by,
+                export_retention_days=retention_days,
+                search_event_log_backend=sel_backend,
+            )
+            return {"export_id": export_id}
+
+        job_id = background_job_manager.submit_job(
+            "query_analytics_export",
+            _export_worker,
+            submitter_username=initiated_by,
+            repo_alias=None,
+        )
+        job_id_holder["job_id"] = job_id
+        return {"job_id": job_id}
+
+    @app.get("/api/admin/search-events/exports")
+    def list_query_analytics_exports(
+        request: Request,
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ) -> Dict[str, Any]:
+        """List all query analytics exports with download links (Issue #1160)."""
+        export_svc = getattr(request.app.state, "query_analytics_export_service", None)
+        if export_svc is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Query analytics export service is not initialized",
+            )
+
+        rows = export_svc._backend.list_exports()
+        result = []
+        for row in rows:
+            eid = row.get("id", "")
+            row_status = row.get("status", "")
+            download_link = (
+                f"/api/admin/search-events/exports/{eid}/download"
+                if row_status == "completed"
+                else None
+            )
+            result.append(
+                {
+                    "id": eid,
+                    "status": row_status,
+                    "initiated_by": row.get("initiated_by"),
+                    "created_at": row.get("created_at"),
+                    "filter_summary": row.get("filter_summary"),
+                    "file_size_bytes": row.get("file_size_bytes"),
+                    "row_count": row.get("row_count"),
+                    "error_message": row.get("error_message"),
+                    "retention_until": row.get("retention_until"),
+                    "download_link": download_link,
+                }
+            )
+        return {"exports": result}
+
+    @app.get("/api/admin/search-events/exports/{export_id}/download")
+    def download_query_analytics_export(
+        request: Request,
+        export_id: str,
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ):
+        """Download a completed query analytics export as an Excel file (Issue #1160)."""
+        from fastapi.responses import FileResponse
+
+        export_svc = getattr(request.app.state, "query_analytics_export_service", None)
+        if export_svc is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Query analytics export service is not initialized",
+            )
+
+        rows = export_svc._backend.list_exports(export_id=export_id)
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Export '{export_id}' not found",
+            )
+
+        row = rows[0]
+        row_status = row.get("status", "")
+        if row_status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Export is not ready for download (status: {row_status})",
+            )
+
+        file_path = row.get("file_path")
+        if not file_path:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Export completed but file path is missing",
+            )
+
+        return FileResponse(
+            path=file_path,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            filename=f"query-analytics-{export_id}.xlsx",
+        )
 
     @app.get("/api/admin/search-events")
     def get_search_events(

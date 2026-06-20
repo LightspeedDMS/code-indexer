@@ -81,6 +81,8 @@ dependencies = [
     "bleach>=6.0.0",
     # Wiki front matter parsing
     "python-frontmatter>=1.0.0",
+    # Excel export for query analytics (Story #1160)
+    "openpyxl>=3.1.0",
     # MFA/TOTP dependencies (Epic #556)
     "pyotp>=2.9.0",
     "qrcode>=7.4.0",

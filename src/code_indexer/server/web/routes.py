@@ -226,6 +226,8 @@ _VALID_CONFIG_SECTIONS = (
     "query_embedding_cache",
     # Story #1159 - Search event log data retention config
     "search_event_log",
+    # Issue #1160 - Export retention config
+    "export",
 )
 
 
@@ -7396,6 +7398,17 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             if retention_days_int < 1 or retention_days_int > 3650:
                 return "search_event_log_retention_days must be between 1 and 3650"
 
+    elif section == "export":
+        # Issue #1160: Export file retention configuration.
+        export_days_val = data.get("export_retention_days")
+        if export_days_val is not None:
+            try:
+                export_days_int = int(export_days_val)
+            except (ValueError, TypeError):
+                return "export_retention_days must be a valid integer"
+            if export_days_int < 1 or export_days_int > 3650:
+                return "export_retention_days must be between 1 and 3650"
+
     return None
 
 
@@ -7590,6 +7603,27 @@ def auto_discovery_page(request: Request):
         {
             "request": request,
             "current_page": "auto-discovery",
+            "show_nav": True,
+            "csrf_token": csrf_token,
+        },
+    )
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
+@web_router.get("/analytics-export", response_class=HTMLResponse)
+def analytics_export_page(request: Request):
+    """Query Analytics Export page — filter and export search event data to Excel."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
+    response = templates.TemplateResponse(
+        "analytics_export.html",
+        {
+            "request": request,
+            "current_page": "analytics-export",
             "show_nav": True,
             "csrf_token": csrf_token,
         },

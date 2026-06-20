@@ -532,6 +532,39 @@ def make_lifespan(
             )
             app.state.search_event_log_writer = None
 
+        # Issue #1160: Initialize QueryAnalyticsExportService (export to Excel).
+        # Mirrors SearchEventLogWriter pattern: select backend from registry or fall back
+        # to SQLite. Service is stateless (no threads to start/stop).
+        try:
+            from code_indexer.server.services.query_analytics_export_service import (
+                QueryAnalyticsExportService,
+                QueryAnalyticsExportSqliteBackend,
+            )
+
+            if backend_registry is not None:
+                _qae_backend = backend_registry.query_analytics_exports
+            else:
+                qae_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _qae_backend = QueryAnalyticsExportSqliteBackend(str(qae_db_path))
+
+            app.state.query_analytics_export_service = QueryAnalyticsExportService(
+                backend=_qae_backend,
+                golden_repos_dir=str(golden_repos_dir),
+            )
+            logger.info(
+                "QueryAnalyticsExportService initialized (Issue #1160)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _qae_exc:
+            logger.error(
+                "Failed to initialize QueryAnalyticsExportService: %s",
+                _qae_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.query_analytics_export_service = None
+
         # Startup: cidx-meta migration and bootstrap moved to after main GoldenRepoManager initialization
         # (See lines after GoldenRepoManager creation below)
 
