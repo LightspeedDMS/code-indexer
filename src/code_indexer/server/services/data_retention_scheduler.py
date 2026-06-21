@@ -223,7 +223,7 @@ class DataRetentionScheduler:
 
         cfg_root = self._config_service.get_config()
         token_blacklist_deleted = self._safe_prune_token_blacklist(
-            jwt_expiration_minutes=cfg_root.jwt_expiration_minutes,
+            jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
             failed_tables=failed_tables,
         )
 
@@ -312,7 +312,7 @@ class DataRetentionScheduler:
 
         cfg_root = self._config_service.get_config()
         token_blacklist_deleted = self._safe_prune_token_blacklist(
-            jwt_expiration_minutes=cfg_root.jwt_expiration_minutes,
+            jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
             failed_tables=failed_tables,
         )
 

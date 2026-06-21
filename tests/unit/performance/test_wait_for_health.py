@@ -56,8 +56,14 @@ _wait_for_health = _benchmark._wait_for_health
 
 
 def _run(coro: Any) -> Any:
-    """Run a coroutine synchronously."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run a coroutine synchronously using a fresh event loop.
+
+    Uses asyncio.run() rather than asyncio.get_event_loop().run_until_complete()
+    so that this helper is immune to event-loop state left by prior async tests
+    (pytest-asyncio in auto/function mode closes the managed loop after each
+    async test, leaving get_event_loop() with no current loop in Python 3.9+).
+    """
+    return asyncio.run(coro)
 
 
 def _patch_async_client(
