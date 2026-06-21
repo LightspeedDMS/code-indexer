@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.151.0] - 2026-06-20
+
+### Fixed
+- **Search event logging and analytics export bug fixes (Bugs #1173 and #1174):** Three bugs found during E2E testing of Stories #1159 and #1160. (1) Bug #1173: `inline_query.py` now gates `_writer.enqueue()` behind a `_search_succeeded` flag (initialized False, set True before each of the 3 success return paths: async 202, FTS/hybrid, and semantic). Events are never logged for failed searches (upstream errors, provider timeouts, invalid queries). The context `_ctx_token` reset stays unconditional in `finally:`. (2) Bug #1174a: `inline_admin_ops.py` `POST /api/admin/analytics-exports` removed the pre-generated `export_id = str(uuid.uuid4())`; the worker now reads `export_id = job_id_holder["job_id"]` after `submit_job()` returns, making the export row id identical to the BGM job id. (3) Bug #1174b: `GET /api/admin/analytics-exports` now accepts an optional `?id=<export_id>` query parameter passed through to `export_svc._backend.list_exports(export_id=id)`, enabling the download handler to retrieve a specific export row by job id.
+
+## [10.150.0] - 2026-06-20
+
+### Added
+- **Background startup migration of monolithic temporal indexes to quarterly shards (Story #1172):** When the server starts up, `submit_temporal_migration_jobs()` (wired in `lifespan.py` after BGM initialization, before `yield`) scans all activated and golden repos for unsharded temporal collections. Detection via `_needs_temporal_migration(index_path)`: a collection qualifies if it passes `is_temporal_collection()`, fails `is_sharded_temporal_collection()`, has no `migration_complete.marker`, and has a `hnsw_index.bin` file. One BGM job (`operation_type="temporal_index_migration"`) is submitted per repo; `DuplicateJobError` is caught and skipped (DEBUG log) for cluster-aware dedup via the `idx_active_job_per_repo` PG partial unique index. The migration job: (1) loads the monolithic HNSW via `hnswlib.Index`, (2) reads `label→point_id` from `collection_meta.json` `hnsw_index.id_mapping`, (3) batch-fetches commit timestamps from git via `git log --no-walk --format=%H %cI` (`%cI` = ISO 8601 strict, Python 3.9 compatible), (4) groups vectors by quarter, (5) writes each quarterly shard atomically via `{shard_name}.migrating` → `os.replace()`, (6) writes `migration_complete.marker`, (7) deletes monolithic `hnsw_index.bin`, `id_index.bin`, and JSON payload files, (8) calls `del monolithic_index; gc.collect()` in a `finally` block to free C++-managed HNSW memory. Stale `.migrating` dirs from prior crashed runs are cleaned at job start. Fully idempotent on restart. Both providers discovered (all unsharded temporal collections, no provider filter). Progress reported via `progress_callback` after each shard. Non-fatal: startup scan failures log WARNING and continue.
+
 ## [10.149.0] - 2026-06-20
 
 ### Added

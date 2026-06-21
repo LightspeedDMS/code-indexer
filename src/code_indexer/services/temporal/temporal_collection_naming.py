@@ -217,7 +217,10 @@ def get_overlapping_shards(
             if overlaps:
                 shards.append(name)
         elif name == base_name:
-            has_legacy = True
+            # Skip dirs where migration has already run (marker present = shards exist, HNSW gone)
+            marker = index_path / name / "migration_complete.marker"
+            if not marker.exists():
+                has_legacy = True
 
     shards.sort()  # YYYYQN is lexicographically == chronologically
     if has_legacy:

@@ -255,6 +255,32 @@ class TestGetOverlappingShards:
         assert f"{base}-2024Q1" not in result
         assert f"{base}-2024Q2" not in result
 
+    def test_get_overlapping_shards_skips_legacy_when_migration_marker_present(
+        self, tmp_path
+    ):
+        """Monolithic dir with migration_complete.marker is NOT appended to shards.
+
+        After Story #1172 migration, the old monolith directory still exists on disk
+        but contains only meta files and migration_complete.marker (no hnsw_index.bin).
+        get_overlapping_shards() must skip it to avoid a pointless no-op HNSW open
+        per query.
+        """
+        base = "code-indexer-temporal-voyage_code_3"
+        (tmp_path / f"{base}-2024Q1").mkdir()
+        (tmp_path / f"{base}-2024Q2").mkdir()
+        # Legacy monolithic dir with migration marker present
+        legacy_dir = tmp_path / base
+        legacy_dir.mkdir()
+        (legacy_dir / "migration_complete.marker").touch()
+
+        result = self.get_overlapping_shards("voyage-code-3", tmp_path, None, None)
+
+        # Shards are present
+        assert f"{base}-2024Q1" in result
+        assert f"{base}-2024Q2" in result
+        # Legacy monolith must NOT appear — marker signals migration is done
+        assert base not in result
+
 
 # ---------------------------------------------------------------------------
 # Indexer routing (AC2)
