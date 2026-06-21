@@ -611,6 +611,42 @@ cidx watch / watch-stop / stop         # Daemon controls
 - **Tmp files**: `~/.tmp`, never `/tmp`. **Container-free**: no ports, no containers.
 - **Import budget**: current startup ~329ms.
 
+### Multi-Worker Throughput Benchmark (Story #1168)
+
+Standalone benchmark: `scripts/analysis/multi_worker_throughput.py`
+
+Measures `POST /api/query` throughput across 4 scenarios per worker count:
+- repeating + cache-on / repeating + cache-off
+- unique + cache-on / unique + cache-off
+
+**Operator gate (NOT automated CI):** The full 1/2/3/4-worker run with 1.7x regression assertion is manual:
+
+```bash
+# Against an already-running server (operator must manage server lifecycle)
+E2E_ADMIN_USER=admin E2E_ADMIN_PASS=admin \
+python3 scripts/analysis/multi_worker_throughput.py \
+  --server http://localhost:8001 \
+  --workers 1,2,3,4 \
+  --queries 200 \
+  --concurrency 20
+```
+
+Quick smoke (read-only, no server restart, no :8000 harm):
+
+```bash
+E2E_ADMIN_USER=admin E2E_ADMIN_PASS=admin \
+python3 scripts/analysis/multi_worker_throughput.py \
+  --server http://localhost:8000 --workers 1 --queries 10 --concurrency 4 --no-wait-health
+```
+
+Credentials: reads `E2E_ADMIN_USER`/`E2E_ADMIN_PASS` or `E2E_ADMIN_USERNAME`/`E2E_ADMIN_PASSWORD` from env or `.local-testing`.
+Reports saved to `reports/perf/` (gitignored). Script exits 1 if regression check fails.
+
+Pytest wrapper: `tests/performance/test_multi_worker_scaling.py` -- skipped unless `CIDX_PERF_TEST=1`.
+Query fixture: `tests/performance/fixtures/benchmark_queries.txt` (300 distinct queries).
+
+NEVER restart or kill the dev server on :8000 when running this benchmark. Use an isolated port.
+
 ---
 
 ## Embedding Provider (VoyageAI)

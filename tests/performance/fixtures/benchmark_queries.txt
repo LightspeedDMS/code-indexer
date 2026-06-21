@@ -1,0 +1,300 @@
+authentication function
+error handling
+database connection
+API endpoint
+cache invalidation
+user login
+password validation
+token refresh
+session management
+rate limiting
+file upload handler
+JSON parsing
+HTTP request
+response serialization
+middleware configuration
+dependency injection
+factory pattern
+repository pattern
+unit test setup
+integration test
+mock object
+async function
+coroutine handler
+event loop
+thread pool
+worker process
+queue consumer
+message broker
+publish subscribe
+webhook handler
+retry logic
+circuit breaker
+timeout configuration
+health check endpoint
+metrics collection
+logging configuration
+trace propagation
+span context
+observability setup
+dashboard query
+search index
+vector embedding
+semantic search
+full text search
+query builder
+SQL query optimization
+database migration
+schema validation
+data transformation
+ETL pipeline
+batch processing
+stream processing
+pagination handler
+cursor based pagination
+offset limit pagination
+sorting algorithm
+filtering criteria
+aggregation function
+group by clause
+join operation
+foreign key constraint
+transaction rollback
+deadlock detection
+lock timeout
+connection pool
+prepared statement
+ORM mapping
+active record
+domain model
+value object
+aggregate root
+bounded context
+command handler
+event sourcing
+CQRS pattern
+saga orchestration
+two phase commit
+distributed lock
+consensus algorithm
+leader election
+replication lag
+failover mechanism
+load balancer configuration
+round robin scheduling
+sticky session
+health probe
+liveness check
+readiness probe
+startup probe
+graceful shutdown
+signal handler
+process manager
+supervisor configuration
+container lifecycle
+kubernetes deployment
+service mesh
+ingress controller
+TLS termination
+certificate rotation
+secret management
+vault integration
+environment variable
+configuration loader
+feature flag
+A/B test assignment
+canary deployment
+blue green deployment
+rollback procedure
+version bump
+changelog entry
+release note
+semantic versioning
+dependency update
+vulnerability scan
+static analysis
+code coverage
+test runner configuration
+CI pipeline
+GitHub Actions workflow
+build artifact
+Docker image
+base image selection
+multi stage build
+layer caching
+registry push
+image signing
+attestation verification
+supply chain security
+SBOM generation
+license check
+compliance audit
+access control list
+role based access
+permission check
+authorization middleware
+RBAC policy
+OAuth flow
+JWT validation
+refresh token rotation
+PKCE flow
+authorization code
+client credentials
+introspection endpoint
+JWKS endpoint
+token revocation
+user registration
+email verification
+password reset
+multi factor authentication
+TOTP setup
+recovery code
+backup code
+device trust
+biometric authentication
+passkey registration
+WebAuthn assertion
+FIDO2 credential
+user profile update
+avatar upload
+notification preference
+email template
+SMS gateway
+push notification
+webhook delivery
+event subscription
+callback URL
+signature verification
+HMAC validation
+API key generation
+key rotation
+key derivation
+encryption at rest
+field level encryption
+homomorphic encryption
+zero knowledge proof
+data masking
+anonymization function
+differential privacy
+data retention policy
+GDPR compliance
+consent management
+audit log
+event journal
+immutable record
+append only store
+write ahead log
+binary log parsing
+change data capture
+debezium connector
+kafka consumer
+stream offset
+partition assignment
+consumer group
+dead letter queue
+poison message
+idempotency key
+duplicate detection
+exactly once delivery
+at least once
+at most once
+saga compensation
+rollback handler
+distributed tracing
+Jaeger integration
+Zipkin exporter
+OpenTelemetry setup
+meter provider
+counter increment
+histogram recording
+gauge observation
+alert rule
+threshold detection
+anomaly detection
+time series query
+Prometheus scrape
+Grafana dashboard
+panel visualization
+data source configuration
+query template
+variable interpolation
+conditional formatting
+threshold coloring
+sparkline chart
+heat map display
+flame graph profiling
+CPU profiling
+memory profiling
+heap allocation
+garbage collection
+GC pressure
+memory leak detection
+object pool
+reference counting
+weak reference
+strong reference
+copy on write
+immutable data structure
+persistent tree
+red black tree
+hash table resize
+bloom filter
+count min sketch
+hyperloglog estimation
+consistent hashing
+rendezvous hashing
+virtual node
+token ring
+gossip protocol
+CRDT merge
+vector clock
+lamport timestamp
+physical clock
+monotonic clock
+NTP synchronization
+clock skew
+drift compensation
+timeout backoff
+exponential backoff
+jitter addition
+deadline propagation
+context cancellation
+select statement
+channel buffering
+goroutine leak
+actor mailbox
+message passing
+supervision tree
+process registry
+node discovery
+peer to peer
+DHT lookup
+NAT traversal
+STUN server
+TURN relay
+ICE candidate
+WebRTC signaling
+SDP offer
+codec negotiation
+media stream
+video encoding
+audio processing
+transcription pipeline
+speech recognition
+language model inference
+tokenization step
+embedding generation
+vector similarity
+cosine distance
+dot product
+approximate nearest neighbor
+HNSW graph
+IVF index
+product quantization
+dimensionality reduction
+PCA projection
+t-SNE visualization
+UMAP embedding
+cluster assignment
+k-means iteration
+silhouette score
