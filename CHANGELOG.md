@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.153.0] - 2026-06-21
+
+### Fixed
+- **Epic #1169 test contamination fix (test_temporal_cache_injection_1170.py):** The module-level `_STUB_MODULES` loop unconditionally wrote `MagicMock()` into `sys.modules` for every listed module not yet imported, including `numpy` and `msgpack`. When pytest collected `test_temporal_cache_injection_1170.py` before `test_temporal_migration_1172.py`, numpy was stubbed before 1172's `import numpy as np` ran, causing `hnswlib` to receive a MagicMock numpy when it imported internally and then raise `AttributeError: __version__` (dunder attributes are not auto-created on MagicMock). All 9 tests in 1172 failed when the three Epic #1169 test files ran in fixed order. Fix: changed the stub loop to `try: __import__(_mod) / except ImportError: sys.modules[_mod] = MagicMock()` — installed packages (numpy, msgpack) now get their real implementations; uninstallable packages (google.protobuf, rich, pathspec) still get MagicMock stubs. All 76 tests in the three 1170+1171+1172 files now pass in fixed order.
+
 ## [10.152.0] - 2026-06-20
 
 ### Fixed
