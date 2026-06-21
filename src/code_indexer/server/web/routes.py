@@ -86,6 +86,7 @@ RESTART_REQUIRED_FIELDS = [
     "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
+    "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
 ]
 
 
@@ -6431,8 +6432,8 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if workers is not None:
             try:
                 workers_int = int(workers)
-                if workers_int < 1:
-                    return "Workers must be a positive number"
+                if workers_int < 1 or workers_int > 64:
+                    return "Workers must be between 1 and 64"
             except (ValueError, TypeError):
                 return "Workers must be a valid number"
 

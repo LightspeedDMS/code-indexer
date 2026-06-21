@@ -36,6 +36,15 @@
                         </td>
                     </tr>
                     <tr>
+                        <td class="config-label">Uvicorn Workers</td>
+                        <td class="config-value">{{ config.server.workers }}</td>
+                        <td class="config-note">
+                            {% if 'workers' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Log Level</td>
                         <td class="config-value">{{ config.server.log_level }}</td>
                         <td class="config-note"></td>
@@ -74,6 +83,11 @@
                     Port
                     <input type="number" id="server-port" name="port" value="{{ config.server.port }}" min="1" max="65535">
                     <small>1-65535</small>
+                </label>
+                <label for="server-workers">
+                    Uvicorn Workers
+                    <input type="number" id="server-workers" name="workers" value="{{ config.server.workers }}" min="1" max="64">
+                    <small>1-64; requires restart</small>
                 </label>
                 <label for="server-log-level">
                     Log Level
