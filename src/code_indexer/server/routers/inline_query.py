@@ -98,6 +98,7 @@ def register_query_routes(
         )
         _ctx_token = _search_event_ctx.set(_event_ctx)
         _result_count = 0
+        _search_succeeded = False
 
         try:
             # Handle background job submission (semantic mode only)
@@ -118,6 +119,7 @@ def register_query_routes(
                 )
                 from fastapi.responses import JSONResponse
 
+                _search_succeeded = True
                 return JSONResponse(
                     status_code=status.HTTP_202_ACCEPTED,
                     content={
@@ -413,6 +415,7 @@ def register_query_routes(
                 from fastapi.responses import JSONResponse
 
                 _result_count = len(truncated_fts) + len(truncated_semantic)
+                _search_succeeded = True
                 return JSONResponse(
                     content={
                         "search_mode": search_mode_actual,
@@ -480,6 +483,7 @@ def register_query_routes(
             from fastapi.responses import JSONResponse
 
             _result_count = len(truncated_results)
+            _search_succeeded = True
             return JSONResponse(
                 content={
                     "results": truncated_results,
@@ -540,11 +544,12 @@ def register_query_routes(
             )
         finally:
             # Issue #1159: reset ctx and enqueue search event record.
+            # Bug #1173: only enqueue on success (H11 — failed searches must NOT log).
             _search_event_ctx.reset(_ctx_token)
             _writer = getattr(
                 getattr(app, "state", None), "search_event_log_writer", None
             )
-            if _writer is not None:
+            if _writer is not None and _search_succeeded:
                 try:
                     _total_ms = int((time.time() - start_time) * 1000)
                     _cfg_svc = get_config_service()

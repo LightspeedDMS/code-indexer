@@ -885,8 +885,6 @@ def register_admin_ops_routes(
         ),
     ) -> Dict[str, Any]:
         """Trigger a background export of query analytics to Excel (Issue #1160)."""
-        import uuid as _uuid
-
         export_svc = getattr(request.app.state, "query_analytics_export_service", None)
         if export_svc is None:
             raise HTTPException(
@@ -894,7 +892,6 @@ def register_admin_ops_routes(
                 detail="Query analytics export service is not initialized",
             )
 
-        export_id = str(_uuid.uuid4())
         initiated_by = current_user.username
         filters = {
             "user": body.user,
@@ -905,11 +902,14 @@ def register_admin_ops_routes(
             "cache_hit_filter": body.cache_hit_filter or "all",
         }
 
-        # job_id_holder pattern: job_id generated inside submit_job,
-        # worker reads it via closure after submit_job returns.
+        # Bug #1174A fix: use the BGM job_id as the export row id so that
+        # clients can look up the export by the job_id they receive.
+        # job_id_holder is populated after submit_job() returns; the worker
+        # thread runs later and reads job_id_holder["job_id"] as the export_id.
         job_id_holder: dict = {}
 
         def _export_worker(progress_callback=None):  # type: ignore[misc]
+            export_id = job_id_holder["job_id"]
             retention_days = _get_export_retention_days()
             sel_writer = getattr(request.app.state, "search_event_log_writer", None)
             sel_backend = sel_writer.backend if sel_writer is not None else None
@@ -934,11 +934,16 @@ def register_admin_ops_routes(
     @app.get("/api/admin/search-events/exports")
     def list_query_analytics_exports(
         request: Request,
+        id: Optional[str] = None,
         current_user: dependencies.User = Depends(
             dependencies.get_current_admin_user_hybrid
         ),
     ) -> Dict[str, Any]:
-        """List all query analytics exports with download links (Issue #1160)."""
+        """List all query analytics exports with download links (Issue #1160).
+
+        Args:
+            id: Optional export id filter. When provided, returns only the matching row.
+        """
         export_svc = getattr(request.app.state, "query_analytics_export_service", None)
         if export_svc is None:
             raise HTTPException(
@@ -946,7 +951,7 @@ def register_admin_ops_routes(
                 detail="Query analytics export service is not initialized",
             )
 
-        rows = export_svc._backend.list_exports()
+        rows = export_svc._backend.list_exports(export_id=id)
         result = []
         for row in rows:
             eid = row.get("id", "")
