@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.155.0] - 2026-06-21
+
+### Fixed
+- **Bug #1177 - ProviderHealthMonitor emits spurious WARNING on None→path transition in CLI temporal query path:** `get_instance()` fired WARNING whenever the singleton existed with `path=None` and a subsequent call provided a real persistence path. In the CLI temporal query path, `semantic_query_manager.py` creates the singleton (path=None) before `cli.py` configures the reranker sinbin persistence path, triggering the mismatch warning on every `--time-range-all` invocation. The WARNING was designed for the dangerous case of two competing non-None paths. A None→real_path transition is benign (no sin-bin state was ever loaded or persisted). Fix: WARNING now fires only when both existing and requested paths are non-None and different; the None→real_path case is demoted to DEBUG with the ignored path for diagnostics.
+
 ## [10.154.0] - 2026-06-21
 
 ### Fixed
