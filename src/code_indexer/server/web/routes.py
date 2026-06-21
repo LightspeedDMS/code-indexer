@@ -6406,6 +6406,25 @@ def _get_current_config() -> dict:
         "cidx_meta_backup": settings.get(
             "cidx_meta_backup", {"enabled": False, "remote_url": ""}
         ),
+        # Bug #1179: search_event_log section was missing, causing Jinja
+        # UndefinedError (HTTP 500) on every admin Config page render.
+        # Both fields are rendered inside the same <details id="section-search_event_log">
+        # block (template lines 2440/2445/2464/2471), so they are merged here
+        # into one dict under the "search_event_log" key.
+        # search_event_log_retention_days comes from settings["search_event_log"]
+        # (Issue #1159); export_retention_days comes from settings["export"]
+        # (Issue #1160).
+        "search_event_log": {
+            **settings.get(
+                "search_event_log",
+                {"search_event_log_retention_days": 90},
+            ),
+            **{
+                "export_retention_days": settings.get("export", {}).get(
+                    "export_retention_days", 30
+                )
+            },
+        },
     }
 
 
