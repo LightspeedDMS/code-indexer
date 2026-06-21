@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [10.155.0] - 2026-06-21
 
+### Added
+- **Story #1163 - JWT Logout Token Revocation + Blacklist Pruning:** Both `GET /logout` (web admin) and `GET /user/logout` (user portal) now blacklist the JWT `jti` at logout via `get_token_blacklist().add(jti)`. The blacklist is DB-backed (`TokenBlacklist`, SQLite solo / PostgreSQL cluster) so revocation is cross-worker and cross-node -- every uvicorn worker and every cluster node rejects the revoked JWT on the next request. New `TokenBlacklist.prune_expired(ttl_seconds)` method deletes expired rows from both SQLite and PostgreSQL backends and evicts matching entries from the local set. `DataRetentionScheduler` now calls `prune_expired` in both cleanup paths (SQLite and PG) using `jwt_expiration_minutes * 60` as the TTL (read live from config, not hardcoded); result dict includes `token_blacklist_deleted` in `total_deleted`. Logout is non-fatal: any failure to extract/blacklist the jti logs a WARNING and never prevents the 303 redirect.
+
 ### Fixed
 - **Bug #1177 - ProviderHealthMonitor emits spurious WARNING on None→path transition in CLI temporal query path:** `get_instance()` fired WARNING whenever the singleton existed with `path=None` and a subsequent call provided a real persistence path. In the CLI temporal query path, `semantic_query_manager.py` creates the singleton (path=None) before `cli.py` configures the reranker sinbin persistence path, triggering the mismatch warning on every `--time-range-all` invocation. The WARNING was designed for the dangerous case of two competing non-None paths. A None→real_path transition is benign (no sin-bin state was ever loaded or persisted). Fix: WARNING now fires only when both existing and requested paths are non-None and different; the None→real_path case is demoted to DEBUG with the ignored path for diagnostics.
 

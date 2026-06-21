@@ -302,6 +302,17 @@ Persistent storage of reusable Rust evaluator patterns in cidx-meta under `xray-
 
 -> Full reference: `docs/totp-elevation.md`
 
+### JWT Logout Token Revocation (Story #1163)
+
+Both logout routes (`GET /logout` via `web_router` and `GET /user/logout` via `user_router` in `server/web/routes.py`) blacklist the JWT `jti` at logout time using `get_token_blacklist().add(jti)`. The blacklist is DB-backed (`TokenBlacklist` in `server/app.py`, wired at lifespan) so the revocation is cross-worker and cross-node — every uvicorn worker and every cluster node rejects the revoked jti on the next request.
+
+**Key invariants** -- NEVER remove these:
+- `_extract_jti_from_request(request)` (private helper in `routes.py`) tries `Authorization: Bearer` header first, then `cidx_session` cookie; returns `None` without raising on any decode error.
+- The JTI-blacklist block is wrapped in `try/except` in both logout routes -- failure logs a WARNING but NEVER prevents the 303 redirect and session clear.
+- `TokenBlacklist.prune_expired(ttl_seconds)` (added in Story #1163) deletes rows where `blacklisted_at < time.time() - ttl_seconds` from SQLite (`_sqlite_prune`) or PostgreSQL (`_pg_prune` using `DELETE ... RETURNING jti`); also evicts deleted JTIs from the local in-memory set.
+- `DataRetentionScheduler._safe_prune_token_blacklist` wires pruning into both `_execute_cleanup_sqlite()` and `_execute_cleanup_pg()`. TTL = `config.jwt_expiration_minutes * 60` (read live from config_service each cycle; NOT hardcoded). Result key `token_blacklist_deleted` is included in both result dicts and in `total_deleted`.
+- The `blacklisted_at` column is a NUMERIC UNIX timestamp (seconds, `time.time()`), NOT an ISO string -- the generic `_cleanup_table` helper (ISO string comparison) MUST NOT be used for `token_blacklist`.
+
 ### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
 
 Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.

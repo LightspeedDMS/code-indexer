@@ -163,6 +163,74 @@ class TokenBlacklist:
         conn.close()
         return row is not None
 
+    def prune_expired(self, ttl_seconds: int) -> int:
+        """Delete expired token blacklist entries older than ttl_seconds.
+
+        A row is expired when blacklisted_at + ttl_seconds < now, i.e.
+        blacklisted_at < (time.time() - ttl_seconds).
+
+        Also evicts deleted JTIs from the local in-memory set.
+        Returns the number of rows deleted.
+        """
+        import time
+
+        if ttl_seconds < 0:
+            raise ValueError(f"ttl_seconds must be >= 0, got {ttl_seconds}")
+
+        cutoff = time.time() - ttl_seconds
+        if self._pool is not None:
+            deleted, evicted_jtis = self._pg_prune(cutoff)
+        elif self._sqlite_db_path:
+            deleted, evicted_jtis = self._sqlite_prune(cutoff)
+        else:
+            return 0
+
+        # Evict deleted JTIs from the local in-memory set
+        if evicted_jtis:
+            self._local -= evicted_jtis
+        return deleted
+
+    def _sqlite_prune(self, cutoff: float) -> "tuple[int, set[str]]":
+        """Select expired JTIs then delete them (SQLite).
+
+        Returns (deleted_count, set_of_deleted_jtis).
+        SELECT-then-DELETE is used because SQLite does not support
+        DELETE ... RETURNING in older versions.
+        """
+        import sqlite3
+
+        assert self._sqlite_db_path is not None
+        conn = sqlite3.connect(self._sqlite_db_path)
+        try:
+            rows = conn.execute(
+                "SELECT jti FROM token_blacklist WHERE blacklisted_at < ?", (cutoff,)
+            ).fetchall()
+            evicted: set[str] = {row[0] for row in rows}
+            conn.execute(
+                "DELETE FROM token_blacklist WHERE blacklisted_at < ?", (cutoff,)
+            )
+            conn.commit()
+            return len(evicted), evicted
+        finally:
+            conn.close()
+
+    def _pg_prune(self, cutoff: float) -> "tuple[int, set[str]]":
+        """Delete expired rows from PostgreSQL using RETURNING to collect JTIs.
+
+        Returns (deleted_count, set_of_deleted_jtis).
+        PostgreSQL supports DELETE ... RETURNING so we collect affected JTIs
+        in a single statement.
+        """
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "DELETE FROM token_blacklist WHERE blacklisted_at < %s RETURNING jti",
+                (cutoff,),
+            ).fetchall()
+            conn.commit()
+        evicted: set[str] = {row[0] for row in rows}
+        return len(evicted), evicted
+
 
 # Module-level singleton
 _token_blacklist = TokenBlacklist()
