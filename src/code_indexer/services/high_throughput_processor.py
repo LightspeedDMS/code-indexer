@@ -610,9 +610,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 # FAST FILE SUBMISSION - No more I/O delays
                 # CRITICAL FIX: Get collection name for regular indexing
                 # When temporal collection exists, regular indexing needs explicit collection_name
-                collection_name = self.vector_store_client.resolve_collection_name(
-                    self.config, self.embedding_provider
-                )
+                # Compute directly from embedding_provider (same logic as
+                # FilesystemVectorStore.resolve_collection_name) so callers that use a
+                # lightweight vector-store client (e.g. test doubles) do not need to
+                # implement resolve_collection_name.
+                _raw_model = self.embedding_provider.get_current_model()
+                collection_name = _raw_model.replace("/", "_").replace(":", "_")
 
                 for file_path in files:
                     if self.cancelled:
