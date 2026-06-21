@@ -450,7 +450,22 @@ Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step
 - `_read_current_fingerprint(repo_path)` is the shared helper used by both `has_changes_since_last_run` and the quarantine gate — no duplicate metadata-reading logic.
 - No Web-UI config knob, no admin un-quarantine tool, no exponential back-off (deferred, out of scope for #1096).
 
-**Regression guard**: `tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py` (15 tests, real SQLite via `DatabaseSchema.initialize_database()`). Includes mandatory cases: quarantine BINDS for persistent failure with NULL `last_known_commit` and stable on-disk commit; auto-clear fires ONLY on real on-disk commit change.
+**Regression guard**: `tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py` (18 tests, real SQLite via `DatabaseSchema.initialize_database()`). Includes mandatory cases: quarantine BINDS for persistent failure with NULL `last_known_commit` and stable on-disk commit; auto-clear fires ONLY on real on-disk commit change.
+
+### Description-Refresh Cross-Worker Dedup (Story #1162)
+
+Under `uvicorn --workers N`, each worker runs its own `DescriptionRefreshScheduler`. Without dedup, N workers can simultaneously dispatch a refresh for the same stale repo, multiplying Claude API cost by N.
+
+**Invariant**: `_run_loop_single_pass` MUST use `register_job_if_no_conflict` (not `register_job`) when registering description refresh jobs. The DB partial unique index `idx_active_job_per_repo` (`WHERE status IN ('pending', 'running') AND repo_alias IS NOT NULL`) is the sole cluster-atomic arbiter: the first worker to claim a repo wins; subsequent workers receive `DuplicateJobError`.
+
+**DuplicateJobError handling** (`description_refresh_scheduler.py`):
+- `except DuplicateJobError:` clause MUST come BEFORE the generic `except Exception:` handler.
+- On `DuplicateJobError`: log at DEBUG ("already claimed for {alias} by another worker; skipping") and `continue` to the next repo. No thread is spawned.
+- On generic `Exception` (DB unavailable, etc.): log WARNING "JobTracker registration failed" and fall through (tracked_job_id = None). Behavior preserved from pre-#1162.
+
+**Accepted limitation**: `_prompt_failure_counts` and `_failure_commit` (quarantine circuit-breaker dicts) remain per-process. Cross-worker quarantine-counter consistency is intentionally out of scope -- the DB dedup gate already prevents duplicate concurrent dispatch; quarantine is defense-in-depth back-off, not the primary cost control.
+
+**Regression guard**: `TestCrossWorkerDedup1162` and `TestSingleWorkerRegression1162` in `test_description_refresh_circuit_breaker_1096.py`. Use real SQLite + `_DeferringExecutor` (keeps job `pending` during second scheduler's claim attempt, modeling the real async background thread).
 
 ### Description-Refresh Tracking Backend Wiring (Bug #1100)
 

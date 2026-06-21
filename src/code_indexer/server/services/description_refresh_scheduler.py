@@ -1344,17 +1344,34 @@ class DescriptionRefreshScheduler:
                     updated_at=now,
                 )
 
-                # Register job in unified tracker before spawning thread (AC2, Story #313)
+                # Register job in unified tracker before spawning thread (AC2, Story #313).
+                # Story #1162: use register_job_if_no_conflict so the DB partial unique
+                # index idx_active_job_per_repo acts as a cluster-atomic gate: the first
+                # worker to claim the repo wins; subsequent workers receive DuplicateJobError
+                # and skip dispatch.  This prevents N-worker cost multiplication under
+                # uvicorn --workers N without any in-process lock or shared dict.
+                #
+                # ACCEPTED LIMITATION: _prompt_failure_counts and _failure_commit
+                # (quarantine / circuit-breaker counters) remain per-process dicts.
+                # Cross-worker quarantine-counter consistency is intentionally out of scope
+                # because the DB dedup gate already prevents duplicate concurrent dispatch;
+                # quarantine is defense-in-depth back-off, not the primary cost control.
                 tracked_job_id: Optional[str] = None
                 if self._job_tracker is not None:
                     try:
                         tracked_job_id = f"desc-refresh-{alias}-{uuid.uuid4().hex[:8]}"
-                        self._job_tracker.register_job(
+                        self._job_tracker.register_job_if_no_conflict(
                             tracked_job_id,
                             "description_refresh",
                             username="system",
                             repo_alias=alias,
                         )
+                    except DuplicateJobError:
+                        logger.debug(
+                            f"description_refresh already claimed for {alias} "
+                            f"by another worker; skipping"
+                        )
+                        continue
                     except Exception as e:
                         logger.warning(
                             f"JobTracker registration failed for {alias}: {e}"
