@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.152.0] - 2026-06-20
+
+### Fixed
+- **Bug #1175 - deployment_lock.py PermissionError crash on Python 3.12 with PrivateTmp=yes:** `cidx-auto-update.service` crashed on every invocation when systemd `PrivateTmp=yes` made `/tmp` paths inaccessible. Python 3.12 propagates `PermissionError` from `Path.exists()` instead of returning `False`. Added `_lock_file_exists()` private helper that wraps all three `self.lock_file.exists()` call sites in `deployment_lock.py` with `try/except OSError: return False`. Staging nodes were stuck at old versions and required manual SSH deployment to recover.
+- **Test suite performance - TestExecuteWiring in test_deployment_executor_memory.py:** Four `execute()` wiring tests each took 6-28 seconds because the un-mocked `_wait_for_drain()` made real HTTP calls to localhost:8000 and `_ensure_claude_cli_updated()` blocked for 5s on `npm --version` timeout. Fixed by: (1) adding `patch.object(executor, "_wait_for_drain", return_value=True)` to each `with` block, and (2) pre-stubbing all non-essential execute() steps (6.5-15) with lambda stubs in `_make_executor_with_mocked_steps()`. Tests now complete in 0.94s for 4 tests (was 28s).
+- **test_partial_file_bug.py AttributeError:** `TrackedFilesystemClient` had no `resolve_collection_name` method; fixed in `high_throughput_processor.py` by computing the collection name inline.
+
 ## [10.151.0] - 2026-06-20
 
 ### Fixed

@@ -20,6 +20,12 @@ class DeploymentLock:
         """
         self.lock_file = lock_file
 
+    def _lock_file_exists(self) -> bool:
+        try:
+            return self.lock_file.exists()
+        except OSError:
+            return False
+
     def acquire(self) -> bool:
         """Attempt to acquire deployment lock.
 
@@ -30,7 +36,7 @@ class DeploymentLock:
             IOError: If lock file operations fail
         """
         # Check if lock file exists
-        if self.lock_file.exists():
+        if self._lock_file_exists():
             # Read PID from lock file
             try:
                 with open(self.lock_file, "r+") as f:
@@ -101,7 +107,7 @@ class DeploymentLock:
 
         Does not raise exceptions if lock file doesn't exist or can't be deleted.
         """
-        if not self.lock_file.exists():
+        if not self._lock_file_exists():
             logger.debug(
                 "Lock file doesn't exist, nothing to release",
                 extra={"correlation_id": get_correlation_id()},
@@ -126,7 +132,7 @@ class DeploymentLock:
         Returns:
             True if lock is stale, False if lock is active or doesn't exist
         """
-        if not self.lock_file.exists():
+        if not self._lock_file_exists():
             return False
 
         try:
