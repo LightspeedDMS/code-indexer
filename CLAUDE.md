@@ -426,6 +426,20 @@ Rolling restarts mean old and new nodes share schema during upgrade. MigrationRu
 - **Allowed**: `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`, `CREATE INDEX IF NOT EXISTS`, new nullable columns / columns with defaults
 - **NEVER**: `DROP TABLE`, `DROP COLUMN`, `RENAME TABLE/COLUMN`, `ALTER COLUMN TYPE`, removing NOT NULL
 
+### Migration Concurrent Startup Safety (Story #1164)
+
+Under `uvicorn --workers N` in PostgreSQL cluster mode, `MigrationRunner.run()` is called once per worker process. Without a lock, concurrent workers race on `schema_migrations.filename UNIQUE` and the second committer's startup fails.
+
+Fix: `run()` acquires a PostgreSQL SESSION advisory lock at entry and releases it in a `finally` block.
+
+**Key invariants -- NEVER violate:**
+- Lock key: `_MIGRATION_ADVISORY_LOCK_KEY` in `runner.py` -- stable `int` derived from `sha256(b"cidx_migrations")[:8]` big-endian signed (value `8835134184625913288`). Must be identical on every node.
+- SESSION-level (`pg_advisory_lock`, NOT `pg_advisory_xact_lock`) -- survives the per-migration `COMMIT`/`ROLLBACK` inside `apply_migration`. Released explicitly in `finally`, or automatically on connection close (crashed worker cannot deadlock others).
+- Always parameterized query `%s` -- NEVER f-string-interpolate the key into the SQL.
+- Unlock is in `finally` on ALL paths (success and exception). Migration failures still propagate to the caller; `finally` only unlocks.
+- `run()` return value (applied count `int`) is preserved inside the `try` block unchanged.
+- SQLite path (`database_manager.py` `_migrate_*` helpers) is a separate code path and MUST NOT reference `pg_advisory_lock`.
+
 ### No Environment Variables for Server Settings
 
 Runtime settings belong in the Web UI Config Screen via `get_config_service().get_config()`. Never use `os.environ["CIDX_SETTING"]`.
