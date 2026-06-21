@@ -74,7 +74,10 @@ _STUB_MODULES = [
 ]
 for _mod in _STUB_MODULES:
     if _mod not in sys.modules:
-        sys.modules[_mod] = MagicMock()
+        try:
+            __import__(_mod)
+        except ImportError:
+            sys.modules[_mod] = MagicMock()
 
 
 class TestTemporalVectorStoreBuiltWithHnswCache:
