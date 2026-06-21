@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.154.0] - 2026-06-21
+
+### Fixed
+- **Bug #1176 - spurious WARNING from migrate_legacy_temporal_collection() on every temporal query:** The function treated the `code-indexer-temporal/` metadata tracker directory (containing only `temporal_metadata.db`) as a legacy HNSW collection. The provider-detection chain exhausted and `_detect_from_config()` emitted a WARNING on every `--time-range-all` query. Added early guard after existence check: if `temporal_metadata.db` is present and none of `{hnsw_index.bin, collection_meta.json, temporal_meta.json}` exist, return `SKIPPED` immediately. The guard cannot false-positive on a genuine legacy collection because `collection_meta.json` is always written at `create_collection()` time before any vectors are added.
+
 ## [10.153.0] - 2026-06-21
 
 ### Fixed
