@@ -3285,6 +3285,13 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Story #1166: HNSW/FTS cache caps are divided by worker count in
+        # initialize_services() (service_init.py) BEFORE the eager
+        # get_global_cache()/get_global_fts_cache() calls build the singletons.
+        # No initialize_caches call here — service_init.py is the single source
+        # of truth so that the division is in place when the singletons are first
+        # constructed, not after.
+
         yield  # Server is now running
 
         # Story #1083: close the pooled production httpx client owned by the

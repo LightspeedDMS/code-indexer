@@ -44,6 +44,11 @@ _global_fts_cache_instance = None
 # in config.json / via the documented environment variables.
 DEFAULT_MAX_CACHE_SIZE_MB = 4096
 
+# Story #1166: Minimum per-worker cap so no worker is starved under heavy
+# subdivision (e.g. 32 workers × 4096 MB → 128 MB → floored to 256 MB).
+# Exported for observability / tests.
+MIN_CAP_PER_WORKER_MB = 256
+
 
 def _apply_default_size_cap(
     config: "HNSWIndexCacheConfig | FTSIndexCacheConfig",
@@ -76,12 +81,208 @@ def _apply_default_size_cap(
     )
 
 
+def _divided_cap(configured_cap: int, worker_count: int) -> int:
+    """
+    Compute the per-worker cache cap by dividing *configured_cap* by
+    *worker_count*, floored at MIN_CAP_PER_WORKER_MB.
+
+    Protects against div-by-zero and negative worker counts via
+    ``max(1, worker_count)`` so that misconfigured values (0, -1) fall back
+    to the full cap rather than raising.
+
+    Args:
+        configured_cap: The resolved per-node cap in MB (after default overlay).
+        worker_count: Number of uvicorn workers sharing this node's budget.
+
+    Returns:
+        Effective per-worker cap in MB, always >= MIN_CAP_PER_WORKER_MB.
+    """
+    effective_divisor = max(1, worker_count)
+    raw = configured_cap // effective_divisor
+    return max(MIN_CAP_PER_WORKER_MB, raw)
+
+
+def _load_hnsw_config() -> "HNSWIndexCacheConfig":
+    """
+    Load HNSWIndexCacheConfig from ~/.cidx-server/config.json (if present),
+    falling back to environment variables / defaults, and overlay the
+    opinionated default size cap (Fix B.1).
+
+    Extracted from get_global_cache() to avoid duplication with
+    initialize_caches() (Messi anti-duplication rule).
+
+    Returns:
+        HNSWIndexCacheConfig with max_cache_size_mb guaranteed to be set.
+    """
+    from pathlib import Path
+    import logging
+
+    logger = logging.getLogger(__name__)
+    config_file = Path.home() / ".cidx-server" / "config.json"
+
+    if config_file.exists():
+        try:
+            config = HNSWIndexCacheConfig.from_file(str(config_file))
+            logger.info(
+                f"Loaded HNSW cache config from {config_file}: TTL={config.ttl_minutes}min",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-007",
+                    f"Failed to load cache config from {config_file}: {e}. Using defaults.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            config = HNSWIndexCacheConfig.from_env()
+    else:
+        config = HNSWIndexCacheConfig.from_env()
+        logger.info(
+            f"Initialized HNSW cache with env/default config: TTL={config.ttl_minutes}min",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    # Fix B.1 (Issue #878): overlay opinionated default size cap.
+    _apply_default_size_cap(config, cache_kind="HNSW")
+    return config
+
+
+def _load_fts_config() -> "FTSIndexCacheConfig":
+    """
+    Load FTSIndexCacheConfig from ~/.cidx-server/config.json (if present),
+    falling back to environment variables / defaults, and overlay the
+    opinionated default size cap (Fix B.1).
+
+    Extracted from get_global_fts_cache() to avoid duplication with
+    initialize_caches() (Messi anti-duplication rule).
+
+    Returns:
+        FTSIndexCacheConfig with max_cache_size_mb guaranteed to be set.
+    """
+    from pathlib import Path
+    import logging
+
+    logger = logging.getLogger(__name__)
+    config_file = Path.home() / ".cidx-server" / "config.json"
+
+    if config_file.exists():
+        try:
+            config = FTSIndexCacheConfig.from_file(str(config_file))
+            logger.info(
+                f"Loaded FTS cache config from {config_file}: "
+                f"TTL={config.ttl_minutes}min, reload_on_access={config.reload_on_access}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-008",
+                    f"Failed to load FTS cache config from {config_file}: {e}. Using defaults.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            config = FTSIndexCacheConfig.from_env()
+    else:
+        config = FTSIndexCacheConfig.from_env()
+        logger.info(
+            f"Initialized FTS cache with env/default config: "
+            f"TTL={config.ttl_minutes}min, reload_on_access={config.reload_on_access}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    # Fix B.1 (Issue #878): overlay opinionated default size cap.
+    _apply_default_size_cap(config, cache_kind="FTS")
+    return config
+
+
+def initialize_caches(worker_count: int) -> None:
+    """
+    Eagerly initialize HNSW and FTS index-cache singletons with a per-worker
+    memory budget.
+
+    Under ``uvicorn --workers N`` every worker process builds its own HNSW
+    and FTS singletons.  Without this call each worker would build at the
+    full per-node cap (DEFAULT_MAX_CACHE_SIZE_MB), so a node with N workers
+    can hold up to N × cap of native memory.  This function divides the
+    configured cap by *worker_count* (floored at MIN_CAP_PER_WORKER_MB) so
+    the total stays within the operator-configured budget.
+
+    Must be called BEFORE the first request handler can trigger the lazy
+    ``get_global_cache()`` / ``get_global_fts_cache()`` path.  Idempotent:
+    if either singleton is already initialized it is skipped (no second
+    background-cleanup thread is spawned).
+
+    When ``initialize_caches`` is NOT called (CLI / single-worker / tests),
+    the lazy getters build at the full cap — behaviour is identical to
+    before Story #1166.
+
+    Args:
+        worker_count: Number of uvicorn workers sharing this node's budget.
+            Misconfigured values (0, negative) are safe — they fall back to
+            the full cap via ``max(1, worker_count)``.
+    """
+    import logging
+
+    global _global_cache_instance, _global_fts_cache_instance
+
+    logger = logging.getLogger(__name__)
+
+    # --- HNSW ---
+    if _global_cache_instance is None:
+        hnsw_config = _load_hnsw_config()
+        hnsw_config.max_cache_size_mb = _divided_cap(
+            hnsw_config.max_cache_size_mb,  # type: ignore[arg-type]
+            worker_count,
+        )
+        _global_cache_instance = HNSWIndexCache(config=hnsw_config)
+        _global_cache_instance.start_background_cleanup()
+        logger.info(
+            "Story #1166: HNSW cache initialized with per-worker cap "
+            f"{hnsw_config.max_cache_size_mb}MB "
+            f"(workers={worker_count}, floor={MIN_CAP_PER_WORKER_MB}MB)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    else:
+        logger.debug(
+            "Story #1166: HNSW cache already initialized — skipping re-construction",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+    # --- FTS ---
+    if _global_fts_cache_instance is None:
+        fts_config = _load_fts_config()
+        fts_config.max_cache_size_mb = _divided_cap(
+            fts_config.max_cache_size_mb,  # type: ignore[arg-type]
+            worker_count,
+        )
+        _global_fts_cache_instance = FTSIndexCache(config=fts_config)
+        _global_fts_cache_instance.start_background_cleanup()
+        logger.info(
+            "Story #1166: FTS cache initialized with per-worker cap "
+            f"{fts_config.max_cache_size_mb}MB "
+            f"(workers={worker_count}, floor={MIN_CAP_PER_WORKER_MB}MB)",
+            extra={"correlation_id": get_correlation_id()},
+        )
+    else:
+        logger.debug(
+            "Story #1166: FTS cache already initialized — skipping re-construction",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+
 def get_global_cache() -> HNSWIndexCache:
     """
     Get or create the global HNSW index cache instance.
 
     This is a singleton pattern - one cache instance shared across
     all server components (SemanticQueryManager, FilesystemVectorStore, etc).
+
+    When ``initialize_caches(worker_count)`` has been called during server
+    startup the already-built (per-worker-capped) singleton is returned
+    unchanged.  When it has NOT been called (CLI / single-worker / tests)
+    the singleton is built here at the full DEFAULT_MAX_CACHE_SIZE_MB cap,
+    preserving pre-Story-#1166 behaviour exactly.
 
     The cache is initialized with configuration from:
     1. ~/.cidx-server/config.json (if exists)
@@ -94,44 +295,8 @@ def get_global_cache() -> HNSWIndexCache:
     global _global_cache_instance
 
     if _global_cache_instance is None:
-        # Try to load configuration from server config file
-        from pathlib import Path
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        config_file = Path.home() / ".cidx-server" / "config.json"
-
-        if config_file.exists():
-            try:
-                config = HNSWIndexCacheConfig.from_file(str(config_file))
-                logger.info(
-                    f"Loaded HNSW cache config from {config_file}: TTL={config.ttl_minutes}min",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "GIT-GENERAL-007",
-                        f"Failed to load cache config from {config_file}: {e}. Using defaults.",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-                config = HNSWIndexCacheConfig.from_env()
-        else:
-            # Try environment variables, fall back to defaults
-            config = HNSWIndexCacheConfig.from_env()
-            logger.info(
-                f"Initialized HNSW cache with env/default config: TTL={config.ttl_minutes}min",
-                extra={"correlation_id": get_correlation_id()},
-            )
-
-        # Fix B.1 (Issue #878): overlay opinionated default size cap.
-        _apply_default_size_cap(config, cache_kind="HNSW")
-
+        config = _load_hnsw_config()
         _global_cache_instance = HNSWIndexCache(config=config)
-
-        # Start background cleanup thread
         _global_cache_instance.start_background_cleanup()
 
     return _global_cache_instance
@@ -157,6 +322,12 @@ def get_global_fts_cache() -> FTSIndexCache:
     This is a singleton pattern - one cache instance shared across
     all server components for FTS search operations.
 
+    When ``initialize_caches(worker_count)`` has been called during server
+    startup the already-built (per-worker-capped) singleton is returned
+    unchanged.  When it has NOT been called (CLI / single-worker / tests)
+    the singleton is built here at the full DEFAULT_MAX_CACHE_SIZE_MB cap,
+    preserving pre-Story-#1166 behaviour exactly.
+
     The cache is initialized with configuration from:
     1. ~/.cidx-server/config.json (if exists)
     2. Environment variables (CIDX_FTS_CACHE_TTL_MINUTES)
@@ -168,45 +339,8 @@ def get_global_fts_cache() -> FTSIndexCache:
     global _global_fts_cache_instance
 
     if _global_fts_cache_instance is None:
-        from pathlib import Path
-        import logging
-
-        logger = logging.getLogger(__name__)
-
-        config_file = Path.home() / ".cidx-server" / "config.json"
-
-        if config_file.exists():
-            try:
-                config = FTSIndexCacheConfig.from_file(str(config_file))
-                logger.info(
-                    f"Loaded FTS cache config from {config_file}: "
-                    f"TTL={config.ttl_minutes}min, reload_on_access={config.reload_on_access}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "GIT-GENERAL-008",
-                        f"Failed to load FTS cache config from {config_file}: {e}. Using defaults.",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-                config = FTSIndexCacheConfig.from_env()
-        else:
-            # Try environment variables, fall back to defaults
-            config = FTSIndexCacheConfig.from_env()
-            logger.info(
-                f"Initialized FTS cache with env/default config: "
-                f"TTL={config.ttl_minutes}min, reload_on_access={config.reload_on_access}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-
-        # Fix B.1 (Issue #878): overlay opinionated default size cap.
-        _apply_default_size_cap(config, cache_kind="FTS")
-
+        config = _load_fts_config()
         _global_fts_cache_instance = FTSIndexCache(config=config)
-
-        # Start background cleanup thread
         _global_fts_cache_instance.start_background_cleanup()
 
     return _global_fts_cache_instance
@@ -264,4 +398,7 @@ __all__ = [
     "CacheNotFoundError",
     # Fix B.1 default size cap (exported for observability / tests)
     "DEFAULT_MAX_CACHE_SIZE_MB",
+    # Story #1166: per-worker budget division (exported for observability / tests)
+    "MIN_CAP_PER_WORKER_MB",
+    "initialize_caches",
 ]

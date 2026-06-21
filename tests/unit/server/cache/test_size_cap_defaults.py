@@ -230,3 +230,197 @@ class TestDefaultAppliedLogMessage:
             get_global_fts_cache()
 
         self._assert_default_applied_info_log(caplog)
+
+
+# ---------------------------------------------------------------------------
+# Story #1166 helpers — extract effective cap from initialized singletons
+# ---------------------------------------------------------------------------
+
+
+def _configured_hnsw_cap(cache_module: ModuleType) -> int:
+    """Return effective max_cache_size_mb from the HNSW singleton."""
+    instance = cache_module._global_cache_instance
+    assert instance is not None, "HNSW singleton must be initialized"
+    return instance.config.max_cache_size_mb  # type: ignore[no-any-return]
+
+
+def _configured_fts_cap(cache_module: ModuleType) -> int:
+    """Return effective max_cache_size_mb from the FTS singleton."""
+    instance = cache_module._global_fts_cache_instance
+    assert instance is not None, "FTS singleton must be initialized"
+    return instance.config.max_cache_size_mb  # type: ignore[no-any-return]
+
+
+# ---------------------------------------------------------------------------
+# Story #1166: initialize_caches per-worker budget division tests
+# ---------------------------------------------------------------------------
+
+
+class TestInitializeCaches:
+    """Story #1166: initialize_caches(worker_count) divides caps by N workers."""
+
+    def test_ac1_four_workers_divides_cap(self) -> None:
+        """
+        AC1: With 4096 MB default cap and 4 workers, each singleton gets
+        4096 // 4 == 1024 MB.  Both HNSW and FTS must reflect the divided cap.
+        """
+        import code_indexer.server.cache as cache_module
+        from code_indexer.server.cache import initialize_caches
+
+        initialize_caches(worker_count=4)
+
+        assert _configured_hnsw_cap(cache_module) == 1024, (
+            "HNSW cap should be 4096//4=1024 with 4 workers; "
+            f"got {_configured_hnsw_cap(cache_module)}"
+        )
+        assert _configured_fts_cap(cache_module) == 1024, (
+            "FTS cap should be 4096//4=1024 with 4 workers; "
+            f"got {_configured_fts_cap(cache_module)}"
+        )
+
+    def test_ac2_one_worker_cap_unchanged(self) -> None:
+        """
+        AC2 regression: With 1 worker, caps remain at 4096 — identical to
+        today's lazy-getter behaviour.  No division must occur.
+        """
+        import code_indexer.server.cache as cache_module
+        from code_indexer.server.cache import (
+            initialize_caches,
+            DEFAULT_MAX_CACHE_SIZE_MB,
+        )
+
+        initialize_caches(worker_count=1)
+
+        assert _configured_hnsw_cap(cache_module) == DEFAULT_MAX_CACHE_SIZE_MB, (
+            f"1-worker HNSW cap must equal DEFAULT_MAX_CACHE_SIZE_MB="
+            f"{DEFAULT_MAX_CACHE_SIZE_MB}; got {_configured_hnsw_cap(cache_module)}"
+        )
+        assert _configured_fts_cap(cache_module) == DEFAULT_MAX_CACHE_SIZE_MB, (
+            f"1-worker FTS cap must equal DEFAULT_MAX_CACHE_SIZE_MB="
+            f"{DEFAULT_MAX_CACHE_SIZE_MB}; got {_configured_fts_cap(cache_module)}"
+        )
+
+    def test_ac3_over_division_floor(self) -> None:
+        """
+        AC3: With 32 workers and a 4096 MB cap, 4096 // 32 == 128 which is
+        below MIN_CAP_PER_WORKER_MB (256).  The floor must apply: caps == 256.
+        """
+        import code_indexer.server.cache as cache_module
+        from code_indexer.server.cache import initialize_caches, MIN_CAP_PER_WORKER_MB
+
+        initialize_caches(worker_count=32)
+
+        assert _configured_hnsw_cap(cache_module) == MIN_CAP_PER_WORKER_MB, (
+            f"HNSW cap must floor at MIN_CAP_PER_WORKER_MB={MIN_CAP_PER_WORKER_MB} "
+            f"when division yields a smaller value; got {_configured_hnsw_cap(cache_module)}"
+        )
+        assert _configured_fts_cap(cache_module) == MIN_CAP_PER_WORKER_MB, (
+            f"FTS cap must floor at MIN_CAP_PER_WORKER_MB={MIN_CAP_PER_WORKER_MB} "
+            f"when division yields a smaller value; got {_configured_fts_cap(cache_module)}"
+        )
+
+    def test_misconfig_zero_worker_count_prevents_div_by_zero(self) -> None:
+        """
+        worker_count=0 must not raise ZeroDivisionError. The effective divisor
+        is max(1, 0) == 1, so the full DEFAULT_MAX_CACHE_SIZE_MB cap is used.
+        """
+        import code_indexer.server.cache as cache_module
+        from code_indexer.server.cache import (
+            initialize_caches,
+            DEFAULT_MAX_CACHE_SIZE_MB,
+        )
+
+        initialize_caches(worker_count=0)
+
+        assert _configured_hnsw_cap(cache_module) == DEFAULT_MAX_CACHE_SIZE_MB, (
+            "worker_count=0 must treat divisor as 1 (full cap); "
+            f"got {_configured_hnsw_cap(cache_module)}"
+        )
+        assert _configured_fts_cap(cache_module) == DEFAULT_MAX_CACHE_SIZE_MB, (
+            "worker_count=0 must treat divisor as 1 (full cap) for FTS; "
+            f"got {_configured_fts_cap(cache_module)}"
+        )
+
+    def test_misconfig_negative_worker_count_prevents_div_by_zero(self) -> None:
+        """
+        Negative worker_count (e.g. -1) must not raise. Effective divisor is
+        max(1, -1) == 1 so caps equal DEFAULT_MAX_CACHE_SIZE_MB for both caches.
+        """
+        import code_indexer.server.cache as cache_module
+        from code_indexer.server.cache import (
+            initialize_caches,
+            DEFAULT_MAX_CACHE_SIZE_MB,
+        )
+
+        initialize_caches(worker_count=-1)
+
+        assert _configured_hnsw_cap(cache_module) == DEFAULT_MAX_CACHE_SIZE_MB, (
+            "Negative worker_count must treat divisor as 1 (full cap); "
+            f"got {_configured_hnsw_cap(cache_module)}"
+        )
+        assert _configured_fts_cap(cache_module) == DEFAULT_MAX_CACHE_SIZE_MB, (
+            "Negative worker_count must treat divisor as 1 (full cap) for FTS; "
+            f"got {_configured_fts_cap(cache_module)}"
+        )
+
+    def test_no_double_construct_lazy_getter_returns_same_instance(self) -> None:
+        """
+        After initialize_caches(4), calling get_global_cache() and
+        get_global_fts_cache() MUST return the already-built singleton with
+        the DIVIDED cap — not reconstruct a new full-cap instance.
+        """
+        import code_indexer.server.cache as cache_module
+        from code_indexer.server.cache import (
+            initialize_caches,
+            get_global_cache,
+            get_global_fts_cache,
+        )
+
+        initialize_caches(worker_count=4)
+
+        hnsw_after_init = cache_module._global_cache_instance
+        fts_after_init = cache_module._global_fts_cache_instance
+
+        hnsw_via_getter = get_global_cache()
+        fts_via_getter = get_global_fts_cache()
+
+        assert hnsw_via_getter is hnsw_after_init, (
+            "get_global_cache() must return the already-built singleton; "
+            "a new full-cap instance was returned instead"
+        )
+        assert fts_via_getter is fts_after_init, (
+            "get_global_fts_cache() must return the already-built singleton; "
+            "a new full-cap instance was returned instead"
+        )
+        assert hnsw_via_getter.config.max_cache_size_mb == 1024, (
+            "Lazy getter must NOT overwrite the divided cap with the full cap; "
+            f"got {hnsw_via_getter.config.max_cache_size_mb}"
+        )
+        assert fts_via_getter.config.max_cache_size_mb == 1024, (
+            "Lazy getter must NOT overwrite the FTS divided cap; "
+            f"got {fts_via_getter.config.max_cache_size_mb}"
+        )
+
+    def test_lazy_fallback_unchanged_when_initialize_not_called(self) -> None:
+        """
+        When initialize_caches is NOT called, get_global_cache() must build
+        at the full DEFAULT_MAX_CACHE_SIZE_MB cap — CLI / single-worker
+        behaviour is completely unchanged.
+        """
+        import code_indexer.server.cache as cache_module
+        from code_indexer.server.cache import (
+            get_global_cache,
+            DEFAULT_MAX_CACHE_SIZE_MB,
+        )
+
+        assert cache_module._global_cache_instance is None, (
+            "Singleton must be None before lazy getter call"
+        )
+
+        cache = get_global_cache()
+
+        assert cache.config.max_cache_size_mb == DEFAULT_MAX_CACHE_SIZE_MB, (
+            "Lazy getter (no initialize_caches call) must build at full "
+            f"DEFAULT_MAX_CACHE_SIZE_MB={DEFAULT_MAX_CACHE_SIZE_MB}; "
+            f"got {cache.config.max_cache_size_mb}"
+        )
