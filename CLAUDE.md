@@ -365,6 +365,17 @@ Server-side cache of query embeddings on the query path, both providers (voyage-
 
 -> Full reference: `docs/query-embedding-cache.md`
 
+### FSV skip_staleness_check for Immutable Versioned Snapshots (Bug #1181 Perf Fix #3)
+
+`FilesystemVectorStore._get_chunk_content_with_staleness` previously called `_compute_file_hash` (reads the entire file + SHA-1) for every git-repo result on every query. For an immutable `.versioned/{alias}/v_{ts}` snapshot the file cannot change, so this second whole-file read is pure overhead.
+
+**Key invariants**:
+- `FilesystemVectorStore.__init__` accepts `skip_staleness_check: bool = False`. Default False = CLI and mutable-path behavior byte-identical. No existing call sites change.
+- When `skip_staleness_check=True`: Tier-1 branch (file exists) reads content once, then returns immediately as NOT stale WITHOUT calling `_compute_file_hash`. File-deleted branch is unaffected (fires before the skip guard).
+- Non-git / payload-content results are unaffected (early return path, never calls `_compute_file_hash`).
+- `FilesystemBackend.get_vector_store_client()` sets the flag: inside the existing `if self.hnsw_index_cache is not None:` server-mode guard, calls `is_immutable_versioned_snapshot(str(self.project_root))` (from `server/services/query_path_cache.py`). Import is server-mode-only so CLI never loads server modules.
+- Mutable base clones, activated CoW repos, and CLI mode all leave the flag False and continue the full staleness check. The immutability predicate is the SINGLE source of truth -- never skip for any path not proven by `is_immutable_versioned_snapshot`.
+
 ### Canonical Versioned-Snapshot Convention + Backend-Aware Cleanup (Bug #1084 Phase A)
 
 Old versioned snapshots used to leak forever on the cow-daemon/ONTAP backends because cleanup was gated on the literal substring `".versioned" in current_target`, which only matches the LocalCloneBackend layout. Phase A replaces that with ONE canonical convention + ONE predicate + backend-aware deletion.
