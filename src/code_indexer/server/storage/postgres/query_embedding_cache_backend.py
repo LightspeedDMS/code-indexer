@@ -189,17 +189,21 @@ class QueryEmbeddingCachePostgresBackend:
         try:
             with self._pool.connection() as conn:
                 conn.execute("SET LOCAL synchronous_commit = off")
-                conn.executemany(
-                    """
-                    UPDATE query_embedding_cache
-                    SET last_used = %s
-                    WHERE cache_key = %s
-                      AND provider  = %s
-                      AND model     = %s
-                      AND dimension = %s
-                    """,
-                    params,
-                )
+                # psycopg v3: executemany lives on the cursor, NOT the connection.
+                # Using the cursor keeps this in the SAME transaction as the
+                # SET LOCAL above and the single commit() below.
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        UPDATE query_embedding_cache
+                        SET last_used = %s
+                        WHERE cache_key = %s
+                          AND provider  = %s
+                          AND model     = %s
+                          AND dimension = %s
+                        """,
+                        params,
+                    )
                 conn.commit()
         except Exception as exc:
             logger.warning(

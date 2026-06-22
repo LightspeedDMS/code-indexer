@@ -130,20 +130,24 @@ class PayloadCachePostgresBackend:
                 # Bug #1181: Relax WAL fsync for ephemeral payload_cache writes.
                 # SET LOCAL is per-transaction; does not affect other statement types.
                 conn.execute("SET LOCAL synchronous_commit = off")
-                conn.executemany(
-                    """
-                    INSERT INTO payload_cache
-                        (cache_handle, content, preview, created_at, ttl_seconds, node_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (cache_handle) DO UPDATE SET
-                        content = EXCLUDED.content,
-                        preview = EXCLUDED.preview,
-                        created_at = EXCLUDED.created_at,
-                        ttl_seconds = EXCLUDED.ttl_seconds,
-                        node_id = EXCLUDED.node_id
-                    """,
-                    rows,
-                )
+                # psycopg v3: executemany lives on the cursor, NOT the connection.
+                # Using the cursor keeps this in the SAME transaction as the
+                # SET LOCAL above and the single commit() below.
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO payload_cache
+                            (cache_handle, content, preview, created_at, ttl_seconds, node_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (cache_handle) DO UPDATE SET
+                            content = EXCLUDED.content,
+                            preview = EXCLUDED.preview,
+                            created_at = EXCLUDED.created_at,
+                            ttl_seconds = EXCLUDED.ttl_seconds,
+                            node_id = EXCLUDED.node_id
+                        """,
+                        rows,
+                    )
                 conn.commit()
         except Exception as exc:
             logger.warning("PayloadCachePostgresBackend: store_batch failed: %s", exc)

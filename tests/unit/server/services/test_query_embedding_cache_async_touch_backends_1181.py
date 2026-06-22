@@ -171,15 +171,32 @@ class TestPostgresBackendTouchLastUsedBatch:
         """SET LOCAL synchronous_commit=off must appear BEFORE any UPDATE statement."""
         executed_stmts: List[str] = []
 
+        class FakeCursor:
+            """Models a psycopg v3 cursor: executemany lives HERE, not on the connection."""
+
+            def execute(self, sql: str, params=None) -> None:
+                executed_stmts.append(sql.strip())
+
+            def executemany(self, sql: str, params_seq) -> None:
+                # Record the SQL template once per executemany call
+                executed_stmts.append(sql.strip())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
         class FakeConn:
+            # psycopg v3 Connection: execute() is a convenience method on the connection
+            # (used for the SET LOCAL statement), but executemany() lives on the cursor.
+            # Modelling this faithfully is what catches the Bug #1181 regression.
             def execute(self, sql: str, params=None):
                 executed_stmts.append(sql.strip())
                 return self
 
-            def executemany(self, sql: str, params_seq):
-                # Record the SQL template once per executemany call
-                executed_stmts.append(sql.strip())
-                return self
+            def cursor(self):
+                return FakeCursor()
 
             def commit(self) -> None:
                 pass

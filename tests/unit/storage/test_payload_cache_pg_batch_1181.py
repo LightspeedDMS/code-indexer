@@ -26,13 +26,33 @@ def _make_backend_with_tracking():
     commit_count: List[int] = [0]
     connection_acquisitions: List[int] = [0]
 
-    class FakeConn:
+    class FakeCursor:
+        """Models a psycopg v3 cursor: this is where execute/executemany live."""
+
         def execute(self, sql, params=None):
             executed_statements.append(sql.strip())
             return MagicMock(rowcount=len(params) if isinstance(params, list) else 1)
 
         def executemany(self, sql, params_list):
             executed_statements.append(sql.strip())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    class FakeConn:
+        # psycopg v3 Connection has execute() (convenience) and cursor(), but
+        # NOT executemany() — that lives on the cursor. Modelling this faithfully
+        # is what catches the Bug #1181 'Connection has no attribute executemany'
+        # regression that the previous mock hid.
+        def execute(self, sql, params=None):
+            executed_statements.append(sql.strip())
+            return MagicMock(rowcount=len(params) if isinstance(params, list) else 1)
+
+        def cursor(self):
+            return FakeCursor()
 
         def commit(self):
             commit_count[0] += 1
