@@ -69,14 +69,29 @@ def _stop_and_clear_singletons(cache_module: ModuleType) -> None:
 def _reset_cache_singletons(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> Iterator[None]:
-    """Reset HNSW/FTS singletons around every test and isolate Path.home()."""
+    """Reset HNSW/FTS singletons around every test and isolate Path.home().
+
+    ISOLATION NOTE: server-fast-automation.sh sets CIDX_SERVER_DATA_DIR to a
+    per-chunk temp dir.  ServerConfigManager honours that env var with higher
+    priority than Path.home(), so the Path.home() monkeypatch alone is not
+    enough to redirect config reads.  We therefore also patch the env var so
+    that get_config_service() reads from the same directory that _write_config()
+    writes to (tmp_path / ".cidx-server").  This makes the tests self-defending
+    regardless of what the runner injects.
+    """
+    server_dir = tmp_path / ".cidx-server"
+    server_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("CIDX_SERVER_DATA_DIR", str(server_dir))
 
     import code_indexer.server.cache as cache_module
+    from code_indexer.server.services.config_service import reset_config_service
 
+    reset_config_service()  # discard any singleton built against a different dir
     _stop_and_clear_singletons(cache_module)
     yield
     _stop_and_clear_singletons(cache_module)
+    reset_config_service()  # prevent leaking config state to subsequent tests
 
 
 # ---------------------------------------------------------------------------
