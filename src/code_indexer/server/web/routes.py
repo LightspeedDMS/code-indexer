@@ -86,6 +86,7 @@ RESTART_REQUIRED_FIELDS = [
     "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
+    "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
 ]
 
 
@@ -366,12 +367,60 @@ def get_csrf_token_from_cookie(request: Request) -> Optional[str]:
 # See login_router below for unified login implementation
 
 
+def _extract_jti_from_request(request: Request) -> "Optional[str]":
+    """Extract the JWT jti claim from an incoming request.
+
+    Checks the Authorization: Bearer <token> header first, then falls back
+    to the CIDX_SESSION_COOKIE cookie.  Returns None (never raises) when:
+      - no token is present
+      - the token is malformed or expired (expected at logout time)
+      - jwt_manager is not initialized
+      - any unexpected error occurs (logged at DEBUG)
+    """
+    from ..auth.dependencies import CIDX_SESSION_COOKIE
+    from ..auth import dependencies as _deps
+    from ..auth.jwt_manager import TokenExpiredError, InvalidTokenError
+
+    try:
+        _jm = _deps.jwt_manager
+        if _jm is None:
+            return None
+
+        # Try Authorization header first (REST/MCP clients)
+        token: Optional[str] = None
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer ") :]
+
+        # Fall back to session cookie (Web UI)
+        if not token:
+            token = request.cookies.get(CIDX_SESSION_COOKIE)
+
+        if not token:
+            return None
+
+        payload = _jm.validate_token(token)
+        return payload.get("jti")
+
+    except (TokenExpiredError, InvalidTokenError):
+        # Expected: token is expired or malformed; jti cannot be extracted.
+        # This is normal — the client's token may already be invalid.
+        return None
+    except Exception:
+        logger.debug(
+            "_extract_jti_from_request: unexpected error extracting jti",
+            exc_info=True,
+        )
+        return None
+
+
 @web_router.get("/logout")
 def logout(request: Request):
     """
     Logout and clear session.
 
     Redirects to unified login page after clearing session.
+    Story #1163: also blacklists the JWT jti for cross-worker revocation.
     """
     # Story #923 AC8: revoke any elevation window for this session
     from code_indexer.server.auth.elevated_session_manager import (
@@ -388,6 +437,24 @@ def logout(request: Request):
                 session_key,
                 exc_info=True,
             )
+
+    # Story #1163 AC1: blacklist the JWT jti so all workers/nodes reject it.
+    # Non-fatal — any failure here must not block the logout redirect.
+    try:
+        jti = _extract_jti_from_request(request)
+        if jti:
+            from code_indexer.server.app import get_token_blacklist
+
+            get_token_blacklist().add(jti)
+        else:
+            logger.warning(
+                "logout: could not extract jti from request; token revocation skipped"
+            )
+    except Exception:
+        logger.warning(
+            "logout: failed to blacklist jti; proceeding with session clear",
+            exc_info=True,
+        )
 
     session_manager = get_session_manager()
     response = RedirectResponse(
@@ -6339,6 +6406,25 @@ def _get_current_config() -> dict:
         "cidx_meta_backup": settings.get(
             "cidx_meta_backup", {"enabled": False, "remote_url": ""}
         ),
+        # Bug #1179: search_event_log section was missing, causing Jinja
+        # UndefinedError (HTTP 500) on every admin Config page render.
+        # Both fields are rendered inside the same <details id="section-search_event_log">
+        # block (template lines 2440/2445/2464/2471), so they are merged here
+        # into one dict under the "search_event_log" key.
+        # search_event_log_retention_days comes from settings["search_event_log"]
+        # (Issue #1159); export_retention_days comes from settings["export"]
+        # (Issue #1160).
+        "search_event_log": {
+            **settings.get(
+                "search_event_log",
+                {"search_event_log_retention_days": 90},
+            ),
+            **{
+                "export_retention_days": settings.get("export", {}).get(
+                    "export_retention_days", 30
+                )
+            },
+        },
     }
 
 
@@ -6365,8 +6451,8 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if workers is not None:
             try:
                 workers_int = int(workers)
-                if workers_int < 1:
-                    return "Workers must be a positive number"
+                if workers_int < 1 or workers_int > 64:
+                    return "Workers must be between 1 and 64"
             except (ValueError, TypeError):
                 return "Workers must be a valid number"
 
@@ -9690,6 +9776,7 @@ def user_logout(request: Request):
     Logout and clear session for user portal.
 
     Redirects to unified login page after clearing session.
+    Story #1163: also blacklists the JWT jti for cross-worker revocation.
     """
     # Story #923 AC8: revoke any elevation window for this session
     from code_indexer.server.auth.elevated_session_manager import (
@@ -9706,6 +9793,24 @@ def user_logout(request: Request):
                 session_key,
                 exc_info=True,
             )
+
+    # Story #1163 AC1: blacklist the JWT jti so all workers/nodes reject it.
+    # Non-fatal — any failure here must not block the logout redirect.
+    try:
+        jti = _extract_jti_from_request(request)
+        if jti:
+            from code_indexer.server.app import get_token_blacklist
+
+            get_token_blacklist().add(jti)
+        else:
+            logger.warning(
+                "user_logout: could not extract jti from request; token revocation skipped"
+            )
+    except Exception:
+        logger.warning(
+            "user_logout: failed to blacklist jti; proceeding with session clear",
+            exc_info=True,
+        )
 
     session_manager = get_session_manager()
     response = RedirectResponse(

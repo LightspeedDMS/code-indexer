@@ -173,6 +173,7 @@ code-indexer-temporal*/
 /reports/bugs/
 /reports/testing/
 /reports/*.md
+/reports/perf/
 
 # Test mock artifacts (should not be committed)
 /MagicMock/

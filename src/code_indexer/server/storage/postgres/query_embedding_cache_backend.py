@@ -12,7 +12,7 @@ the SQLite BLOB representation.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
 
@@ -160,6 +160,57 @@ class QueryEmbeddingCachePostgresBackend:
         except Exception as exc:
             logger.warning(
                 "QueryEmbeddingCachePostgresBackend: touch_last_used failed: %s", exc
+            )
+
+    def touch_last_used_batch(
+        self,
+        items: List[Tuple[str, str, str, int, float]],
+    ) -> None:
+        """Update last_used for multiple rows in a single batch transaction.
+
+        Bug #1181 Perf Fix #2: drains the async touch flusher's coalescing buffer
+        in one transaction.  Uses SET LOCAL synchronous_commit = off because
+        last_used is ephemeral LRU bookkeeping — a crash losing a buffered touch
+        is acceptable; the row remains valid, just not freshly time-stamped.
+
+        Args:
+            items: List of (cache_key, provider, model, dimension, last_used) tuples.
+                Empty list is a no-op (no DB connection opened).
+        """
+        if not items:
+            return
+
+        # Reorder to (last_used, cache_key, provider, model, dimension) for the UPDATE
+        params = [
+            (last_used, cache_key, provider, model, dimension)
+            for cache_key, provider, model, dimension, last_used in items
+        ]
+
+        try:
+            with self._pool.connection() as conn:
+                conn.execute("SET LOCAL synchronous_commit = off")
+                # psycopg v3: executemany lives on the cursor, NOT the connection.
+                # Using the cursor keeps this in the SAME transaction as the
+                # SET LOCAL above and the single commit() below.
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        UPDATE query_embedding_cache
+                        SET last_used = %s
+                        WHERE cache_key = %s
+                          AND provider  = %s
+                          AND model     = %s
+                          AND dimension = %s
+                        """,
+                        params,
+                    )
+                conn.commit()
+        except Exception as exc:
+            logger.warning(
+                "QueryEmbeddingCachePostgresBackend: touch_last_used_batch failed "
+                "(fail-open, %d items): %s",
+                len(items),
+                exc,
             )
 
     def prune_to_max(self, max_entries: int) -> int:

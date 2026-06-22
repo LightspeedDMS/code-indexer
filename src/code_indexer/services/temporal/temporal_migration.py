@@ -64,6 +64,20 @@ def migrate_legacy_temporal_collection(
     if not legacy_dir.exists() or not legacy_dir.is_dir():
         return _check_stale_sentinel(index_path, config)
 
+    # Guard: skip the metadata-tracker layout (Bug #1176).
+    # code-indexer-temporal/ is also used as a metadata tracker that contains
+    # only temporal_metadata.db.  When the provider detection chain runs on
+    # this directory it exhausts all strategies and _detect_from_config()
+    # emits a spurious WARNING on every temporal query.
+    # Discriminator: the directory has temporal_metadata.db but none of the
+    # known HNSW collection files (hnsw_index.bin, collection_meta.json,
+    # temporal_meta.json).
+    _hnsw_markers = ("hnsw_index.bin", "collection_meta.json", "temporal_meta.json")
+    if (legacy_dir / "temporal_metadata.db").exists() and not any(
+        (legacy_dir / m).exists() for m in _hnsw_markers
+    ):
+        return MigrationResult.SKIPPED
+
     model_name = _detect_provider_from_disk(legacy_dir, config)
     target_name = resolve_temporal_collection_name(model_name)
     target_dir = index_path / target_name

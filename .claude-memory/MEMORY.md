@@ -27,6 +27,7 @@
 - [feedback_xray_queries_not_in_dashboard.md](feedback_xray_queries_not_in_dashboard.md) - xray_search/xray_search_batch jobs must NOT appear in the dashboard — user explicitly requires this
 
 - [feedback_run_tests_with_timeout_and_monitor.md](feedback_run_tests_with_timeout_and_monitor.md) - NEVER launch tests without --timeout and active monitoring; know expected duration before running; fast-automation ≤10min, server-fast ≤15min, unit files ≤30s
+- [feedback_faithful_db_mocks.md](feedback_faithful_db_mocks.md) - DB mocks must mirror the real driver; psycopg3 executemany is on the cursor NOT the connection; unfaithful FakeConn certified silent-no-op writes — verify storage writes against real PG
 
 ## Workflow Preferences
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - ALWAYS switch to development branch before committing — never commit on master/staging

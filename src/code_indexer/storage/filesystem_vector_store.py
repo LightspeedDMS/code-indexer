@@ -275,6 +275,7 @@ class FilesystemVectorStore:
         project_root: Optional[Path] = None,
         hnsw_index_cache: Optional[Any] = None,
         id_index_cache: Optional[Any] = None,
+        skip_staleness_check: bool = False,
     ):
         """Initialize filesystem vector store.
 
@@ -283,6 +284,9 @@ class FilesystemVectorStore:
             project_root: Root directory of the project being indexed (for git operations)
             hnsw_index_cache: Optional HNSW index cache for server-side performance (Story #526)
             id_index_cache: Optional id_index cache for server-side performance (Bug #1078)
+            skip_staleness_check: When True, skip _compute_file_hash in the git-repo Tier 1
+                branch for immutable versioned snapshots (Bug #1181 Perf Fix #3). Default
+                False preserves byte-identical CLI and mutable-path behavior.
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -332,6 +336,11 @@ class FilesystemVectorStore:
         # Bug #1078: Server-side id_index cache to eliminate per-query pathlib deserialization
         # (~33% GIL time). Mirrors HNSW cache pattern. None in CLI/standalone mode.
         self.id_index_cache = id_index_cache
+
+        # Bug #1181 Perf Fix #3: skip _compute_file_hash for immutable versioned snapshots.
+        # Set True by the server layer when project_root is a proven-immutable .versioned path.
+        # Default False preserves byte-identical CLI and mutable-path behavior.
+        self.skip_staleness_check: bool = skip_staleness_check
 
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}
@@ -2895,6 +2904,17 @@ class FilesystemVectorStore:
                     with open(full_path) as f:
                         lines = f.readlines()
                         chunk_content = "".join(lines[(start_line - 1) : end_line])
+
+                    # Bug #1181 Perf Fix #3: for immutable versioned snapshots the file
+                    # cannot have changed since indexing, so skip the second whole-file
+                    # read + SHA-1 (_compute_file_hash) and return fresh immediately.
+                    if self.skip_staleness_check:
+                        return chunk_content, {
+                            "is_stale": False,
+                            "staleness_indicator": None,
+                            "staleness_reason": None,
+                            "hash_mismatch": False,
+                        }
 
                     # Compute current file hash
                     current_hash = self._compute_file_hash(full_path)

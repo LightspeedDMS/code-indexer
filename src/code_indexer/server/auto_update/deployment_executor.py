@@ -1798,10 +1798,12 @@ class DeploymentExecutor:
             return False
 
     def _ensure_workers_config(self) -> bool:
-        """Ensure systemd service has --workers 1 configured.
+        """Ensure systemd service has the configured --workers count set.
 
-        Single worker maintains in-memory cache coherency (HNSW, FTS, OmniCache).
-        Multiple workers duplicate caches and break cursor-based pagination.
+        Reads the worker count from ServerConfigManager (bootstrap config) and
+        writes it into the ExecStart line.  Uses max(1, ...) to guard against
+        a misconfigured zero or negative value.  Single-writer invariant: this
+        is the only method that writes a --workers token to the unit file.
 
         Returns:
             True if config is correct or was updated, False on error
@@ -1809,6 +1811,14 @@ class DeploymentExecutor:
         service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
 
         try:
+            # Read configured worker count — same idiom as other _ensure_* methods.
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            _config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
+            worker_count = max(1, getattr(_config, "workers", 1) or 1)
+
             if not service_path.exists():
                 logger.warning(
                     format_error_log(
@@ -1821,7 +1831,7 @@ class DeploymentExecutor:
 
             content = service_path.read_text()
 
-            # Check if --workers is already configured
+            # Check if --workers is already configured (idempotency guard)
             if "--workers" in content:
                 logger.debug(
                     "Workers config already present in service file",
@@ -1829,17 +1839,16 @@ class DeploymentExecutor:
                 )
                 return True
 
-            # Add --workers 1 to ExecStart line
+            # Add --workers {worker_count} to ExecStart line
             if "ExecStart=" in content and "uvicorn" in content:
-                # Find ExecStart line and add --workers 1
+                # Find ExecStart line and append --workers N
                 lines = content.split("\n")
                 updated_lines = []
                 modified = False
 
                 for line in lines:
                     if line.startswith("ExecStart=") and "uvicorn" in line:
-                        # Add --workers 1 before any newline
-                        line = line.rstrip() + " --workers 1"
+                        line = line.rstrip() + f" --workers {worker_count}"
                         modified = True
                     updated_lines.append(line)
 
@@ -1863,14 +1872,23 @@ class DeploymentExecutor:
                         )
                         return False
 
-                    # Reload systemd
-                    subprocess.run(
+                    # Reload systemd (non-fatal: unit file already written)
+                    reload_result = subprocess.run(
                         ["sudo", "systemctl", "daemon-reload"],
                         capture_output=True,
+                        text=True,
                     )
+                    if reload_result.returncode != 0:
+                        logger.warning(
+                            format_error_log(
+                                "DEPLOY-GENERAL-173",
+                                f"daemon-reload failed after workers update: {reload_result.stderr}",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
 
                     logger.info(
-                        "Added --workers 1 to service file",
+                        f"Added --workers {worker_count} to service file",
                         extra={"correlation_id": get_correlation_id()},
                     )
 

@@ -204,6 +204,8 @@ Every story DoD must require `./lint.sh` to exit 0 BEFORE merging back to `devel
 
 **`PayloadCache` is the designated system for ephemeral cross-node data** (job results, large search payloads, delegation results). It is wired at `app.state.payload_cache` (lifespan). PostgreSQL backend in cluster mode (`payload_cache` table, shared across all nodes). TTL-evicted (default 900s, Web UI configurable). Key methods: `store_with_key(key, content)`, `has_key(key)`, `retrieve(key)`. See `src/code_indexer/server/cache/payload_cache.py` and `src/code_indexer/server/storage/postgres/payload_cache_backend.py`.
 
+**Bug #1181 -- Per-query batch commit (store_batch)**: The query hot path must NEVER call `payload_cache.store()` once per result in a loop. Use `payload_cache.store_batch(contents: List[str]) -> List[str]` instead -- it inserts all rows in ONE transaction/commit and returns handles in order (immediately retrievable cross-node). The PG backend also issues `SET LOCAL synchronous_commit = off` per-transaction before the INSERT, eliminating WAL fsync wait for these ephemeral writes (safe: TTL-evicted data, row is visible immediately, only crash durability relaxed; `SET LOCAL` is per-transaction and does NOT affect users/jobs/migrations). Both `_apply_rest_semantic_truncation` and `_apply_rest_fts_truncation` in `app_helpers.py`, and `_apply_fts_payload_truncation` in `mcp/handlers/_utils.py`, use `store_batch`. Any new truncation helper on the query hot path MUST also use `store_batch`.
+
 **HAProxy affinity is NOT a substitute for cluster-aware code.** Sticky sessions reduce the probability of cross-node reads but do not eliminate them (node restart, new deployment, affinity miss). Code correctness must not depend on proxy configuration.
 
 This rule applies to ALL contexts: main context, subagents, tdd-engineer, code-reviewer. A code reviewer who approves a module-level dict used as cross-request server state has missed a critical cluster bug.
@@ -302,6 +304,17 @@ Persistent storage of reusable Rust evaluator patterns in cidx-meta under `xray-
 
 -> Full reference: `docs/totp-elevation.md`
 
+### JWT Logout Token Revocation (Story #1163)
+
+Both logout routes (`GET /logout` via `web_router` and `GET /user/logout` via `user_router` in `server/web/routes.py`) blacklist the JWT `jti` at logout time using `get_token_blacklist().add(jti)`. The blacklist is DB-backed (`TokenBlacklist` in `server/app.py`, wired at lifespan) so the revocation is cross-worker and cross-node — every uvicorn worker and every cluster node rejects the revoked jti on the next request.
+
+**Key invariants** -- NEVER remove these:
+- `_extract_jti_from_request(request)` (private helper in `routes.py`) tries `Authorization: Bearer` header first, then `cidx_session` cookie; returns `None` without raising on any decode error.
+- The JTI-blacklist block is wrapped in `try/except` in both logout routes -- failure logs a WARNING but NEVER prevents the 303 redirect and session clear.
+- `TokenBlacklist.prune_expired(ttl_seconds)` (added in Story #1163) deletes rows where `blacklisted_at < time.time() - ttl_seconds` from SQLite (`_sqlite_prune`) or PostgreSQL (`_pg_prune` using `DELETE ... RETURNING jti`); also evicts deleted JTIs from the local in-memory set.
+- `DataRetentionScheduler._safe_prune_token_blacklist` wires pruning into both `_execute_cleanup_sqlite()` and `_execute_cleanup_pg()`. TTL = `config.jwt_expiration_minutes * 60` (read live from config_service each cycle; NOT hardcoded). Result key `token_blacklist_deleted` is included in both result dicts and in `total_deleted`.
+- The `blacklisted_at` column is a NUMERIC UNIX timestamp (seconds, `time.time()`), NOT an ISO string -- the generic `_cleanup_table` helper (ISO string comparison) MUST NOT be used for `token_blacklist`.
+
 ### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
 
 Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.
@@ -341,7 +354,7 @@ Server-side cache of query embeddings on the query path, both providers (voyage-
 **Hard invariants** -- NEVER violate:
 - NEVER lowercase the key. `build_key()` (`server/services/query_embedding_cache.py`) keeps case at every step (CamelCase identifier signal -- empirically top-1 flips ~34% under lowercase on a code index). Anchor-token normalization: first N tokens in order + sorted tail; default anchor depth 2; N>=token count == exact-match; N=0 == sort-all.
 - Composite PK `(cache_key, provider, model, dimension)`. NO repo/collection column (embedding is repo-independent). PK is the cross-provider/model/dimension isolation.
-- Synchronous DB-direct: sync SELECT on lookup, sync UPSERT on miss (+ `prune_to_max`), sync `last_used` touch on hit. NO RAM layer, NO async/batched writer (deliberate: ~500 searches/day, 30/sec ceiling; RAM layer is a clean additive future optimization). The shared count cap `max_entries` (default 10000, >=100 floor in `_resolve_max_entries`, single LRU bucket both providers) is the SINGLE true cluster-wide cap.
+- DB access pattern: sync SELECT on lookup (zero-copy read), sync UPSERT on miss (+ `prune_to_max`). Hit path does ZERO synchronous DB writes -- `last_used` is updated asynchronously/best-effort (Bug #1181 Perf Fix #2): `record_hit()` coalesces touches into an in-process dict keyed by `(cache_key, provider, model, dimension)` -> latest float timestamp; a background daemon thread (`qec-touch-flusher`) drains the buffer every ~5s via `touch_last_used_batch()` in ONE transaction. SQLite uses `executemany` in a single `execute_atomic` transaction; PG uses `SET LOCAL synchronous_commit = off` then `executemany` + commit (ephemeral LRU bookkeeping -- crash durability relaxed, row remains valid). Buffer capped at 2048 entries; early flush on cap hit. `QueryEmbeddingCacheBackend` Protocol includes `touch_last_used_batch(items)` (mypy-enforced). `QueryEmbeddingCache.start()` / `stop(timeout)` lifecycle: `start()` called after `set_query_embedding_cache()` in lifespan startup; `stop()` called before `clear_query_embedding_cache()` in shutdown. This is approximate LRU -- the ordering is best-effort, correctness (row validity) is never compromised. NO RAM embedding layer. The shared count cap `max_entries` (default 10000, >=100 floor in `_resolve_max_entries`, single LRU bucket both providers) is the SINGLE true cluster-wide cap.
 - Table stores ONLY query-purpose embeddings -- NEVER document-purpose (different Cohere `input_type` semantics). Cache value is ONLY query->vector, NEVER auth-bearing.
 - Key format (Story #1149): `s:<config-digest>:<normalized-query>`. The `s:` prefix is provably disjoint from legacy 64-hex SHA-256 keys (passive LRU reset -- old rows age out via prune_to_max, no active clear needed). `config_digest` is the coalescer-registry digest (provider + endpoint + model) so cache identity == coalescer identity. `build_key()` returns None when the normalized-query part exceeds 256 chars -- callers treat None as a MISS and skip lookup/write.
 - Migration `028_query_embedding_cache.sql` is additive (`CREATE TABLE IF NOT EXISTS`). Both backends first-class: `QueryEmbeddingCacheSqliteBackend` (solo) + `QueryEmbeddingCachePostgresBackend` (cluster); float32-LE blob (BLOB/BYTEA). All cache ops are fail-open (WARNING + live path; never break a query).
@@ -351,6 +364,17 @@ Server-side cache of query embeddings on the query path, both providers (voyage-
 **S4 bypass**: per-request `no_embedding_cache_shortcut` (default False) on all REST/MCP search endpoints (`SemanticSearchRequest`) skips the cache READ but STILL writes; the off/not-enabled gates fire FIRST. **S5 metrics**: `query_embedding_cache_metrics.py` on `cidx.cache` meter (hit/miss tagged `{mode,provider}`, total_entries ObservableGauge from cheap memo NOT live COUNT, shadow_cosine histogram); built only when cache+telemetry present. **S6 audit**: `embedding_cache_audit.py` runs a 2nd HNSW at the FSV `search()` chokepoint on sampled hits (per-provider `audit_sample_rate`, default 0.0) -- shadow audits the already-computed live vec for free; on-mode sampled hits RE-EMBED one provider call (sampled fraction only; non-sampled on-hits skip the provider). **S0 Cohere fix (Bug #1104)**: query sites passed `embedding_purpose=None` -> Cohere embedded queries as `search_document`; fix sets `embedding_purpose="query"` at all query-embed sites + threads it through the coalescer.
 
 -> Full reference: `docs/query-embedding-cache.md`
+
+### FSV skip_staleness_check for Immutable Versioned Snapshots (Bug #1181 Perf Fix #3)
+
+`FilesystemVectorStore._get_chunk_content_with_staleness` previously called `_compute_file_hash` (reads the entire file + SHA-1) for every git-repo result on every query. For an immutable `.versioned/{alias}/v_{ts}` snapshot the file cannot change, so this second whole-file read is pure overhead.
+
+**Key invariants**:
+- `FilesystemVectorStore.__init__` accepts `skip_staleness_check: bool = False`. Default False = CLI and mutable-path behavior byte-identical. No existing call sites change.
+- When `skip_staleness_check=True`: Tier-1 branch (file exists) reads content once, then returns immediately as NOT stale WITHOUT calling `_compute_file_hash`. File-deleted branch is unaffected (fires before the skip guard).
+- Non-git / payload-content results are unaffected (early return path, never calls `_compute_file_hash`).
+- `FilesystemBackend.get_vector_store_client()` sets the flag: inside the existing `if self.hnsw_index_cache is not None:` server-mode guard, calls `is_immutable_versioned_snapshot(str(self.project_root))` (from `server/services/query_path_cache.py`). Import is server-mode-only so CLI never loads server modules.
+- Mutable base clones, activated CoW repos, and CLI mode all leave the flag False and continue the full staleness check. The immutability predicate is the SINGLE source of truth -- never skip for any path not proven by `is_immutable_versioned_snapshot`.
 
 ### Canonical Versioned-Snapshot Convention + Backend-Aware Cleanup (Bug #1084 Phase A)
 
@@ -406,6 +430,8 @@ Server-side query-embed coalescing gated by a self-tuning per-lane concurrency g
 
 **Runtime config (NOT bootstrap; no env vars; mirrors `memory_retrieval_enabled`)** — `coalesce_enabled` (default True; read LIVE each call -> kill switch + hot-reload), `coalesce_max_batch_size` (default 96 == Cohere texts cap; live ceiling, hot-reloads at seal time), `coalesce_k_min=8`/`coalesce_k_max=32` (construction-scoped AIMD/limiter K bounds seeded into the governor at build; NOT live-reload, clamp-validated with 8/32 fallback). Initial K seed (`query_provider_max_concurrency`) clamps to `[k_min, k_max]`. Observability: governor `current_k` per lane, AIMD-decrease WARNING, coalescer `batches_dispatched`/`texts_coalesced`.
 
+**Per-worker governor scaling (Story #1165)** — `query_provider_max_concurrency` is the PER-NODE total provider-concurrency budget. At governor construction (auto-seed path only, i.e. `ProviderConcurrencyGovernor()` with no explicit `max_concurrency` argument), the per-node budget is divided by `config.workers` so combined embedding pressure across all uvicorn workers on the node stays within the configured limit. Per-worker seed = `max(k_min, per_node_budget // workers)`, then clamped to `[k_min, k_max]`. Key invariants: workers=1 is byte-identical to pre-#1165 behavior (no change); workers=0 or negative falls back to 1 (no division); explicit `max_concurrency` construction (used in tests) is NEVER divided. Cross-node budgeting remains the operator's responsibility — each node has its own `query_provider_max_concurrency`. This division introduces NO shared/cross-process state; it is pure per-process construction-time arithmetic.
+
 -> Deterministic fault-injection gate: `tests/integration/server/test_coalescer_fault_injection_1079.py`.
 
 ### Database Migrations Must Be Backward Compatible
@@ -414,6 +440,20 @@ Rolling restarts mean old and new nodes share schema during upgrade. MigrationRu
 
 - **Allowed**: `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`, `CREATE INDEX IF NOT EXISTS`, new nullable columns / columns with defaults
 - **NEVER**: `DROP TABLE`, `DROP COLUMN`, `RENAME TABLE/COLUMN`, `ALTER COLUMN TYPE`, removing NOT NULL
+
+### Migration Concurrent Startup Safety (Story #1164)
+
+Under `uvicorn --workers N` in PostgreSQL cluster mode, `MigrationRunner.run()` is called once per worker process. Without a lock, concurrent workers race on `schema_migrations.filename UNIQUE` and the second committer's startup fails.
+
+Fix: `run()` acquires a PostgreSQL SESSION advisory lock at entry and releases it in a `finally` block.
+
+**Key invariants -- NEVER violate:**
+- Lock key: `_MIGRATION_ADVISORY_LOCK_KEY` in `runner.py` -- stable `int` derived from `sha256(b"cidx_migrations")[:8]` big-endian signed (value `8835134184625913288`). Must be identical on every node.
+- SESSION-level (`pg_advisory_lock`, NOT `pg_advisory_xact_lock`) -- survives the per-migration `COMMIT`/`ROLLBACK` inside `apply_migration`. Released explicitly in `finally`, or automatically on connection close (crashed worker cannot deadlock others).
+- Always parameterized query `%s` -- NEVER f-string-interpolate the key into the SQL.
+- Unlock is in `finally` on ALL paths (success and exception). Migration failures still propagate to the caller; `finally` only unlocks.
+- `run()` return value (applied count `int`) is preserved inside the `try` block unchanged.
+- SQLite path (`database_manager.py` `_migrate_*` helpers) is a separate code path and MUST NOT reference `pg_advisory_lock`.
 
 ### No Environment Variables for Server Settings
 
@@ -428,6 +468,8 @@ Runtime settings belong in the Web UI Config Screen via `get_config_service().ge
 All systemd/env/config changes flow through auto-updater: `git pull` -> `pip install` -> `DeploymentExecutor.execute()` -> `systemctl restart`. Pattern: `_ensure_X_config()` -- idempotent check-then-apply. `CIDX_DATA_DIR` honored for IPC path alignment when server and auto-updater run as different OS users (Bug #879).
 
 **Bug #1052 (Step 14.5)**: `_ensure_activated_repos_symlink_for_cow_daemon()` -- on `clone_backend=cow-daemon` deployments, idempotently creates `~/.cidx-server/data/activated-repos -> {cow_daemon.mount_point}/activated-repos` symlink so `CowDaemonBackend.create_clone_at_path()` accepts activation destinations. No-op for local/ontap backends. If a real directory with user data already exists at the path, logs a structured WARNING with the manual migration command and returns without touching the data.
+
+**Story #1167 (Workers Un-Pin)**: `_ensure_workers_config()` reads `config.workers` via `ServerConfigManager(server_dir_path=str(_cidx_data_dir)).load_config()` (same bootstrap-config idiom as all sibling `_ensure_*` methods) and writes `--workers {worker_count}` into the ExecStart line. Uses `max(1, getattr(config, "workers", 1) or 1)` to guard misconfigured zero/negative values. Workers=1 produces byte-identical output to the old hardcoded behavior. Idempotency guard (`if "--workers" in content: return True`) is unchanged. Single-writer invariant: `_ensure_workers_config` is the ONLY method that writes a `--workers` token to the unit file -- `restart_server()` and `HealthWatchdog._restart_server()` both call `systemctl restart` on the existing unit without modifying it. Web UI: `"workers"` is in `RESTART_REQUIRED_FIELDS` (routes.py); the Server Settings display table shows "Uvicorn Workers" with restart-required note; the edit form has a number input (1-64); validation rejects outside-range and non-integer values. Backend: `workers` was already in `BOOTSTRAP_KEYS` and `_update_server_setting` already mapped it -- no backend changes needed.
 
 ### Pace-Maker Pre-Invocation Guard (Story #997)
 
@@ -450,7 +492,22 @@ Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step
 - `_read_current_fingerprint(repo_path)` is the shared helper used by both `has_changes_since_last_run` and the quarantine gate — no duplicate metadata-reading logic.
 - No Web-UI config knob, no admin un-quarantine tool, no exponential back-off (deferred, out of scope for #1096).
 
-**Regression guard**: `tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py` (15 tests, real SQLite via `DatabaseSchema.initialize_database()`). Includes mandatory cases: quarantine BINDS for persistent failure with NULL `last_known_commit` and stable on-disk commit; auto-clear fires ONLY on real on-disk commit change.
+**Regression guard**: `tests/unit/server/services/test_description_refresh_circuit_breaker_1096.py` (18 tests, real SQLite via `DatabaseSchema.initialize_database()`). Includes mandatory cases: quarantine BINDS for persistent failure with NULL `last_known_commit` and stable on-disk commit; auto-clear fires ONLY on real on-disk commit change.
+
+### Description-Refresh Cross-Worker Dedup (Story #1162)
+
+Under `uvicorn --workers N`, each worker runs its own `DescriptionRefreshScheduler`. Without dedup, N workers can simultaneously dispatch a refresh for the same stale repo, multiplying Claude API cost by N.
+
+**Invariant**: `_run_loop_single_pass` MUST use `register_job_if_no_conflict` (not `register_job`) when registering description refresh jobs. The DB partial unique index `idx_active_job_per_repo` (`WHERE status IN ('pending', 'running') AND repo_alias IS NOT NULL`) is the sole cluster-atomic arbiter: the first worker to claim a repo wins; subsequent workers receive `DuplicateJobError`.
+
+**DuplicateJobError handling** (`description_refresh_scheduler.py`):
+- `except DuplicateJobError:` clause MUST come BEFORE the generic `except Exception:` handler.
+- On `DuplicateJobError`: log at DEBUG ("already claimed for {alias} by another worker; skipping") and `continue` to the next repo. No thread is spawned.
+- On generic `Exception` (DB unavailable, etc.): log WARNING "JobTracker registration failed" and fall through (tracked_job_id = None). Behavior preserved from pre-#1162.
+
+**Accepted limitation**: `_prompt_failure_counts` and `_failure_commit` (quarantine circuit-breaker dicts) remain per-process. Cross-worker quarantine-counter consistency is intentionally out of scope -- the DB dedup gate already prevents duplicate concurrent dispatch; quarantine is defense-in-depth back-off, not the primary cost control.
+
+**Regression guard**: `TestCrossWorkerDedup1162` and `TestSingleWorkerRegression1162` in `test_description_refresh_circuit_breaker_1096.py`. Use real SQLite + `_DeferringExecutor` (keeps job `pending` during second scheduler's claim attempt, modeling the real async background thread).
 
 ### Description-Refresh Tracking Backend Wiring (Bug #1100)
 
@@ -472,7 +529,7 @@ Auto-updater installs/updates pace-maker (`_ensure_pace_maker_installed()`, Step
 
 **Key invariants** (see `docs/server-memory-invariants.md` for full detail):
 - Cleanup daemon: once per app lifetime, started/stopped in lifespan. NEVER piggyback in `get_connection()`, NEVER call `_cleanup_all_instances()` from daemon loop, NEVER remove `try/finally` in `BackgroundJobManager._execute_job`.
-- HNSW/FTS cache: `DEFAULT_MAX_CACHE_SIZE_MB = 4096`. Hot-reload narrow-scoped to `index_cache_max_size_mb`/`fts_cache_max_size_mb`.
+- HNSW/FTS cache: `DEFAULT_MAX_CACHE_SIZE_MB = 4096`. Hot-reload narrow-scoped to `index_cache_max_size_mb`/`fts_cache_max_size_mb`. Story #1166: `initialize_caches(worker_count)` (`src/code_indexer/server/cache/__init__.py`) divides the per-node cap by `config.workers` with a floor of `MIN_CAP_PER_WORKER_MB = 256` so N uvicorn workers each hold 1/N of the cap instead of N x full cap. Called inside `initialize_services()` (`service_init.py`) BEFORE the eager `get_global_cache()`/`get_global_fts_cache()` calls — this ordering is critical so the singletons are built with the divided cap, not the full cap. Worker count read via `get_config_service().get_config().workers` (bootstrap key, available before `initialize_runtime_db`); fallback to 1 on any error/non-int, mirroring `ProviderConcurrencyGovernor._read_config_workers`. Idempotent — skips re-construction if singleton already built. Lazy getters remain the full-cap safety net for CLI/single-worker/tests that never call `initialize_caches`. CAUTION: do NOT add a second `initialize_caches` call in lifespan.py — the single source of truth is `service_init.py`.
 - Omni fan-out: `omni_wildcard_expansion_cap` (50) + `omni_max_repos_per_search` (50). Fan-out passes `hnsw_cache=None`.
 - Bug #897 mitigations default ON: `enable_malloc_trim`, `enable_malloc_arena_max` (bootstrap-only flags).
 
@@ -566,6 +623,42 @@ cidx watch / watch-stop / stop         # Daemon controls
 - **Smart indexer**: Always consider `--reconcile` (non git-aware) -- maintain feature parity.
 - **Tmp files**: `~/.tmp`, never `/tmp`. **Container-free**: no ports, no containers.
 - **Import budget**: current startup ~329ms.
+
+### Multi-Worker Throughput Benchmark (Story #1168)
+
+Standalone benchmark: `scripts/analysis/multi_worker_throughput.py`
+
+Measures `POST /api/query` throughput across 4 scenarios per worker count:
+- repeating + cache-on / repeating + cache-off
+- unique + cache-on / unique + cache-off
+
+**Operator gate (NOT automated CI):** The full 1/2/3/4-worker run with 1.7x regression assertion is manual:
+
+```bash
+# Against an already-running server (operator must manage server lifecycle)
+E2E_ADMIN_USER=admin E2E_ADMIN_PASS=admin \
+python3 scripts/analysis/multi_worker_throughput.py \
+  --server http://localhost:8001 \
+  --workers 1,2,3,4 \
+  --queries 200 \
+  --concurrency 20
+```
+
+Quick smoke (read-only, no server restart, no :8000 harm):
+
+```bash
+E2E_ADMIN_USER=admin E2E_ADMIN_PASS=admin \
+python3 scripts/analysis/multi_worker_throughput.py \
+  --server http://localhost:8000 --workers 1 --queries 10 --concurrency 4 --no-wait-health
+```
+
+Credentials: reads `E2E_ADMIN_USER`/`E2E_ADMIN_PASS` or `E2E_ADMIN_USERNAME`/`E2E_ADMIN_PASSWORD` from env or `.local-testing`.
+Reports saved to `reports/perf/` (gitignored). Script exits 1 if regression check fails.
+
+Pytest wrapper: `tests/performance/test_multi_worker_scaling.py` -- skipped unless `CIDX_PERF_TEST=1`.
+Query fixture: `tests/performance/fixtures/benchmark_queries.txt` (300 distinct queries).
+
+NEVER restart or kill the dev server on :8000 when running this benchmark. Use an isolated port.
 
 ---
 

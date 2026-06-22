@@ -106,7 +106,48 @@ def initialize_services() -> Dict[str, Any]:
     from code_indexer.server.routers.repo_categories import set_category_service
 
     # Story #526: Initialize server-side HNSW cache at bootstrap for 1800x performance
-    from code_indexer.server.cache import get_global_cache, get_global_fts_cache
+    from code_indexer.server.cache import (
+        get_global_cache,
+        get_global_fts_cache,
+        initialize_caches,
+    )
+
+    # Story #1166 Fix 1: Divide HNSW/FTS caps by worker count BEFORE the eager
+    # getters build the singletons.  initialize_caches is idempotent so if a
+    # lazy getter somehow fired first (degraded path) it skips re-construction.
+    #
+    # Worker count is a BOOTSTRAP key stored in config.json and is available
+    # this early (before initialize_runtime_db).  Mirrors the pattern used by
+    # ProviderConcurrencyGovernor._read_config_workers(): try get_config_service,
+    # fall back to 1 on any error/non-int so worker_count is NEVER 0 or None.
+    _cache_worker_count = 1
+    try:
+        from code_indexer.server.services.config_service import (
+            get_config_service as _get_cfg_svc,
+        )
+
+        _cfg_workers = getattr(_get_cfg_svc().get_config(), "workers", None)
+        if isinstance(_cfg_workers, int):
+            _cache_worker_count = max(1, _cfg_workers)
+        else:
+            logger.debug(
+                "Story #1166: config.workers is not an int (%r); "
+                "using worker_count=1 (no per-worker cap division)",
+                _cfg_workers,
+            )
+    except Exception as _wc_exc:
+        logger.debug(
+            "Story #1166: could not read config.workers (%s); "
+            "using worker_count=1 (no per-worker cap division)",
+            _wc_exc,
+        )
+    initialize_caches(worker_count=_cache_worker_count)
+    logger.info(
+        "Story #1166: HNSW/FTS cache caps initialized with per-worker budget "
+        "(workers=%d)",
+        _cache_worker_count,
+        extra={"correlation_id": get_correlation_id()},
+    )
 
     _server_hnsw_cache = get_global_cache()
     logger.info(

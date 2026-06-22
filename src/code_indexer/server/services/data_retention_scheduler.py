@@ -221,18 +221,26 @@ class DataRetentionScheduler:
             failed_tables=failed_tables,
         )
 
+        cfg_root = self._config_service.get_config()
+        token_blacklist_deleted = self._safe_prune_token_blacklist(
+            jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
+            failed_tables=failed_tables,
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
             "sync_jobs_deleted": sync_jobs_deleted,
             "dep_map_history_deleted": dep_map_history_deleted,
             "background_jobs_deleted": background_jobs_deleted,
+            "token_blacklist_deleted": token_blacklist_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
                 + sync_jobs_deleted
                 + dep_map_history_deleted
                 + background_jobs_deleted
+                + token_blacklist_deleted
             ),
             "failed_tables": failed_tables,
         }
@@ -302,18 +310,26 @@ class DataRetentionScheduler:
             failed_tables=failed_tables,
         )
 
+        cfg_root = self._config_service.get_config()
+        token_blacklist_deleted = self._safe_prune_token_blacklist(
+            jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
+            failed_tables=failed_tables,
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
             "sync_jobs_deleted": sync_jobs_deleted,
             "dep_map_history_deleted": dep_map_history_deleted,
             "background_jobs_deleted": background_jobs_deleted,
+            "token_blacklist_deleted": token_blacklist_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
                 + sync_jobs_deleted
                 + dep_map_history_deleted
                 + background_jobs_deleted
+                + token_blacklist_deleted
             ),
             "failed_tables": failed_tables,
         }
@@ -416,6 +432,36 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append(table_name)
+            return 0
+
+    def _safe_prune_token_blacklist(
+        self,
+        jwt_expiration_minutes: int,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from token_blacklist (Story #1163 AC2).
+
+        TTL is derived from jwt_expiration_minutes (the token lifetime) so
+        rows cannot be pruned before the JWT they represent could still be
+        considered valid.
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'token_blacklist' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.app import get_token_blacklist
+
+            ttl_seconds = jwt_expiration_minutes * 60
+            return int(get_token_blacklist().prune_expired(ttl_seconds=ttl_seconds))
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'token_blacklist' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("token_blacklist")
             return 0
 
     # ------------------------------------------------------------------

@@ -136,16 +136,27 @@ class FilesystemBackend(VectorStoreBackend):
         # Bug #1078: server mode (hnsw_index_cache present) -> inject id_index cache.
         # Local import avoids pulling server modules into CLI startup path.
         id_index_cache = None
+        skip_staleness = False
         if self.hnsw_index_cache is not None:
             from ..server.cache.id_index_cache import get_global_id_index_cache
 
             id_index_cache = get_global_id_index_cache()
+
+            # Bug #1181 Perf Fix #3: skip _compute_file_hash for immutable .versioned snapshots.
+            # Import is server-mode-only (guarded by hnsw_index_cache) so CLI never pulls
+            # in server modules. Predicate is purely structural (no filesystem access).
+            from ..server.services.query_path_cache import (
+                is_immutable_versioned_snapshot,
+            )
+
+            skip_staleness = is_immutable_versioned_snapshot(str(self.project_root))
 
         return FilesystemVectorStore(
             base_path=self.vectors_dir,
             project_root=self.project_root,
             hnsw_index_cache=self.hnsw_index_cache,
             id_index_cache=id_index_cache,
+            skip_staleness_check=skip_staleness,
         )
 
     def health_check(self) -> bool:

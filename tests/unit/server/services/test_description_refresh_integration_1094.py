@@ -84,6 +84,12 @@ class _StubJobTracker:
     def register_job(self, *a: Any, **k: Any) -> None:
         pass
 
+    def register_job_if_no_conflict(self, *a: Any, **k: Any) -> None:
+        # Story #1162: scheduler calls this so the DB partial unique index acts as
+        # a cluster-atomic dedup gate.  The stub accepts without raising so that
+        # tracked_job_id stays set and _run_lifecycle_via_batch_runner is not skipped.
+        pass
+
     def update_status(self, *a: Any, **k: Any) -> None:
         pass
 

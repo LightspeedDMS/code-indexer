@@ -22,8 +22,12 @@ Design principles:
 - Sinbin pre-check: if the lane's mapped health key is sinbinned, raise
   ProviderSinbinnedError FAST without consuming a slot.
 - Initial K is seeded from server runtime config field
-  ``query_provider_max_concurrency`` (default 8 when unset/unreadable), then
-  CLAMPED into ``[k_min, k_max]``.
+  ``query_provider_max_concurrency`` (PER-NODE total budget; default 8 when
+  unset/unreadable). Story #1165: at construction the per-node budget is
+  divided by ``config.workers`` so combined embedding pressure across all
+  uvicorn workers stays within the per-node limit. Per-worker K =
+  max(k_min, per_node_budget // workers), then CLAMPED into ``[k_min, k_max]``.
+  Workers=1 is byte-identical to the pre-#1165 behavior.
 - The K bounds ``[k_min, k_max]`` (the AIMD floor/ceiling AND the per-lane
   limiter clamp) are themselves seeded from config ``coalesce_k_min`` /
   ``coalesce_k_max`` (defaults ``[K_MIN, K_MAX] = [8, 32]``; valid range
@@ -120,7 +124,13 @@ class ProviderConcurrencyGovernor:
         # unaffected; only the auto-seed path consults config for the bounds.
         if max_concurrency is None:
             k_min, k_max = self._read_config_k_bounds()
-            max_concurrency = self._read_config_concurrency()
+            per_node_seed = self._read_config_concurrency()
+            worker_count = self._read_config_workers()
+            # Story #1165: query_provider_max_concurrency is the PER-NODE total
+            # provider-concurrency budget. Divide it across this node's uvicorn
+            # workers so combined embedding pressure across all workers stays within
+            # the configured per-node budget. Floor via the [k_min, k_max] clamp below.
+            max_concurrency = max(k_min, per_node_seed // worker_count)
         else:
             k_min, k_max = K_MIN, K_MAX
         # Clamp the initial K seed into the (possibly config-widened) bounds.
@@ -289,9 +299,16 @@ class ProviderConcurrencyGovernor:
     def _read_config_concurrency() -> int:
         """Read query_provider_max_concurrency from server runtime config.
 
+        This value is the PER-DEPLOYMENT-NODE total provider-concurrency budget.
+        Story #1165: the constructor (auto-seed path only) divides this per-node
+        budget by ``config.workers`` so that the combined embedding pressure across
+        all uvicorn workers on the node stays within the configured limit.
+        Cross-node budgeting remains the operator's responsibility.
+
         Falls back to _DEFAULT_MAX_CONCURRENCY (= K_MIN = 8) on any error (config
         not yet initialized, missing field, test context, etc.). The returned
-        value is clamped into [K_MIN, K_MAX] by the constructor.
+        value is divided by worker_count then clamped into [k_min, k_max] by the
+        constructor.
         """
         try:
             from code_indexer.server.services.config_service import get_config_service
@@ -308,6 +325,43 @@ class ProviderConcurrencyGovernor:
                 _DEFAULT_MAX_CONCURRENCY,
             )
         return _DEFAULT_MAX_CONCURRENCY
+
+    @staticmethod
+    def _read_config_workers() -> int:
+        """Read config.workers (number of uvicorn workers on this node).
+
+        Story #1165: query_provider_max_concurrency is the PER-NODE total
+        provider-concurrency budget. This helper reads the worker count so the
+        constructor can divide the per-node budget across workers.
+
+        Falls back to 1 (no division) on any error (config not yet initialized,
+        missing field, non-int, zero, negative, test context, etc.). The
+        ``max(1, value)`` guard prevents division-by-zero and ensures a
+        misconfigured 0 or negative count is treated as a single worker.
+
+        Per-node scope: this divides ONE node's budget across that node's
+        workers. Cross-node budgeting remains the operator's responsibility
+        (one ``query_provider_max_concurrency`` per node).
+        """
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            cfg = get_config_service().get_config()
+            value = getattr(cfg, "workers", None)
+            if isinstance(value, int):
+                return max(1, value)
+            logger.debug(
+                "ProviderConcurrencyGovernor: config.workers is not an int (%r); "
+                "using worker_count=1 (no per-worker division)",
+                value,
+            )
+        except Exception as exc:
+            logger.debug(
+                "ProviderConcurrencyGovernor: could not read config.workers (%s); "
+                "using worker_count=1 (no per-worker division)",
+                exc,
+            )
+        return 1
 
     @staticmethod
     def _read_config_k_bounds() -> Tuple[int, int]:

@@ -3184,9 +3184,13 @@ def make_lifespan(
                     backend=_qec_backend,
                 )
                 set_query_embedding_cache(_query_embedding_cache)
+                # Bug #1181 Perf Fix #2: start the async touch-flush background thread
+                # so cache hits buffer last_used touches instead of doing synchronous
+                # DB writes on the hot query path.
+                _query_embedding_cache.start()
                 logger.info(
-                    "Query embedding cache built (Story #1105, "
-                    "live config reads via QueryEmbeddingCacheConfig)",
+                    "Query embedding cache built and async touch flusher started "
+                    "(Story #1105, Bug #1181 Perf Fix #2)",
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:
@@ -3284,6 +3288,13 @@ def make_lifespan(
                 exc_info=True,
                 extra={"correlation_id": get_correlation_id()},
             )
+
+        # Story #1166: HNSW/FTS cache caps are divided by worker count in
+        # initialize_services() (service_init.py) BEFORE the eager
+        # get_global_cache()/get_global_fts_cache() calls build the singletons.
+        # No initialize_caches call here — service_init.py is the single source
+        # of truth so that the division is in place when the singletons are first
+        # constructed, not after.
 
         yield  # Server is now running
 
@@ -3396,6 +3407,19 @@ def make_lifespan(
         except Exception:
             logger.debug(
                 "Coalescer registry clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Bug #1181 Perf Fix #2: stop the async touch-flush background thread so
+        # it performs a final drain of buffered last_used touches before the cache
+        # is cleared.  Must run BEFORE clear_query_embedding_cache() below.
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            if "_query_embedding_cache" in dir():
+                _query_embedding_cache.stop()
+        except Exception:
+            logger.debug(
+                "Query embedding cache async touch flusher stop failed (expected during shutdown)",
                 exc_info=True,
             )
 
