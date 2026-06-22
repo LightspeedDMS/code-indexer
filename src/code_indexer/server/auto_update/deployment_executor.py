@@ -1829,27 +1829,46 @@ class DeploymentExecutor:
                 )
                 return True  # Not an error if service doesn't exist yet
 
+            import re as _re
+
             content = service_path.read_text()
 
-            # Check if --workers is already configured (idempotency guard)
-            if "--workers" in content:
-                logger.debug(
-                    "Workers config already present in service file",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                return True
+            # Idempotency guard: value-aware, scoped to the ExecStart uvicorn line only.
+            # A token-bounded pattern prevents '--workers 4' matching '--workers 40'.
+            _exact_re = _re.compile(
+                r"(?<!\S)--workers\s+" + _re.escape(str(worker_count)) + r"(?!\S)"
+            )
 
-            # Add --workers {worker_count} to ExecStart line
+            # Add or replace --workers {worker_count} on the ExecStart line
             if "ExecStart=" in content and "uvicorn" in content:
-                # Find ExecStart line and append --workers N
                 lines = content.split("\n")
                 updated_lines = []
                 modified = False
 
                 for line in lines:
                     if line.startswith("ExecStart=") and "uvicorn" in line:
-                        line = line.rstrip() + f" --workers {worker_count}"
-                        modified = True
+                        if _exact_re.search(line):
+                            # Already the correct value on this line — no-op
+                            logger.debug(
+                                f"Workers config already set to {worker_count} in service file",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                            updated_lines.append(line)
+                            # No modification needed; skip to next line but don't
+                            # set modified=True so we skip the write path.
+                            continue
+                        elif "--workers" in line:
+                            # Replace existing (wrong) worker count on this line
+                            line = _re.sub(
+                                r"(?<!\S)--workers\s+\S+",
+                                f"--workers {worker_count}",
+                                line,
+                            )
+                            modified = True
+                        else:
+                            # Append new --workers token
+                            line = line.rstrip() + f" --workers {worker_count}"
+                            modified = True
                     updated_lines.append(line)
 
                 if modified:

@@ -18,6 +18,7 @@ from code_indexer.server.auto_update.deployment_executor import (
     RESTART_SIGNAL_PATH,
     RESTART_SIGNAL_STALENESS_THRESHOLD,
 )
+from code_indexer.server.auto_update.deployment_lock import get_default_lock_path
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -46,11 +47,11 @@ class AutoUpdateService:
         Args:
             repo_path: Path to git repository
             check_interval: Polling interval in seconds
-            lock_file: Path to lock file (default: /tmp/cidx-auto-update.lock)
+            lock_file: Path to lock file (default: {CIDX_DATA_DIR}/cidx-auto-update.lock)
         """
         self.repo_path = repo_path
         self.check_interval = check_interval
-        self.lock_file = lock_file or Path("/tmp/cidx-auto-update.lock")
+        self.lock_file = lock_file or get_default_lock_path()
         self.current_state = ServiceState.IDLE
         self.last_deployment: Optional[datetime] = None
         self.last_error: Optional[Exception] = None

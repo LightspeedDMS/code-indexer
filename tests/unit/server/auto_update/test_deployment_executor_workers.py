@@ -40,6 +40,17 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app --host 127.0.0.1 --port 8000 --wor
 WantedBy=multi-user.target
 """
 
+_UNIT_WITH_WORKERS_1 = """\
+[Unit]
+Description=CIDX Server
+
+[Service]
+ExecStart=/usr/bin/python3 -m uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
+
+[Install]
+WantedBy=multi-user.target
+"""
+
 
 def _make_config(workers: int) -> MagicMock:
     """Return a mock ServerConfig with a specific workers value."""
@@ -151,9 +162,14 @@ class TestWorkersUnPin:
         assert written.count("--workers") == 1
 
     def test_ac3_idempotency_workers_already_present_no_write(self):
-        """AC3: When --workers already in unit, returns True, NO sudo tee called."""
+        """AC3: When --workers already set to the SAME value as config, NO sudo tee called.
+
+        The idempotency guard must be value-aware: '--workers 4' + config.workers=4
+        is a no-op. A different count (e.g. '--workers 1' + config.workers=4)
+        must rewrite (tested separately in TestWorkersIdempotencyOnValue).
+        """
         executor = _make_executor()
-        fake_config = _make_config(2)
+        fake_config = _make_config(4)  # matches _UNIT_WITH_WORKERS_4
 
         subprocess_calls: list = []
 
@@ -246,6 +262,93 @@ class TestWorkersUnPin:
             MockSCM.return_value.load_config.return_value = fake_config
             result = executor._ensure_workers_config()
 
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Bug #1175 / Story #1167 — idempotency on VALUE not mere presence of --workers
+# ---------------------------------------------------------------------------
+
+
+class TestWorkersIdempotencyOnValue:
+    """_ensure_workers_config must be idempotent on the EXACT worker count value.
+
+    The original idempotency guard short-circuited on the MERE PRESENCE of any
+    '--workers' token. Old unit files already contain '--workers 1', so on nodes
+    where config.workers=4 the guard fired and the count was never updated.
+
+    Correct behaviour:
+    - Unit has '--workers 1', config.workers=4 -> REWRITE to '--workers 4'
+    - Unit has '--workers 4', config.workers=4 -> NO-OP (true idempotency)
+    """
+
+    def _run_with_unit(
+        self,
+        unit_content: str,
+        config_workers: int,
+    ) -> tuple[list[str], bool]:
+        """Run _ensure_workers_config and return (tee_written_contents, return_value)."""
+        executor = _make_executor()
+        fake_config = _make_config(config_workers)
+
+        tee_calls: list[str] = []
+
+        def fake_subprocess_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            if "tee" in cmd:
+                tee_calls.append(kwargs.get("input", ""))
+            return result
+
+        with (
+            patch(
+                "code_indexer.server.utils.config_manager.ServerConfigManager"
+            ) as MockSCM,
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "read_text", return_value=unit_content),
+            patch(
+                "code_indexer.server.auto_update.deployment_executor.subprocess.run",
+                side_effect=fake_subprocess_run,
+            ),
+        ):
+            MockSCM.return_value.load_config.return_value = fake_config
+            result = executor._ensure_workers_config()
+
+        return tee_calls, result
+
+    def test_unit_has_workers_1_config_is_4_rewrites_to_4(self):
+        """Bug B: unit has '--workers 1', config.workers=4 -> must rewrite to '--workers 4'.
+
+        The old guard ('if \"--workers\" in content: return True') fires here and
+        returns without updating, leaving the node stuck at 1 worker. The fix must
+        detect the VALUE mismatch and rewrite the ExecStart line.
+        """
+        tee_calls, result = self._run_with_unit(_UNIT_WITH_WORKERS_1, config_workers=4)
+
+        assert tee_calls, (
+            "sudo tee must be called when existing '--workers 1' != config.workers=4"
+        )
+        written = tee_calls[0]
+        assert "--workers 4" in written, (
+            f"Written content must contain '--workers 4', got: {written!r}"
+        )
+        assert "--workers 1" not in written, (
+            f"Written content must NOT contain old '--workers 1', got: {written!r}"
+        )
+        assert result is True
+
+    def test_unit_has_workers_4_config_is_4_no_tee_call(self):
+        """Bug B: unit has '--workers 4', config.workers=4 -> NO-OP (true idempotency).
+
+        When the existing value already matches config, no write should occur.
+        """
+        tee_calls, result = self._run_with_unit(_UNIT_WITH_WORKERS_4, config_workers=4)
+
+        assert not tee_calls, (
+            f"sudo tee must NOT be called when '--workers 4' already matches config; "
+            f"got tee calls: {tee_calls}"
+        )
         assert result is True
 
 
