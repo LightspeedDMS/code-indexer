@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.158.0] - 2026-06-22
+
+### Documentation
+- **Auto-Updater Invariants (#1182, #1183):** Documented the deployment-lock self-heal invariant in `CLAUDE.md` -- the lock MUST live under `CIDX_DATA_DIR` (never `/tmp`, which systemd `PrivateTmp=yes` isolates and Python 3.12 rejects with `PermissionError`), and `DeploymentLock.acquire()` must be fail-soft so a lock-create failure never freezes a deploy. Corrected the now-stale Story #1167 note: the `_ensure_workers_config` idempotency guard is value-aware, not presence-only. No code change versus 10.157.0 (this release carries documentation only and serves as the staging deploy that validates the previously-frozen Python 3.12 node self-heals without manual intervention).
+
 ## [10.157.0] - 2026-06-22
 
 ### Fixed
