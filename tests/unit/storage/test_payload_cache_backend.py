@@ -55,6 +55,9 @@ class TestPayloadCacheBackendProtocol:
         protocol_methods = dir(PayloadCacheBackend)
 
         assert "store" in protocol_methods, "PayloadCacheBackend must have store()"
+        assert "store_batch" in protocol_methods, (
+            "PayloadCacheBackend must have store_batch() — Bug #1181 C1 guard"
+        )
         assert "retrieve" in protocol_methods, (
             "PayloadCacheBackend must have retrieve()"
         )
@@ -381,7 +384,13 @@ class TestPayloadCachePostgresBackend:
             PayloadCachePostgresBackend,
         )
 
-        required_methods = {"store", "retrieve", "cleanup_expired", "close"}
+        required_methods = {
+            "store",
+            "store_batch",
+            "retrieve",
+            "cleanup_expired",
+            "close",
+        }
         class_methods = set(dir(PayloadCachePostgresBackend))
         missing = required_methods - class_methods
         assert not missing, f"PayloadCachePostgresBackend is missing methods: {missing}"

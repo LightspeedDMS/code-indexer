@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .connection_pool import ConnectionPool
 
@@ -78,6 +78,9 @@ class PayloadCachePostgresBackend:
         now = datetime.now(timezone.utc).isoformat()
         try:
             with self._pool.connection() as conn:
+                # Bug #1181: Relax durability for ephemeral payload_cache writes.
+                # SET LOCAL is per-transaction; does not affect users/jobs/migrations.
+                conn.execute("SET LOCAL synchronous_commit = off")
                 conn.execute(
                     """
                     INSERT INTO payload_cache
@@ -95,6 +98,55 @@ class PayloadCachePostgresBackend:
                 conn.commit()
         except Exception as exc:
             logger.warning("PayloadCachePostgresBackend: store failed: %s", exc)
+
+    def store_batch(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Store multiple payload cache entries in ONE transaction/commit.
+
+        Bug #1181: Batch all per-query stores to avoid N fsync'd commits per query
+        saturating the PostgreSQL WAL write lock at concurrency.
+
+        SET LOCAL synchronous_commit = off relaxes WAL fsync for these ephemeral
+        rows — the commit is still visible immediately; only crash durability is
+        relaxed, which is safe for TTL-evicted payload cache data.
+
+        Args:
+            entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+        if not entries:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (handle, content, preview, now, ttl_secs, node_id)
+            for handle, content, preview, ttl_secs in entries
+        ]
+        try:
+            with self._pool.connection() as conn:
+                # Bug #1181: Relax WAL fsync for ephemeral payload_cache writes.
+                # SET LOCAL is per-transaction; does not affect other statement types.
+                conn.execute("SET LOCAL synchronous_commit = off")
+                conn.executemany(
+                    """
+                    INSERT INTO payload_cache
+                        (cache_handle, content, preview, created_at, ttl_seconds, node_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (cache_handle) DO UPDATE SET
+                        content = EXCLUDED.content,
+                        preview = EXCLUDED.preview,
+                        created_at = EXCLUDED.created_at,
+                        ttl_seconds = EXCLUDED.ttl_seconds,
+                        node_id = EXCLUDED.node_id
+                    """,
+                    rows,
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("PayloadCachePostgresBackend: store_batch failed: %s", exc)
 
     def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
         """Retrieve a cache entry by handle, or None if missing or expired.

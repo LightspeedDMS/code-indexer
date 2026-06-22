@@ -454,6 +454,9 @@ def _apply_fts_payload_truncation(
     For FTS results with large code_snippet or match_text fields, replaces
     them with preview + cache_handle. Each field is cached independently.
 
+    Bug #1181: Batches all large-field stores into ONE store_batch() call per
+    field type per query to avoid N fsync'd PostgreSQL COMMITs per query.
+
     Args:
         results: List of FTS search result dicts with 'code_snippet' and/or
                  'match_text' fields
@@ -463,65 +466,87 @@ def _apply_fts_payload_truncation(
     """
     payload_cache = getattr(app_module.app.state, "payload_cache", None)
     if payload_cache is None:
-        # Cache not available, return results unchanged
         return results
 
     preview_size = payload_cache.config.preview_size_chars
 
-    for result_dict in results:
-        # Handle code_snippet field (AC1)
-        code_snippet = result_dict.get("code_snippet")
-        if code_snippet is not None:
-            try:
-                if len(code_snippet) > preview_size:
-                    # Large snippet: store and replace with preview (sync call)
-                    cache_handle = payload_cache.store(code_snippet)
-                    result_dict["snippet_preview"] = code_snippet[:preview_size]
-                    result_dict["snippet_cache_handle"] = cache_handle
-                    result_dict["snippet_has_more"] = True
-                    result_dict["snippet_total_size"] = len(code_snippet)
-                    del result_dict["code_snippet"]
-                else:
-                    # Small snippet: keep as-is, add metadata
-                    result_dict["snippet_cache_handle"] = None
-                    result_dict["snippet_has_more"] = False
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-024",
-                        f"Failed to truncate code_snippet: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-                result_dict["snippet_cache_handle"] = None
-                result_dict["snippet_has_more"] = False
+    # --- code_snippet field (AC1) ---
+    snippet_large_indices: List[int] = []
+    snippet_large_contents: List[str] = []
 
-        # Handle match_text field (AC2)
-        match_text = result_dict.get("match_text")
-        if match_text is not None:
-            try:
-                if len(match_text) > preview_size:
-                    # Large match_text: store and replace with preview (sync call)
-                    cache_handle = payload_cache.store(match_text)
-                    result_dict["match_text_preview"] = match_text[:preview_size]
-                    result_dict["match_text_cache_handle"] = cache_handle
-                    result_dict["match_text_has_more"] = True
-                    result_dict["match_text_total_size"] = len(match_text)
-                    del result_dict["match_text"]
-                else:
-                    # Small match_text: keep as-is, add metadata
-                    result_dict["match_text_cache_handle"] = None
-                    result_dict["match_text_has_more"] = False
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-025",
-                        f"Failed to truncate match_text: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+    for i, result_dict in enumerate(results):
+        code_snippet = result_dict.get("code_snippet")
+        if code_snippet is None:
+            continue
+        if len(code_snippet) > preview_size:
+            snippet_large_indices.append(i)
+            snippet_large_contents.append(code_snippet)
+        else:
+            result_dict["snippet_cache_handle"] = None
+            result_dict["snippet_has_more"] = False
+
+    if snippet_large_contents:
+        try:
+            handles = payload_cache.store_batch(snippet_large_contents)
+            for idx, snippet, handle in zip(
+                snippet_large_indices, snippet_large_contents, handles
+            ):
+                result_dict = results[idx]
+                result_dict["snippet_preview"] = snippet[:preview_size]
+                result_dict["snippet_cache_handle"] = handle
+                result_dict["snippet_has_more"] = True
+                result_dict["snippet_total_size"] = len(snippet)
+                del result_dict["code_snippet"]
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-024",
+                    f"Failed to batch-store code_snippets in FTS truncation: {e}",
+                    extra={"correlation_id": get_correlation_id()},
                 )
-                result_dict["match_text_cache_handle"] = None
-                result_dict["match_text_has_more"] = False
+            )
+            for idx in snippet_large_indices:
+                results[idx]["snippet_cache_handle"] = None
+                results[idx]["snippet_has_more"] = False
+
+    # --- match_text field (AC2) ---
+    match_large_indices: List[int] = []
+    match_large_contents: List[str] = []
+
+    for i, result_dict in enumerate(results):
+        match_text = result_dict.get("match_text")
+        if match_text is None:
+            continue
+        if len(match_text) > preview_size:
+            match_large_indices.append(i)
+            match_large_contents.append(match_text)
+        else:
+            result_dict["match_text_cache_handle"] = None
+            result_dict["match_text_has_more"] = False
+
+    if match_large_contents:
+        try:
+            handles = payload_cache.store_batch(match_large_contents)
+            for idx, match_text, handle in zip(
+                match_large_indices, match_large_contents, handles
+            ):
+                result_dict = results[idx]
+                result_dict["match_text_preview"] = match_text[:preview_size]
+                result_dict["match_text_cache_handle"] = handle
+                result_dict["match_text_has_more"] = True
+                result_dict["match_text_total_size"] = len(match_text)
+                del result_dict["match_text"]
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-025",
+                    f"Failed to batch-store match_texts in FTS truncation: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            for idx in match_large_indices:
+                results[idx]["match_text_cache_handle"] = None
+                results[idx]["match_text_has_more"] = False
 
     return results
 

@@ -999,6 +999,23 @@ class PayloadCacheBackend(Protocol):
         """
         ...
 
+    def store_batch(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Store multiple payload cache entries in ONE atomic transaction.
+
+        Bug #1181: Batch all per-query stores to avoid N fsync'd commits.
+        The facade (PayloadCache) is the sole handle authority — it generates
+        UUID4 handles and passes them in via entries.
+
+        Args:
+            entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+        ...
+
     def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
         """Retrieve a cache entry by handle, or None if missing or expired.
 
