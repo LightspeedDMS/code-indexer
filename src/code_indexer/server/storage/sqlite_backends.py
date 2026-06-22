@@ -6836,6 +6836,40 @@ class QueryEmbeddingCacheSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
+    def touch_last_used_batch(
+        self,
+        items: List[Tuple[str, str, str, int, float]],
+    ) -> None:
+        """Update last_used for multiple rows in a single atomic transaction.
+
+        Bug #1181 Perf Fix #2: drains the async touch flusher's coalescing buffer
+        in one executemany call, avoiding per-hit WAL lock contention.
+
+        Args:
+            items: List of (cache_key, provider, model, dimension, last_used) tuples.
+                Empty list is a no-op.
+        """
+        if not items:
+            return
+
+        # Reorder to (last_used, cache_key, provider, model, dimension) for the UPDATE
+        params = [
+            (last_used, cache_key, provider, model, dimension)
+            for cache_key, provider, model, dimension, last_used in items
+        ]
+
+        def operation(conn: Any) -> None:
+            conn.executemany(
+                """
+                UPDATE query_embedding_cache
+                SET last_used = ?
+                WHERE cache_key = ? AND provider = ? AND model = ? AND dimension = ?
+                """,
+                params,
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
     def prune_to_max(self, max_entries: int) -> int:
         """Delete rows beyond max_entries ordered by last_used ASC (deterministic tie-break).
 

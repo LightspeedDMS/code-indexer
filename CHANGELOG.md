@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.156.0] - 2026-06-21
+
+### Fixed
+- **Bug #1181 - Perf Fix #2: async/coalesced best-effort last_used touch for query-embedding cache:** The 98%-common cache-hit path previously issued a synchronous `UPDATE query_embedding_cache SET last_used=...` on every hit, contending on the WAL lock and the hot row under multi-worker deployments. Fix: `record_hit()` now does ZERO synchronous DB writes. It coalesces touches into an in-process dict keyed by `(cache_key, provider, model, dimension)` -> latest float timestamp; a background daemon thread (`qec-touch-flusher`) drains the buffer every ~5 seconds via new `touch_last_used_batch(items)` method in ONE transaction. SQLite backend uses `executemany` in a single `execute_atomic` transaction. PostgreSQL backend uses `SET LOCAL synchronous_commit = off` then `executemany` + commit -- safe because `last_used` is ephemeral LRU bookkeeping: a crash losing a buffered touch leaves the row valid, just without a freshly updated timestamp. Buffer is bounded at 2048 entries with early flush on cap hit (Messi Rule #14 compliance). `QueryEmbeddingCacheBackend` Protocol gains `touch_last_used_batch(items)` (mypy-enforced on both backends). `QueryEmbeddingCache.start()` / `stop(timeout)` lifecycle wired in `startup/lifespan.py`: `start()` after `set_query_embedding_cache()`; `stop()` before `clear_query_embedding_cache()`. This is approximate LRU -- ordering is best-effort, row correctness is never compromised. 34 new unit tests in `tests/unit/server/services/test_query_embedding_cache_async_touch_1181.py` and `tests/unit/server/services/test_query_embedding_cache_async_touch_backends_1181.py`.
+
 ## [10.155.0] - 2026-06-21
 
 ### Added

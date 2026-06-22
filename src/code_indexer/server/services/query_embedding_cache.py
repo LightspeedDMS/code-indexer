@@ -37,12 +37,26 @@ Namespace-change observability (Story #1106):
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from typing import Dict, List, NamedTuple, Optional, cast
+from typing import Dict, List, NamedTuple, Optional, Tuple, cast
 
 from code_indexer.server.storage.protocols import QueryEmbeddingCacheBackend
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Async touch-flush constants (Bug #1181 Perf Fix #2)
+# ---------------------------------------------------------------------------
+
+# Background flush interval: drain the coalescing buffer every 5 seconds.
+_TOUCH_FLUSH_INTERVAL_SECONDS = 5.0
+
+# Soft cap on the coalescing buffer (distinct keys).  Coalescing already limits
+# growth to one entry per distinct (cache_key, provider, model, dimension) tuple
+# per flush interval.  This cap guards against an extreme number of unique queries
+# in a single interval — when reached, an early synchronous flush is triggered.
+_TOUCH_BUFFER_MAX_SIZE = 2048
 
 # ---------------------------------------------------------------------------
 # Mode constants
@@ -202,6 +216,15 @@ class QueryEmbeddingCache:
         # bound, matching post-prune reality cheaply with no DB call on the exporter
         # thread.
         self._cached_total: int = 0
+        # Bug #1181 Perf Fix #2: async/coalescing last_used touch buffer.
+        # Keys: (cache_key, provider, model, dimension); values: latest timestamp.
+        # Guarded by _touch_buffer_lock for thread safety.
+        self._touch_buffer: Dict[Tuple[str, str, str, int], float] = {}
+        self._touch_buffer_lock = threading.Lock()
+        self._touch_buffer_max_size: int = _TOUCH_BUFFER_MAX_SIZE
+        # Background flush thread lifecycle (None until start() is called).
+        self._stop_event = threading.Event()
+        self._flush_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # Key / qualifier helpers
@@ -575,26 +598,161 @@ class QueryEmbeddingCache:
         cache_key: str,
         qualifier: CacheQualifier,
     ) -> None:
-        """Touch last_used timestamp for an existing cache row.  Fail-open.
+        """Buffer a last_used touch for an existing cache row.  Non-blocking, fail-open.
+
+        Bug #1181 Perf Fix #2: the hot cache-hit path performs ZERO synchronous DB
+        writes.  The touch is coalesced into an in-process dict keyed by
+        ``(cache_key, provider, model, dimension)`` with the latest timestamp.
+        A background thread (started by ``start()``) drains the buffer every
+        ``_TOUCH_FLUSH_INTERVAL_SECONDS`` via ``touch_last_used_batch``.
+
+        If the buffer reaches ``_touch_buffer_max_size`` distinct keys, an early
+        synchronous flush is triggered inline to bound memory growth (Messi #14).
+        The early flush is also fail-open: any backend error is logged at WARNING.
 
         Args:
             cache_key: String key of the form ``s:<config-digest>:<normalized-query>``
                 as returned by :meth:`build_key` (Story #1149).
             qualifier: Provider / model / dimension tuple.
         """
-        try:
-            self._backend.touch_last_used(
+        buf_key: Tuple[str, str, str, int] = (
+            cache_key,
+            qualifier.provider,
+            qualifier.model,
+            qualifier.dimension,
+        )
+        ts = time.time()
+        with self._touch_buffer_lock:
+            self._touch_buffer[buf_key] = ts
+            # Early flush when the buffer hits the cap (Messi #14: bounded growth).
+            if len(self._touch_buffer) >= self._touch_buffer_max_size:
+                self._flush_touches_locked()
+
+    # ------------------------------------------------------------------
+    # Async touch-flush internals (Bug #1181 Perf Fix #2)
+    # ------------------------------------------------------------------
+
+    def _drain_buffer_locked(self) -> List[Tuple[str, str, str, int, float]]:
+        """Snapshot and clear the touch buffer.  MUST be called while holding _touch_buffer_lock.
+
+        Returns the snapshotted items (may be empty).  Does NOT write to the
+        backend — callers on the periodic/final flush path must perform the
+        backend write OUTSIDE the lock so concurrent record_hit calls are never
+        blocked by DB I/O.
+        """
+        if not self._touch_buffer:
+            return []
+        items: List[Tuple[str, str, str, int, float]] = [
+            (cache_key, provider, model, dimension, ts)
+            for (
                 cache_key,
-                qualifier.provider,
-                qualifier.model,
-                qualifier.dimension,
-                time.time(),
-            )
+                provider,
+                model,
+                dimension,
+            ), ts in self._touch_buffer.items()
+        ]
+        self._touch_buffer.clear()
+        return items
+
+    def _flush_touches(self) -> None:
+        """Drain the touch buffer and persist via touch_last_used_batch.  Fail-open.
+
+        Called by the background thread every _TOUCH_FLUSH_INTERVAL_SECONDS, and
+        synchronously by stop() for the final drain so no touches are lost.
+
+        Lock discipline: snapshot+clear under the lock, then write outside it.
+        This ensures concurrent record_hit calls on the hot path are never
+        blocked by DB I/O (the exact fix for Bug #1181 code-review defect #9).
+        """
+        with self._touch_buffer_lock:
+            items = self._drain_buffer_locked()
+        # Lock is released here — backend write happens outside the lock.
+        if not items:
+            return
+        try:
+            self._backend.touch_last_used_batch(items)
         except Exception:
             logger.warning(
-                "query_embedding_cache: touch_last_used failed (fail-open)",
+                "query_embedding_cache: touch_last_used_batch failed (fail-open, %d items)",
+                len(items),
                 exc_info=True,
             )
+
+    def _flush_touches_locked(self) -> None:
+        """Drain+write while already holding ``_touch_buffer_lock``.  Used by record_hit only.
+
+        This is the inline early-flush safety-valve: called from record_hit when
+        the buffer reaches its cap.  It intentionally holds the lock across the
+        backend write because the overflow case is rare and bounded (Messi #14),
+        and restructuring record_hit to release-then-reacquire would add complexity
+        for a path that fires infrequently.  The periodic flush path (_flush_touches)
+        uses _drain_buffer_locked + out-of-lock write instead.
+        """
+        items = self._drain_buffer_locked()
+        if not items:
+            return
+        try:
+            self._backend.touch_last_used_batch(items)
+        except Exception:
+            logger.warning(
+                "query_embedding_cache: touch_last_used_batch failed (fail-open, %d items)",
+                len(items),
+                exc_info=True,
+            )
+
+    def _flush_loop(self) -> None:
+        """Background thread body: flush every _TOUCH_FLUSH_INTERVAL_SECONDS."""
+        while not self._stop_event.wait(timeout=_TOUCH_FLUSH_INTERVAL_SECONDS):
+            try:
+                self._flush_touches()
+            except Exception:
+                logger.warning(
+                    "query_embedding_cache: flush loop error (fail-open)",
+                    exc_info=True,
+                )
+        # Final drain on shutdown so no buffered touches are lost.
+        try:
+            self._flush_touches()
+        except Exception:
+            logger.warning(
+                "query_embedding_cache: final flush error on stop (fail-open)",
+                exc_info=True,
+            )
+
+    def start(self) -> None:
+        """Start the background touch-flush thread.  Idempotent.
+
+        Called by server lifespan startup after the cache is wired.
+        Has no effect if the thread is already running.
+        """
+        if self._flush_thread is not None and self._flush_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._flush_thread = threading.Thread(
+            target=self._flush_loop,
+            daemon=True,
+            name="qec-touch-flusher",
+        )
+        self._flush_thread.start()
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """Signal the flush thread to stop, perform a final drain, and join.
+
+        Called by server lifespan shutdown.  Blocks until the thread exits or
+        ``timeout`` seconds elapse.  The final drain inside ``_flush_loop``
+        ensures no buffered touches are lost on graceful shutdown.
+
+        Args:
+            timeout: Maximum seconds to wait for the thread to join.
+        """
+        self._stop_event.set()
+        if self._flush_thread is not None:
+            self._flush_thread.join(timeout=timeout)
+            if self._flush_thread.is_alive():
+                logger.warning(
+                    "query_embedding_cache: touch-flush thread did not stop within %.1fs",
+                    timeout,
+                )
 
     def total_entries(self) -> int:
         """Return total row count from the backend.
