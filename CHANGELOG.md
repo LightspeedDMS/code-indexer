@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.157.0] - 2026-06-22
+
+### Fixed
+- **Bug #1182 - Auto-Updater Self-Heal (incomplete Bug #1175 fix):** The auto-updater no longer deadlocks permanently on Python 3.12 nodes running under systemd `PrivateTmp=yes`. Two-layer fix: (1) the deployment lock is moved off `/tmp` to a `CIDX_DATA_DIR`-anchored path via a new shared `get_default_lock_path()` helper (consumed by both `run_once.py` and `service.py`), so the lock lives under the server data directory that `PrivateTmp` does not isolate; (2) `DeploymentLock.acquire()` create-path is now fail-soft (`except OSError` -> WARNING + `return True`, never re-raises), so a lock-create failure can never freeze a deploy. The prior #1175 fix only hardened the `.exists()` probe, not the `open()` write, and left the lock on `/tmp`; every 60s poll re-raised `PermissionError` and aborted before git pull / pip install / restart, a self-perpetuating deadlock. Trigger was strictly Python 3.12 (3.9 nodes unaffected). New tests exercise the real failure surface (patch `builtins.open` to raise on the lock write; assert the lock path is not under `/tmp`).
+- **Bug #1183 - Workers Config Idempotent-On-Value (Story #1167 guard gap):** `DeploymentExecutor._ensure_workers_config()` now rewrites an existing `--workers N` token to the configured `config.workers` value instead of short-circuiting on the mere presence of any `--workers` token. The prior presence-only guard (`if "--workers" in content: return True`) left the multi-worker un-pin inert on every already-deployed node (units already carried a hardcoded `--workers 1`), so `config.workers > 1` had no effect. The replacement uses a token-bounded, ExecStart-scoped regex (`(?<!\S)--workers\s+\S+`) so `--workers 1` is not confused with `--workers 10` and adjacent flags are never clobbered; three cases handled: exact-value no-op, wrong-value rewrite (tee + daemon-reload), absent append. New tests cover the 1->4 rewrite and the 4->4 true no-op. Makes Epic #1161's configurable multi-worker actually take effect on real clusters.
+
 ## [10.156.0] - 2026-06-22
 
 ### Added
