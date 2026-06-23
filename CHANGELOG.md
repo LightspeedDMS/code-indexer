@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.160.0] - 2026-06-23
+
+### Fixed
+- **Auto-updater admin-restart ignored the worker count:** An admin-UI-requested restart (`POST /admin/restart` -> `restart.signal` file in systemd mode) was handled by the auto-updater's poll loop with a bare `restart_server()` (`systemctl restart`) only -- it never ran `execute()`, so `_ensure_workers_config()` (the sole writer of the systemd unit's `--workers N`) was skipped. The server relaunched with the OLD worker count even though `workers` is in `RESTART_REQUIRED_FIELDS`. Proven on staging: set `config.workers=3`, requested restart, `ExecStart` stayed `--workers 1` and only 1 worker came up. Fix: the restart-signal handler in `server/auto_update/service.py` now calls `_ensure_workers_config()` (idempotent, value-aware, non-fatal) immediately before `restart_server()`, so an admin-requested restart re-applies the configured worker count. The single-writer invariant is preserved (`restart_server()` still does not modify the unit; `_ensure_workers_config` remains the only `--workers` writer, now invoked from both `execute()` and the restart-signal handler).
+
 ## [10.159.0] - 2026-06-22
 
 ### Fixed
