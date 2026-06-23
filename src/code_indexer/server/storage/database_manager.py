@@ -679,7 +679,17 @@ class DatabaseSchema:
 
         Creates parent directories with secure permissions (0700) if they don't exist.
         Enables WAL mode for concurrent reads during writes.
+
+        Bug #1178: A cross-process filelock serializes concurrent first-boot
+        bootstrap across all uvicorn worker processes.  The lock file lives at
+        ``{db_path}.bootstrap.lock`` next to the database.  Because every DDL
+        statement uses ``CREATE TABLE IF NOT EXISTS`` / ``CREATE INDEX IF NOT
+        EXISTS`` and every migration helper is idempotent, workers that acquire
+        the lock after the first worker has already completed bootstrap simply
+        run a series of no-op statements and return cleanly.
         """
+        import filelock  # already a project dependency (ssh_key_manager.py)
+
         db_path = Path(self.db_path)
 
         # Create parent directory with secure permissions
@@ -690,6 +700,23 @@ class DatabaseSchema:
             # Ensure existing directory has secure permissions
             os.chmod(parent_dir, 0o700)
 
+        lock_path = str(db_path) + ".bootstrap.lock"
+        # is_singleton=True: one FileLock instance per path per process.
+        # This makes the lock reentrant — if service_init.py already holds the
+        # outer bootstrap lock at the same path, this inner acquire nests cleanly
+        # without deadlock (the lock object is the same instance, so the acquire
+        # counter simply increments).  Cross-process exclusion is preserved.
+        with filelock.FileLock(lock_path, timeout=120, is_singleton=True):
+            self._initialize_database_locked(db_path)
+
+    def _initialize_database_locked(self, db_path: Path) -> None:
+        """
+        Inner bootstrap body executed while holding the cross-process file lock.
+
+        Separated from initialize_database() so the lock acquisition and the
+        actual DDL/migration work are in distinct scopes, making it easier to
+        unit-test each independently.
+        """
         # Create database and tables
         conn = sqlite3.connect(str(db_path))
         try:

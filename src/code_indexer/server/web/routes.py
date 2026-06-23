@@ -8842,9 +8842,20 @@ async def update_config_section(
                 success_message=f"{section.title()} configuration saved successfully",
             )
 
-        # Update all settings without validating (batch update)
+        # Update all settings without validating (batch update).
+        # Bug #1180: the search_event_log UI section renders two fields that
+        # belong to different config categories:
+        #   - search_event_log_retention_days -> category "search_event_log"
+        #   - export_retention_days           -> category "export"
+        # Without this override, every key is sent under the URL section name,
+        # causing _update_search_event_log_setting to raise ValueError on
+        # export_retention_days.
+        _section_key_category_overrides: dict = {}
+        if section == "search_event_log":
+            _section_key_category_overrides = {"export_retention_days": "export"}
         for key, value in data.items():
-            config_service.update_setting(section, key, value, skip_validation=True)
+            category = _section_key_category_overrides.get(key, section)
+            config_service.update_setting(category, key, value, skip_validation=True)
 
         # Validate configuration
         config = config_service.get_config()

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
+from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -138,13 +139,22 @@ class DataRetentionScheduler:
         job_id = f"data-retention-{uuid.uuid4().hex[:8]}"
 
         if self._job_tracker is not None:
-            self._job_tracker.register_job(
-                job_id,
-                "data_retention_cleanup",
-                username="system",
-                repo_alias="server",
-            )
-            self._job_tracker.update_status(job_id, status="running")
+            try:
+                self._job_tracker.register_job_if_no_conflict(
+                    job_id,
+                    "data_retention_cleanup",
+                    username="system",
+                    repo_alias="server",
+                )
+                self._job_tracker.update_status(job_id, status="running")
+            except DuplicateJobError:
+                # Another worker already claimed this cleanup cycle — skip silently.
+                # This is expected and benign under multi-worker deployments (Bug #1184).
+                logger.debug(
+                    "DataRetentionScheduler: data_retention_cleanup already claimed "
+                    "by another worker; skipping"
+                )
+                return
 
         try:
             if self._storage_mode == "postgres" and self._backend_registry is not None:

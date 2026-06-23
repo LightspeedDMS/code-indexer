@@ -3537,6 +3537,12 @@ class ActivatedRepoManager:
                     if golden_repo is None:
                         continue
 
+                    # local:// is an internal scheme (cidx-meta, langfuse, etc.)
+                    # that has no canonical git URL. Skip before normalization to
+                    # avoid a spurious WARNING (Bug #1188).
+                    if golden_repo.repo_url.startswith("local://"):
+                        continue
+
                     # Normalize the golden repository's URL
                     normalized = normalizer.normalize(golden_repo.repo_url)
 

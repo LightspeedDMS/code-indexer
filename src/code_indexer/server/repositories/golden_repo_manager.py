@@ -2091,6 +2091,12 @@ class GoldenRepoManager:
         matching_repos = []
 
         for repo in self.golden_repos.values():
+            # local:// is an internal scheme (cidx-meta, langfuse, etc.) that has
+            # no canonical git URL and can never match a canonical-URL search.
+            # Skip it before normalization to avoid a spurious WARNING (Bug #1188).
+            if repo.repo_url.startswith("local://"):
+                continue
+
             try:
                 # Normalize the repository's URL
                 normalized = normalizer.normalize(repo.repo_url)

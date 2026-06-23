@@ -478,42 +478,67 @@ def initialize_services() -> Dict[str, Any]:
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
 
-    # Migration and bootstrap using the main golden_repo_manager instance
-    try:
-        migrate_legacy_cidx_meta(
-            golden_repo_manager, golden_repo_manager.golden_repos_dir
-        )
-        bootstrap_cidx_meta(golden_repo_manager, golden_repo_manager.golden_repos_dir)
-        register_langfuse_golden_repos(
-            golden_repo_manager, golden_repo_manager.golden_repos_dir
-        )
-        logger.info(
-            "cidx-meta migration and bootstrap completed",
-            extra={"correlation_id": get_correlation_id()},
-        )
+    # Bug #1178: Outer bootstrap lock.  Serializes the entire first-boot SQLite
+    # critical section — seed_initial_admin + cidx-meta migration/bootstrap —
+    # across all concurrent uvicorn worker processes.  Only the first worker
+    # does real work; the others block then find everything already done.
+    # is_singleton=True makes the lock reentrant within the same process so the
+    # inner FileLock inside initialize_database() (same path) nests cleanly.
+    # SQLite mode only — PG first-boot is covered by the Story #1164
+    # pg_advisory_lock in MigrationRunner.run().
+    import filelock as _filelock
 
-        # Register cidx-meta-global as write exception (Story #197 AC1/AC4)
-        from code_indexer.server.services.file_crud_service import file_crud_service
+    _BOOTSTRAP_LOCK_TIMEOUT = 120  # seconds; matches inner lock in database_manager
+    _bootstrap_lock_path = str(db_path) + ".bootstrap.lock"
+    with _filelock.FileLock(
+        _bootstrap_lock_path, timeout=_BOOTSTRAP_LOCK_TIMEOUT, is_singleton=True
+    ):
+        # Seed initial admin user inside the lock so concurrent workers cannot
+        # race on the users.username UNIQUE constraint.  seed_initial_admin()
+        # pre-checks get_user("admin") before calling create_user(), so the
+        # second worker skips the INSERT entirely — backends stay strict (fail-loud).
+        user_manager.seed_initial_admin()
 
-        cidx_meta_path = Path(golden_repo_manager.golden_repos_dir) / "cidx-meta"
-        file_crud_service.register_write_exception("cidx-meta-global", cidx_meta_path)
-        # Inject golden_repos_dir for write-mode marker lookup (Story #231)
-        file_crud_service.set_golden_repos_dir(
-            Path(golden_repo_manager.golden_repos_dir)
-        )
-        logger.info(
-            "Registered cidx-meta-global as write exception for direct editing",
-            extra={"correlation_id": get_correlation_id()},
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "APP-GENERAL-011",
-                f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
-                exc_info=True,
+        # Migration and bootstrap using the main golden_repo_manager instance
+        try:
+            migrate_legacy_cidx_meta(
+                golden_repo_manager, golden_repo_manager.golden_repos_dir
+            )
+            bootstrap_cidx_meta(
+                golden_repo_manager, golden_repo_manager.golden_repos_dir
+            )
+            register_langfuse_golden_repos(
+                golden_repo_manager, golden_repo_manager.golden_repos_dir
+            )
+            logger.info(
+                "cidx-meta migration and bootstrap completed",
                 extra={"correlation_id": get_correlation_id()},
             )
-        )
+
+            # Register cidx-meta-global as write exception (Story #197 AC1/AC4)
+            from code_indexer.server.services.file_crud_service import file_crud_service
+
+            cidx_meta_path = Path(golden_repo_manager.golden_repos_dir) / "cidx-meta"
+            file_crud_service.register_write_exception(
+                "cidx-meta-global", cidx_meta_path
+            )
+            # Inject golden_repos_dir for write-mode marker lookup (Story #231)
+            file_crud_service.set_golden_repos_dir(
+                Path(golden_repo_manager.golden_repos_dir)
+            )
+            logger.info(
+                "Registered cidx-meta-global as write exception for direct editing",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-011",
+                    f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     activated_repo_manager = ActivatedRepoManager(
         data_dir=data_dir,
