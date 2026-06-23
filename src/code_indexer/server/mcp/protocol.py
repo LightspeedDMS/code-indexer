@@ -54,6 +54,38 @@ _OWNER_ENFORCED_TOOLS: frozenset = frozenset({"deactivate_repository"})
 # Bug #1008: git_blame on repos with deep history can block indefinitely.
 HANDLER_TIMEOUT_SECONDS = 60
 
+# Extended timeout for exit_write_mode (Issue #1190).
+# exit_write_mode runs _execute_refresh() which invokes Claude-CLI conflict
+# resolution. The inner budget (_DEFAULT_CONFLICT_TIMEOUT in conflict_resolver.py)
+# is 600s. We add 120s headroom for surrounding git fetch/rebase/index/push work.
+#
+# COUPLING: tests/e2e/helpers.py CONFLICT_RESOLUTION_TIMEOUT = 600.0 is the
+# matching E2E HTTP-client cap. If the inner conflict budget is ever raised,
+# WRITE_MODE_HANDLER_TIMEOUT_SECONDS AND that client cap must move together.
+WRITE_MODE_HANDLER_TIMEOUT_SECONDS = 720
+
+# Per-tool timeout overrides for sync handlers that legitimately need more than
+# HANDLER_TIMEOUT_SECONDS. All other tools keep the 60s default (Bug #1008).
+_HANDLER_TIMEOUT_OVERRIDES: Dict[str, int] = {
+    "exit_write_mode": WRITE_MODE_HANDLER_TIMEOUT_SECONDS,
+}
+
+
+def _resolve_handler_timeout(tool_name: str) -> int:
+    """Return the effective timeout in seconds for a given tool's sync handler.
+
+    Returns the per-tool override from _HANDLER_TIMEOUT_OVERRIDES if one exists,
+    otherwise returns HANDLER_TIMEOUT_SECONDS (60s default, Bug #1008).
+
+    Args:
+        tool_name: The MCP tool name being dispatched.
+
+    Returns:
+        Timeout in seconds to use with asyncio.wait_for.
+    """
+    return _HANDLER_TIMEOUT_OVERRIDES.get(tool_name, HANDLER_TIMEOUT_SECONDS)
+
+
 from code_indexer.server.services.api_metrics_service import (  # noqa: E402
     api_metrics_service,
 )
@@ -178,6 +210,7 @@ async def _invoke_handler(
     is_async: bool,
     session_id: Optional[str] = None,
     elevation_key: Optional[str] = None,
+    timeout_seconds: float = HANDLER_TIMEOUT_SECONDS,
 ) -> Any:
     """
     Invoke handler with appropriate parameters.
@@ -194,6 +227,10 @@ async def _invoke_handler(
             Only elevation_key is used for session_key injection; session_id
             is intentionally never used as an elevation key per CLAUDE.md
             invariant (session_key = JWT jti Bearer OR cidx_session cookie).
+        timeout_seconds: Timeout in seconds for sync handlers executed via
+            run_in_executor. Defaults to HANDLER_TIMEOUT_SECONDS (60s).
+            Typed as float because asyncio.wait_for accepts Optional[float].
+            Use _resolve_handler_timeout(tool_name) to get per-tool overrides.
 
     Returns:
         Handler result
@@ -224,12 +261,12 @@ async def _invoke_handler(
         try:
             return await asyncio.wait_for(
                 loop.run_in_executor(None, bound),
-                timeout=HANDLER_TIMEOUT_SECONDS,
+                timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
             return {
                 "success": False,
-                "error": f"Tool execution timed out after {HANDLER_TIMEOUT_SECONDS} seconds",
+                "error": f"Tool execution timed out after {timeout_seconds} seconds",
             }
 
 
@@ -610,6 +647,11 @@ async def handle_tools_call(
     sig = inspect.signature(handler)
     is_async = asyncio.iscoroutinefunction(handler)
 
+    # Issue #1190: Resolve per-tool timeout so exit_write_mode gets enough
+    # headroom for Claude-CLI conflict resolution (600s budget + 120s buffer).
+    # All other tools keep the 60s default (Bug #1008 protection unchanged).
+    handler_timeout = _resolve_handler_timeout(tool_name)
+
     # Determine if we should intercept this tool call with span logging
     # Exclude tracing tools to avoid recursion
     should_intercept = tool_name not in {"start_trace", "end_trace"}
@@ -635,6 +677,7 @@ async def handle_tools_call(
                 is_async,
                 session_id=session_id,
                 elevation_key=elevation_key,
+                timeout_seconds=handler_timeout,
             )
 
         # Execute through span interceptor
@@ -665,6 +708,7 @@ async def handle_tools_call(
             is_async,
             session_id=session_id,
             elevation_key=elevation_key,
+            timeout_seconds=handler_timeout,
         )
 
     # Bug #350: Protocol-level API metrics tracking.

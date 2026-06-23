@@ -365,7 +365,14 @@ class UsersSqliteBackend:
         email: Optional[str] = None,
         created_at: Optional[str] = None,
     ) -> None:
-        """Create a new user."""
+        """Create a new user.
+
+        Raises:
+            sqlite3.IntegrityError: When a user with the same username already exists.
+                Callers must pre-check existence (e.g. get_user()) before calling this
+                method.  Race safety is provided by the outer bootstrap FileLock in
+                service_init.py, not by silent OR IGNORE tolerance.
+        """
         now = created_at if created_at else datetime.now(timezone.utc).isoformat()
 
         def operation(conn):
@@ -1813,7 +1820,11 @@ class GoldenRepoMetadataSqliteBackend:
             temporal_options: Optional temporal indexing options (stored as JSON).
 
         Raises:
-            sqlite3.IntegrityError: If alias already exists.
+            sqlite3.IntegrityError: When a repo with the same alias already exists.
+                Callers must pre-check existence (e.g. repo_exists() or the in-memory
+                golden_repos dict) before calling this method.  Race safety is provided
+                by the outer bootstrap FileLock in service_init.py plus the callers'
+                own pre-checks, not by silent OR IGNORE tolerance.
         """
         temporal_json = json.dumps(temporal_options) if temporal_options else None
 

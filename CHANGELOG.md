@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.159.0] - 2026-06-22
+
+### Fixed
+- **#1190 MCP exit_write_mode 60s guillotine:** The MCP protocol dispatch applied one global 60s cap (`HANDLER_TIMEOUT_SECONDS`) to all synchronous tool handlers, killing `exit_write_mode` 10x below its budget when the cidx-meta backup hit a rebase conflict that real Claude-CLI resolution needs minutes for. Added a per-tool timeout override (`exit_write_mode` -> 720s = 600s conflict budget + 120s buffer) threaded through `_invoke_handler` at both dispatch call sites; every other tool keeps the 60s default (Bug #1008 protection intact).
+- **#1186 cidx-meta backup rebase masking:** Backup sync treated any non-zero `git rebase` as a conflict-stop and then ran `rebase --continue` even when no rebase was in progress, masking the real failure. Now gates conflict resolution on `_rebase_in_progress()` (checks `.git/rebase-merge`/`rebase-apply`) and surfaces the original rebase stderr otherwise.
+- **#1185 regex_search dash-pattern crash:** User regex patterns starting with `-` were passed as a bare ripgrep positional arg, crashing with "unrecognized flag". Patterns are now passed via `-e <pattern>` and the search path after `--`.
+- **#1184 reaper/retention DuplicateJobError noise:** Data-retention and activated-reaper schedulers logged benign cross-worker `DuplicateJobError` collisions at ERROR; now use `register_job_if_no_conflict` and demote the dedup collision to DEBUG (matching the #1162 pattern).
+- **#1180 Search Event Log config save:** The `export_retention_days` field was posted under the wrong config category, raising a ValueError on save. Added a per-key category override so the section saves correctly.
+- **#1178 SQLite multi-worker bootstrap race:** Under `uvicorn --workers N`, concurrent workers raced in DB bootstrap (`initialize_database` / `seed_initial_admin` / golden-repo + cidx-meta seeding). Serialized the bootstrap path with a `filelock` singleton lock; backends remain fail-loud (strict INSERT) for race safety.
+- **#1188 local:// URL-normalize WARNING:** Golden/activated repo URL-match loops logged a benign WARNING for the internal `local://` scheme; the scheme is now skipped before normalization (the genuine-error WARNING remains as a safety net).
+- **#1189 / #1192 / #1187 test-and-gate hygiene:** Allowlisted a benign `auto_watch_manager` "No watch running" e2e WARNING (#1189); rewrote a stale file-content truncation test to the post-Bug-#1080 line-offset pagination contract (#1192); fixed a coalescer e2e test to the `(vector, EmbeddingCacheMetadata)` tuple contract (#1187).
+
 ## [10.158.0] - 2026-06-22
 
 ### Documentation
