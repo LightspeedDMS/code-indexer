@@ -592,6 +592,102 @@ class TestSignalCheckedBeforeRedeployMarker:
         service.change_detector.has_changes.assert_called_once()
 
 
+class TestWorkersConfigAppliedBeforeRestartSignal:
+    """Tests for bug fix: admin-requested restart must re-apply workers config.
+
+    When the Web UI triggers a restart via restart.signal, _ensure_workers_config()
+    must be called BEFORE restart_server() so that a changed worker count is picked
+    up by the new uvicorn process.  Stale signals must NOT call either method.
+    """
+
+    def test_fresh_signal_calls_ensure_workers_config_before_restart(
+        self, service, tmp_path
+    ):
+        """Fresh restart signal: _ensure_workers_config() called BEFORE restart_server().
+
+        Given a fresh restart.signal file exists
+        When poll_once() processes it
+        Then deployment_executor._ensure_workers_config() is called
+        And that call appears BEFORE deployment_executor.restart_server() in mock_calls
+        """
+        signal_file = tmp_path / "restart.signal"
+        make_signal_file(signal_file, age_seconds=5)
+
+        mock_pending = MagicMock()
+        mock_pending.exists.return_value = False
+        mock_legacy = MagicMock()
+        mock_legacy.exists.return_value = False
+
+        # Use a parent mock so mock_calls captures call ORDER across both methods
+        parent = MagicMock()
+        service.deployment_executor = parent
+
+        with patch(
+            "code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", signal_file
+        ):
+            with patch(
+                "code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER",
+                mock_pending,
+            ):
+                with patch(
+                    "code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER",
+                    mock_legacy,
+                ):
+                    service.poll_once()
+
+        called_names = [call[0] for call in parent.mock_calls]
+        assert "_ensure_workers_config" in called_names, (
+            "_ensure_workers_config() must be called on a fresh restart signal"
+        )
+        assert "restart_server" in called_names, (
+            "restart_server() must be called on a fresh restart signal"
+        )
+        workers_idx = called_names.index("_ensure_workers_config")
+        restart_idx = called_names.index("restart_server")
+        assert workers_idx < restart_idx, (
+            "_ensure_workers_config() must be called BEFORE restart_server(), "
+            f"but got order: {called_names}"
+        )
+
+    def test_stale_signal_does_not_call_ensure_workers_config(self, service, tmp_path):
+        """Stale restart signal: neither _ensure_workers_config nor restart_server called.
+
+        Given a stale restart.signal file (older than threshold)
+        When poll_once() processes it
+        Then _ensure_workers_config() is NOT called
+        And restart_server() is NOT called
+        """
+        from code_indexer.server.auto_update.deployment_executor import (
+            RESTART_SIGNAL_STALENESS_THRESHOLD,
+        )
+
+        signal_file = tmp_path / "restart.signal"
+        make_signal_file(
+            signal_file, age_seconds=RESTART_SIGNAL_STALENESS_THRESHOLD + 30
+        )
+
+        mock_pending = MagicMock()
+        mock_pending.exists.return_value = False
+        mock_legacy = MagicMock()
+        mock_legacy.exists.return_value = False
+
+        with patch(
+            "code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", signal_file
+        ):
+            with patch(
+                "code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER",
+                mock_pending,
+            ):
+                with patch(
+                    "code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER",
+                    mock_legacy,
+                ):
+                    service.poll_once()
+
+        service.deployment_executor._ensure_workers_config.assert_not_called()
+        service.deployment_executor.restart_server.assert_not_called()
+
+
 class TestSignalConstantsExist:
     """Tests that required constants are properly defined."""
 

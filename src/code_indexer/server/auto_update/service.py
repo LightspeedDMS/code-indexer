@@ -130,6 +130,21 @@ class AutoUpdateService:
                 "Restart signal detected, file deleted, executing restart",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Re-apply bootstrap->unit config (e.g. uvicorn --workers) so an
+            # admin-requested restart picks up worker-count changes written to
+            # config.json via the Web UI.  _ensure_workers_config is idempotent
+            # and value-aware (Bug #1183).  restart_server() itself does NOT
+            # modify the unit file, so the single-writer invariant is preserved.
+            try:
+                self.deployment_executor._ensure_workers_config()
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "AUTO-UPDATE-014",
+                        f"Failed to re-apply workers config before restart: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
             restart_ok = self.deployment_executor.restart_server()
             if not restart_ok:
                 logger.error(
