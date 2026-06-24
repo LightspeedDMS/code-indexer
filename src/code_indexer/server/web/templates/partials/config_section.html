@@ -47,7 +47,11 @@
                     <tr>
                         <td class="config-label">Log Level</td>
                         <td class="config-value">{{ config.server.log_level }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'log_level' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">JWT Expiration (minutes)</td>
@@ -110,12 +114,67 @@
                 </label>
             </div>
             <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
+                <button type="button" class="primary" onclick="submitServerConfig()">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('server')">Cancel</button>
             </div>
         </form>
     </article>
 </details>
+
+<!-- Host/Port Change Confirmation Modal (Story #1195 AC2) -->
+<dialog id="host-port-confirm-modal">
+    <article>
+        <header>
+            <button aria-label="Close" rel="prev" onclick="closeHostPortModal()"></button>
+            <h3>Confirm Host/Port Change</h3>
+        </header>
+        <p>
+            <strong>Warning:</strong> Changing the server host or port has infrastructure implications:
+        </p>
+        <ul>
+            <li>HAProxy backend configuration must be updated to match the new host/port.</li>
+            <li>Firewall rules are bound to the existing port — changing it may sever cluster connectivity.</li>
+            <li>A server restart is required for changes to take effect.</li>
+        </ul>
+        <p>Are you sure you want to change the host or port?</p>
+        <footer>
+            <button type="button" class="secondary" onclick="closeHostPortModal()">Cancel</button>
+            <button type="button" class="primary" onclick="confirmHostPortChange()">Confirm Change</button>
+        </footer>
+    </article>
+</dialog>
+
+<script>
+function submitServerConfig() {
+    var form = document.getElementById('edit-form-server');
+    var originalHost = '{{ config.server.host }}';
+    var originalPort = '{{ config.server.port }}';
+    var newHost = document.getElementById('server-host').value;
+    var newPort = document.getElementById('server-port').value;
+    var hostChanged = newHost !== originalHost;
+    var portChanged = newPort !== String(originalPort);
+    if (hostChanged || portChanged) {
+        document.getElementById('host-port-confirm-modal').showModal();
+    } else {
+        form.submit();
+    }
+}
+
+function closeHostPortModal() {
+    document.getElementById('host-port-confirm-modal').close();
+}
+
+function confirmHostPortChange() {
+    var form = document.getElementById('edit-form-server');
+    var confirmInput = document.createElement('input');
+    confirmInput.type = 'hidden';
+    confirmInput.name = 'confirm_host_port_change';
+    confirmInput.value = '1';
+    form.appendChild(confirmInput);
+    closeHostPortModal();
+    form.submit();
+}
+</script>
 
 
 <details class="config-section" id="section-provider-api-keys">

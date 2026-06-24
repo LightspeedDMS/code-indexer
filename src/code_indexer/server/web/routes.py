@@ -87,6 +87,7 @@ RESTART_REQUIRED_FIELDS = [
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
     "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
+    "log_level",  # Log level — read at uvicorn startup; Story #1195 AC1
 ]
 
 
@@ -8842,6 +8843,43 @@ async def update_config_section(
                 success_message=f"{section.title()} configuration saved successfully",
             )
 
+        # Story #1195 AC2: Read pre-change host/port BEFORE any mutation (Opus nit).
+        # This snapshot is the authoritative "what was persisted" value so the
+        # guardrail compares the incoming form value against the ORIGINAL, not an
+        # already-mutated in-memory config.
+        _pre_change_config = config_service.get_config()
+
+        # Story #1195 AC2: Server-side host/port confirmation guardrail.
+        # Client-side modal is UX-only; a direct POST bypasses it, so enforcement
+        # MUST be server-side.  HAProxy and firewall are bound to the existing
+        # host/port — a silent change would sever cluster connectivity.
+        # Guardrail fires ONLY when host or port TRULY differs from the persisted
+        # value AND the explicit confirm flag is absent from the form submission.
+        if section == "server":
+            _incoming_host = str(data.get("host", _pre_change_config.host))
+            _incoming_port_raw = data.get("port", str(_pre_change_config.port))
+            try:
+                _incoming_port = int(str(_incoming_port_raw))
+            except (ValueError, TypeError):
+                _incoming_port = _pre_change_config.port
+            _host_changed = _incoming_host != _pre_change_config.host
+            _port_changed = _incoming_port != _pre_change_config.port
+            _confirm_flag = bool(data.get("confirm_host_port_change", ""))
+            if (_host_changed or _port_changed) and not _confirm_flag:
+                return _create_config_page_response(
+                    request,
+                    session,
+                    error_message=(
+                        "Changing host or port requires explicit confirmation — "
+                        "HAProxy backend and firewall port-lock warning. "
+                        "Please confirm the change via the confirmation dialog."
+                    ),
+                )
+
+        # Strip the confirm flag from data before passing to update_setting
+        # (it is a UI-only field, not a config key).
+        data.pop("confirm_host_port_change", None)
+
         # Update all settings without validating (batch update).
         # Bug #1180: the search_event_log UI section renders two fields that
         # belong to different config categories:
@@ -11515,7 +11553,34 @@ def restart_server(request: Request) -> JSONResponse:
     username = session.username
     logger.info(f"Server restart requested by {username}")
 
-    # Schedule delayed restart on background thread
+    # Story #1200 AC7: branch on cluster vs solo mode.
+    #
+    # Cluster (PG pool present): bump launch_restart_generation only.
+    # The bumping node does NOT synchronously write restart.signal here — its
+    # own check_pending_launch_restart() poll (running every interval) detects
+    # target > applied and signals itself (MAJOR-M3 / FIX-2).  All other nodes
+    # are signalled by their own poll loops independently.
+    #
+    # Solo: retain the existing single-node restart path (materialize + signal /
+    # os.execv).  Do NOT bump the generation in solo mode (FIX-5).
+    config_svc = get_config_service()
+    if config_svc._pool is not None:
+        # Cluster mode: bump generation, let per-poll check handle restart.signal
+        config_svc.bump_launch_restart_generation()
+        with _restart_lock:
+            _restart_in_progress = False
+        return JSONResponse(
+            status_code=202,
+            content={
+                "message": (
+                    "Cluster restart requested: generation bumped. "
+                    "All nodes will restart via the auto-updater."
+                )
+            },
+        )
+
+    # Solo mode: materialize launch config then schedule single-node restart
+    config_svc.materialize_launch_config()
     _schedule_delayed_restart(delay=2)
 
     # Return 202 Accepted immediately
