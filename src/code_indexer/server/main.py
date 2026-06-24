@@ -24,6 +24,12 @@ def main():
     parser.add_argument(
         "--reload", action="store_true", help="Enable auto-reload for development"
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of uvicorn worker processes (default: 1)",
+    )
 
     args = parser.parse_args()
 
@@ -43,6 +49,7 @@ def main():
         port=args.port,
         reload=args.reload,
         access_log=True,
+        workers=args.workers,
     )
 
 

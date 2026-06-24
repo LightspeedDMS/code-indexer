@@ -344,13 +344,20 @@ class TestInitializeRuntimeDb:
         assert "service_display_name" in runtime_dict
         assert runtime_dict["service_display_name"] == original_display_name
 
-        # Assert: config.json stripped to bootstrap only
+        # Assert: config.json stripped to bootstrap + transition-preserved keys.
+        # Story #1197: TRANSITION_PRESERVE_KEYS (workers/log_level/host/port) are
+        # no longer in BOOTSTRAP_KEYS but must survive the strip for one transition
+        # release so old nodes in a rolling upgrade can still read them.
+        from code_indexer.server.services.config_service import TRANSITION_PRESERVE_KEYS
+
         config_path = os.path.join(tmp_server_dir, "config.json")
         with open(config_path) as f:
             saved = json.load(f)
+        allowed_keys = BOOTSTRAP_KEYS | TRANSITION_PRESERVE_KEYS
         for key in saved:
-            assert key in BOOTSTRAP_KEYS, (
-                f"Non-bootstrap key '{key}' in config.json after migration"
+            assert key in allowed_keys, (
+                f"Unexpected key '{key}' in config.json after migration "
+                f"(must be in BOOTSTRAP_KEYS or TRANSITION_PRESERVE_KEYS)"
             )
 
         # Assert: backup created
@@ -491,11 +498,17 @@ class TestSaveConfigSqlite:
         )
         svc.set_connection_pool(mock_pool)
 
-        # Re-mock for save (UPDATE + SELECT version)
+        # Re-mock for save (SELECT config_json + UPDATE + SELECT version).
+        # _save_runtime_to_pg now reads current generation before writing (AC2).
+        snap_cursor = MagicMock()
+        snap_cursor.fetchone.return_value = {
+            "config_json": json.dumps(runtime_dict),
+            "version": 10,
+        }
         update_cursor = MagicMock()
         select_cursor = MagicMock()
         select_cursor.fetchone.return_value = {"version": 11}
-        mock_conn.execute.side_effect = [update_cursor, select_cursor]
+        mock_conn.execute.side_effect = [snap_cursor, update_cursor, select_cursor]
 
         config = svc.get_config()
         config.service_display_name = "ClusterSave"

@@ -1891,7 +1891,13 @@ class DeploymentExecutor:
         return host, port, workers
 
     def _resolve_launch_values(self, mode: str) -> Optional[dict]:
-        """Return resolved {host, port, workers} or None (DEPLOY: missing/corrupt source)."""
+        """Return resolved {host, port, workers} or None (DEPLOY: missing/corrupt source).
+
+        For APPLY mode, also includes applied_restart_generation sourced from
+        launch.json's target_restart_generation (defaults to 0 when absent).
+        DEPLOY mode is unaffected: it reads applied_launch.json which has no generation
+        field, and the ExecStart rewrite must not receive that field.
+        """
         raw = self._read_launch_source(mode)
         if raw is None:
             return (
@@ -1900,13 +1906,21 @@ class DeploymentExecutor:
 
         host, port, workers = raw.get("host"), raw.get("port"), raw.get("workers")
         host, port, workers = self._fill_from_config_json(host, port, workers)
-        return {
+        result: dict = {
             "host": host if host is not None else _LAUNCH_DEFAULT_HOST,
             "port": int(port) if port is not None else _LAUNCH_DEFAULT_PORT,
             "workers": max(
                 1, int(workers) if workers is not None else _LAUNCH_DEFAULT_WORKERS
             ),
         }
+        if mode == "APPLY":
+            # APPLY reads launch.json; target_restart_generation is written by Story #1198.
+            # Story #1200 reads applied_restart_generation to detect pending restart loops.
+            # Default 0 matches COALESCE(applied, 0) semantics in #1200 AC1/AC5.
+            result["applied_restart_generation"] = int(
+                raw.get("target_restart_generation") or 0
+            )
+        return result
 
     @staticmethod
     def _is_cidx_execstart(line: str) -> bool:
@@ -2044,6 +2058,10 @@ class DeploymentExecutor:
                 lines, host, port, workers
             )
             snapshot: dict = {"host": host, "port": port, "workers": workers}
+            if "applied_restart_generation" in values:
+                snapshot["applied_restart_generation"] = values[
+                    "applied_restart_generation"
+                ]
             if not modified:
                 logger.debug(
                     f"ExecStart already matches ({host}:{port} workers={workers}); no-op",

@@ -89,6 +89,11 @@ def test_all_server_config_fields_are_classified() -> None:
             "query_embedding_cache_config",  # Story #1105 — runtime Web UI cache config
             "search_event_log_retention_days",  # Issue #1159 — runtime Web UI setting
             "export_retention_days",  # Story #1160 — runtime Web UI export retention
+            # Story #1197: four launch keys moved from BOOTSTRAP_KEYS to runtime
+            "workers",  # Story #1197 — runtime (cluster-propagated via shared DB row)
+            "log_level",  # Story #1197 — runtime (cluster-propagated via shared DB row)
+            "host",  # Story #1197 — runtime (cluster-propagated via shared DB row)
+            "port",  # Story #1197 — runtime (cluster-propagated via shared DB row)
         }
     )
 

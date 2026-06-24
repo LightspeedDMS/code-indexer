@@ -1,6 +1,7 @@
 """Lifespan context manager for CIDX server startup and shutdown."""
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -9,7 +10,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
@@ -154,6 +155,19 @@ def make_lifespan(
         )
         startup_config = None  # Story #746: ensure always defined before try block
         try:
+            # Story #1198 AC5: try launch.json first for log_level (written by
+            # ConfigService.materialize_launch_config); fall back to config.json.
+            from code_indexer.server.auto_update.deployment_executor import (
+                LAUNCH_CONFIG_PATH,
+            )
+
+            _launch_log_level: Optional[str] = None
+            try:
+                _launch_data = json.loads(LAUNCH_CONFIG_PATH.read_text())
+                _launch_log_level = _launch_data.get("log_level")
+            except Exception:
+                pass  # launch.json absent or unreadable — proceed to load_config()
+
             # Load config to get configured log level (Story #38: respect log_level setting)
             from code_indexer.server.utils.config_manager import ServerConfigManager
 
@@ -168,8 +182,14 @@ def make_lifespan(
                 "ERROR": logging.ERROR,
                 "CRITICAL": logging.CRITICAL,
             }
+            # Story #1198 AC5: prefer log_level from launch.json if available
+            _effective_log_level = (
+                _launch_log_level
+                if _launch_log_level is not None
+                else startup_config.log_level
+            )
             configured_level = log_level_map.get(
-                startup_config.log_level.upper(), logging.INFO
+                _effective_log_level.upper(), logging.INFO
             )
 
             log_db_path = Path(server_data_dir) / "logs.db"
@@ -2621,6 +2641,11 @@ def make_lifespan(
 
                     _config_svc = get_config_service()
                     _config_svc.set_connection_pool(_cluster_pool)
+                    # Story #1198 AC2/FIX-3: register materialize_launch_config as cb1
+                    # before the reload poller starts, so config changes trigger a re-write.
+                    _config_svc.register_on_change_callback(
+                        lambda _cfg: _config_svc.materialize_launch_config()
+                    )  # noqa: E501
                     _config_svc.start_config_reload(interval_seconds=30)
 
                     # Bug #998: Late-initialize OIDC on cluster secondary nodes.
