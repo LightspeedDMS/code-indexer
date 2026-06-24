@@ -1826,28 +1826,36 @@ class DeploymentExecutor:
     def _read_launch_source(self, mode: str) -> Optional[dict]:
         """Read launch config JSON for the given mode.
 
-        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (fall through).
-        DEPLOY: reads APPLIED_LAUNCH_CONFIG_PATH.
-            - MISSING (first boot): returns {} so caller falls through to config.json → defaults.
-              AC2 gherkin: 'applied_launch.json does NOT exist yet (first boot) → falls back
-              to config.json → ServerConfig defaults (NOT launch.json/TARGET)'.
-            - CORRUPT (exists but JSON parse fails): returns None so caller preserves the live
-              ExecStart byte-for-byte. AC2 gherkin: 'applied_launch.json exists but is
-              CORRUPT/malformed → logs WARNING, preserves CURRENT live-unit ExecStart'.
-        These are two DISTINCT branches — NOT the same 'preserve' path.
+        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (fall through
+                to config.json → defaults; APPLY's job is to apply the TARGET).
+        DEPLOY: reads APPLIED_LAUNCH_CONFIG_PATH. Both the MISSING and CORRUPT cases
+            return None so the caller PRESERVES the live ExecStart unchanged — a routine
+            code deploy must never rewrite the live unit from a stale config. The live
+            ExecStart is the confirmed running state (e.g. --host 0.0.0.0 bound so HAProxy
+            on another host can reach this node); falling through to config.json /
+            ServerConfig defaults would risk rewriting --host 0.0.0.0 → 127.0.0.1 (the
+            ServerConfig default), dropping the node off the load balancer (a confirmed
+            production-outage path). A present+valid applied_launch.json is used normally.
         """
         source_path = (
             LAUNCH_CONFIG_PATH if mode == "APPLY" else APPLIED_LAUNCH_CONFIG_PATH
         )
         if not source_path.exists():
             if mode == "DEPLOY":
-                # First boot: no applied_launch.json yet. Fall through to config.json → defaults.
-                # Do NOT preserve (there is no working ExecStart established by this node yet).
+                # DEPLOY + missing applied_launch.json: preserve the live ExecStart.
+                # The live unit IS the confirmed running state (e.g. --host 0.0.0.0 bound
+                # so HAProxy on another host can reach this node). Falling through to
+                # config.json / ServerConfig defaults risks rewriting --host 0.0.0.0
+                # to 127.0.0.1 (the ServerConfig default), dropping the node off the
+                # load balancer (production outage).
+                # Treat identically to the CORRUPT case: return None so the caller
+                # preserves the live unit unchanged.
                 logger.debug(
-                    "DEPLOY: applied_launch.json missing (first boot) — falling back to config.json/defaults",
+                    "DEPLOY: applied_launch.json missing — preserving live ExecStart "
+                    "(same as corrupt path; live unit is the confirmed running state)",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                return {}
+                return None
             return {}
         try:
             return dict(json.loads(source_path.read_text()))

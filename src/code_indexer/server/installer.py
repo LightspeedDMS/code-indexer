@@ -104,6 +104,12 @@ class ServerInstaller:
         # Create configuration using ServerConfigManager
         config = self.config_manager.create_default_config()
         config.port = port  # Set allocated port
+        # Set host to 0.0.0.0 to match the ExecStart in the systemd service file
+        # (create_systemd_service hardcodes --host 0.0.0.0 so HAProxy on another host
+        # can reach this node). Without this, config.json defaults to 127.0.0.1 while
+        # ExecStart uses 0.0.0.0 — a mismatch that would cause production-safety issues
+        # if config.json is ever used as a fallback for ExecStart reconstruction.
+        config.host = "0.0.0.0"
 
         # Apply environment overrides
         config = self.config_manager.apply_env_overrides(config)
