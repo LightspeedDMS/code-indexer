@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.163.0] - 2026-06-24
+
+### Fixed
+- **Epic #1194 production-safety: a routine deploy could rebind a cluster node to loopback and drop it off HAProxy.** The auto-updater's DEPLOY path rewrote the systemd ExecStart `--host` from `config.host`, whose `ServerConfig` default is `127.0.0.1` -- a value the installer never overwrote (it hardcodes `--host 0.0.0.0` directly into ExecStart). On any node whose `applied_launch.json` did not yet exist, a routine code deploy therefore rewrote `--host 0.0.0.0` -> `127.0.0.1`, binding loopback-only and severing HAProxy/cluster reachability. Confirmed live on the staging cluster (all 3 nodes went 503). Fix: `_ensure_launch_config` DEPLOY mode now PRESERVES the live ExecStart when `applied_launch.json` is MISSING (identical to the existing CORRUPT handling) -- a routine deploy never rewrites the live unit from a stale config; the live ExecStart is the confirmed running state (MAJOR-M1). Intentional host changes still flow through the Web UI -> diagnostics-restart (APPLY) path, which is unchanged. Additionally the installer now writes `host: 0.0.0.0` into the generated `config.json` so it matches the `--host 0.0.0.0` it already bakes into ExecStart, eliminating the stale default for fresh installs. Validated end-to-end on the live staging cluster (host=0.0.0.0 propagated cluster-wide, generation-bump restart converged all 3 nodes, HAProxy front door recovered 503 -> serving).
+
 ## [10.162.0] - 2026-06-24
 
 ### Added

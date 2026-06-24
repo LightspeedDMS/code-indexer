@@ -257,8 +257,19 @@ class TestWorkersUnPin:
         written = self._run_ensure_with_config(tmp_path, workers=-5)
         assert "--workers 1" in written
 
-    def test_misconfig_applied_missing_writes_workers_1(self, tmp_path):
-        """Misconfig: no applied_launch.json -> falls back to ServerConfig defaults (port 8000, workers 1)."""
+    def test_misconfig_applied_missing_preserves_live(self, tmp_path):
+        """CORRECTED: no applied_launch.json -> preserve live ExecStart (no rewrite).
+
+        This test previously encoded a production-safety bug: it asserted that
+        DEPLOY+missing falls through to ServerConfig defaults and rewrites ExecStart.
+        In a real cluster, the live ExecStart has --host 0.0.0.0 but config.json has
+        host=127.0.0.1 (the ServerConfig default). The old behavior would rewrite
+        --host 0.0.0.0 to 127.0.0.1, dropping the node off HAProxy (production outage).
+
+        After the fix: DEPLOY+missing returns None from _read_launch_source (same as
+        CORRUPT), so _ensure_launch_config returns without touching the live unit.
+        No tee call is expected.
+        """
         executor = _make_executor()
         unit_dir = tmp_path / "systemd"
         unit_dir.mkdir()
@@ -289,9 +300,12 @@ class TestWorkersUnPin:
                 ):
                     executor._ensure_launch_config("DEPLOY")
 
-        assert tee_calls, "Expected sudo tee to be called (first-boot defaults applied)"
-        assert "--workers 1" in tee_calls[0], (
-            f"Expected '--workers 1' (default) in: {tee_calls[0]!r}"
+        # CORRECTED: no rewrite expected when applied_launch.json is missing
+        assert not tee_calls, (
+            "DEPLOY + missing applied_launch.json must preserve live ExecStart (no tee call). "
+            "The old assertion ('tee must be called with defaults') encoded the production-safety "
+            "bug where --host 0.0.0.0 would be rewritten to 127.0.0.1 from config.json defaults. "
+            f"Got tee_calls: {tee_calls!r}"
         )
 
     def test_workers_count_written_for_workers_3(self, tmp_path):

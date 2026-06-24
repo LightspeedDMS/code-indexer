@@ -150,18 +150,24 @@ class TestAC2DeployMode:
             f"Corrupt applied_launch.json must NOT rewrite ExecStart. Got: {written!r}"
         )
 
-    def test_deploy_missing_applied_falls_back_to_defaults(
+    def test_deploy_missing_applied_preserves_live_execstart(
         self, executor: Any, unit_dir: Path, tmp_path: Path
     ) -> None:
-        """AC2/AC4 BEHAVIORAL: Missing applied_launch.json → first-boot fallback to config.json
-        then ServerConfig defaults. ExecStart IS rewritten from defaults (port 8000).
-        DEPLOY must NOT return None for the missing case — that would make first-boot a no-op.
+        """AC2 CORRECTED: Missing applied_launch.json → preserve live ExecStart (no rewrite).
 
-        AC2 (first-boot gherkin): 'applied_launch.json does NOT exist yet (first boot)
-        → DEPLOY mode falls back to config.json -> ServerConfig defaults (NOT launch.json/TARGET)'
+        This test previously encoded a production-safety bug: it asserted that
+        DEPLOY+missing falls back to config.json/ServerConfig defaults, which would
+        rewrite --host 0.0.0.0 (live HAProxy-facing bind) to --host 127.0.0.1
+        (the ServerConfig default) on any routine code deploy, dropping the node off
+        the load balancer.
 
-        The CORRUPT case (applied exists but is malformed) is what triggers preserve/None.
-        MISSING triggers the defaults fallback path.
+        The correct behavior (now matching CORRUPT): DEPLOY+missing returns None from
+        _read_launch_source, so _ensure_launch_config returns without touching the live
+        unit. The live ExecStart IS the confirmed running state on this node.
+
+        DEPLOY must NOT read launch.json (TARGET) — that would apply an unconfirmed
+        config change. It also must NOT fall to config.json/defaults (that rewrites
+        with potentially wrong host). The safe choice is: preserve the live unit.
         """
         write_unit(unit_dir)
         applied = tmp_path / "applied_launch.json"  # deliberately NOT created
@@ -171,26 +177,28 @@ class TestAC2DeployMode:
 
         result, written = run_deploy(executor, unit_dir, applied, launch)
 
-        # DEPLOY returns None (it never returns a snapshot), but it MUST have rewritten
-        # ExecStart from config.json→defaults (port 8000 default, not 1111 from launch.json)
+        # DEPLOY always returns None (never a snapshot)
         assert result is None, f"DEPLOY must always return None; got: {result!r}"
-        assert written is not None, (
-            "Missing applied_launch.json (first boot) must still rewrite ExecStart "
-            "from config.json→defaults. DEPLOY must NOT be a no-op on first boot."
-        )
-        assert "--port 1111" not in written, (
-            f"DEPLOY must NOT use launch.json port (1111) even when applied is missing. "
-            f"Got: {written!r}"
+        # CORRECTED: missing applied_launch.json preserves live ExecStart (no tee rewrite)
+        assert written is None, (
+            "DEPLOY + missing applied_launch.json must preserve live ExecStart (no rewrite). "
+            "The old 'fall through to config.json/defaults' behavior was a production-safety "
+            "bug: it rewrote --host 0.0.0.0 to 127.0.0.1, dropping the node off HAProxy. "
+            f"Got written: {written!r}"
         )
 
-    def test_deploy_corrupt_distinct_from_missing_preserves_live(
+    def test_deploy_corrupt_applied_preserves_live(
         self, executor: Any, unit_dir: Path, tmp_path: Path
     ) -> None:
         """AC2 BEHAVIORAL: CORRUPT applied_launch.json → preserve live ExecStart (no rewrite).
-        MISSING and CORRUPT are TWO DISTINCT cases — not the same 'preserve' path.
+
+        After the production-safety fix, MISSING and CORRUPT both preserve the live
+        ExecStart (both return None from _read_launch_source). This test guards the
+        CORRUPT path specifically. For the MISSING path see
+        test_deploy_missing_applied_preserves_live_execstart above.
 
         CORRUPT: applied file EXISTS but cannot be parsed → preserve live ExecStart.
-        MISSING: applied file does NOT exist → fall through to defaults.
+        MISSING: applied file does NOT exist → also preserve live ExecStart (after fix).
         """
         # Unit has distinct existing ExecStart — corrupt should leave it untouched
         write_unit(unit_dir)
