@@ -92,7 +92,7 @@ def _patch_execute_siblings(executor, *, claude_side_effect=None):
         patch.object(executor, "git_submodule_update", return_value=True),
         patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
         patch.object(executor, "pip_install", return_value=True),
-        patch.object(executor, "_ensure_workers_config", return_value=True),
+        patch.object(executor, "_ensure_launch_config", return_value=None),
         patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
         patch.object(executor, "_ensure_git_safe_directory", return_value=True),
         patch.object(
