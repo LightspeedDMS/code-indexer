@@ -382,6 +382,8 @@ class ServerLifecycleManager:
             config["host"],
             "--port",
             str(config["port"]),
+            "--workers",
+            str(config.get("workers", 1)),
         ]
 
         # Create log directory for server output

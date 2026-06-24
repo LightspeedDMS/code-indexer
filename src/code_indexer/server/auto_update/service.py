@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from .deployment_lock import DeploymentLock
     from .deployment_executor import DeploymentExecutor
 from code_indexer.server.auto_update.deployment_executor import (
+    APPLIED_LAUNCH_CONFIG_PATH,
     LEGACY_REDEPLOY_MARKER,
     PENDING_REDEPLOY_MARKER,
     RESTART_SIGNAL_PATH,
@@ -130,21 +131,23 @@ class AutoUpdateService:
                 "Restart signal detected, file deleted, executing restart",
                 extra={"correlation_id": get_correlation_id()},
             )
-            # Re-apply bootstrap->unit config (e.g. uvicorn --workers) so an
-            # admin-requested restart picks up worker-count changes written to
-            # config.json via the Web UI.  _ensure_workers_config is idempotent
-            # and value-aware (Bug #1183).  restart_server() itself does NOT
-            # modify the unit file, so the single-writer invariant is preserved.
-            try:
-                self.deployment_executor._ensure_workers_config()
-            except Exception as e:
+            # Re-apply launch config (host/port/workers) before restart so an
+            # admin-requested restart picks up any pending config changes.
+            # _ensure_launch_config is idempotent and value-aware (Bug #1183).
+            # MAJOR-M5: check return value — skip restart if ensure fails.
+            # APPLY mode reads launch.json (TARGET) and returns a snapshot on success.
+            # DEPLOY always returns None (by design), which would unconditionally
+            # trigger the 'if not launch_snapshot' guard and skip restart_server().
+            launch_snapshot = self.deployment_executor._ensure_launch_config("APPLY")
+            if not launch_snapshot:
                 logger.warning(
                     format_error_log(
                         "AUTO-UPDATE-014",
-                        f"Failed to re-apply workers config before restart: {e}",
+                        "Failed to apply launch config before restart; skipping restart",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
+                return
             restart_ok = self.deployment_executor.restart_server()
             if not restart_ok:
                 logger.error(
@@ -152,6 +155,19 @@ class AutoUpdateService:
                         "AUTO-UPDATE-013",
                         "Restart signal handler: server restart FAILED "
                         "(signal already deleted, no retry)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return
+            # Write applied_launch.json only after ensure+restart both succeed (MAJOR-M5).
+            # Single-writer invariant: only this code path writes applied_launch.json.
+            try:
+                APPLIED_LAUNCH_CONFIG_PATH.write_text(json.dumps(launch_snapshot))
+            except OSError as e:
+                logger.warning(
+                    format_error_log(
+                        "AUTO-UPDATE-015",
+                        f"Failed to write applied_launch.json: {e}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )

@@ -57,6 +57,32 @@ RESTART_SIGNAL_PATH = _cidx_data_dir / "restart.signal"
 # and deleted without triggering a restart. Set to 2x the typical poll interval.
 RESTART_SIGNAL_STALENESS_THRESHOLD = 120
 
+# Story #1198 MAJOR-M2: launch.json written by ConfigService.materialize_launch_config()
+# to capture the TARGET launch parameters (workers, log_level, host, port,
+# target_restart_generation).  The auto-updater reads this file before restarting
+# uvicorn so that the restarted process picks up any pending config changes.
+LAUNCH_CONFIG_PATH = _cidx_data_dir / "launch.json"
+# applied_launch.json written by the auto-updater AFTER it has applied a launch
+# config (started uvicorn with the values from launch.json).  Consumers such as
+# applied_worker_count.py read this to determine the APPLIED (running) count.
+APPLIED_LAUNCH_CONFIG_PATH = _cidx_data_dir / "applied_launch.json"
+
+
+# Canonical server defaults mirroring ServerConfig field declarations (config_manager.py).
+# Used by _resolve_launch_values so defaults stay centralized; never hardcode these inline.
+def _get_server_config_defaults() -> tuple:
+    """Return (host, port, workers) defaults from ServerConfig field declarations."""
+    from code_indexer.server.utils.config_manager import ServerConfig as _SC
+    import dataclasses as _dc
+
+    _fields = {f.name: f.default for f in _dc.fields(_SC)}
+    return _fields["host"], _fields["port"], _fields["workers"]
+
+
+_LAUNCH_DEFAULT_HOST, _LAUNCH_DEFAULT_PORT, _LAUNCH_DEFAULT_WORKERS = (
+    _get_server_config_defaults()
+)
+
 # Hnswlib fallback constants (Bug #160)
 # Note: Using /var/tmp/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 HNSWLIB_FALLBACK_PATH = Path("/var/tmp/cidx-hnswlib")
@@ -1797,131 +1823,268 @@ class DeploymentExecutor:
             )
             return False
 
-    def _ensure_workers_config(self) -> bool:
-        """Ensure systemd service has the configured --workers count set.
+    def _read_launch_source(self, mode: str) -> Optional[dict]:
+        """Read launch config JSON for the given mode.
 
-        Reads the worker count from ServerConfigManager (bootstrap config) and
-        writes it into the ExecStart line.  Uses max(1, ...) to guard against
-        a misconfigured zero or negative value.  Single-writer invariant: this
-        is the only method that writes a --workers token to the unit file.
-
-        Returns:
-            True if config is correct or was updated, False on error
+        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (fall through).
+        DEPLOY: reads APPLIED_LAUNCH_CONFIG_PATH.
+            - MISSING (first boot): returns {} so caller falls through to config.json → defaults.
+              AC2 gherkin: 'applied_launch.json does NOT exist yet (first boot) → falls back
+              to config.json → ServerConfig defaults (NOT launch.json/TARGET)'.
+            - CORRUPT (exists but JSON parse fails): returns None so caller preserves the live
+              ExecStart byte-for-byte. AC2 gherkin: 'applied_launch.json exists but is
+              CORRUPT/malformed → logs WARNING, preserves CURRENT live-unit ExecStart'.
+        These are two DISTINCT branches — NOT the same 'preserve' path.
         """
-        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
-
+        source_path = (
+            LAUNCH_CONFIG_PATH if mode == "APPLY" else APPLIED_LAUNCH_CONFIG_PATH
+        )
+        if not source_path.exists():
+            if mode == "DEPLOY":
+                # First boot: no applied_launch.json yet. Fall through to config.json → defaults.
+                # Do NOT preserve (there is no working ExecStart established by this node yet).
+                logger.debug(
+                    "DEPLOY: applied_launch.json missing (first boot) — falling back to config.json/defaults",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return {}
+            return {}
         try:
-            # Read configured worker count — same idiom as other _ensure_* methods.
-            from code_indexer.server.utils.config_manager import ServerConfigManager
-
-            _config = ServerConfigManager(
-                server_dir_path=str(_cidx_data_dir)
-            ).load_config()
-            worker_count = max(1, getattr(_config, "workers", 1) or 1)
-
-            if not service_path.exists():
+            return dict(json.loads(source_path.read_text()))
+        except (json.JSONDecodeError, OSError) as exc:
+            if mode == "DEPLOY":
                 logger.warning(
                     format_error_log(
-                        "DEPLOY-GENERAL-017",
-                        f"Service file not found: {service_path}",
+                        "DEPLOY-GENERAL-199",
+                        f"DEPLOY: applied_launch.json corrupt — preserving live ExecStart: {exc}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return True  # Not an error if service doesn't exist yet
+                return None
+            logger.debug(
+                f"APPLY: launch.json unreadable ({exc}); falling through to config.json",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return {}
 
-            import re as _re
+    def _fill_from_config_json(
+        self, host: Optional[str], port: Optional[int], workers: Optional[int]
+    ) -> tuple:
+        """Fill any still-None values from config.json; return (host, port, workers)."""
+        if all(v is not None for v in (host, port, workers)):
+            return host, port, workers
+        config_path = _cidx_data_dir / "config.json"
+        if config_path.exists():
+            try:
+                cfg = json.loads(config_path.read_text())
+                if host is None:
+                    host = cfg.get("host")
+                if port is None:
+                    port = cfg.get("port")
+                if workers is None:
+                    workers = cfg.get("workers")
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug(
+                    f"config.json unreadable ({exc}); using ServerConfig defaults",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        return host, port, workers
 
-            content = service_path.read_text()
+    def _resolve_launch_values(self, mode: str) -> Optional[dict]:
+        """Return resolved {host, port, workers} or None (DEPLOY: missing/corrupt source).
 
-            # Idempotency guard: value-aware, scoped to the ExecStart uvicorn line only.
-            # A token-bounded pattern prevents '--workers 4' matching '--workers 40'.
-            _exact_re = _re.compile(
-                r"(?<!\S)--workers\s+" + _re.escape(str(worker_count)) + r"(?!\S)"
+        For APPLY mode, also includes applied_restart_generation sourced from
+        launch.json's target_restart_generation (defaults to 0 when absent).
+        DEPLOY mode is unaffected: it reads applied_launch.json which has no generation
+        field, and the ExecStart rewrite must not receive that field.
+        """
+        raw = self._read_launch_source(mode)
+        if raw is None:
+            return (
+                None  # DEPLOY: corrupt/missing applied_launch.json — preserve ExecStart
             )
 
-            # Add or replace --workers {worker_count} on the ExecStart line
-            if "ExecStart=" in content and "uvicorn" in content:
-                lines = content.split("\n")
-                updated_lines = []
-                modified = False
+        host, port, workers = raw.get("host"), raw.get("port"), raw.get("workers")
+        host, port, workers = self._fill_from_config_json(host, port, workers)
+        result: dict = {
+            "host": host if host is not None else _LAUNCH_DEFAULT_HOST,
+            "port": int(port) if port is not None else _LAUNCH_DEFAULT_PORT,
+            "workers": max(
+                1, int(workers) if workers is not None else _LAUNCH_DEFAULT_WORKERS
+            ),
+        }
+        if mode == "APPLY":
+            # APPLY reads launch.json; target_restart_generation is written by Story #1198.
+            # Story #1200 reads applied_restart_generation to detect pending restart loops.
+            # Default 0 matches COALESCE(applied, 0) semantics in #1200 AC1/AC5.
+            result["applied_restart_generation"] = int(
+                raw.get("target_restart_generation") or 0
+            )
+        return result
 
-                for line in lines:
-                    if line.startswith("ExecStart=") and "uvicorn" in line:
-                        if _exact_re.search(line):
-                            # Already the correct value on this line — no-op
-                            logger.debug(
-                                f"Workers config already set to {worker_count} in service file",
-                                extra={"correlation_id": get_correlation_id()},
-                            )
-                            updated_lines.append(line)
-                            # No modification needed; skip to next line but don't
-                            # set modified=True so we skip the write path.
-                            continue
-                        elif "--workers" in line:
-                            # Replace existing (wrong) worker count on this line
-                            line = _re.sub(
-                                r"(?<!\S)--workers\s+\S+",
-                                f"--workers {worker_count}",
-                                line,
-                            )
-                            modified = True
-                        else:
-                            # Append new --workers token
-                            line = line.rstrip() + f" --workers {worker_count}"
-                            modified = True
-                    updated_lines.append(line)
+    @staticmethod
+    def _is_cidx_execstart(line: str) -> bool:
+        """Detection predicate covering both ExecStart shapes (CRITICAL-D).
 
-                if modified:
-                    new_content = "\n".join(updated_lines)
-                    # Write via sudo
-                    result = subprocess.run(
-                        ["sudo", "tee", str(service_path)],
-                        input=new_content,
-                        capture_output=True,
-                        text=True,
-                    )
+        The old uvicorn-only gate silently skipped installer-shape units that use
+        'code_indexer.server.main' instead of 'uvicorn'. This predicate covers both.
+        """
+        return line.startswith("ExecStart=") and (
+            "code_indexer.server.main" in line or "uvicorn" in line
+        )
 
-                    if result.returncode != 0:
-                        logger.error(
-                            format_error_log(
-                                "DEPLOY-GENERAL-018",
-                                f"Failed to update service file: {result.stderr}",
-                                extra={"correlation_id": get_correlation_id()},
-                            )
-                        )
-                        return False
+    @staticmethod
+    def _rewrite_flag(line: str, flag: str, value: str) -> tuple:
+        """Token-bounded in-place flag rewrite (Bug #1183 idiom).
 
-                    # Reload systemd (non-fatal: unit file already written)
-                    reload_result = subprocess.run(
-                        ["sudo", "systemctl", "daemon-reload"],
-                        capture_output=True,
-                        text=True,
-                    )
-                    if reload_result.returncode != 0:
-                        logger.warning(
-                            format_error_log(
-                                "DEPLOY-GENERAL-173",
-                                f"daemon-reload failed after workers update: {reload_result.stderr}",
-                                extra={"correlation_id": get_correlation_id()},
-                            )
-                        )
+        Returns (new_line, was_modified). Exact match → no-op.
+        Differing value → bounded replace. Absent flag → append.
+        Never confuses '--workers 1' with '--workers 10'.
+        """
+        import re as _re
 
-                    logger.info(
-                        f"Added --workers {worker_count} to service file",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+        exact = _re.compile(
+            r"(?<!\S)" + _re.escape(flag) + r"\s+" + _re.escape(value) + r"(?!\S)"
+        )
+        if exact.search(line):
+            return line, False
 
-            return True
+        bounded = _re.compile(r"(?<!\S)" + _re.escape(flag) + r"\s+\S+")
+        if bounded.search(line):
+            return bounded.sub(f"{flag} {value}", line), True
 
-        except Exception as e:
+        return line.rstrip() + f" {flag} {value}", True
+
+    def _read_cidx_service_lines(self, service_path: "Path") -> Optional[list]:
+        """Read service file lines; return them only if a cidx ExecStart is present.
+
+        Returns None when the file is missing or contains no cidx ExecStart line.
+        """
+        if not service_path.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-017",
+                    f"Service file not found: {service_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
+        lines = service_path.read_text().split("\n")
+        if not any(self._is_cidx_execstart(ln) for ln in lines):
+            logger.debug(
+                "No cidx ExecStart found; skipping launch config rewrite",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+        return lines
+
+    def _rewrite_execstart_lines(
+        self, lines: list, host: str, port: int, workers: int
+    ) -> tuple:
+        """Rewrite --host/--port/--workers on cidx ExecStart lines only.
+
+        Returns (updated_lines, was_modified). Never writes --log-level (CRITICAL-A).
+        """
+        updated, modified = [], False
+        for line in lines:
+            if self._is_cidx_execstart(line):
+                line, c1 = self._rewrite_flag(line, "--host", str(host))
+                line, c2 = self._rewrite_flag(line, "--port", str(port))
+                line, c3 = self._rewrite_flag(line, "--workers", str(workers))
+                modified = modified or c1 or c2 or c3
+            updated.append(line)
+        return updated, modified
+
+    def _write_and_reload_service(self, service_path: "Path", lines: list) -> bool:
+        """Write lines to service_path via sudo tee, then daemon-reload.
+
+        Returns True on tee success; daemon-reload failure is logged but non-fatal.
+        """
+        tee = subprocess.run(
+            ["sudo", "tee", str(service_path)],
+            input="\n".join(lines),
+            capture_output=True,
+            text=True,
+        )
+        if tee.returncode != 0:
             logger.error(
                 format_error_log(
-                    "DEPLOY-GENERAL-019",
-                    f"Error checking workers config: {e}",
+                    "DEPLOY-GENERAL-018",
+                    f"sudo tee failed updating service file: {tee.stderr}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
+        reload = subprocess.run(
+            ["sudo", "systemctl", "daemon-reload"],
+            capture_output=True,
+            text=True,
+        )
+        if reload.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-173",
+                    f"daemon-reload failed after launch config update: {reload.stderr}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+        return True
+
+    def _ensure_launch_config(self, mode: str) -> Optional[dict]:
+        """Rewrite --host/--port/--workers in the live systemd ExecStart.
+
+        APPLY:  returns snapshot {host, port, workers} on success; None on failure.
+        DEPLOY: rewrites ExecStart then always returns None (MAJOR-M5).
+        """
+        if mode not in {"APPLY", "DEPLOY"}:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-200",
+                    f"_ensure_launch_config: invalid mode={mode!r}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
+        try:
+            values = self._resolve_launch_values(mode)
+            if values is None:
+                return None
+            host, port, workers = values["host"], values["port"], values["workers"]
+            service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+            lines = self._read_cidx_service_lines(service_path)
+            if lines is None:
+                return None
+            updated, modified = self._rewrite_execstart_lines(
+                lines, host, port, workers
+            )
+            snapshot: dict = {"host": host, "port": port, "workers": workers}
+            if "applied_restart_generation" in values:
+                snapshot["applied_restart_generation"] = values[
+                    "applied_restart_generation"
+                ]
+            if not modified:
+                logger.debug(
+                    f"ExecStart already matches ({host}:{port} workers={workers}); no-op",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return snapshot if mode == "APPLY" else None
+            if not self._write_and_reload_service(service_path, updated):
+                return None
+            logger.info(
+                f"Rewrote ExecStart: --host {host} --port {port} --workers {workers} "
+                f"(mode={mode})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return snapshot if mode == "APPLY" else None
+        except Exception as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-019",
+                    f"Error in _ensure_launch_config(mode={mode}): {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
 
     def _extract_service_user(self, content: str) -> Optional[str]:
         """Extract User= value from service file content.
@@ -2886,8 +3049,13 @@ class DeploymentExecutor:
             )
             return False
 
-        # Step 3: Story #30 AC4 - Ensure workers config
-        self._ensure_workers_config()
+        # Step 3: Story #1199 - Ensure launch config (host/port/workers) from applied_launch.json.
+        # DEPLOY mode reads applied_launch.json → config.json → ServerConfig defaults (NEVER launch.json)
+        # so a routine code deploy preserves the last operator-applied launch config without
+        # auto-applying a saved-but-unconfirmed TARGET change (decision #3).
+        # Uses the broadened ExecStart predicate (CRITICAL-D) that covers both installer-shape
+        # (code_indexer.server.main) and uvicorn-shape units.
+        self._ensure_launch_config("DEPLOY")
 
         # Step 4: Bug #87 - Ensure CIDX_REPO_ROOT environment variable
         self._ensure_cidx_repo_root()

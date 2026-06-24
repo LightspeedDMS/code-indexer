@@ -116,28 +116,21 @@ def initialize_services() -> Dict[str, Any]:
     # getters build the singletons.  initialize_caches is idempotent so if a
     # lazy getter somehow fired first (degraded path) it skips re-construction.
     #
-    # Worker count is a BOOTSTRAP key stored in config.json and is available
-    # this early (before initialize_runtime_db).  Mirrors the pattern used by
-    # ProviderConcurrencyGovernor._read_config_workers(): try get_config_service,
-    # fall back to 1 on any error/non-int so worker_count is NEVER 0 or None.
+    # Story #1197 AC5 (CRITICAL-C2): Use the applied-worker-count resolver
+    # (applied_launch.json → config.json → 1) instead of get_config().workers.
+    # This ensures the cache cap is divided by the APPLIED count (the count the
+    # running process was actually launched with), not a saved-but-unapplied
+    # TARGET that an admin saved via the Web UI without triggering a restart.
     _cache_worker_count = 1
     try:
-        from code_indexer.server.services.config_service import (
-            get_config_service as _get_cfg_svc,
+        from code_indexer.server.services.applied_worker_count import (
+            get_applied_worker_count as _get_applied_workers,
         )
 
-        _cfg_workers = getattr(_get_cfg_svc().get_config(), "workers", None)
-        if isinstance(_cfg_workers, int):
-            _cache_worker_count = max(1, _cfg_workers)
-        else:
-            logger.debug(
-                "Story #1166: config.workers is not an int (%r); "
-                "using worker_count=1 (no per-worker cap division)",
-                _cfg_workers,
-            )
+        _cache_worker_count = _get_applied_workers()
     except Exception as _wc_exc:
         logger.debug(
-            "Story #1166: could not read config.workers (%s); "
+            "Story #1166/#1197: could not read applied worker count (%s); "
             "using worker_count=1 (no per-worker cap division)",
             _wc_exc,
         )
@@ -229,6 +222,9 @@ def initialize_services() -> Dict[str, Any]:
     # Story #578: Initialize SQLite-backed runtime config (unified model).
     # Must happen after schema init (server_config table) and before PG pool.
     config_service.initialize_runtime_db(str(db_path))
+    # Story #1198 AC4: materialize launch.json once at startup (solo and cluster).
+    # Fail-soft — materialize_launch_config() never raises.
+    config_service.materialize_launch_config()
 
     # Epic #408: Cluster mode — determine storage backend
     _storage_mode = "sqlite"

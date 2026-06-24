@@ -571,11 +571,35 @@ class _FakeConfigWithWorkers:
 
 
 def _patch_config_workers(cfg):
-    """Patch get_config_service to return a service yielding ``cfg``."""
-    return patch(
-        "code_indexer.server.services.config_service.get_config_service",
-        return_value=_FakeConfigService(cfg),
+    """Patch get_config_service AND the applied-worker-count resolver.
+
+    Story #1197 rerouted _read_config_workers() through the file-based
+    applied_worker_count resolver instead of get_config_service().workers.
+    Both patches are required so TestWorkerConcurrencyScaling tests inject
+    the desired worker count into the governor.
+    """
+    workers = getattr(cfg, "workers", 1)
+    # Ensure max(1, workers) discipline matches the real resolver behaviour.
+    applied_workers = max(1, workers) if isinstance(workers, int) else 1
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=_FakeConfigService(cfg),
+        )
     )
+    stack.enter_context(
+        patch(
+            # The governor imports via `from ... import get_applied_worker_count`
+            # inside a try block (local import), so we must patch the name in
+            # the source module, not in the governor's namespace.
+            "code_indexer.server.services.applied_worker_count.get_applied_worker_count",
+            return_value=applied_workers,
+        )
+    )
+    return stack
 
 
 class TestWorkerConcurrencyScaling:

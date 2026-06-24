@@ -22,9 +22,15 @@ from unittest.mock import Mock, MagicMock, patch
 
 
 @pytest.fixture
-def service():
+def service(tmp_path, monkeypatch):
     """Create AutoUpdateService instance for testing."""
     from code_indexer.server.auto_update.service import AutoUpdateService
+    import code_indexer.server.auto_update.service as svc_mod
+
+    # Story #1199 AC5: redirect applied_launch.json write to tmp dir
+    monkeypatch.setattr(
+        svc_mod, "APPLIED_LAUNCH_CONFIG_PATH", tmp_path / "applied_launch.json"
+    )
 
     svc = AutoUpdateService(
         repo_path=Path("/test/repo"),
@@ -34,6 +40,14 @@ def service():
     svc.change_detector = Mock()
     svc.deployment_lock = Mock()
     svc.deployment_executor = Mock()
+    # Story #1199 AC5: _ensure_launch_config returns a JSON-serializable snapshot
+    # (service.py now calls _ensure_launch_config("DEPLOY") and json.dumps the result)
+    svc.deployment_executor._ensure_launch_config.return_value = {
+        "host": "127.0.0.1",
+        "port": 8000,
+        "workers": 1,
+    }
+    svc.deployment_executor.restart_server.return_value = True
     return svc
 
 
@@ -593,25 +607,28 @@ class TestSignalCheckedBeforeRedeployMarker:
 
 
 class TestWorkersConfigAppliedBeforeRestartSignal:
-    """Tests for bug fix: admin-requested restart must re-apply workers config.
+    """Tests for: admin-requested restart must re-apply launch config.
 
-    When the Web UI triggers a restart via restart.signal, _ensure_workers_config()
-    must be called BEFORE restart_server() so that a changed worker count is picked
-    up by the new uvicorn process.  Stale signals must NOT call either method.
+    Story #1199: _ensure_launch_config("APPLY") replaced _ensure_workers_config().
+    When the Web UI triggers a restart via restart.signal, _ensure_launch_config("APPLY")
+    must be called BEFORE restart_server(). APPLY reads launch.json (TARGET) and returns
+    a snapshot; DEPLOY always returns None which would unconditionally skip restart_server().
+    Stale signals must NOT call either method.
     """
 
-    def test_fresh_signal_calls_ensure_workers_config_before_restart(
+    def test_fresh_signal_calls_ensure_launch_config_before_restart(
         self, service, tmp_path
     ):
-        """Fresh restart signal: _ensure_workers_config() called BEFORE restart_server().
+        """Fresh restart signal: _ensure_launch_config('APPLY') called BEFORE restart_server().
 
         Given a fresh restart.signal file exists
         When poll_once() processes it
-        Then deployment_executor._ensure_workers_config() is called
+        Then deployment_executor._ensure_launch_config('APPLY') is called
         And that call appears BEFORE deployment_executor.restart_server() in mock_calls
         """
         signal_file = tmp_path / "restart.signal"
         make_signal_file(signal_file, age_seconds=5)
+        applied_path = tmp_path / "applied_launch.json"
 
         mock_pending = MagicMock()
         mock_pending.exists.return_value = False
@@ -620,41 +637,49 @@ class TestWorkersConfigAppliedBeforeRestartSignal:
 
         # Use a parent mock so mock_calls captures call ORDER across both methods
         parent = MagicMock()
+        parent._ensure_launch_config.return_value = {
+            "host": "127.0.0.1",
+            "port": 8000,
+            "workers": 1,
+        }
+        parent.restart_server.return_value = True
         service.deployment_executor = parent
 
         with patch(
             "code_indexer.server.auto_update.service.RESTART_SIGNAL_PATH", signal_file
         ):
             with patch(
-                "code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER",
-                mock_pending,
+                "code_indexer.server.auto_update.service.APPLIED_LAUNCH_CONFIG_PATH",
+                applied_path,
             ):
                 with patch(
-                    "code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER",
-                    mock_legacy,
+                    "code_indexer.server.auto_update.service.PENDING_REDEPLOY_MARKER",
+                    mock_pending,
                 ):
-                    service.poll_once()
+                    with patch(
+                        "code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER",
+                        mock_legacy,
+                    ):
+                        service.poll_once()
 
+        parent._ensure_launch_config.assert_called_once_with("APPLY")
         called_names = [call[0] for call in parent.mock_calls]
-        assert "_ensure_workers_config" in called_names, (
-            "_ensure_workers_config() must be called on a fresh restart signal"
-        )
         assert "restart_server" in called_names, (
             "restart_server() must be called on a fresh restart signal"
         )
-        workers_idx = called_names.index("_ensure_workers_config")
+        ensure_idx = called_names.index("_ensure_launch_config")
         restart_idx = called_names.index("restart_server")
-        assert workers_idx < restart_idx, (
-            "_ensure_workers_config() must be called BEFORE restart_server(), "
+        assert ensure_idx < restart_idx, (
+            "_ensure_launch_config() must be called BEFORE restart_server(), "
             f"but got order: {called_names}"
         )
 
-    def test_stale_signal_does_not_call_ensure_workers_config(self, service, tmp_path):
-        """Stale restart signal: neither _ensure_workers_config nor restart_server called.
+    def test_stale_signal_does_not_call_ensure_launch_config(self, service, tmp_path):
+        """Stale restart signal: neither _ensure_launch_config nor restart_server called.
 
         Given a stale restart.signal file (older than threshold)
         When poll_once() processes it
-        Then _ensure_workers_config() is NOT called
+        Then _ensure_launch_config() is NOT called
         And restart_server() is NOT called
         """
         from code_indexer.server.auto_update.deployment_executor import (
@@ -684,7 +709,7 @@ class TestWorkersConfigAppliedBeforeRestartSignal:
                 ):
                     service.poll_once()
 
-        service.deployment_executor._ensure_workers_config.assert_not_called()
+        service.deployment_executor._ensure_launch_config.assert_not_called()
         service.deployment_executor.restart_server.assert_not_called()
 
 

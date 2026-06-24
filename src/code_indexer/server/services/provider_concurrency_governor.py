@@ -342,22 +342,22 @@ class ProviderConcurrencyGovernor:
         Per-node scope: this divides ONE node's budget across that node's
         workers. Cross-node budgeting remains the operator's responsibility
         (one ``query_provider_max_concurrency`` per node).
+
+        Story #1197 AC5 (CRITICAL-C2): reads the APPLIED worker count via the
+        applied_worker_count resolver (applied_launch.json → config.json → 1),
+        never get_config().workers (the TARGET, which may have been saved but
+        not yet restarted into effect).  This prevents a node still running the
+        old worker count from dividing its budget by the new unapplied TARGET.
         """
         try:
-            from code_indexer.server.services.config_service import get_config_service
-
-            cfg = get_config_service().get_config()
-            value = getattr(cfg, "workers", None)
-            if isinstance(value, int):
-                return max(1, value)
-            logger.debug(
-                "ProviderConcurrencyGovernor: config.workers is not an int (%r); "
-                "using worker_count=1 (no per-worker division)",
-                value,
+            from code_indexer.server.services.applied_worker_count import (
+                get_applied_worker_count,
             )
+
+            return int(get_applied_worker_count())
         except Exception as exc:
             logger.debug(
-                "ProviderConcurrencyGovernor: could not read config.workers (%s); "
+                "ProviderConcurrencyGovernor: could not read applied worker count (%s); "
                 "using worker_count=1 (no per-worker division)",
                 exc,
             )

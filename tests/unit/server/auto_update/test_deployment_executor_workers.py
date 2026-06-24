@@ -1,11 +1,17 @@
 """
-Tests for uvicorn workers configuration in auto-update.
+Tests for workers configuration in auto-update.
 
-Tests for DeploymentExecutor._ensure_workers_config() method that writes
-the configured worker count (from ServerConfigManager) to existing systemd
-service files during auto-update.
+Previously tested DeploymentExecutor._ensure_workers_config(); Story #1199 replaced
+that method with _ensure_launch_config(mode), which handles host/port/workers together.
+
+Tests retargeted from _ensure_workers_config → _ensure_launch_config("DEPLOY")
+for Story #1199 orphan-cleanup. Behavioral equivalence is preserved: the same
+ExecStart rewriting logic (_rewrite_execstart_lines / _rewrite_flag / _write_and_reload_service)
+is exercised; only the source of the workers value changed from ServerConfigManager
+to applied_launch.json.
 
 Story #1167: Auto-Updater Workers Un-Pin + Web UI Workers Setting
+Story #1199: _ensure_launch_config replaces _ensure_workers_config
 """
 
 from pathlib import Path
@@ -68,33 +74,50 @@ def _make_executor(service_name: str = "cidx-server") -> DeploymentExecutor:
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureWorkersConfig:
-    """AC4: Tests for _ensure_workers_config method."""
+class TestEnsureLaunchConfigExists:
+    """AC4 (retargeted): DeploymentExecutor must expose _ensure_launch_config (Story #1199).
 
-    def test_ensure_workers_config_method_exists(self):
-        """AC4: DeploymentExecutor should have _ensure_workers_config method."""
+    _ensure_workers_config was removed as orphan code after Step 3 of execute() was
+    rewired to call _ensure_launch_config("DEPLOY") instead.
+    """
+
+    def test_ensure_launch_config_method_exists(self):
+        """AC4: DeploymentExecutor must have _ensure_launch_config method."""
         executor = _make_executor()
-        assert hasattr(executor, "_ensure_workers_config")
-        assert callable(getattr(executor, "_ensure_workers_config"))
+        assert hasattr(executor, "_ensure_launch_config")
+        assert callable(getattr(executor, "_ensure_launch_config"))
 
-    def test_ensure_workers_returns_true_when_service_not_found(self):
-        """AC4: Should return True when service file doesn't exist (not an error)."""
+    def test_ensure_workers_config_removed(self):
+        """Story #1199: _ensure_workers_config must NOT exist (orphan removed)."""
+        executor = _make_executor()
+        assert not hasattr(executor, "_ensure_workers_config"), (
+            "_ensure_workers_config was an orphan after Story #1199 and must be removed. "
+            "Use _ensure_launch_config instead."
+        )
+
+    def test_deploy_returns_none_when_service_not_found(self, tmp_path):
+        """DEPLOY returns None when service file doesn't exist (no-op, unit dir is empty)."""
+        import json
+
         executor = _make_executor("nonexistent-service")
+        unit_dir = tmp_path / "systemd"
+        unit_dir.mkdir()
+        applied = tmp_path / "applied_launch.json"
+        applied.write_text(
+            json.dumps({"host": "127.0.0.1", "port": 8000, "workers": 1})
+        )
 
-        with patch.object(Path, "exists", return_value=False):
-            result = executor._ensure_workers_config()
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.APPLIED_LAUNCH_CONFIG_PATH",
+            applied,
+        ):
+            with patch(
+                "code_indexer.server.auto_update.deployment_executor.SYSTEMD_UNIT_DIR",
+                unit_dir,
+            ):
+                result = executor._ensure_launch_config("DEPLOY")
 
-        assert result is True
-
-    def test_ensure_workers_returns_true_when_workers_already_present(self):
-        """AC3/AC4: Should return True without modification if --workers already configured."""
-        executor = _make_executor()
-
-        with patch.object(Path, "exists", return_value=True):
-            with patch.object(Path, "read_text", return_value=_UNIT_WITH_WORKERS_4):
-                result = executor._ensure_workers_config()
-
-        assert result is True
+        assert result is None, f"DEPLOY must return None; got: {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -103,21 +126,37 @@ class TestEnsureWorkersConfig:
 
 
 class TestWorkersUnPin:
-    """Story #1167 AC1/AC2: _ensure_workers_config writes the configured count."""
+    """Story #1167 AC1/AC2 (retargeted): _ensure_launch_config("DEPLOY") writes the configured workers.
+
+    Previously tested _ensure_workers_config; Story #1199 replaced it with
+    _ensure_launch_config("DEPLOY"). Workers are now sourced from applied_launch.json
+    instead of ServerConfigManager. Same ExecStart rewriting behavior is verified.
+    """
 
     def _run_ensure_with_config(
         self,
+        tmp_path: Path,
         workers: int,
         unit_content: str = _UNIT_WITHOUT_WORKERS,
     ) -> str:
-        """
-        Run _ensure_workers_config() with a mocked ServerConfigManager returning
-        a config whose .workers == workers.
+        """Run _ensure_launch_config("DEPLOY") with workers sourced from applied_launch.json.
 
         Returns the string written to sudo tee (i.e. the new unit content).
+        workers <= 0 are clamped to 1 by _ensure_launch_config (max(1,...)).
         """
+        import json
+
         executor = _make_executor()
-        fake_config = _make_config(workers)
+        unit_dir = tmp_path / "systemd"
+        unit_dir.mkdir(exist_ok=True)
+        (unit_dir / "cidx-server.service").write_text(unit_content)
+
+        # Supply workers via applied_launch.json (DEPLOY source)
+        # Values <= 0 get clamped to 1 by _resolve_launch_values max(1,...)
+        applied = tmp_path / "applied_launch.json"
+        applied.write_text(
+            json.dumps({"host": "0.0.0.0", "port": 8000, "workers": workers})
+        )
 
         tee_calls: list[str] = []
 
@@ -129,47 +168,56 @@ class TestWorkersUnPin:
                 tee_calls.append(kwargs.get("input", ""))
             return result
 
-        with (
-            patch(
-                "code_indexer.server.utils.config_manager.ServerConfigManager"
-            ) as MockSCM,
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value=unit_content),
-            patch(
-                "code_indexer.server.auto_update.deployment_executor.subprocess.run",
-                side_effect=fake_subprocess_run,
-            ),
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.subprocess.run",
+            side_effect=fake_subprocess_run,
         ):
-            MockSCM.return_value.load_config.return_value = fake_config
-            executor._ensure_workers_config()
+            with patch(
+                "code_indexer.server.auto_update.deployment_executor.APPLIED_LAUNCH_CONFIG_PATH",
+                applied,
+            ):
+                with patch(
+                    "code_indexer.server.auto_update.deployment_executor.SYSTEMD_UNIT_DIR",
+                    unit_dir,
+                ):
+                    executor._ensure_launch_config("DEPLOY")
 
         assert tee_calls, "Expected sudo tee to be called (unit was written)"
         return tee_calls[0]
 
-    def test_ac1_config_workers_2_writes_workers_2(self):
-        """AC1: When config.workers==2, unit is written with --workers 2."""
-        written = self._run_ensure_with_config(workers=2)
+    def test_ac1_config_workers_2_writes_workers_2(self, tmp_path):
+        """AC1: When applied_launch.json has workers=2, unit is written with --workers 2."""
+        written = self._run_ensure_with_config(tmp_path, workers=2)
         assert "--workers 2" in written, f"Expected '--workers 2' in: {written!r}"
 
-    def test_ac2_config_workers_1_writes_workers_1_regression(self):
-        """AC2: When config.workers==1, writes --workers 1 (byte-identical to old behaviour)."""
-        written = self._run_ensure_with_config(workers=1)
+    def test_ac2_config_workers_1_writes_workers_1_regression(self, tmp_path):
+        """AC2: When applied_launch.json has workers=1, writes --workers 1."""
+        written = self._run_ensure_with_config(tmp_path, workers=1)
         assert "--workers 1" in written, f"Expected '--workers 1' in: {written!r}"
 
-    def test_ac2_config_workers_1_no_double_workers(self):
+    def test_ac2_config_workers_1_no_double_workers(self, tmp_path):
         """AC2: Only one --workers token is written, not two."""
-        written = self._run_ensure_with_config(workers=1)
+        written = self._run_ensure_with_config(tmp_path, workers=1)
         assert written.count("--workers") == 1
 
-    def test_ac3_idempotency_workers_already_present_no_write(self):
-        """AC3: When --workers already set to the SAME value as config, NO sudo tee called.
+    def test_ac3_idempotency_workers_already_present_no_write(self, tmp_path):
+        """AC3: When ExecStart already has the exact --workers value, NO sudo tee called.
 
-        The idempotency guard must be value-aware: '--workers 4' + config.workers=4
-        is a no-op. A different count (e.g. '--workers 1' + config.workers=4)
-        must rewrite (tested separately in TestWorkersIdempotencyOnValue).
+        The idempotency guard must be value-aware: '--workers 4' in ExecStart + workers=4
+        in applied_launch.json is a no-op. A different count must rewrite
+        (tested separately in TestWorkersIdempotencyOnValue).
         """
+        import json
+
         executor = _make_executor()
-        fake_config = _make_config(4)  # matches _UNIT_WITH_WORKERS_4
+        unit_dir = tmp_path / "systemd"
+        unit_dir.mkdir()
+        (unit_dir / "cidx-server.service").write_text(_UNIT_WITH_WORKERS_4)
+
+        applied = tmp_path / "applied_launch.json"
+        applied.write_text(
+            json.dumps({"host": "127.0.0.1", "port": 8000, "workers": 4})
+        )
 
         subprocess_calls: list = []
 
@@ -179,39 +227,45 @@ class TestWorkersUnPin:
             result.returncode = 0
             return result
 
-        with (
-            patch(
-                "code_indexer.server.utils.config_manager.ServerConfigManager"
-            ) as MockSCM,
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value=_UNIT_WITH_WORKERS_4),
-            patch(
-                "code_indexer.server.auto_update.deployment_executor.subprocess.run",
-                side_effect=fake_subprocess_run,
-            ),
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.subprocess.run",
+            side_effect=fake_subprocess_run,
         ):
-            MockSCM.return_value.load_config.return_value = fake_config
-            result = executor._ensure_workers_config()
+            with patch(
+                "code_indexer.server.auto_update.deployment_executor.APPLIED_LAUNCH_CONFIG_PATH",
+                applied,
+            ):
+                with patch(
+                    "code_indexer.server.auto_update.deployment_executor.SYSTEMD_UNIT_DIR",
+                    unit_dir,
+                ):
+                    result = executor._ensure_launch_config("DEPLOY")
 
-        assert result is True
+        assert result is None, f"DEPLOY must return None; got: {result!r}"
         tee_calls = [c for c in subprocess_calls if "tee" in c]
         assert not tee_calls, (
-            "sudo tee must NOT be called when --workers already present"
+            "sudo tee must NOT be called when --workers already present at correct value"
         )
 
-    def test_misconfig_workers_zero_writes_workers_1(self):
-        """Misconfig: config.workers==0 -> max(1,0)==1, writes --workers 1."""
-        written = self._run_ensure_with_config(workers=0)
+    def test_misconfig_workers_zero_writes_workers_1(self, tmp_path):
+        """Misconfig: applied workers=0 -> max(1,0)==1, writes --workers 1."""
+        written = self._run_ensure_with_config(tmp_path, workers=0)
         assert "--workers 1" in written
 
-    def test_misconfig_workers_negative_writes_workers_1(self):
-        """Misconfig: config.workers==-5 -> max(1,-5)==1, writes --workers 1."""
-        written = self._run_ensure_with_config(workers=-5)
+    def test_misconfig_workers_negative_writes_workers_1(self, tmp_path):
+        """Misconfig: applied workers=-5 -> max(1,-5)==1, writes --workers 1."""
+        written = self._run_ensure_with_config(tmp_path, workers=-5)
         assert "--workers 1" in written
 
-    def test_misconfig_config_none_writes_workers_1(self):
-        """Misconfig: load_config() returns None -> falls back to 1."""
+    def test_misconfig_applied_missing_writes_workers_1(self, tmp_path):
+        """Misconfig: no applied_launch.json -> falls back to ServerConfig defaults (port 8000, workers 1)."""
         executor = _make_executor()
+        unit_dir = tmp_path / "systemd"
+        unit_dir.mkdir()
+        (unit_dir / "cidx-server.service").write_text(_UNIT_WITHOUT_WORKERS)
+
+        applied = tmp_path / "applied_launch.json"  # deliberately NOT created
+
         tee_calls: list[str] = []
 
         def fake_subprocess_run(cmd, **kwargs):
@@ -221,48 +275,29 @@ class TestWorkersUnPin:
                 tee_calls.append(kwargs.get("input", ""))
             return result
 
-        with (
-            patch(
-                "code_indexer.server.utils.config_manager.ServerConfigManager"
-            ) as MockSCM,
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value=_UNIT_WITHOUT_WORKERS),
-            patch(
-                "code_indexer.server.auto_update.deployment_executor.subprocess.run",
-                side_effect=fake_subprocess_run,
-            ),
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.subprocess.run",
+            side_effect=fake_subprocess_run,
         ):
-            MockSCM.return_value.load_config.return_value = None
-            executor._ensure_workers_config()
+            with patch(
+                "code_indexer.server.auto_update.deployment_executor.APPLIED_LAUNCH_CONFIG_PATH",
+                applied,
+            ):
+                with patch(
+                    "code_indexer.server.auto_update.deployment_executor.SYSTEMD_UNIT_DIR",
+                    unit_dir,
+                ):
+                    executor._ensure_launch_config("DEPLOY")
 
-        assert tee_calls, "Expected sudo tee to be called"
-        assert "--workers 1" in tee_calls[0]
+        assert tee_calls, "Expected sudo tee to be called (first-boot defaults applied)"
+        assert "--workers 1" in tee_calls[0], (
+            f"Expected '--workers 1' (default) in: {tee_calls[0]!r}"
+        )
 
-    def test_workers_count_logged_on_write(self):
-        """The method succeeds with workers=3 (dynamic count written)."""
-        executor = _make_executor()
-        fake_config = _make_config(3)
-
-        def fake_subprocess_run(cmd, **kwargs):
-            result = MagicMock()
-            result.returncode = 0
-            return result
-
-        with (
-            patch(
-                "code_indexer.server.utils.config_manager.ServerConfigManager"
-            ) as MockSCM,
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value=_UNIT_WITHOUT_WORKERS),
-            patch(
-                "code_indexer.server.auto_update.deployment_executor.subprocess.run",
-                side_effect=fake_subprocess_run,
-            ),
-        ):
-            MockSCM.return_value.load_config.return_value = fake_config
-            result = executor._ensure_workers_config()
-
-        assert result is True
+    def test_workers_count_written_for_workers_3(self, tmp_path):
+        """DEPLOY succeeds with workers=3 (applied_launch.json value written)."""
+        written = self._run_ensure_with_config(tmp_path, workers=3)
+        assert "--workers 3" in written, f"Expected '--workers 3' in: {written!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -271,25 +306,33 @@ class TestWorkersUnPin:
 
 
 class TestWorkersIdempotencyOnValue:
-    """_ensure_workers_config must be idempotent on the EXACT worker count value.
+    """_ensure_launch_config("DEPLOY") must be idempotent on the EXACT worker count value.
 
-    The original idempotency guard short-circuited on the MERE PRESENCE of any
-    '--workers' token. Old unit files already contain '--workers 1', so on nodes
-    where config.workers=4 the guard fired and the count was never updated.
+    Retargeted from _ensure_workers_config (Story #1199 orphan-cleanup).
+    Workers are now sourced from applied_launch.json. Same invariants apply:
 
-    Correct behaviour:
-    - Unit has '--workers 1', config.workers=4 -> REWRITE to '--workers 4'
-    - Unit has '--workers 4', config.workers=4 -> NO-OP (true idempotency)
+    - Unit has '--workers 1', applied has workers=4 -> REWRITE to '--workers 4'
+    - Unit has '--workers 4', applied has workers=4 -> NO-OP (true idempotency)
     """
 
     def _run_with_unit(
         self,
+        tmp_path: Path,
         unit_content: str,
-        config_workers: int,
-    ) -> tuple[list[str], bool]:
-        """Run _ensure_workers_config and return (tee_written_contents, return_value)."""
+        applied_workers: int,
+    ) -> tuple[list[str], object]:
+        """Run _ensure_launch_config("DEPLOY") and return (tee_written_contents, return_value)."""
+        import json
+
         executor = _make_executor()
-        fake_config = _make_config(config_workers)
+        unit_dir = tmp_path / "systemd"
+        unit_dir.mkdir(exist_ok=True)
+        (unit_dir / "cidx-server.service").write_text(unit_content)
+
+        applied = tmp_path / "applied_launch.json"
+        applied.write_text(
+            json.dumps({"host": "127.0.0.1", "port": 8000, "workers": applied_workers})
+        )
 
         tee_calls: list[str] = []
 
@@ -301,33 +344,35 @@ class TestWorkersIdempotencyOnValue:
                 tee_calls.append(kwargs.get("input", ""))
             return result
 
-        with (
-            patch(
-                "code_indexer.server.utils.config_manager.ServerConfigManager"
-            ) as MockSCM,
-            patch.object(Path, "exists", return_value=True),
-            patch.object(Path, "read_text", return_value=unit_content),
-            patch(
-                "code_indexer.server.auto_update.deployment_executor.subprocess.run",
-                side_effect=fake_subprocess_run,
-            ),
+        with patch(
+            "code_indexer.server.auto_update.deployment_executor.subprocess.run",
+            side_effect=fake_subprocess_run,
         ):
-            MockSCM.return_value.load_config.return_value = fake_config
-            result = executor._ensure_workers_config()
+            with patch(
+                "code_indexer.server.auto_update.deployment_executor.APPLIED_LAUNCH_CONFIG_PATH",
+                applied,
+            ):
+                with patch(
+                    "code_indexer.server.auto_update.deployment_executor.SYSTEMD_UNIT_DIR",
+                    unit_dir,
+                ):
+                    result = executor._ensure_launch_config("DEPLOY")
 
         return tee_calls, result
 
-    def test_unit_has_workers_1_config_is_4_rewrites_to_4(self):
-        """Bug B: unit has '--workers 1', config.workers=4 -> must rewrite to '--workers 4'.
+    def test_unit_has_workers_1_applied_is_4_rewrites_to_4(self, tmp_path):
+        """Bug B: unit has '--workers 1', applied has workers=4 -> must rewrite to '--workers 4'.
 
         The old guard ('if \"--workers\" in content: return True') fires here and
         returns without updating, leaving the node stuck at 1 worker. The fix must
         detect the VALUE mismatch and rewrite the ExecStart line.
         """
-        tee_calls, result = self._run_with_unit(_UNIT_WITH_WORKERS_1, config_workers=4)
+        tee_calls, result = self._run_with_unit(
+            tmp_path, _UNIT_WITH_WORKERS_1, applied_workers=4
+        )
 
         assert tee_calls, (
-            "sudo tee must be called when existing '--workers 1' != config.workers=4"
+            "sudo tee must be called when existing '--workers 1' != applied workers=4"
         )
         written = tee_calls[0]
         assert "--workers 4" in written, (
@@ -336,20 +381,22 @@ class TestWorkersIdempotencyOnValue:
         assert "--workers 1" not in written, (
             f"Written content must NOT contain old '--workers 1', got: {written!r}"
         )
-        assert result is True
+        assert result is None, f"DEPLOY must return None; got: {result!r}"
 
-    def test_unit_has_workers_4_config_is_4_no_tee_call(self):
-        """Bug B: unit has '--workers 4', config.workers=4 -> NO-OP (true idempotency).
+    def test_unit_has_workers_4_applied_is_4_no_tee_call(self, tmp_path):
+        """Bug B: unit has '--workers 4', applied has workers=4 -> NO-OP (true idempotency).
 
-        When the existing value already matches config, no write should occur.
+        When the existing value already matches applied_launch.json, no write should occur.
         """
-        tee_calls, result = self._run_with_unit(_UNIT_WITH_WORKERS_4, config_workers=4)
+        tee_calls, result = self._run_with_unit(
+            tmp_path, _UNIT_WITH_WORKERS_4, applied_workers=4
+        )
 
         assert not tee_calls, (
-            f"sudo tee must NOT be called when '--workers 4' already matches config; "
+            f"sudo tee must NOT be called when '--workers 4' already matches applied; "
             f"got tee calls: {tee_calls}"
         )
-        assert result is True
+        assert result is None, f"DEPLOY must return None; got: {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -358,8 +405,9 @@ class TestWorkersIdempotencyOnValue:
 
 
 class TestSingleWriterInvariant:
-    """The ONLY method writing --workers is _ensure_workers_config.
+    """The ONLY method writing --workers is _ensure_launch_config (and its helpers).
     restart_server() and HealthWatchdog._restart_server() must NOT touch the unit.
+    _ensure_workers_config was removed as orphan code in Story #1199.
 
     Verified via source inspection (avoids live HTTP/drain calls that would timeout).
     """
@@ -450,10 +498,25 @@ class TestSingleWriterInvariant:
             "HealthWatchdog._restart_server() must not write '--workers'"
         )
 
-    def test_source_ensure_workers_config_is_only_writer(self):
-        """Source-text guard: only _ensure_workers_config writes --workers in deployment_executor."""
+    def test_source_ensure_launch_config_is_only_writer(self):
+        """Source-text guard: only the _ensure_launch_config family writes --workers.
+
+        Story #1199 replaced _ensure_workers_config with _ensure_launch_config.
+        _ensure_workers_config was then removed as orphan code (no production callers).
+        Permitted writers (single-writer family): _ensure_launch_config,
+        _rewrite_execstart_lines, _rewrite_flag, _write_and_reload_service.
+        Forbidden: _ensure_workers_config (deleted), restart_server,
+        HealthWatchdog._restart_server.
+        """
         import inspect
         import code_indexer.server.auto_update.deployment_executor as mod
+
+        _PERMITTED_WRITERS = {
+            "_ensure_launch_config",
+            "_rewrite_execstart_lines",
+            "_rewrite_flag",
+            "_write_and_reload_service",
+        }
 
         source = inspect.getsource(mod)
         lines = source.split("\n")
@@ -470,14 +533,18 @@ class TestSingleWriterInvariant:
                 or "+ '" in src_line
             )
         ]
-        # All write-producing lines should be inside _ensure_workers_config
+        # All write-producing lines should be inside a permitted writer method
         for lineno, line in write_worker_lines:
             # Walk back to find the enclosing def
             for j in range(lineno - 2, max(0, lineno - 200), -1):
                 if lines[j].strip().startswith("def "):
-                    assert "_ensure_workers_config" in lines[j], (
-                        f"Line {lineno} writes '--workers' but is NOT inside "
-                        f"_ensure_workers_config — single-writer invariant violated: {line!r}"
+                    enclosing = lines[j]
+                    assert any(name in enclosing for name in _PERMITTED_WRITERS), (
+                        f"Line {lineno} writes '--workers' but is NOT inside a permitted "
+                        f"single-writer method — single-writer invariant violated.\n"
+                        f"Enclosing def: {enclosing.strip()!r}\n"
+                        f"Line: {line!r}\n"
+                        f"Permitted: {_PERMITTED_WRITERS}"
                     )
                     break
 
@@ -570,11 +637,17 @@ class TestAC5WorkersSaveFlow:
         assert config.workers == 4
 
     def test_workers_in_bootstrap_keys(self):
-        """AC5: 'workers' must be a BOOTSTRAP_KEY (persisted to config.json)."""
-        from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
+        """AC5: 'workers' must be persisted to config.json.
 
-        assert "workers" in BOOTSTRAP_KEYS, (
-            "'workers' must be in BOOTSTRAP_KEYS so it is saved to config.json"
+        Story #1197 moved 'workers' from BOOTSTRAP_KEYS to TRANSITION_PRESERVE_KEYS
+        so that it continues to be written to config.json during the transition
+        release while also being available as a runtime key in the DB.
+        """
+        from code_indexer.server.services.config_service import TRANSITION_PRESERVE_KEYS
+
+        assert "workers" in TRANSITION_PRESERVE_KEYS, (
+            "'workers' must be in TRANSITION_PRESERVE_KEYS so it is saved to config.json. "
+            "Story #1197 moved it from BOOTSTRAP_KEYS to TRANSITION_PRESERVE_KEYS."
         )
 
 
