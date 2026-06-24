@@ -60,6 +60,13 @@ class IndexingResult:
 # Story #1158: Default parallelism for git-diff ThreadPoolExecutor sites.
 _DEFAULT_PARALLEL_REQUESTS = 8
 
+# Bug #1206 Fix 2: flush progressive metadata to disk every N commits (amortized).
+# Per-commit flushing re-sorted and rewrote the entire completed list each time
+# (O(N) cost per commit).  With lazy staging + periodic flush, each commit costs
+# O(1) (in-memory set.add) and the disk write happens at most every
+# _FLUSH_INTERVAL commits.  A final flush runs after all workers complete.
+_FLUSH_INTERVAL = 10
+
 
 class TemporalIndexer:
     """Orchestrates git history indexing with commit-based change tracking.
@@ -1227,8 +1234,17 @@ class TemporalIndexer:
                     # TIMEOUT ARCHITECTURE FIX: Only save commit if no errors occurred
                     # Failed/cancelled commits should not be saved to progressive metadata
                     if not commit_had_errors:
-                        # Save completed commit to progressive metadata (Bug #8 fix)
-                        self.progressive_metadata.save_completed(commit.hash)
+                        # Bug #1206 Fix 2: stage the commit in O(1) memory instead of
+                        # triggering a full re-sort + fsync per commit.  flush_pending()
+                        # is called amortized (every _FLUSH_INTERVAL commits) inside the
+                        # progress_lock block below so the counter and the flush are
+                        # always consistent.  The final flush runs after all workers
+                        # complete (see below the ThreadPoolExecutor block).
+                        # DURABILITY ORDER: mark AFTER vectors + metadata are on disk
+                        # (upsert_points already committed the SQLite batch above).
+                        # A crash before flush leaves this commit absent from
+                        # load_completed() — re-indexed on resume via deterministic point_ids.
+                        self.progressive_metadata.mark_commit_indexed(commit.hash)
                     else:
                         logger.warning(
                             f"Commit {commit.hash[:8]}: Not saved to progressive metadata (errors or cancellation)"
@@ -1249,6 +1265,12 @@ class TemporalIndexer:
                     with progress_lock:
                         completed_count[0] += 1
                         current = completed_count[0]
+
+                        # Bug #1206 Fix 2: amortized flush — write progress file every
+                        # _FLUSH_INTERVAL commits, not every commit.  Runs inside
+                        # progress_lock so only one worker flushes at a time.
+                        if current % _FLUSH_INTERVAL == 0:
+                            self.progressive_metadata.flush_pending()
 
                         # Update file counter
                         total_files_processed[0] += files_in_this_commit
@@ -1347,6 +1369,12 @@ class TemporalIndexer:
             # Shutdown executor without waiting for running tasks
             # This prevents atexit handler errors
             raise  # Re-raise to propagate interrupt
+
+        # Bug #1206 Fix 2: flush any staged commits that didn't hit the _FLUSH_INTERVAL
+        # boundary (the "tail" commits).  Runs only on clean exit because KeyboardInterrupt
+        # re-raises above and bypasses this line.  flush_pending() is idempotent when
+        # _pending is already empty.
+        self.progressive_metadata.flush_pending()
 
         # Return actual totals: (commits_processed, files_processed, vectors_created)
         # Use completed_count[0] which tracks commits actually processed (not just passed in)

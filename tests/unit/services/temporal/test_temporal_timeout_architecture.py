@@ -394,9 +394,17 @@ class TestProgressiveMetadataErrorHandling:
                     )
                 )
 
-                # VERIFY: Successful commits WERE saved
-                assert mock_progressive_metadata.save_completed.call_count > 0, (
-                    "Successful commits should be saved to metadata"
+                # VERIFY: Successful commits WERE staged via mark_commit_indexed
+                # (Bug #1206 Fix 2: save_completed replaced by mark_commit_indexed +
+                # amortized flush_pending — the new two-phase API).
+                assert mock_progressive_metadata.mark_commit_indexed.call_count > 0, (
+                    "Successful commits should be staged via mark_commit_indexed"
+                )
+                # VERIFY: flush_pending was called at least once so staged commits
+                # are durably written (final flush fires inside _process_commits_parallel
+                # after the ThreadPoolExecutor block completes).
+                assert mock_progressive_metadata.flush_pending.call_count > 0, (
+                    "flush_pending must be called so staged commits are persisted"
                 )
 
         finally:
