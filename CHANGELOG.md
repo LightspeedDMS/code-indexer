@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.162.0] - 2026-06-24
+
+### Added
+- **Epic #1194 -- Cluster-wide launch-affecting settings via shared state.** `host`, `port`, `workers`, and `log_level` are now runtime-configurable from the Web UI and propagate across a cluster via a shared-state, uncoordinated per-node self-restart -- no leader election, no new table, no ordered rolling restart. Completes (and supersedes) the partial v10.161.0.
+  - **#1197 -- Runtime launch keys.** Moves `host`/`port`/`workers`/`log_level` out of the `config.json` bootstrap into runtime config (kept in `config.json` for one transition release via `TRANSITION_PRESERVE_KEYS`). New `get_applied_worker_count()` resolver (`applied_launch.json` -> `config.json` -> default) feeds the provider-concurrency governor and the HNSW/FTS caches so per-node concurrency/memory budgets size against the APPLIED worker count.
+  - **#1198 -- Per-node launch.json materializer.** `ConfigService.materialize_launch_config()` writes a per-node `launch.json` (the TARGET snapshot: workers/log_level/host/port + `target_restart_generation`) atomically via tempfile + `os.replace`, wired into the runtime save path and startup, and registered on the Bug #586 reload callback.
+  - **#1199 -- Auto-updater ExecStart reconstruction.** `_ensure_launch_config(APPLY|DEPLOY)` performs a token-bounded, value-aware in-place rewrite of `--host`/`--port`/`--workers` on the live systemd ExecStart, matching BOTH the `code_indexer.server.main` and `uvicorn` unit shapes (the old `uvicorn`-only gate was a silent no-op on real installer units). APPLY sources from `launch.json` and records `applied_launch.json` (incl. `applied_restart_generation`) ONLY after a successful ensure + restart; DEPLOY sources from `applied_launch.json` -> `config.json` -> defaults and never from the TARGET (corrupt applied -> preserve the live ExecStart). `code_indexer.server.main` and the solo CLI launch path now accept/forward `--workers`. `--log-level` is deliberately NOT in ExecStart (it is applied in-process).
+  - **#1200 -- Cluster-wide restart via `launch_restart_generation`.** A raw `config_json` JSON key bumped by an atomic in-SQL `jsonb_set` increment (no `asdict()` round-trip; bumping node's `_db_config_version` left unadvanced so it self-restarts). A normal settings-save preserves the generation via a race-safe targeted single-key re-inject (no lost update, no dropped-key resurrection). An explicit per-poll `check_pending_launch_restart()` -- wired into the reload poll loop, version-diff-independent -- materializes then signals while `target > applied`, never records applied (the auto-updater owns that), and emits one rate-limited WARNING when a node is stuck.
+  - **#1195 -- Web UI launch settings + server-side host/port guardrail.** The four settings are editable via the runtime save path with restart-required badges; a SERVER-SIDE confirmation guardrail (pre-change value read before mutation; client `<dialog>` injects the confirm flag for UX) blocks accidental host/port changes that could sever HAProxy/firewall connectivity; the diagnostics restart is cluster-aware (cluster bump-only, solo single-node). The existing TOTP elevation gate on the config-save and `/restart` endpoints is verified, not duplicated.
+
+## [10.161.0] - 2026-06-24
+
+### Fixed
+- **Partial Epic #1194 (#1199) intermediate cut** -- auto-updater APPLY/DEPLOY ExecStart reconstruction defect fixes. Superseded by v10.162.0, which completes the epic; use v10.162.0.
+
 ## [10.160.0] - 2026-06-23
 
 ### Fixed
