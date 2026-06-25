@@ -264,3 +264,133 @@ class TestMultiIndexQueryServiceNoMultimodalFailureWarning:
             f"Expected no 'multimodal_index query failed' warnings but got: "
             f"{[r.message for r in failure_warnings]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 5 (Bug #1212): get_provider_name() exists and returns correct identifier
+# ---------------------------------------------------------------------------
+
+
+class TestGetProviderName1212:
+    """Bug #1212: VoyageMultimodalClient is missing get_provider_name().
+
+    VoyageMultimodalClient is used as an EmbeddingProvider in the multi-index
+    query path.  filesystem_vector_store.py calls embedding_provider.get_provider_name()
+    to route telemetry.  The missing method raises AttributeError which is swallowed
+    as a WARNING, silently dropping the multimodal contribution from results.
+
+    The correct return value is "voyage-ai" because:
+    - VoyageAIClient.get_provider_name() returns "voyage-ai" (voyage_ai.py:650).
+    - _write_embed_meta_to_event_ctx checks 'if "cohere" in provider_name.lower()'
+      to route telemetry; anything else routes to the voyage branch — so returning
+      "voyage-ai" correctly selects voyage telemetry for a Voyage multimodal client.
+    - The value is used for labelling/telemetry only, not for collection keying.
+    """
+
+    EXPECTED_PROVIDER_NAME = "voyage-ai"
+
+    def test_get_provider_name_method_exists(self, client):
+        """VoyageMultimodalClient must have a get_provider_name() method."""
+        assert hasattr(client, "get_provider_name"), (
+            "VoyageMultimodalClient is missing get_provider_name() — "
+            "required by EmbeddingProvider ABC and called by filesystem_vector_store.py"
+        )
+        assert callable(client.get_provider_name), "get_provider_name must be callable"
+
+    def test_get_provider_name_returns_voyage_ai(self, client):
+        """get_provider_name() must return 'voyage-ai' to route telemetry correctly."""
+        result = client.get_provider_name()
+
+        assert result == self.EXPECTED_PROVIDER_NAME, (
+            f"Expected get_provider_name() == {self.EXPECTED_PROVIDER_NAME!r}, "
+            f"got {result!r}. "
+            "The return value must match VoyageAIClient.get_provider_name() so "
+            "_write_embed_meta_to_event_ctx routes to the voyage telemetry branch."
+        )
+
+    def test_get_provider_name_returns_string(self, client):
+        """get_provider_name() must return a str."""
+        result = client.get_provider_name()
+        assert isinstance(result, str), f"Expected str, got {type(result).__name__}"
+
+    def test_get_provider_name_not_cohere(self, client):
+        """Return value must NOT contain 'cohere' — telemetry would route incorrectly."""
+        result = client.get_provider_name()
+        assert "cohere" not in result.lower(), (
+            f"get_provider_name() returned {result!r} which contains 'cohere'; "
+            "this would incorrectly route voyage multimodal telemetry to cohere fields."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 (Bug #1212): multi-index path calls get_provider_name() without AttributeError
+# ---------------------------------------------------------------------------
+
+
+class TestMultiIndexGetProviderNameNotDropped1212:
+    """Bug #1212: multi-index path must not silently drop multimodal contribution.
+
+    The multi-index query service catches ANY exception (including AttributeError
+    from a missing method) and logs a WARNING, silently dropping the multimodal
+    contribution.  This test drives the path that calls get_provider_name() and
+    asserts the call succeeds — no AttributeError, no multimodal_index WARNING.
+    """
+
+    GET_PROVIDER_NAME_ERROR_FRAGMENT = "get_provider_name"
+
+    def test_get_provider_name_called_without_attribute_error(
+        self, multimodal_service, caplog
+    ):
+        """Drive the multi-index search path; assert no AttributeError on get_provider_name.
+
+        The mock vector_store.search side_effect additionally calls
+        embedding_provider.get_provider_name() to replicate the
+        filesystem_vector_store.py path that triggers Bug #1212.
+        """
+        service, real_multimodal_client = multimodal_service
+
+        # Extend the existing mock search side_effect to also call get_provider_name()
+        # This replicates filesystem_vector_store.py:2670 where get_provider_name() is called.
+        original_side_effect = service.vector_store.search.side_effect
+
+        def search_with_get_provider_name(
+            query, embedding_provider, collection_name, **kw
+        ):
+            # Call get_provider_name() exactly as filesystem_vector_store.py does
+            _provider_name = embedding_provider.get_provider_name()
+            return original_side_effect(
+                query, embedding_provider, collection_name, **kw
+            )
+
+        service.vector_store.search.side_effect = search_with_get_provider_name
+
+        with caplog.at_level(
+            logging.WARNING,
+            logger="code_indexer.services.multi_index_query_service",
+        ):
+            service.query(
+                query_text="find authentication code",
+                limit=SEARCH_LIMIT,
+                collection_name="voyage-code-3",
+            )
+
+        # Assert no multimodal_index failure warning (AttributeError would cause this)
+        attribute_error_warnings = [
+            r
+            for r in caplog.records
+            if "multimodal_index query failed" in r.message
+            and self.GET_PROVIDER_NAME_ERROR_FRAGMENT in r.message
+        ]
+        assert not attribute_error_warnings, (
+            f"get_provider_name() raised AttributeError that was silently swallowed: "
+            f"{[r.message for r in attribute_error_warnings]}"
+        )
+
+        # Assert no multimodal_index failure at all (contribution must NOT be dropped)
+        any_multimodal_failures = [
+            r for r in caplog.records if "multimodal_index query failed" in r.message
+        ]
+        assert not any_multimodal_failures, (
+            f"Multimodal contribution was silently dropped: "
+            f"{[r.message for r in any_multimodal_failures]}"
+        )
