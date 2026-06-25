@@ -232,6 +232,14 @@ def initialize_services() -> Dict[str, Any]:
 
     get_token_blacklist().set_sqlite_path(str(db_path))
 
+    # Bug #1221: Wire ElevatedSessionManager with shared SQLite path so all
+    # workers on the same node read/write the same elevated_sessions table.
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+
+    elevated_session_manager.set_sqlite_path(str(db_path))
+
     # Bug #577: Wire DelegationJobTracker with SQLite path for standalone mode
     from code_indexer.server.services.delegation_job_tracker import (
         DelegationJobTracker,

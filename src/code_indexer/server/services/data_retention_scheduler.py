@@ -237,6 +237,10 @@ class DataRetentionScheduler:
             failed_tables=failed_tables,
         )
 
+        elevated_sessions_deleted = self._safe_prune_elevated_sessions(
+            failed_tables=failed_tables,
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
@@ -244,6 +248,7 @@ class DataRetentionScheduler:
             "dep_map_history_deleted": dep_map_history_deleted,
             "background_jobs_deleted": background_jobs_deleted,
             "token_blacklist_deleted": token_blacklist_deleted,
+            "elevated_sessions_deleted": elevated_sessions_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
@@ -251,6 +256,7 @@ class DataRetentionScheduler:
                 + dep_map_history_deleted
                 + background_jobs_deleted
                 + token_blacklist_deleted
+                + elevated_sessions_deleted
             ),
             "failed_tables": failed_tables,
         }
@@ -326,6 +332,10 @@ class DataRetentionScheduler:
             failed_tables=failed_tables,
         )
 
+        elevated_sessions_deleted = self._safe_prune_elevated_sessions(
+            failed_tables=failed_tables,
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
@@ -333,6 +343,7 @@ class DataRetentionScheduler:
             "dep_map_history_deleted": dep_map_history_deleted,
             "background_jobs_deleted": background_jobs_deleted,
             "token_blacklist_deleted": token_blacklist_deleted,
+            "elevated_sessions_deleted": elevated_sessions_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
@@ -340,6 +351,7 @@ class DataRetentionScheduler:
                 + dep_map_history_deleted
                 + background_jobs_deleted
                 + token_blacklist_deleted
+                + elevated_sessions_deleted
             ),
             "failed_tables": failed_tables,
         }
@@ -472,6 +484,36 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append("token_blacklist")
+            return 0
+
+    def _safe_prune_elevated_sessions(
+        self,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from elevated_sessions (Bug #1221).
+
+        TTL is the manager's configured max_age_seconds so rows cannot be
+        pruned before the elevation window they represent has fully expired.
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'elevated_sessions' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.auth.elevated_session_manager import (
+                elevated_session_manager,
+            )
+
+            max_age_seconds = elevated_session_manager._max_age
+            return int(elevated_session_manager.prune_expired(max_age_seconds))
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'elevated_sessions' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("elevated_sessions")
             return 0
 
     # ------------------------------------------------------------------

@@ -423,6 +423,26 @@ CREATE INDEX IF NOT EXISTS idx_elevated_sessions_username
 """
 
 
+class _PrefetchedCursor:
+    """Cursor wrapping a pre-fetched list of rows.
+
+    Used by DELETE...RETURNING emulation in _EsmPgConn.execute() to return
+    rows that were captured by a SELECT BEFORE the DELETE was executed.
+    Without this, fetchall() on a live sqlite3.Cursor after DELETE on the
+    same connection only returns 1 row (lazy evaluation truncation).
+    """
+
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+        self.rowcount = len(rows)
+
+    def fetchall(self) -> list:
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
 class _EsmPgCursor:
     """Cursor-like context manager delegating execute/fetchone to _EsmPgConn."""
 
@@ -508,6 +528,30 @@ class _EsmPgConn:
         returning_match = re.search(r"\bRETURNING\b", query, re.IGNORECASE)
         if returning_match:
             query_no_ret = query[: returning_match.start()].strip()
+            # DELETE ... RETURNING: SELECT affected rows FIRST (fetchall before
+            # DELETE so lazy SQLite cursor is not truncated by the mutation),
+            # then DELETE, then return a _PrefetchedCursor wrapping the rows.
+            if re.match(r"\s*DELETE\b", query_no_ret, re.IGNORECASE):
+                # Extract WHERE clause to build an equivalent SELECT.
+                where_match = re.search(
+                    r"\bWHERE\b(.*)", query_no_ret, re.IGNORECASE | re.DOTALL
+                )
+                if where_match:
+                    where_clause = where_match.group(1).strip()
+                    pre_rows = self._run(
+                        self._translate(
+                            f"SELECT session_key FROM elevated_sessions WHERE {where_clause}"
+                        ),
+                        params,
+                    ).fetchall()  # fetchall() BEFORE DELETE to avoid lazy-eval truncation
+                    # Execute the actual DELETE.
+                    self._run(self._translate(query_no_ret), params)
+                    return _PrefetchedCursor(pre_rows)  # type: ignore[return-value]
+                # No WHERE clause — delete all and return empty prefetched cursor.
+                self._run(self._translate(query_no_ret), params)
+                return _PrefetchedCursor([])  # type: ignore[return-value]
+
+            # UPDATE ... RETURNING: original logic.
             cursor = self._run(self._translate(query_no_ret), params)
             if cursor.rowcount > 0:
                 session_key = self._returning_session_key(query_no_ret, params)
@@ -692,3 +736,311 @@ def test_cluster_revoke_all_does_not_affect_other_users(cluster_manager):
     cluster_manager.create(_SESSION_KEY_B, other_user, _IP_LOCAL)
     cluster_manager.revoke_all_for_username(_USERNAME_ADMIN)
     assert cluster_manager.get_status(_SESSION_KEY_B) is not None
+
+
+# ===========================================================================
+# Bug #1221 — set_sqlite_path + cross-instance visibility + prune_expired
+# ===========================================================================
+#
+# These tests document and prove the per-worker elevation-sharing fix:
+#
+#   1. set_sqlite_path(path) — redirect storage to shared cidx_server.db,
+#      mirroring TokenBlacklist (service_init.py line 233).
+#
+#   2. Cross-instance SQLite visibility — two independent manager instances
+#      sharing the SAME SQLite file via set_sqlite_path() must see each
+#      other's elevation windows.  This is the headline Bug #1221 regression.
+#
+#   3. Cross-instance PG visibility — two managers sharing the SAME PG pool
+#      must see each other's elevation windows.
+#
+#   4. prune_expired(max_age_seconds) — removes stale elevation rows, mirrors
+#      TokenBlacklist.prune_expired() wired via DataRetentionScheduler.
+#
+#   5. Fail-closed on store read failure — a broken/unavailable store MUST
+#      deny access (return None), never grant elevation silently.
+
+
+# ---------------------------------------------------------------------------
+# set_sqlite_path() — must exist and redirect writes/reads
+# ---------------------------------------------------------------------------
+
+
+def test_set_sqlite_path_method_exists():
+    """ElevatedSessionManager must expose set_sqlite_path(path) (Bug #1221)."""
+    assert hasattr(ElevatedSessionManager, "set_sqlite_path"), (
+        "ElevatedSessionManager missing set_sqlite_path() — needed for service_init.py "
+        "to wire the shared cidx_server.db (mirrors TokenBlacklist pattern)"
+    )
+    assert callable(ElevatedSessionManager.set_sqlite_path)
+
+
+def test_set_sqlite_path_redirects_writes(tmp_path):
+    """set_sqlite_path() must write to the given path, not the default one."""
+    shared_db = str(tmp_path / "cidx_server.db")
+    mgr = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    mgr.set_sqlite_path(shared_db)
+
+    mgr.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+
+    # Verify row landed in shared_db
+    conn = sqlite3.connect(shared_db)
+    try:
+        row = conn.execute(
+            "SELECT session_key FROM elevated_sessions WHERE session_key = ?",
+            (_SESSION_KEY_A,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "Row not found in shared_db after set_sqlite_path"
+
+
+def test_set_sqlite_path_redirects_reads(tmp_path):
+    """set_sqlite_path() must make get_status() read from the given path."""
+    shared_db = str(tmp_path / "cidx_server.db")
+    mgr = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    mgr.set_sqlite_path(shared_db)
+
+    mgr.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    result = mgr.get_status(_SESSION_KEY_A)
+    assert result is not None, "get_status returned None after set_sqlite_path"
+    assert result.session_key == _SESSION_KEY_A
+
+
+# ---------------------------------------------------------------------------
+# Cross-instance SQLite visibility (Bug #1221 headline test — RED until fix)
+# ---------------------------------------------------------------------------
+
+
+def test_cross_instance_visibility_sqlite_shared_file(tmp_path):
+    """Elevation granted on instance A is visible to instance B via shared file.
+
+    This is the Bug #1221 headline regression: with uvicorn --workers N, the
+    worker that handled POST /auth/elevate differs from the one that handles
+    the next protected request.  Both must see the same elevation state.
+
+    Fails before fix because set_sqlite_path() does not exist yet.
+    """
+    shared_db = str(tmp_path / "shared_cidx_server.db")
+
+    # Instance A — simulates the worker that received POST /auth/elevate
+    instance_a = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    instance_a.set_sqlite_path(shared_db)
+
+    # Instance B — simulates the worker that receives the protected GET request
+    instance_b = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    instance_b.set_sqlite_path(shared_db)
+
+    # Worker A: elevation granted
+    instance_a.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+
+    # Worker B: must see the elevation window
+    result = instance_b.get_status(_SESSION_KEY_A)
+    assert result is not None, (
+        "BUG #1221: worker B cannot see elevation granted by worker A. "
+        "Both instances must share state via set_sqlite_path(shared_cidx_server_db)."
+    )
+    assert result.session_key == _SESSION_KEY_A
+    assert result.username == _USERNAME_ADMIN
+
+
+def test_cross_instance_touch_atomic_shared_file(tmp_path):
+    """touch_atomic_for_user() by instance B must reach session created by instance A."""
+    shared_db = str(tmp_path / "shared_cidx_server.db")
+
+    instance_a = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    instance_a.set_sqlite_path(shared_db)
+
+    instance_b = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    instance_b.set_sqlite_path(shared_db)
+
+    instance_a.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+
+    # require_elevation calls touch_atomic_for_user on the checking worker
+    touched = instance_b.touch_atomic_for_user(_SESSION_KEY_A, _USERNAME_ADMIN)
+    assert touched is not None, (
+        "BUG #1221: touch_atomic_for_user() on worker B returned None "
+        "for session created on worker A."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-instance PG visibility
+# ---------------------------------------------------------------------------
+
+
+def test_cross_instance_pg_shared_pool_visibility(pg_pool):
+    """Two managers sharing the same PG pool must see each other's sessions."""
+    instance_a = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    instance_a.set_connection_pool(pg_pool)
+
+    instance_b = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    instance_b.set_connection_pool(pg_pool)
+
+    instance_a.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+
+    result = instance_b.get_status(_SESSION_KEY_A)
+    assert result is not None, (
+        "PG cross-instance visibility failed: instance B cannot see "
+        "session created by instance A on the same PG pool."
+    )
+    assert result.session_key == _SESSION_KEY_A
+
+
+# ---------------------------------------------------------------------------
+# prune_expired() — method must exist and clean up stale rows
+# ---------------------------------------------------------------------------
+
+
+def test_prune_expired_method_exists():
+    """ElevatedSessionManager must expose prune_expired(max_age_seconds) (Bug #1221)."""
+    assert hasattr(ElevatedSessionManager, "prune_expired"), (
+        "ElevatedSessionManager missing prune_expired() — needed by "
+        "DataRetentionScheduler to prevent unbounded table growth"
+    )
+    assert callable(ElevatedSessionManager.prune_expired)
+
+
+def test_prune_expired_removes_expired_rows(tmp_path):
+    """prune_expired() must delete rows whose elevation window is fully expired."""
+    db_path = str(tmp_path / "elevated_sessions.db")
+    mgr = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+        db_path=db_path,
+    )
+    mgr.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    mgr.create(_SESSION_KEY_B, _USERNAME_ADMIN, _IP_LOCAL)
+
+    # Backdate both rows so they are well past max_age
+    long_ago = time.time() - (_DEFAULT_MAX_AGE + 600)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE elevated_sessions SET elevated_at = ?, last_touched_at = ?",
+            (long_ago, long_ago),
+        )
+        conn.commit()
+        count_before = conn.execute(
+            "SELECT COUNT(*) FROM elevated_sessions"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert count_before == 2
+
+    deleted = mgr.prune_expired(max_age_seconds=_DEFAULT_MAX_AGE)
+    assert deleted == 2, f"Expected 2 rows deleted, got {deleted}"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        count_after = conn.execute("SELECT COUNT(*) FROM elevated_sessions").fetchone()[
+            0
+        ]
+    finally:
+        conn.close()
+    assert count_after == 0
+
+
+def test_prune_expired_keeps_active_rows(tmp_path):
+    """prune_expired() must not delete rows within max_age."""
+    db_path = str(tmp_path / "elevated_sessions.db")
+    mgr = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+        db_path=db_path,
+    )
+    mgr.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+
+    deleted = mgr.prune_expired(max_age_seconds=_DEFAULT_MAX_AGE)
+    assert deleted == 0, f"Active row must not be pruned, got {deleted} deleted"
+
+    result = mgr.get_status(_SESSION_KEY_A)
+    assert result is not None, "Active session must still be present after prune"
+
+
+def test_prune_expired_pg_backend(pg_pool):
+    """prune_expired() via PG pool must delete expired rows."""
+    mgr = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+    )
+    mgr.set_connection_pool(pg_pool)
+    mgr.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+    mgr.create(_SESSION_KEY_B, _USERNAME_ADMIN, _IP_LOCAL)
+
+    long_ago = time.time() - (_DEFAULT_MAX_AGE + 600)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE elevated_sessions SET elevated_at = ?, last_touched_at = ?",
+            (long_ago, long_ago),
+        )
+        conn.commit()
+
+    deleted = mgr.prune_expired(max_age_seconds=_DEFAULT_MAX_AGE)
+    assert deleted == 2, f"Expected 2 rows deleted from PG backend, got {deleted}"
+
+
+def test_prune_expired_returns_zero_on_empty_table(tmp_path):
+    """prune_expired() on an empty table must return 0 without error."""
+    db_path = str(tmp_path / "elevated_sessions.db")
+    mgr = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+        db_path=db_path,
+    )
+    deleted = mgr.prune_expired(max_age_seconds=_DEFAULT_MAX_AGE)
+    assert deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed: a store error during elevation check must DENY, not grant
+# ---------------------------------------------------------------------------
+
+
+def test_fail_closed_store_error_denies_access(tmp_path, monkeypatch):
+    """get_status() must return None (deny) when the store read raises an error.
+
+    This verifies the anti-silent-failure invariant: a broken storage backend
+    must cause a deny (elevation_required), never a silent grant.
+    """
+    db_path = str(tmp_path / "elevated_sessions.db")
+    mgr = ElevatedSessionManager(
+        idle_timeout_seconds=_DEFAULT_IDLE_TIMEOUT,
+        max_age_seconds=_DEFAULT_MAX_AGE,
+        db_path=db_path,
+    )
+    mgr.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
+
+    # Force an error by pointing _db_path at a nonexistent directory path
+    # so sqlite3.connect() raises OperationalError.
+    monkeypatch.setattr(mgr, "_db_path", str(tmp_path / "nonexistent_dir" / "x.db"))
+
+    result = mgr.get_status(_SESSION_KEY_A)
+    assert result is None, (
+        "Fail-closed violated: get_status must return None (deny) on store error, "
+        "not raise or grant access."
+    )
