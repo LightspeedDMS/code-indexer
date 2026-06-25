@@ -4,9 +4,10 @@ Unit tests for daemon mode FTS rebuild with progress callbacks.
 Tests AC4: Daemon mode FTS rebuild with progress reporting.
 """
 
+import json
 import tempfile
 from pathlib import Path
-import json
+from typing import Any
 from unittest.mock import Mock
 
 
@@ -115,3 +116,130 @@ class TestDaemonRebuildFTS:
             # Verify success
             assert result.get("status") == "success", f"Expected success, got: {result}"
             assert "files_indexed" in result, "Result must include files_indexed count"
+
+    # ------------------------------------------------------------------
+    # Helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_project(tmpdir: str, py_files: list) -> tuple[Path, Any]:
+        """Create a minimal project with config + progress file and return (project_dir, service)."""
+        from code_indexer.daemon.service import CIDXDaemonService
+
+        project_dir = Path(tmpdir)
+        config_dir = project_dir / ".code-indexer"
+        config_dir.mkdir(exist_ok=True)
+
+        for name, content in py_files:
+            (project_dir / name).write_text(content)
+
+        config_data = {
+            "codebase_dir": str(project_dir),
+            "embedding_provider": "voyage-ai",
+            "embedding_model": "voyage-code-3",
+            "file_extensions": [".py"],
+            "exclude_dirs": [".git", "node_modules"],
+        }
+        (config_dir / "config.json").write_text(json.dumps(config_data))
+
+        progress_data = {
+            "current_session": {
+                "session_id": "test",
+                "operation_type": "full",
+                "embedding_provider": "voyage-ai",
+                "embedding_model": "voyage-code-3",
+                "total_files": len(py_files),
+                "files_completed": len(py_files),
+            },
+            "file_records": {},
+        }
+        (config_dir / "indexing_progress.json").write_text(json.dumps(progress_data))
+
+        return project_dir, CIDXDaemonService()
+
+    # ------------------------------------------------------------------
+    # Bug #1218 residual: total-failure guard
+    # ------------------------------------------------------------------
+
+    def test_all_files_fail_returns_error_status(self):
+        """
+        Bug #1218 residual: daemon in-process FTS rebuild with ALL files failing
+        must return status != 'success' (total-failure guard).
+
+        RED: current code returns {"status": "success", "files_indexed": 0, "files_failed": N}.
+        GREEN: must return {"status": "error"/"failed", ...} with a descriptive message.
+        """
+        from unittest.mock import patch
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir, service = self._make_project(
+                tmpdir,
+                [("main.py", "def main(): pass"), ("utils.py", "def helper(): pass")],
+            )
+
+            with patch.object(
+                TantivyIndexManager, "add_document", side_effect=Exception("forced")
+            ):
+                result = service.exposed_rebuild_fts_index(
+                    str(project_dir), callback=None
+                )
+
+        assert result.get("status") != "success", (
+            f"ALL files failed => must NOT return success, got: {result}\n"
+            "Bug #1218 residual: daemon FTS rebuild must fail loudly on total failure."
+        )
+        assert result.get("status") in ("error", "failed"), (
+            f"Expected status 'error' or 'failed', got: {result.get('status')!r}"
+        )
+        assert result.get("error") or result.get("message"), (
+            f"Non-success result must include 'error' or 'message', got: {result}"
+        )
+
+    def test_partial_success_still_returns_success(self):
+        """
+        Guard: partial success (>=1 file indexed, >=1 failed) must still be 'success'.
+        The total-failure guard must NOT over-fire.
+        """
+        from unittest.mock import patch
+        from code_indexer.services.tantivy_index_manager import TantivyIndexManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir, service = self._make_project(
+                tmpdir,
+                [("main.py", "def main(): pass"), ("utils.py", "def helper(): pass")],
+            )
+
+            call_count = {"n": 0}
+            original_add = TantivyIndexManager.add_document
+
+            def fail_first_only(self_mgr, doc):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    raise Exception("forced partial failure")
+                return original_add(self_mgr, doc)
+
+            with patch.object(TantivyIndexManager, "add_document", fail_first_only):
+                result = service.exposed_rebuild_fts_index(
+                    str(project_dir), callback=None
+                )
+
+        assert result.get("status") == "success", (
+            f"Partial success must still return 'success', got: {result}"
+        )
+        assert result.get("files_indexed", 0) >= 1
+        assert result.get("files_failed", 0) >= 1
+
+    def test_normal_success_unchanged(self):
+        """Regression guard: all files succeed => status must still be 'success'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir, service = self._make_project(
+                tmpdir, [("main.py", "def main(): pass")]
+            )
+            result = service.exposed_rebuild_fts_index(str(project_dir), callback=None)
+
+        assert result.get("status") == "success", (
+            f"Normal success must return 'success', got: {result}"
+        )
+        assert result.get("files_indexed", 0) >= 1
+        assert result.get("files_failed", 0) == 0
