@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.167.0] - 2026-06-25
+
+### Fixed
+- **Cluster elevation: elevated TOTP session not shared across workers/nodes (#1221).** The step-up elevation state lived in per-process RAM, so an elevation obtained on one uvicorn worker (or cluster node) was invisible to every other worker/node behind HAProxy -- admin user/group mutations failed with `elevation_required` immediately after a successful elevate, depending on which worker served the retry. Elevation state now persists in a shared store (`ElevatedSessionManager` backed by PostgreSQL in cluster mode, SQLite in solo) wired at lifespan, with `prune_expired()` cleanup and a fail-closed `get_status()`. The three TOTP error codes, the 503 kill switch, the `totp_repair` recovery scope, and the replay-prevention CAS are all preserved. Isolated security-sensitive commit per the Story #929 discipline.
+- **Duplicate-job insert surfaced as scheduler RuntimeError instead of a benign skip (#1220).** The blocking-job lookup used the paginated `list_jobs` view, which could miss the conflicting active row, so a concurrent duplicate registration raised an unhandled `RuntimeError` (seen as a `DataRetentionScheduler` error) instead of the intended `DuplicateJobError` benign skip. Added a direct, non-paginated `find_active_job_by_type_and_alias(operation_type, repo_alias)` on the job-tracker (both SQLite and PostgreSQL backends) and routed `_find_blocking_active_job_id` through it, so collisions deterministically raise `DuplicateJobError` and the caller skips quietly.
+- **Daemon in-process FTS rebuild reported success when every file failed (#1218 residual).** `exposed_rebuild_fts_index` returned `status:"ok"` even when `indexed_count == 0 and failed_count > 0`, masking a total failure as success. It now returns `status:"error"` in that case so callers see the failure. Completes the #1218 timeout-removal work on the daemon path.
+
 ## [10.166.0] - 2026-06-25
 
 ### Added
