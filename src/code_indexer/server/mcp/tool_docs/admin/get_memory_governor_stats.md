@@ -1,7 +1,7 @@
 ---
 name: get_memory_governor_stats
 category: admin
-required_permission: admin
+required_permission: manage_users
 tl_dr: Return the memory-governor band, pressure signal, counters, and config echoes.
 slim_description: "Return the full memory-governor snapshot (band, used_pct, counters, watermark config)."
 inputSchema:

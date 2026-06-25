@@ -11,6 +11,16 @@ from unittest.mock import MagicMock
 
 from code_indexer.server.services.memory_governor import MemoryBand, MemoryGovernor
 
+# Hot-reload watermark values (different from CUSTOM_* constructor args below)
+LIVE_YELLOW_PCT = 55.0
+LIVE_RED_PCT = 75.0
+LIVE_HYSTERESIS_PCT = 5.0
+LIVE_RED_MIN_DWELL = 10.0
+LIVE_SAMPLE_INTERVAL = 1.0
+LIVE_SWAP_FORCES_RED = False
+LIVE_RSS_INFLATION = 3.0
+LIVE_ENABLED = True
+
 # ---------------------------------------------------------------------------
 # Named constants (no magic numbers)
 # ---------------------------------------------------------------------------
@@ -168,3 +178,63 @@ class TestGetSnapshotFields:
         """swap_used_mb must always be >= 0."""
         snap = _green_gov().get_snapshot()
         assert snap["swap_used_mb"] >= 0
+
+    def test_snapshot_echoes_live_watermarks_after_hot_reload(self):
+        """get_snapshot() must reflect live config watermarks, not constructor-frozen values.
+
+        Simulates a Web UI hot-reload: governor constructed with defaults, then
+        config_service mock is mutated to return LIVE_* values.  get_snapshot()
+        must read live config at call-time and return the new values.
+        """
+        # Step 1: Build mock with constructor-default watermarks.
+        mock_cache_cfg = MagicMock()
+        mock_cache_cfg.memory_governor_enabled = True
+        mock_cache_cfg.memory_governor_yellow_pct = YELLOW_PCT_DEFAULT
+        mock_cache_cfg.memory_governor_red_pct = RED_PCT_DEFAULT
+        mock_cache_cfg.memory_governor_hysteresis_pct = HYSTERESIS_PCT_DEFAULT
+        mock_cache_cfg.memory_governor_red_min_dwell_seconds = 30.0
+        mock_cache_cfg.memory_governor_sample_interval_seconds = SAMPLE_INTERVAL_DEFAULT
+        mock_cache_cfg.memory_governor_swap_forces_red = True
+        mock_cache_cfg.memory_governor_rss_inflation_factor = (
+            RSS_INFLATION_FACTOR_DEFAULT
+        )
+        mock_config = MagicMock()
+        mock_config.cache_config = mock_cache_cfg
+        mock_config_service = MagicMock()
+        mock_config_service.get_config.return_value = mock_config
+
+        gov = MemoryGovernor(
+            readers=_make_readers(GREEN_USAGE_PCT),
+            enabled=True,
+            start_sampler=False,
+            yellow_pct=YELLOW_PCT_DEFAULT,
+            red_pct=RED_PCT_DEFAULT,
+            hysteresis_pct=HYSTERESIS_PCT_DEFAULT,
+            red_min_dwell_seconds=0.0,
+            config_service=mock_config_service,
+        )
+        gov._tick()
+
+        # Step 2: Simulate Web UI hot-reload — mutate the mock to LIVE_* values.
+        mock_cache_cfg.memory_governor_enabled = LIVE_ENABLED
+        mock_cache_cfg.memory_governor_yellow_pct = LIVE_YELLOW_PCT
+        mock_cache_cfg.memory_governor_red_pct = LIVE_RED_PCT
+        mock_cache_cfg.memory_governor_hysteresis_pct = LIVE_HYSTERESIS_PCT
+        mock_cache_cfg.memory_governor_red_min_dwell_seconds = LIVE_RED_MIN_DWELL
+        mock_cache_cfg.memory_governor_sample_interval_seconds = LIVE_SAMPLE_INTERVAL
+        mock_cache_cfg.memory_governor_swap_forces_red = LIVE_SWAP_FORCES_RED
+        mock_cache_cfg.memory_governor_rss_inflation_factor = LIVE_RSS_INFLATION
+
+        # Step 3: Snapshot must now reflect the LIVE values.
+        snap = gov.get_snapshot()
+        assert snap["yellow_pct"] == LIVE_YELLOW_PCT, (
+            f"yellow_pct echoes constructor default {snap['yellow_pct']}, "
+            f"expected live value {LIVE_YELLOW_PCT}"
+        )
+        assert snap["red_pct"] == LIVE_RED_PCT
+        assert snap["hysteresis_pct"] == LIVE_HYSTERESIS_PCT
+        assert snap["red_min_dwell_seconds"] == LIVE_RED_MIN_DWELL
+        assert snap["sample_interval_seconds"] == LIVE_SAMPLE_INTERVAL
+        assert snap["swap_forces_red"] == LIVE_SWAP_FORCES_RED
+        assert snap["rss_inflation_factor"] == LIVE_RSS_INFLATION
+        assert snap["enabled"] == LIVE_ENABLED

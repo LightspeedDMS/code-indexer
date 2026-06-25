@@ -12,9 +12,11 @@ Tests:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.services.memory_governor import (
     MemoryBand,
     MemoryGovernor,
@@ -39,6 +41,9 @@ TOOL_NAME = "get_memory_governor_stats"
 TOOL_DOC_RELATIVE = (
     "src/code_indexer/server/mcp/tool_docs/admin/get_memory_governor_stats.md"
 )
+# The permission declared in the tool doc's required_permission field must be
+# a real permission that admin users actually hold (not the literal string "admin").
+REQUIRED_PERMISSION = "manage_users"
 
 
 # ---------------------------------------------------------------------------
@@ -148,3 +153,51 @@ class TestMCPTwinHandler:
         clear_memory_governor()
         result = handle_get_memory_governor_stats({}, _admin_user())
         assert result is not None
+
+    def test_real_admin_user_passes_permission_gate(self):
+        """required_permission in tool doc must be a real permission admin holds.
+
+        Checks: (1) real admin User has REQUIRED_PERMISSION, (2) normal user does
+        not (confirming the gate is admin-restricted), (3) tool doc frontmatter
+        declares required_permission == REQUIRED_PERMISSION.
+        Catches the defect where the doc declared "admin" (not a real permission).
+        """
+        import yaml
+
+        _dummy_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        # (1) A real admin user must hold REQUIRED_PERMISSION.
+        admin_user = User(
+            username="admin",
+            role=UserRole.ADMIN,
+            password_hash="x",
+            created_at=_dummy_ts,
+        )
+        assert admin_user.has_permission(REQUIRED_PERMISSION), (
+            f"Admin user does not have permission '{REQUIRED_PERMISSION}' — "
+            "check the permission model in auth/user_manager.py"
+        )
+
+        # (2) A normal user must NOT hold REQUIRED_PERMISSION.
+        normal_user = User(
+            username="alice",
+            role=UserRole.NORMAL_USER,
+            password_hash="x",
+            created_at=_dummy_ts,
+        )
+        assert not normal_user.has_permission(REQUIRED_PERMISSION), (
+            f"Normal user unexpectedly has permission '{REQUIRED_PERMISSION}'"
+        )
+
+        # (3) The tool doc must declare the same real permission.
+        md_file = _project_root() / TOOL_DOC_RELATIVE
+        content = md_file.read_text()
+        parts = content.split("---")
+        assert len(parts) >= 3, "tool doc has no YAML frontmatter"
+        frontmatter = yaml.safe_load(parts[1])
+        doc_permission = frontmatter.get("required_permission", "")
+        assert doc_permission == REQUIRED_PERMISSION, (
+            f"Tool doc required_permission is '{doc_permission}', "
+            f"expected '{REQUIRED_PERMISSION}'. "
+            "No user role holds a permission literally named 'admin'."
+        )

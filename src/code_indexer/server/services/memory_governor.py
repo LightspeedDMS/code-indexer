@@ -264,9 +264,13 @@ class MemoryGovernor:
         of whether the trim actually freed pages (malloc_trim return value is
         advisory only — never assert it lowered RSS per design §5).
 
+        Emits GOV-004 on every call (Story 4): released=True when malloc_trim
+        reported freed pages, False on non-linux, call failure, or trim returned 0.
+
         Never raises: any OS/ctypes error is logged at WARNING and swallowed so
         an eviction call-site is never interrupted by a trim failure.
         """
+        released = False
         try:
             import ctypes
             import sys
@@ -274,7 +278,7 @@ class MemoryGovernor:
             if sys.platform == "linux":
                 try:
                     libc = ctypes.CDLL("libc.so.6", use_errno=True)
-                    libc.malloc_trim(0)
+                    released = bool(libc.malloc_trim(0))
                 except Exception as trim_exc:  # noqa: BLE001
                     logger.warning(
                         "GOV maybe_trim: malloc_trim call failed (best-effort, "
@@ -284,6 +288,7 @@ class MemoryGovernor:
         except Exception as exc:  # noqa: BLE001
             logger.warning("GOV maybe_trim failed (best-effort, ignoring): %s", exc)
         finally:
+            self.log_gov004_trim(released=released)
             self.counters.trim_calls += 1
 
     def should_evict_after_shard(self) -> bool:
@@ -331,6 +336,32 @@ class MemoryGovernor:
         except Exception as exc:  # noqa: BLE001
             logger.warning("GOV get_snapshot: swap_memory() read failed: %s", exc)
 
+        # Echo live config watermarks when a config_service is set.
+        # Falls back to constructor-frozen defaults when no config_service is
+        # configured (CLI/pre-init) or when the read fails (fail-soft: this is
+        # a display-only read; never apply fail-safe RED here).
+        live_cfg = self._read_live_config()
+        if live_cfg is not None:
+            echo_enabled = bool(live_cfg.memory_governor_enabled)
+            echo_yellow_pct = float(live_cfg.memory_governor_yellow_pct)
+            echo_red_pct = float(live_cfg.memory_governor_red_pct)
+            echo_hysteresis_pct = float(live_cfg.memory_governor_hysteresis_pct)
+            echo_red_min_dwell = float(live_cfg.memory_governor_red_min_dwell_seconds)
+            echo_sample_interval = float(
+                live_cfg.memory_governor_sample_interval_seconds
+            )
+            echo_swap_forces_red = bool(live_cfg.memory_governor_swap_forces_red)
+            echo_rss_inflation = float(live_cfg.memory_governor_rss_inflation_factor)
+        else:
+            echo_enabled = self._enabled
+            echo_yellow_pct = self._yellow_pct
+            echo_red_pct = self._red_pct
+            echo_hysteresis_pct = self._hysteresis_pct
+            echo_red_min_dwell = self._red_min_dwell_seconds
+            echo_sample_interval = self._sample_interval_seconds
+            echo_swap_forces_red = self._swap_forces_red
+            echo_rss_inflation = self._rss_inflation_factor
+
         return {
             # Signal fields
             "band": band.value,
@@ -351,15 +382,15 @@ class MemoryGovernor:
             "shards_evicted_after_use": self.counters.shards_evicted_after_use,
             "lru_evictions": self.counters.lru_evictions,
             "trim_calls": self.counters.trim_calls,
-            # Config echoes
-            "enabled": self._enabled,
-            "yellow_pct": self._yellow_pct,
-            "red_pct": self._red_pct,
-            "hysteresis_pct": self._hysteresis_pct,
-            "red_min_dwell_seconds": self._red_min_dwell_seconds,
-            "sample_interval_seconds": self._sample_interval_seconds,
-            "swap_forces_red": self._swap_forces_red,
-            "rss_inflation_factor": self._rss_inflation_factor,
+            # Config echoes — live values when config_service is set, else constructor defaults
+            "enabled": echo_enabled,
+            "yellow_pct": echo_yellow_pct,
+            "red_pct": echo_red_pct,
+            "hysteresis_pct": echo_hysteresis_pct,
+            "red_min_dwell_seconds": echo_red_min_dwell,
+            "sample_interval_seconds": echo_sample_interval,
+            "swap_forces_red": echo_swap_forces_red,
+            "rss_inflation_factor": echo_rss_inflation,
             # Process identity
             "pid": os.getpid(),
         }

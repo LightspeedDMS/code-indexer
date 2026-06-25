@@ -225,6 +225,23 @@ class TestGovStructuredLogs:
         gov004 = [r for r in rows if r[2].startswith("GOV-004")]
         assert len(gov004) >= 1, "GOV-004 not in logs.db"
 
+    def test_gov004_emitted_from_maybe_trim(self, log_db):
+        """GOV-004 must land in logs.db when maybe_trim() is called (not just via direct helper).
+
+        This is the call-site wiring test: maybe_trim() must call log_gov004_trim()
+        internally so every trim attempt emits exactly one GOV-004 log entry.
+        """
+        db_path, handler = log_db
+        gov = _red_gov()
+        gov.maybe_trim()
+        handler.flush()
+        rows = _query_gov_rows(db_path)
+        gov004 = [r for r in rows if r[2].startswith("GOV-004")]
+        assert len(gov004) >= 1, (
+            "GOV-004 not in logs.db after maybe_trim() — "
+            "log_gov004_trim() is not called from maybe_trim()"
+        )
+
     def test_gov005_swap_in_forced_red_logged(self, log_db):
         """GOV-005 lands in logs.db when pswpin_rate > 0 forces the band to RED."""
         db_path, handler = log_db
