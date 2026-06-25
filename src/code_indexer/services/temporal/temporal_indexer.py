@@ -26,6 +26,7 @@ from ...storage.filesystem_vector_store import FilesystemVectorStore
 from .models import CommitInfo
 from .temporal_collection_naming import LEGACY_TEMPORAL_COLLECTION
 from .temporal_diff_scanner import TemporalDiffScanner
+from .temporal_migration_service import _cleanup_monolithic_collection
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,13 @@ class TemporalIndexer:
         # Initialize blob registry for tracking indexed content
         # Keyed by collection_name to support dual-provider indexing (Story #631)
         self.indexed_blobs: dict[str, set[str]] = {}
+
+        # Bug #1207 BLOCKER 1: guard cleanup on successful completion only.
+        # Set True at the very end of index_commits() after the shard loop fully
+        # completes without exception.  close() requires this flag AND non-empty
+        # _processed_shards before calling _cleanup_monolithic_collection so that
+        # a crash mid-shard loop does NOT delete the monolith (the only good copy).
+        self._indexing_complete: bool = False
 
         # Initialize progressive metadata tracker for resume capability (primary collection)
         self.progressive_metadata = TemporalProgressiveMetadata(self.temporal_dir)
@@ -578,6 +586,12 @@ class TemporalIndexer:
             max_commits=max_commits,
             since_date=since_date,
         )
+
+        # Bug #1207 BLOCKER 1: mark successful completion so close() knows it is safe
+        # to clean up the monolithic base directory.  This line is only reached when
+        # the entire shard loop completes without raising — any exception propagates
+        # upward before this point, leaving _indexing_complete=False.
+        self._indexing_complete = True
 
         return IndexingResult(
             total_commits=commits_processed,
@@ -1494,13 +1508,60 @@ class TemporalIndexer:
         Story #1171: When sharded indexing was used, end_indexing is already called
         per-shard inside index_commits(). We skip the base-collection call in that case
         to avoid a ValueError on a non-existent collection directory.
+
+        Bug #1207 Fix 1 (CLI parity cleanup): After shard-based indexing, write
+        migration_complete.marker and delete the monolithic hnsw_index.bin / id_index.bin
+        from the base collection directory.  This matches what the server-startup
+        migration (Story #1172) does via _cleanup_monolithic_collection(), and prevents
+        get_overlapping_shards() from re-including the base dir as a "legacy monolith"
+        on every subsequent query.  The same shared helper is used here so the two
+        code paths cannot drift apart (anti-duplication).
+
+        Cleanup errors are logged as WARNING but do not abort the process — a partially
+        cleaned directory is still safe because the hardened get_overlapping_shards()
+        predicate requires hnsw_index.bin to be present before including the base dir
+        as a legacy collection.
         """
         # Story #1171: Sharded indexing already called end_indexing per shard inside
         # index_commits(). Only call end_indexing here for the legacy (non-sharded) path.
         processed_shards = getattr(self, "_processed_shards", [])
-        if processed_shards:
+        indexing_complete = getattr(self, "_indexing_complete", False)
+        if processed_shards and indexing_complete:
+            # Bug #1207 Fix 1: clean up the base (monolithic) collection directory so
+            # that get_overlapping_shards() stops enumerating it on future queries.
+            # Gated on BOTH non-empty _processed_shards AND _indexing_complete=True so
+            # that a crash mid-shard loop (close() called from finally) does NOT delete
+            # the monolith — which may be the only good copy of the vectors.
+            # collection_name may have been temporarily changed to a shard name during
+            # index_commits(); _original_collection_name is restored in the finally block
+            # there, so self.collection_name is back to the base name here.
             logger.info(
                 "Sharded indexing complete — HNSW indexes already built per shard (%d shards).",
+                len(processed_shards),
+            )
+            base_coll_dir = self.vector_store.base_path / self.collection_name
+            if base_coll_dir.is_dir():
+                try:
+                    _cleanup_monolithic_collection(base_coll_dir)
+                    logger.info(
+                        "Bug #1207: wrote migration_complete.marker and removed "
+                        "monolithic binaries from %s",
+                        base_coll_dir,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Bug #1207: cleanup of monolithic base dir %s failed: %s — "
+                        "index is still correct; marker absent but get_overlapping_shards "
+                        "predicate requires hnsw_index.bin to re-include the base dir.",
+                        base_coll_dir,
+                        exc,
+                    )
+        elif processed_shards and not indexing_complete:
+            # Partial failure: some shards were written but index_commits() raised before
+            # completing.  The monolith is intact; do NOT clean it up.
+            logger.info(
+                "Sharded indexing was INCOMPLETE (%d shards written but _indexing_complete "
+                "is False) — skipping monolithic cleanup to preserve the original data.",
                 len(processed_shards),
             )
         else:

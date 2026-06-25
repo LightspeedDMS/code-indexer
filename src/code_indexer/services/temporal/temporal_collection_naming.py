@@ -170,6 +170,37 @@ def get_quarter_range(year: int, quarter: int) -> Tuple[datetime, datetime]:
     return start, end
 
 
+def has_real_monolith(coll_dir: Path) -> bool:
+    """Return True iff the directory contains a real monolithic HNSW that has not been migrated.
+
+    A collection directory is considered a real monolith when ALL of:
+    - ``hnsw_index.bin`` exists inside the directory (there is actual data to query)
+    - ``migration_complete.marker`` does NOT exist (migration has not already run)
+
+    This is the single source-of-truth predicate shared by:
+    - ``get_overlapping_shards()`` (query fan-out — Bug #1207 Fix 2)
+    - ``_needs_temporal_migration()`` in temporal_migration_service (server-startup gate)
+
+    Using a single predicate prevents the two callers from drifting apart (anti-duplication).
+
+    Args:
+        coll_dir: Path to the collection directory (e.g. index/code-indexer-temporal-X/).
+
+    Returns:
+        True if the collection contains a real unmigrated monolithic HNSW.
+    """
+    from code_indexer.services.temporal.temporal_migration_service import (
+        MIGRATION_COMPLETE_MARKER,
+    )
+
+    coll_dir = Path(coll_dir)
+    if not coll_dir.is_dir():
+        return False
+    if (coll_dir / MIGRATION_COMPLETE_MARKER).exists():
+        return False
+    return (coll_dir / "hnsw_index.bin").exists()
+
+
 def get_overlapping_shards(
     model_name: str,
     index_path: Path,
@@ -217,9 +248,13 @@ def get_overlapping_shards(
             if overlaps:
                 shards.append(name)
         elif name == base_name:
-            # Skip dirs where migration has already run (marker present = shards exist, HNSW gone)
-            marker = index_path / name / "migration_complete.marker"
-            if not marker.exists():
+            # Include as legacy monolith ONLY when a real unmirgated HNSW is present.
+            # Bug #1207 Fix 2: the original marker-absence-only check incorrectly included
+            # the base dir after CLI sharding (when HNSW was never written there to begin
+            # with, or was already deleted), causing spurious HNSW-stale warnings and
+            # potential stale-read mixing.  has_real_monolith() requires hnsw_index.bin
+            # to exist AND migration_complete.marker to be absent.
+            if has_real_monolith(entry):
                 has_legacy = True
 
     shards.sort()  # YYYYQN is lexicographically == chronologically
