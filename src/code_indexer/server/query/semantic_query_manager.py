@@ -2188,8 +2188,13 @@ class SemanticQueryManager:
             # Create vector store (Story #526: pass server cache)
             from ..app import _server_hnsw_cache
 
+            from ..services.memory_governor import get_memory_governor
+
             backend = BackendFactory.create(
-                config=config, project_root=repo_path, hnsw_cache=_server_hnsw_cache
+                config=config,
+                project_root=repo_path,
+                hnsw_cache=_server_hnsw_cache,
+                memory_governor=get_memory_governor(),
             )
             vector_store = backend.get_vector_store_client()
             index_path = repo_path / ".code-indexer" / "index"

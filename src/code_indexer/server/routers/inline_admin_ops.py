@@ -1115,3 +1115,21 @@ def register_admin_ops_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to query search event log: {str(e)}",
             )
+
+    @app.get("/api/admin/memory-governor")
+    def get_memory_governor_stats(
+        current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
+    ) -> Dict[str, Any]:
+        """Return the §3.5 memory-governor snapshot (Story 4).
+
+        Returns the full snapshot when the governor is active, or a minimal
+        not-active response when the governor has not been initialised (e.g.
+        CLI mode or pre-lifespan).  Never returns HTTP 500.
+        """
+        from code_indexer.server.services.memory_governor import get_memory_governor
+
+        gov = get_memory_governor()
+        if gov is None:
+            return {"enabled": False, "band": None, "active": False}
+        snapshot: Dict[str, Any] = gov.get_snapshot()
+        return snapshot

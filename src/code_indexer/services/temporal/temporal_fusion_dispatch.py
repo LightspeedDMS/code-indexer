@@ -36,8 +36,27 @@ logger = logging.getLogger(__name__)
 
 TEMPORAL_QUERY_TIMEOUT_SECONDS = 15
 
+# Story #1213 Story 3: Reduced per-shard overfetch multiplier under YELLOW memory pressure.
+# TEMPORAL_OVERFETCH_MULTIPLIER=3 is the normal value; YELLOW reduces this to 2 to lower
+# peak RAM usage while returning enough candidates for good RRF fusion quality.
+YELLOW_OVERFETCH_MULTIPLIER = 2
+
 # Latency placeholder when per-future timing is not available
 _UNKNOWN_LATENCY_MS = 0.0
+
+
+def _effective_overfetch_multiplier(vector_store: Any) -> int:
+    """Return the overfetch multiplier for the current memory band.
+
+    YELLOW band -> YELLOW_OVERFETCH_MULTIPLIER (2).
+    All other bands or no governor -> TEMPORAL_OVERFETCH_MULTIPLIER (3).
+    """
+    from code_indexer.server.services.memory_governor import MemoryBand
+
+    gov = getattr(vector_store, "memory_governor", None)
+    if gov is not None and gov.band == MemoryBand.YELLOW:
+        return YELLOW_OVERFETCH_MULTIPLIER
+    return TEMPORAL_OVERFETCH_MULTIPLIER
 
 
 def execute_temporal_query_with_fusion(
@@ -128,7 +147,7 @@ def execute_temporal_query_with_fusion(
             vector_store,
             shards,
             query_text,
-            limit * TEMPORAL_OVERFETCH_MULTIPLIER,
+            limit * _effective_overfetch_multiplier(vector_store),
             time_range,
             file_path_filter,
             language=language,
@@ -172,7 +191,7 @@ def execute_temporal_query_with_fusion(
             vector_store,
             shards,
             query_text,
-            limit * TEMPORAL_OVERFETCH_MULTIPLIER,
+            limit * _effective_overfetch_multiplier(vector_store),
             time_range,
             file_path_filter,
             language=language,
@@ -394,18 +413,48 @@ def _query_shards_raw(
             record_temporal_failure(shard_name, (_time.time() - _t0) * 1000)
             logger.warning("Temporal shard query failed for %s: %s", shard_name, e)
         finally:
-            # Bug #1171: Evict this shard's HNSW index from the server-mode cache so
-            # peak RAM is bounded to one shard at a time during a sequential scan.
-            # Eviction runs unconditionally (success OR failure): the HNSW may have
-            # been loaded before a query exception, so we must release it regardless
-            # of outcome to guarantee the RAM bound.
-            # CLI/standalone mode has hnsw_index_cache=None — skip eviction there.
-            # Cache key matches FilesystemVectorStore.search():
-            #   str(collection_path.resolve()) where collection_path = base_path / name.
+            # Story #1213 Story 3: Conditional eviction via MemoryGovernor.
+            #
+            # Bug #1171 (unconditional evict) was the proven-safe baseline.
+            # We now consult the governor before evicting so GREEN-band servers
+            # can retain shard HNSWs across queries for cross-query warm-cache reuse.
+            #
+            # Fail-safe contract (SAFETY-CRITICAL):
+            #   - gov is None  (CLI/solo)          → ALWAYS evict  (#1171 byte-identical)
+            #   - gov.should_evict_after_shard() raises → caught here → ALWAYS evict
+            #   - gov disabled / RED / pre-first-sample → should_evict returns True → evict
+            #   - gov GREEN                        → should_evict returns False → retain
+            #
+            # Cache key: str((base_path / shard_name).resolve()) — matches #1171 exactly.
             _hnsw_cache = getattr(vector_store, "hnsw_index_cache", None)
             if _hnsw_cache is not None:
-                _shard_path = Path(vector_store.base_path) / shard_name
-                _hnsw_cache.invalidate(str(_shard_path.resolve()))
+                _gov = getattr(vector_store, "memory_governor", None)
+                _should_evict = True  # fail-safe default
+                _gov_healthy = (
+                    False  # True only if should_evict_after_shard() returned normally
+                )
+                if _gov is not None:
+                    try:
+                        _should_evict = _gov.should_evict_after_shard()
+                        _gov_healthy = True
+                    except Exception as _gov_exc:  # noqa: BLE001
+                        logger.warning(
+                            "GOV should_evict_after_shard() raised — fail-safe evict: %s",
+                            _gov_exc,
+                        )
+                        _should_evict = True  # explicit fail-safe
+                if _should_evict:
+                    _shard_path = Path(vector_store.base_path) / shard_name
+                    _hnsw_cache.invalidate(str(_shard_path.resolve()))
+                    # Only update governor counters/trim/log when governor is healthy;
+                    # a broken governor must not prevent the eviction from completing.
+                    if _gov is not None and _gov_healthy:
+                        _gov.counters.shards_evicted_after_use += 1
+                        _gov.maybe_trim()
+                        # GOV-002: emitted from the dispatch evict call-site (Story 4).
+                        # freed_mb=0.0 is best-effort — no expensive size computation
+                        # on the eviction hot path.
+                        _gov.log_gov002_evict(shard=shard_name, freed_mb=0.0)
 
     return results_by_shard
 

@@ -142,11 +142,31 @@ def initialize_services() -> Dict[str, Any]:
         extra={"correlation_id": get_correlation_id()},
     )
 
+    # Story #1213 Story 1/2: build and install the node-level MemoryGovernor.
+    # Story 2: pass get_config_service() so watermarks are read LIVE from the
+    # Web UI config on each tick (hot-reload, no server restart required).
+    from code_indexer.server.services.config_service import get_config_service
+    from code_indexer.server.services.memory_governor import (
+        build_memory_governor,
+        set_memory_governor,
+    )
+
+    _memory_governor = build_memory_governor(config_service=get_config_service())
+    set_memory_governor(_memory_governor)
+    _memory_governor.start()
+    logger.info(
+        "Story #1213: MemoryGovernor built, installed, and sampler started "
+        "(band=RED until first sample; live config_service wired for hot-reload)",
+        extra={"correlation_id": get_correlation_id()},
+    )
+
     _server_hnsw_cache = get_global_cache()
     logger.info(
         f"HNSW index cache initialized (TTL: {_server_hnsw_cache.config.ttl_minutes}min)",
         extra={"correlation_id": get_correlation_id()},
     )
+    # Story 4: wire HNSW cache into governor for YELLOW proactive LRU eviction.
+    _memory_governor.attach_cache(_server_hnsw_cache)
 
     # Initialize server-side FTS cache for FTS query performance
     _server_fts_cache = get_global_fts_cache()
@@ -623,4 +643,5 @@ def initialize_services() -> Dict[str, Any]:
         "_server_fts_cache": _server_fts_cache,
         "scip_audit_repository": scip_audit_repository,
         "latency_tracker": latency_tracker,
+        "memory_governor": _memory_governor,
     }

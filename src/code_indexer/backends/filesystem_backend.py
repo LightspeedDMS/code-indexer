@@ -27,19 +27,28 @@ class FilesystemBackend(VectorStoreBackend):
                 └── (vector storage files)
     """
 
-    def __init__(self, project_root: Path, hnsw_index_cache: Any = None):
+    def __init__(
+        self,
+        project_root: Path,
+        hnsw_index_cache: Any = None,
+        memory_governor: Any = None,
+    ):
         """Initialize FilesystemBackend.
 
         Args:
             project_root: Root directory of the project being indexed
             hnsw_index_cache: Optional HNSW index cache for server performance (Story #526)
                              Server mode passes this explicitly. None for CLI mode.
+            memory_governor: Optional MemoryGovernor for Story #1213 Story 3.
+                             Server mode passes get_memory_governor(); CLI leaves it None.
         """
         super().__init__(project_root)
         self.vectors_dir = self.project_root / ".code-indexer" / "index"
 
         # Story #526: Server passes cache explicitly, CLI leaves it None
         self.hnsw_index_cache = hnsw_index_cache
+        # Story #1213 Story 3: Server passes governor; CLI leaves it None
+        self.memory_governor = memory_governor
         # py-spy logging-lock fix (follow-up to Bug #1078): the per-construction
         # "HNSW index caching enabled" INFO log was removed. FilesystemBackend is
         # constructed once per server query, so this fired on every hot-path call.
@@ -157,6 +166,7 @@ class FilesystemBackend(VectorStoreBackend):
             hnsw_index_cache=self.hnsw_index_cache,
             id_index_cache=id_index_cache,
             skip_staleness_check=skip_staleness,
+            memory_governor=self.memory_governor,
         )
 
     def health_check(self) -> bool:
