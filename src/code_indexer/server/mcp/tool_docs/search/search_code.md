@@ -325,6 +325,18 @@ outputSchema:
             rerank_time_ms:
               type: integer
               description: Time spent in the reranking stage in milliseconds
+            effective_search_mode:
+              type: string
+              description: "AC7 (Bug #1202): The search mode that actually ran for this request (e.g. 'fts', 'semantic', 'hybrid'). Echoes the requested search_mode. Present on all non-omni single-repo requests."
+            effective_query_strategy:
+              type: string
+              description: "AC7 (Bug #1202): The query strategy that actually ran (e.g. 'primary_only', 'parallel', 'failover'). On dual-provider repos with search_mode='fts' or 'hybrid', this will be 'primary_only' (the auto-parallel default does NOT fire for non-semantic modes). Present on all non-omni single-repo requests."
+            preview_size_chars:
+              type: integer
+              description: "AC4 (Bug #1202): The payload preview threshold in characters applied to fts/hybrid results. Code snippets and match_text fields larger than this value are stored in the payload cache and replaced with snippet_preview + snippet_cache_handle. Use snippet_lines=0 for list-first mode to avoid large snippet payloads. Only present for fts/hybrid search modes when payload cache is active."
+            rows_capped:
+              type: integer
+              description: "AC4 (Bug #1202): Number of result rows where at least one field (code_snippet or match_text) exceeded preview_size_chars and was truncated. 0 means all fields fit within the threshold. Only present for fts/hybrid search modes when payload cache is active."
     error:
       type: string
       description: Error message (present when success=False)

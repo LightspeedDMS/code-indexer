@@ -6,6 +6,7 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
 
 import json
 import os
@@ -100,6 +101,7 @@ class ActivatedRepoManager:
         golden_repo_manager: Optional[GoldenRepoManager] = None,
         background_job_manager: Optional[BackgroundJobManager] = None,
         clone_backend: Optional["CloneBackend"] = None,
+        index_manager: Optional[Any] = None,
     ):
         """
         Initialize activated repository manager.
@@ -110,6 +112,10 @@ class ActivatedRepoManager:
             background_job_manager: Background job manager instance
             clone_backend: Optional CloneBackend for CoW snapshot operations
                 (Commit 1 injection point — stored, used in later commits).
+            index_manager: Optional ActivatedRepoIndexManager for branch-delta
+                reindex after activation/switch/sync on non-default branches
+                (Bug #1203). When None, post-activation reindex is skipped
+                (safe for legacy callers until lifespan wires this in).
         """
         if data_dir:
             self.data_dir = data_dir
@@ -146,6 +152,9 @@ class ActivatedRepoManager:
         self.golden_repo_manager = golden_repo_manager
         self.background_job_manager = background_job_manager or BackgroundJobManager()
         self._clone_backend = clone_backend
+        # Bug #1203: injected index manager for branch-delta reindex on
+        # non-default branch activations/switches/syncs. None = skip reindex.
+        self._index_manager = index_manager
 
     def set_connection_pool(self, pool: Any) -> None:
         """Set PostgreSQL connection pool for cluster mode.
@@ -1157,6 +1166,16 @@ class ActivatedRepoManager:
 
             self._save_metadata(username, user_alias, repo_data)
 
+            # Step 4.5 (Bug #1203): Run branch-aware delta reindex when the
+            # new branch differs from the golden repo's default branch.
+            # _run_branch_delta_index is a no-op when _index_manager is None
+            # or when user_alias ends with '-global'.
+            golden_repo_alias_sw = repo_data.get("golden_repo_alias")
+            if golden_repo_alias_sw:
+                _gr_sw = self.golden_repo_manager.get_golden_repo(golden_repo_alias_sw)
+                if _gr_sw is not None and branch_name != _gr_sw.default_branch:
+                    self._run_branch_delta_index(repo_dir, user_alias)
+
             # Step 5: Return success with detailed operation information
             message = f"Successfully switched to branch '{branch_name}' in repository '{user_alias}'"
 
@@ -1389,6 +1408,18 @@ class ActivatedRepoManager:
             repo_data["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
             self._save_metadata(username, user_alias, repo_data)
+
+            # Step 4.5 (Bug #1203): Run branch-aware delta reindex when the
+            # current branch differs from the golden repo's default branch.
+            # Merged changes on a non-default branch may shift file content
+            # relative to the stored embeddings; reindex corrects this.
+            # _run_branch_delta_index is a no-op when _index_manager is None
+            # or when user_alias ends with '-global'.
+            _gr_alias_sync = repo_data.get("golden_repo_alias")
+            if _gr_alias_sync:
+                _gr_sync = self.golden_repo_manager.get_golden_repo(_gr_alias_sync)
+                if _gr_sync is not None and current_branch != _gr_sync.default_branch:
+                    self._run_branch_delta_index(repo_dir, user_alias)
 
             # Step 5: Return success message with details
             changed_files = (
@@ -1898,8 +1929,30 @@ class ActivatedRepoManager:
                     + (f", ssh_key_used={ssh_key_used}" if ssh_key_used else "")
                 )
 
+            # Bug #1203: Run branch-aware delta reindex for non-default branches.
+            # The CoW clone copies the golden repo's default-branch index byte-
+            # for-byte.  When the activated branch differs, files that diverge
+            # from the default branch would return default-branch embeddings.
+            # _run_branch_delta_index is a no-op when _index_manager is None or
+            # when user_alias ends with '-global'.
+            if branch_name != golden_repo.default_branch:
+                update_progress(88, f"Reindexing branch '{branch_name}' (branch-delta)")
+                try:
+                    self._run_branch_delta_index(activated_repo_path, user_alias)
+                except ActivatedRepoError:
+                    # Bug #1203 MEDIUM 2: reindex failed BEFORE metadata was written.
+                    # Remove the orphaned CoW clone so a failed activation does not
+                    # leak a directory with no corresponding metadata.
+                    self.logger.warning(
+                        f"Removing orphaned clone at '{activated_repo_path}' "
+                        f"after reindex failure for '{user_alias}'",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    shutil.rmtree(activated_repo_path, ignore_errors=True)
+                    raise
+
             # Create metadata file
-            update_progress(88, "Creating repository metadata")
+            update_progress(90, "Creating repository metadata")
             activated_at = datetime.now(timezone.utc).isoformat()
             metadata = {
                 "username": username,
@@ -3243,6 +3296,84 @@ class ActivatedRepoManager:
             raise ActivatedRepoError("Migration operation timed out")
         except Exception as e:
             raise ActivatedRepoError(f"Failed to migrate legacy remotes: {str(e)}")
+
+    def _run_branch_delta_index(self, repo_path: str, user_alias: str) -> None:
+        """
+        Run branch-aware delta semantic reindex on an activated repo (Bug #1203).
+
+        Called after activation/switch/sync when the target branch differs from
+        the golden repo's default branch. The CoW clone inherits the default-
+        branch index byte-for-byte; this corrects it for files that differ on
+        the non-default branch.
+
+        Skip conditions (no-op, returns immediately):
+        - self._index_manager is None  (not injected — legacy callers)
+        - user_alias ends with '-global'  (global repos share the golden index)
+
+        Args:
+            repo_path: Filesystem path of the activated repository clone.
+            user_alias: User's alias for the repository.
+
+        Raises:
+            ActivatedRepoError: If indexing fails (correctness-first: the
+                caller's operation is considered incomplete/failed).
+        """
+        if self._index_manager is None:
+            return
+        if user_alias.endswith("-global"):
+            self.logger.info(
+                f"Skipping branch-delta reindex for global repo '{user_alias}'"
+            )
+            return
+
+        self.logger.info(
+            f"Running branch-delta reindex for '{user_alias}' at '{repo_path}'",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        try:
+            self._index_manager.run_branch_delta_index(repo_path)
+        except RuntimeError as exc:
+            error_msg = f"Branch-delta reindex failed for '{user_alias}': {exc}"
+            self.logger.error(error_msg, extra={"correlation_id": get_correlation_id()})
+            raise ActivatedRepoError(error_msg) from exc
+
+        # Bug #1203 cache fix: evict in-memory HNSW and id_index cache entries so
+        # the next query reloads the freshly written on-disk index.  The subprocess
+        # (`cidx index`) rewrote the collection files but cannot reach the server's
+        # in-process RAM caches — invalidation must happen here.
+        #
+        # Cache key shape (filesystem_vector_store.py:2555/2582):
+        #   str(collection_path.resolve())  where collection_path =
+        #   <repo_root>/.code-indexer/index/<collection_name>
+        #
+        # So we must evict by prefix = <repo_root>/.code-indexer/index, which
+        # covers all collection entries under that repo's index directory.
+        #
+        # FTS (TantivyIndexManager) is built fresh per query from the on-disk
+        # directory — it has NO in-process cache, so no FTS invalidation is needed.
+        #
+        # Non-fatal: a cache-eviction failure must never fail an already-successful
+        # reindex.
+        try:
+            index_base = str(Path(repo_path) / ".code-indexer" / "index")
+            get_global_cache().invalidate_prefix(index_base)
+            get_global_id_index_cache().invalidate_prefix(index_base)
+            self.logger.info(
+                f"Evicted HNSW+id_index cache entries for '{user_alias}' "
+                f"under '{index_base}'",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as cache_exc:
+            self.logger.warning(
+                f"Failed to evict caches after branch-delta reindex "
+                f"for '{user_alias}': {cache_exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        self.logger.info(
+            f"Branch-delta reindex completed for '{user_alias}'",
+            extra={"correlation_id": get_correlation_id()},
+        )
 
     def _validate_branch_name(self, branch_name: str) -> None:
         """

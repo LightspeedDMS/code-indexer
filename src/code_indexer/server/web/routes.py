@@ -6779,24 +6779,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             MAX_SCIP_CALLCHAIN_LIMIT,
         )
 
-        indexing_timeout = data.get("indexing_timeout_seconds")
-        if indexing_timeout is not None:
-            try:
-                timeout_int = int(indexing_timeout)
-                if timeout_int < 60:
-                    return "Indexing Timeout must be at least 60 seconds"
-            except (ValueError, TypeError):
-                return "Indexing Timeout must be a valid number"
-
-        scip_timeout = data.get("scip_generation_timeout_seconds")
-        if scip_timeout is not None:
-            try:
-                timeout_int = int(scip_timeout)
-                if timeout_int < 60:
-                    return "SCIP Generation Timeout must be at least 60 seconds"
-            except (ValueError, TypeError):
-                return "SCIP Generation Timeout must be a valid number"
-
         stale_threshold = data.get("temporal_stale_threshold_days")
         if stale_threshold is not None:
             try:

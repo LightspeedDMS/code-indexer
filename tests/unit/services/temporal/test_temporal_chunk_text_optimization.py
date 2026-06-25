@@ -36,8 +36,8 @@ class TestChunkTextOptimization:
         content_in_payload = False
 
         for i, line in enumerate(lines):
-            # Look for point = { structure (around line 1076)
-            if "point = {" in line and i > 1050 and i < 1180:
+            # Look for point = { structure (around line 1187 after Bug #1206 edits)
+            if "point = {" in line and i > 1050 and i < 1210:
                 point_creation_found = True
                 # Check next 10 lines for structure
                 point_block = "\n".join(lines[i : i + 15])

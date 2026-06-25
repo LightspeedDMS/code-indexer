@@ -295,3 +295,15 @@ class VoyageMultimodalClient:
         return self.get_multimodal_embedding(
             text=text, image_paths=[], input_type="query"
         )
+
+    def get_provider_name(self) -> str:
+        """Get the name of this embedding provider.
+
+        Returns "voyage-ai" to match VoyageAIClient.get_provider_name() and satisfy
+        the EmbeddingProvider contract called by filesystem_vector_store.py.
+
+        The consumer (_write_embed_meta_to_event_ctx) checks whether the name contains
+        "cohere" to route telemetry; anything else is treated as voyage.  Returning
+        "voyage-ai" correctly routes multimodal telemetry to the voyage branch.
+        """
+        return "voyage-ai"

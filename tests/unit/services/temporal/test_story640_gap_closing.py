@@ -378,7 +378,13 @@ def test_filter_healthy_wired_in_dispatch(tmp_path):
         healthy_collection = "code-indexer-temporal-voyage_code_3"
         unhealthy_collection = "code-indexer-temporal-embed_v4_0"
         (index_path / healthy_collection).mkdir()
+        (index_path / healthy_collection / "hnsw_index.bin").write_bytes(
+            b"fake_hnsw_data"
+        )
         (index_path / unhealthy_collection).mkdir()
+        (index_path / unhealthy_collection / "hnsw_index.bin").write_bytes(
+            b"fake_hnsw_data"
+        )
 
         monitor = ProviderHealthMonitor.get_instance()
         health_key = make_temporal_health_key(unhealthy_collection)
@@ -437,6 +443,7 @@ def test_record_success_failure_wired(tmp_path):
     index_path.mkdir()
     collection_name = "code-indexer-temporal-voyage_code_3"
     (index_path / collection_name).mkdir()
+    (index_path / collection_name / "hnsw_index.bin").write_bytes(b"fake_hnsw_data")
 
     mock_vector_store = MagicMock()
     mock_vector_store.project_root = tmp_path

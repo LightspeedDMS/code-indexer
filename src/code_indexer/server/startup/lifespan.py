@@ -858,6 +858,19 @@ def make_lifespan(
                     arm = getattr(golden_repo_manager, "activated_repo_manager", None)
                     if arm is not None:
                         arm._clone_backend = snapshot_manager._clone_backend
+                        # Bug #1203: wire ActivatedRepoIndexManager into ARM so
+                        # _run_branch_delta_index is not a no-op in production.
+                        # Pass activated_repo_manager=arm explicitly to avoid the
+                        # circular-construction hazard where the default constructor
+                        # creates a second ActivatedRepoManager.
+                        from code_indexer.server.services.activated_repo_index_manager import (
+                            ActivatedRepoIndexManager,
+                        )
+
+                        arm._index_manager = ActivatedRepoIndexManager(
+                            activated_repo_manager=arm,
+                            background_job_manager=background_job_manager,
+                        )
                 # Direct wire into refresh_scheduler (belt-and-suspenders)
                 global_lifecycle_manager.refresh_scheduler._snapshot_manager = (
                     snapshot_manager

@@ -382,3 +382,98 @@ def test_multi_provider_fusion_applied(tmp_path):
         )
 
     mock_fuse.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Bug #1210 — _query_single_provider must split comma-joined file_path_filter
+# ---------------------------------------------------------------------------
+
+# Shared patch list for _query_single_provider split tests.
+# We call _query_single_provider directly and capture the kwargs that reach
+# service.query_temporal so we can assert the split contract.
+
+_SHARD = "code-indexer-temporal-voyage_code_3"
+
+
+def _invoke_query_single_provider(
+    tmp_path,
+    file_path_filter,
+):
+    """Call _query_single_provider with given file_path_filter; return the
+    kwargs dict that was passed to the mocked query_temporal."""
+    from code_indexer.services.temporal.temporal_fusion_dispatch import (
+        _query_single_provider,
+    )
+
+    config = _make_mock_config()
+    vector_store = _make_mock_vector_store(tmp_path)
+
+    captured: dict = {}
+
+    def _capture_query_temporal(**kwargs):
+        captured.update(kwargs)
+        return _make_results_with([])
+
+    with (
+        patch(
+            "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+        ) as MockService,
+        patch(
+            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+        ) as MockFactory,
+    ):
+        mock_svc = MagicMock()
+        mock_svc.query_temporal.side_effect = _capture_query_temporal
+        MockService.return_value = mock_svc
+        MockFactory.create.return_value = MagicMock()
+
+        _query_single_provider(
+            config=config,
+            vector_store=vector_store,
+            coll_name=_SHARD,
+            query_text="test",
+            limit=5,
+            time_range=None,
+            file_path_filter=file_path_filter,
+        )
+
+    return captured
+
+
+def test_file_path_filter_comma_split_reaches_query_temporal(tmp_path):
+    """Bug #1210 dispatch split: 'a/**,b/**' must reach query_temporal as ['a/**', 'b/**']."""
+    captured = _invoke_query_single_provider(tmp_path, "a/**,b/**")
+    path_filter = captured.get("path_filter")
+    assert path_filter is not None, (
+        "path_filter must not be None for a comma-joined file_path_filter"
+    )
+    assert isinstance(path_filter, list), (
+        f"path_filter must be a list, got {type(path_filter)}"
+    )
+    assert len(path_filter) == 2, (
+        f"Expected 2 patterns from 'a/**,b/**', got {path_filter!r}"
+    )
+    assert "a/**" in path_filter, f"'a/**' missing from {path_filter!r}"
+    assert "b/**" in path_filter, f"'b/**' missing from {path_filter!r}"
+
+
+def test_file_path_filter_single_pattern_is_one_element_list(tmp_path):
+    """Bug #1210 dispatch split: single pattern '*/src/*' must reach query_temporal as ['*/src/*']."""
+    captured = _invoke_query_single_provider(tmp_path, "*/src/*")
+    path_filter = captured.get("path_filter")
+    assert path_filter is not None, (
+        "path_filter must not be None for a single file_path_filter"
+    )
+    assert isinstance(path_filter, list), (
+        f"path_filter must be a list, got {type(path_filter)}"
+    )
+    assert path_filter == ["*/src/*"], f"Expected ['*/src/*'], got {path_filter!r}"
+
+
+def test_file_path_filter_none_passes_none_to_query_temporal(tmp_path):
+    """Bug #1210 dispatch split: None file_path_filter must reach query_temporal as None."""
+    captured = _invoke_query_single_provider(tmp_path, None)
+    path_filter = captured.get("path_filter")
+    assert path_filter is None, (
+        f"path_filter must be None when file_path_filter is None, got {path_filter!r}"
+    )

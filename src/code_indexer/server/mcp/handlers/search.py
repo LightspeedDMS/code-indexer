@@ -15,7 +15,7 @@ import asyncio
 import logging
 import socket
 import time
-from typing import TYPE_CHECKING, Dict, Any, List, Optional, cast
+from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple, cast
 
 if TYPE_CHECKING:
     from code_indexer.server.services.search_event_log_writer import (
@@ -153,14 +153,46 @@ def _filter_errors_for_user(errors: dict, user: User) -> dict:
 
 def _apply_search_truncation(
     results: list, search_mode: str, params: Dict[str, Any]
-) -> list:
-    """Apply payload truncation based on search mode."""
+) -> Tuple[list, Dict[str, Any]]:
+    """Apply payload truncation based on search mode.
+
+    Returns:
+        (results, meta) 2-tuple.  For fts/hybrid modes, meta contains:
+          - preview_size_chars: int  -- threshold from payload_cache config
+          - rows_capped: int         -- rows where at least one field was truncated
+        For non-fts/hybrid modes, meta is an empty dict {}.
+        When payload_cache is not configured, meta is an empty dict for fts/hybrid too.
+
+    AC4 (Bug #1202): meta is injected into query_metadata by callers so the
+    MCP consumer can see how many rows were truncated and at what threshold.
+    """
     if search_mode in ["fts", "hybrid"]:
-        return _apply_fts_payload_truncation(results)
+        truncated = _apply_fts_payload_truncation(results)
+        # Build meta only when a payload_cache is active.  _apply_fts_payload_truncation
+        # returns the original list unchanged when there is no cache, so rows_capped
+        # would be 0 anyway -- return empty meta to avoid surfacing a misleading 0.
+        payload_cache = getattr(
+            getattr(_utils.app_module.app, "state", None), "payload_cache", None
+        )
+        if payload_cache is None:
+            logger.debug(
+                "AC4 fts truncation meta: payload_cache not configured, skipping meta"
+            )
+            return truncated, {}
+        rows_capped = sum(
+            1
+            for r in truncated
+            if r.get("snippet_has_more") or r.get("match_text_has_more")
+        )
+        meta: Dict[str, Any] = {
+            "preview_size_chars": payload_cache.config.preview_size_chars,
+            "rows_capped": rows_capped,
+        }
+        return truncated, meta
     elif _is_temporal_query(params):
-        return _apply_temporal_payload_truncation(results)
+        return _apply_temporal_payload_truncation(results), {}
     else:
-        return _apply_payload_truncation(results)
+        return _apply_payload_truncation(results), {}
 
 
 def _resolve_search_type(params: Dict[str, Any], user: User) -> str:
@@ -415,8 +447,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         "response_format", "grouped" if len(repo_aliases) > 1 else "flat"
     )
     search_mode = params.get("search_mode", "semantic")
+    fts_truncation_meta: Dict[str, Any] = {}
     if final_results:
-        final_results = _apply_search_truncation(final_results, search_mode, params)
+        final_results, fts_truncation_meta = _apply_search_truncation(
+            final_results, search_mode, params
+        )
 
     access_filtering_service = _get_access_filtering_service()
     if access_filtering_service:
@@ -432,6 +467,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         errors=errors,
         cursor="",
     )
+
+    # AC4 (Bug #1202): surface fts truncation metadata in omni response.
+    if fts_truncation_meta:
+        omni_qm = formatted.setdefault("query_metadata", {})
+        omni_qm.update(fts_truncation_meta)
 
     if _is_temporal_query(params):
         temporal_status = _get_temporal_status(repo_aliases)
@@ -494,7 +534,9 @@ def _apply_rerank_and_filter(
 ) -> tuple:
     """Apply reranking, truncation, and access filtering to search results.
 
-    Returns (filtered_results, rerank_meta).
+    Returns (filtered_results, rerank_meta) where rerank_meta is the dict from
+    _apply_reranking_sync, optionally enriched with AC4 fts truncation keys
+    (preview_size_chars, rows_capped) when search_mode is fts or hybrid.
     """
     rerank_query = params.get("rerank_query")
     rerank_instruction = params.get("rerank_instruction")
@@ -502,13 +544,18 @@ def _apply_rerank_and_filter(
         results=results,
         rerank_query=rerank_query,
         rerank_instruction=rerank_instruction,
-        content_extractor=lambda r: r.get("content", "") or r.get("code_snippet", ""),
+        content_extractor=_mcp_reranking.extract_rerank_document,
         requested_limit=requested_limit,
         config_service=get_config_service(),
     )
 
     search_mode = params.get("search_mode", "semantic")
-    results = _apply_search_truncation(results, search_mode, params)
+    results, fts_truncation_meta = _apply_search_truncation(
+        results, search_mode, params
+    )
+    # AC4 (Bug #1202): surface fts truncation metadata alongside rerank meta.
+    if fts_truncation_meta:
+        rerank_meta.update(fts_truncation_meta)
 
     access_filtering_service = _get_access_filtering_service()
     if access_filtering_service:
@@ -1075,6 +1122,13 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
         qm["reranker_used"] = rerank_meta["reranker_used"]
         qm["reranker_provider"] = rerank_meta["reranker_provider"]
         qm["rerank_time_ms"] = rerank_meta["rerank_time_ms"]
+        # AC4 (Bug #1202): propagate fts truncation metadata from rerank_meta into qm.
+        # _apply_rerank_and_filter merges preview_size_chars / rows_capped from
+        # _apply_search_truncation into rerank_meta; they must be forwarded here
+        # so the single-repo path matches the omni path's query_metadata coverage.
+        for _ac4_key in ("preview_size_chars", "rows_capped"):
+            if _ac4_key in rerank_meta:
+                qm[_ac4_key] = rerank_meta[_ac4_key]
         # Story #883: parallel memory retrieval — reranker_status extracted here so
         # _run_memory_retrieval receives a plain string, not a nested dict.
         reranker_status: str = rerank_meta["reranker_status"]["status"]
@@ -1088,6 +1142,9 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
         )
         if relevant_memories is not None:
             qm["relevant_memories"] = relevant_memories
+        # AC7 (Bug #1202): effective_search_mode and effective_query_strategy are
+        # already in qm — they arrive via QueryMetadata.to_dict() in the
+        # per-request result dict.  No singleton read-back needed here.
 
     return _mcp_response({"success": True, "results": result})
 

@@ -205,6 +205,10 @@ python, javascript, typescript, java, c, cpp, csharp, go, rust, kotlin, swift, r
 - `?` - Match single character
 - `[seq]` - Match character class
 
+Note: patterns starting with `*/` match at any depth including the repository root.
+`*/tests/*` matches both `tests/foo.py` (root) and `src/tests/foo.py` (nested).
+`**/tests/**` is equivalent and also accepted.
+
 **Examples**:
 ```bash
 # Filter by language

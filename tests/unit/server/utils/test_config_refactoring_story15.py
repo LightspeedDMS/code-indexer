@@ -47,11 +47,11 @@ class TestIndexingConfig:
         assert hasattr(config, "temporal_stale_threshold_days")
         assert config.temporal_stale_threshold_days == 7
 
-    def test_scip_config_has_indexing_timeout_seconds(self):
-        """Story #683 AC1: indexing_timeout_seconds canonical location is ScipConfig."""
+    def test_scip_config_does_not_have_indexing_timeout_seconds(self):
+        """Bug #1218: indexing_timeout_seconds was removed from ScipConfig.
+        Overarching job timeouts caused large-repo indexing to be killed mid-flight."""
         config = ScipConfig()
-        assert hasattr(config, "indexing_timeout_seconds")
-        assert config.indexing_timeout_seconds == 3600
+        assert not hasattr(config, "indexing_timeout_seconds")
 
     def test_server_config_has_indexing_config(self):
         """AC1: ServerConfig should have indexing_config attribute."""
@@ -74,7 +74,6 @@ class TestIndexingConfig:
                 indexing_config=IndexingConfig(),
                 scip_config=ScipConfig(
                     temporal_stale_threshold_days=14,
-                    indexing_timeout_seconds=7200,
                 ),
             )
 
@@ -83,9 +82,7 @@ class TestIndexingConfig:
 
             assert loaded_config is not None
             assert loaded_config.indexing_config is not None
-            # Removed fields are now in ScipConfig (canonical location)
             assert loaded_config.scip_config.temporal_stale_threshold_days == 14
-            assert loaded_config.scip_config.indexing_timeout_seconds == 7200
 
 
 class TestScipWorkspaceRetentionDaysMove:
@@ -111,7 +108,6 @@ class TestScipWorkspaceRetentionDaysMove:
                 server_dir=tmpdir,
                 scip_config=ScipConfig(
                     scip_workspace_retention_days=14,
-                    scip_generation_timeout_seconds=600,
                 ),
             )
 

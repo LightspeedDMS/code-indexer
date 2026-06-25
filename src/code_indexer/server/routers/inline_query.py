@@ -31,6 +31,14 @@ from ..app_helpers import (
     _apply_rest_semantic_truncation,
     _apply_rest_fts_truncation,
 )
+from code_indexer.server.mcp.reranking import (
+    _apply_reranking_sync as _rest_apply_reranking_sync,
+    calculate_overfetch_limit as _rest_calculate_overfetch_limit,
+    extract_rerank_document as _rest_extract_rerank_document,
+)
+
+# Bug #1209: default overfetch multiplier when rerank config is unavailable.
+_REST_DEFAULT_OVERFETCH_MULTIPLIER = 5
 
 # Module-level logger
 logger = logging.getLogger(__name__)
@@ -435,11 +443,27 @@ def register_query_routes(
                 )
 
             # Default semantic mode (backward compatibility)
+            # Bug #1209: when reranking is requested, overfetch so the reranker
+            # receives a larger candidate pool before trimming to requested_limit.
+            _requested_limit = request.limit
+            _fetch_limit = _requested_limit
+            if request.rerank_query:
+                _cfg_svc = get_config_service()
+                _rc = _cfg_svc.get_config().rerank_config
+                _overfetch_mul = (
+                    _rc.overfetch_multiplier
+                    if _rc
+                    else _REST_DEFAULT_OVERFETCH_MULTIPLIER
+                )
+                _fetch_limit = _rest_calculate_overfetch_limit(
+                    _requested_limit, _overfetch_mul
+                )
+
             results = semantic_query_manager.query_user_repositories(
                 username=current_user.username,
                 query_text=request.query_text,
                 repository_alias=request.repository_alias,
-                limit=request.limit,
+                limit=_fetch_limit,
                 min_score=request.min_score,
                 file_extensions=request.file_extensions,
                 # Phase 1 parameters (Story #503)
@@ -470,6 +494,21 @@ def register_query_routes(
                     app.state.access_filtering_service.filter_query_results(
                         results["results"], current_user.username
                     )
+                )
+                results["total_results"] = len(results["results"])
+
+            # Bug #1209: apply reranking AFTER fusion and BEFORE truncation,
+            # mirroring the MCP _apply_rerank_and_filter pipeline order exactly.
+            # The reranker receives the full fused candidate set; it trims to
+            # _requested_limit internally.
+            if request.rerank_query:
+                results["results"], _rerank_meta = _rest_apply_reranking_sync(
+                    results=results["results"],
+                    rerank_query=request.rerank_query,
+                    rerank_instruction=request.rerank_instruction,
+                    content_extractor=_rest_extract_rerank_document,
+                    requested_limit=_requested_limit,
+                    config_service=get_config_service(),
                 )
                 results["total_results"] = len(results["results"])
 

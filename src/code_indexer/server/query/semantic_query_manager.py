@@ -142,15 +142,25 @@ class QueryMetadata:
     execution_time_ms: int
     repositories_searched: int
     timeout_occurred: bool
+    # AC7 (Bug #1202): effective routing decision after auto-parallel gate.
+    # Optional so existing callers that build QueryMetadata without these fields
+    # continue to compile.  query_user_repositories always populates them.
+    effective_search_mode: Optional[str] = None
+    effective_query_strategy: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API response."""
-        return {
+        result: Dict[str, Any] = {
             "query_text": self.query_text,
             "execution_time_ms": self.execution_time_ms,
             "repositories_searched": self.repositories_searched,
             "timeout_occurred": self.timeout_occurred,
         }
+        if self.effective_search_mode is not None:
+            result["effective_search_mode"] = self.effective_search_mode
+        if self.effective_query_strategy is not None:
+            result["effective_query_strategy"] = self.effective_query_strategy
+        return result
 
 
 class SemanticQueryManager:
@@ -527,8 +537,13 @@ class SemanticQueryManager:
 
         # Perform the search
         start_time = time.time()
+        effective_strategy: str = query_strategy or "primary_only"
         try:
-            results = self._perform_search(
+            # AC7 (Bug #1202): _perform_search returns (results, effective_strategy).
+            # Routing decision is per-request; no singleton state.
+            # Backward compat: if a test patches _perform_search to return a plain
+            # list (not a tuple), unpack gracefully.
+            _raw = self._perform_search(
                 username,
                 all_repos,
                 query_text,
@@ -569,6 +584,12 @@ class SemanticQueryManager:
                 # Story #1108 (S4): per-request cache bypass
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
+            # Unpack (results, effective_strategy) tuple; fall back gracefully if
+            # a test patches _perform_search to return a plain list.
+            if isinstance(_raw, tuple):
+                results, effective_strategy = _raw
+            else:
+                results = _raw
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
         except TimeoutError as e:
@@ -586,12 +607,15 @@ class SemanticQueryManager:
                 raise SemanticQueryError(f"Query timed out: {str(e)}")
             raise SemanticQueryError(f"Search failed: {str(e)}")
 
-        # Create metadata
+        # Create metadata — AC7 (Bug #1202): include effective routing decision
+        # from the per-request out-param (no singleton state).
         metadata = QueryMetadata(
             query_text=query_text,
             execution_time_ms=execution_time_ms,
             repositories_searched=len(all_repos),
             timeout_occurred=timeout_occurred,
+            effective_search_mode=search_mode,
+            effective_query_strategy=effective_strategy,
         )
 
         # Handle case where mocked _perform_search returns dict instead of QueryResult list
@@ -772,9 +796,14 @@ class SemanticQueryManager:
         precomputed_query_vector: Optional[List[float]] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
-    ) -> List[QueryResult]:
+    ) -> "Tuple[List[QueryResult], str]":
         """
         Perform the actual search across user repositories.
+
+        Returns:
+            Tuple of (results, effective_query_strategy) where effective_query_strategy
+            is the resolved routing decision ("parallel", "primary_only", etc.) after
+            the auto-parallel gate in _search_single_repository.
 
         Supports three search modes:
         - 'semantic': Vector-based semantic similarity search (default)
@@ -821,6 +850,11 @@ class SemanticQueryManager:
 
         all_results: List[QueryResult] = []
         repo_errors: List[str] = []
+        # AC7 (Bug #1202): track the effective routing decision from the first
+        # successfully-searched repo (all repos in one request share the same
+        # search_mode and query_strategy parameters so the resolved value is
+        # constant across the loop).
+        _effective_strategy: str = query_strategy or "primary_only"
 
         # Search each repository
         for repo_info in user_repos:
@@ -861,6 +895,7 @@ class SemanticQueryManager:
 
                 # Create temporary config and search engine for this repository
                 # This would need actual implementation with proper config management
+                _strat_out: List[str] = []
                 results = self._search_single_repository(
                     repo_path,
                     repo_alias,
@@ -901,7 +936,14 @@ class SemanticQueryManager:
                     precomputed_query_vector=precomputed_query_vector,
                     # Story #1108 (S4): per-request cache bypass
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+                    # AC7 (Bug #1202): collect resolved routing decision
+                    _effective_strategy_out=_strat_out,
                 )
+                # AC7: capture routing decision from the first resolved repo
+                if _strat_out and _effective_strategy == (
+                    query_strategy or "primary_only"
+                ):
+                    _effective_strategy = _strat_out[0]
                 all_results.extend(results)
 
             except (TimeoutError, Exception) as e:
@@ -936,7 +978,7 @@ class SemanticQueryManager:
 
         # Apply global result limit
         effective_limit = min(limit, self.max_results_per_query)
-        return all_results[:effective_limit]
+        return (all_results[:effective_limit], _effective_strategy)
 
     def _both_providers_configured(self, repo_path: str) -> bool:
         """Check if both VoyageAI and Cohere providers have API keys configured."""
@@ -1016,6 +1058,10 @@ class SemanticQueryManager:
         precomputed_query_vector: Optional[List[float]] = None,
         # Story #1108 (S4): per-request bypass of the query-embedding cache read
         no_embedding_cache_shortcut: bool = False,
+        # AC7 (Bug #1202): out-param for routing decision — caller passes a
+        # single-element list; resolved query_strategy is written into [0].
+        # Per-request, no shared state.
+        _effective_strategy_out: Optional[List[str]] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1096,6 +1142,10 @@ class SemanticQueryManager:
         # Story #618: Auto-default to parallel when both providers configured
         # Bug #667: Skip parallel when temporal params present — temporal routing gate
         # at line ~1387 must be reached; parallel block returns early before it.
+        # Bug #1202: Skip parallel when search_mode is 'fts' or 'hybrid' — FTS branch
+        # at line ~1563 must be reached; parallel block returns early before it.
+        # Accepted tradeoff: hybrid's semantic half no longer fans out across both
+        # providers when both are configured (single provider path runs instead).
         if query_strategy is None:
             _has_temporal_for_strategy = any(
                 [
@@ -1108,13 +1158,21 @@ class SemanticQueryManager:
                     author,
                 ]
             )
-            if not _has_temporal_for_strategy and self._both_providers_configured(
-                repo_path
+            if (
+                not _has_temporal_for_strategy
+                and search_mode
+                == "semantic"  # Bug #1202: fts/hybrid must not be preempted
+                and self._both_providers_configured(repo_path)
             ):
                 query_strategy = "parallel"
                 score_fusion = score_fusion or "rrf"
             else:
                 query_strategy = "primary_only"
+
+        # AC7 (Bug #1202): carry the resolved routing decision back to the caller
+        # via the per-request out-param (no singleton state written here).
+        if _effective_strategy_out is not None:
+            _effective_strategy_out[:] = [query_strategy]
 
         # Log query strategy if non-default (Story #488 Phase 4)
         if query_strategy is not None and query_strategy != "primary_only":

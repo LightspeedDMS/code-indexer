@@ -319,6 +319,16 @@ Both logout routes (`GET /logout` via `web_router` and `GET /user/logout` via `u
 
 Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.
 
+### Activation Branch-Delta Reindex (Bug #1203)
+
+Activation of a golden repo on a NON-DEFAULT branch (and `switch_branch` / `sync_with_golden_repository`) now runs a branch-aware delta semantic reindex as its final phase, via `ActivatedRepoIndexManager.run_branch_delta_index(repo_path)` (public wrapper over `_execute_semantic_indexing(repo_path, clear=False)` -> `cidx index` subprocess -> SmartIndexer git-topology delta). Before #1203 the CoW clone copied the golden's DEFAULT-branch index byte-for-byte and never reindexed, so non-default branches silently served default-branch embeddings for files that differ.
+
+**Key invariants -- NEVER violate:**
+- All three lifecycle sites route through the single helper `ActivatedRepoManager._run_branch_delta_index`. Skip guards: target `branch == golden_repo.default_branch` (CoW index already correct), `user_alias.endswith("-global")` (global repos share the golden's immutable index), or `self._index_manager is None`.
+- `_index_manager` is wired POST-HOC in `startup/lifespan.py` (mirrors the Bug #1044 `_clone_backend` block): `arm._index_manager = ActivatedRepoIndexManager(activated_repo_manager=arm, background_job_manager=...)`. Passing `activated_repo_manager=arm` explicitly avoids the circular-construction default at `activated_repo_index_manager.py:84`. If this assignment is removed, the fix goes INERT (the production ARM falls back to None and silently skips reindex). Guard: `tests/unit/server/startup/test_lifespan_index_manager_wiring_bug1203.py`.
+- After a SUCCESSFUL reindex, `_run_branch_delta_index` invalidates the server in-memory caches for the repo via PREFIX eviction: `get_global_cache().invalidate_prefix(index_base)` and `get_global_id_index_cache().invalidate_prefix(index_base)` where `index_base = {repo_path}/.code-indexer/index`. The HNSW/id-index caches are keyed by the per-COLLECTION path (`{repo}/.code-indexer/index/{collection}`, resolved), NOT the repo root -- a plain `invalidate(repo_path)` matches nothing and silently serves stale results. NO FTS cache invalidation: the server FTS query builds `TantivyIndexManager(fts_index_dir)` directly from disk and does not read `get_global_fts_cache()`, so a fresh per-query manager picks up the rewritten index automatically.
+- Failure is correctness-first: a failed reindex raises `ActivatedRepoError` (activation also `shutil.rmtree`s the freshly-created orphan clone before re-raising). Cache invalidation is non-fatal (WARNING, never fails an already-successful reindex) but runs on the success path.
+
 ### Golden Repo Versioned Path (mutable-vs-immutable -- resolver-accurate)
 
 - **Base clone** (`golden-repos/{alias}/`): mutable -- where git ops and indexing happen
@@ -433,6 +443,21 @@ Server-side query-embed coalescing gated by a self-tuning per-lane concurrency g
 **Per-worker governor scaling (Story #1165)** — `query_provider_max_concurrency` is the PER-NODE total provider-concurrency budget. At governor construction (auto-seed path only, i.e. `ProviderConcurrencyGovernor()` with no explicit `max_concurrency` argument), the per-node budget is divided by `config.workers` so combined embedding pressure across all uvicorn workers on the node stays within the configured limit. Per-worker seed = `max(k_min, per_node_budget // workers)`, then clamped to `[k_min, k_max]`. Key invariants: workers=1 is byte-identical to pre-#1165 behavior (no change); workers=0 or negative falls back to 1 (no division); explicit `max_concurrency` construction (used in tests) is NEVER divided. Cross-node budgeting remains the operator's responsibility — each node has its own `query_provider_max_concurrency`. This division introduces NO shared/cross-process state; it is pure per-process construction-time arithmetic.
 
 -> Deterministic fault-injection gate: `tests/integration/server/test_coalescer_fault_injection_1079.py`.
+
+### Indexing Path Has No Job/Subprocess/Per-File Timeouts (Bug #1218)
+
+The indexing / golden-repo-registration / SCIP-generation path carries NO wall-clock timeout on the whole job, the whole subprocess, or any per-file/per-batch unit. A large repo legitimately takes hours (runtime tracks normal outbound embedding-provider latency); bounding the job on a clock SIGKILLs healthy indexing, and per-file timeout-swallow handlers produce a silent partial index that reports success.
+
+**The ONLY legitimate timeout on this path is the per-request outbound embedding-provider HTTP call** (connect/read on a single POST to Voyage/Cohere) plus its retry/backoff. Those stay (`voyage_ai.py`, `cohere_embedding.py`, `cohere_multimodal.py`, `provider_backoff.py`).
+
+**Key invariants -- NEVER reintroduce:**
+- `run_with_popen_progress` (`services/progress_subprocess_runner.py`) has NO `timeout` parameter, NO watchdog thread, NO `os.killpg(...SIGKILL)`, NO `returncode == -9` detection. Do not add a job/subprocess clock here or at any caller.
+- No `future.result(timeout=...)` + swallow-and-skip on the per-file/per-batch path (`file_chunking_manager.py`, `high_throughput_processor.py`, `temporal/temporal_indexer.py`). A genuine post-retry embedding failure must PROPAGATE and fail the job LOUD -- never `except TimeoutError: skip this file`, never a silent partial index (Messi #2 Anti-Fallback, #13 Anti-Silent-Failure).
+- The removed `ScipConfig` fields `indexing_timeout_seconds`, `scip_generation_timeout_seconds`, `registration_indexing_timeout_seconds` are GONE; both `ScipConfig(**...)` construction sites strip them from old persisted configs (backward compat). Do not re-add.
+- KEEP (NOT a job clock, do not remove): governor acquire, coalescer join, rerankers, BackgroundJobManager SIGTERM/SIGKILL (cancel/shutdown only), and short local-git metadata subprocess bounds (progress-estimate only, not index correctness).
+- **Fail-loud on total failure (anti-silent-failure):** `cidx index` exits NON-ZERO when `files_processed == 0 and failed_files > 0` (`cli.py` index completion block). This propagates through `run_with_popen_progress` (raises `IndexingSubprocessError` on returncode != 0) so a golden-repo registration whose indexing all-fails (e.g. bad provider key) FAILS the registration instead of reporting success with an empty index. The "All files failed to index" message is deliberately distinct from the benign "No files found to index" allowlist so it is not swallowed.
+- **Registration failure cleans up its own clone:** `golden_repo_manager._cleanup_failed_clone(_clone_path_for_cleanup)` runs in all `background_worker` failure paths and removes ONLY the freshly-created clone before re-raising, so a retry never hits "destination path already exists". Without this, a failed registration leaves an orphan clone that permanently blocks retries.
+- **Known residual follow-up (NOT fixed in #1218):** the daemon in-process FTS rebuild (`daemon/service.py`) can still report `status: success` on an all-failed in-process rebuild -- a separate path, tracked separately.
 
 ### Database Migrations Must Be Backward Compatible
 
@@ -616,6 +641,8 @@ cidx watch / watch-stop / stop         # Daemon controls
 ```
 
 **Flags** (always `--quiet`): `--limit N` (start 5-10), `--language python`, `--path-filter */tests/*`, `--min-score 0.8`, `--accuracy high`.
+
+Note: `*/tests/*` matches at any depth including root (`tests/foo.py` and `src/tests/foo.py`). `**/tests/**` is equivalent.
 
 ---
 

@@ -443,7 +443,10 @@ def _query_single_provider(
     )
 
     resolved_range = time_range if time_range is not None else ALL_TIME_RANGE
-    path_filter = [file_path_filter] if file_path_filter else None
+    # Split comma-joined path_filter string using the same parse_exclude_patterns
+    # contract already used for exclude_path below (Bug #1210).  Single patterns
+    # pass through as a 1-element list; None/empty -> None.
+    path_filter = parse_exclude_patterns(file_path_filter) or None
 
     _t0 = _time.time()
     try:

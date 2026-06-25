@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from code_indexer.services.temporal.temporal_collection_naming import (
+    has_real_monolith,
     is_sharded_temporal_collection,
     is_temporal_collection,
     quarter_suffix,
@@ -77,9 +78,10 @@ def _needs_temporal_migration(index_path: Path) -> bool:
             continue
         if is_sharded_temporal_collection(entry.name):
             continue
-        if (entry / MIGRATION_COMPLETE_MARKER).exists():
-            continue
-        if (entry / "hnsw_index.bin").exists():
+        # Bug #1207 BLOCKER 3: use the single shared predicate has_real_monolith()
+        # instead of duplicating the marker/hnsw check here.  Both callers now agree
+        # on what constitutes a real unmigrated monolith — one source of truth.
+        if has_real_monolith(entry):
             return True
     return False
 

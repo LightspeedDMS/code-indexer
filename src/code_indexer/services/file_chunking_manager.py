@@ -35,7 +35,9 @@ logger = logging.getLogger(__name__)
 
 
 # Constants
-VECTOR_PROCESSING_TIMEOUT = 300.0  # 5 minutes timeout for vector processing
+# Note (Bug #1218): VECTOR_PROCESSING_TIMEOUT removed — no per-batch wall-clock
+# bound on the indexing path; the only legitimate timeout is the per-request
+# outbound embedding-provider HTTP call inside the provider itself.
 THREAD_POOL_SHUTDOWN_TIMEOUT = 30.0  # 30 seconds for graceful shutdown
 
 
@@ -799,9 +801,7 @@ class FileChunkingManager:
             try:
                 # Collect embeddings from all batches in order
                 for batch_future in batch_futures:
-                    batch_result = batch_future.result(
-                        timeout=VECTOR_PROCESSING_TIMEOUT
-                    )
+                    batch_result = batch_future.result()
 
                     # CRITICAL: Validate each batch result
                     if (

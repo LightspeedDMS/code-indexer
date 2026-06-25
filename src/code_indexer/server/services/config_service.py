@@ -581,8 +581,6 @@ class ConfigService:
                 "cpu_sustained_threshold_percent": config.health_config.cpu_sustained_threshold_percent,
             },
             "scip": {
-                "indexing_timeout_seconds": config.scip_config.indexing_timeout_seconds,
-                "scip_generation_timeout_seconds": config.scip_config.scip_generation_timeout_seconds,
                 "temporal_stale_threshold_days": config.scip_config.temporal_stale_threshold_days,
                 # P3 settings (AC31-AC34)
                 "scip_reference_limit": config.scip_config.scip_reference_limit,
@@ -1808,11 +1806,7 @@ class ConfigService:
         """Update a SCIP setting (Story #3 - Phase 2)."""
         scip = config.scip_config
         assert scip is not None  # Guaranteed by ServerConfig.__post_init__
-        if key == "indexing_timeout_seconds":
-            scip.indexing_timeout_seconds = int(value)
-        elif key == "scip_generation_timeout_seconds":
-            scip.scip_generation_timeout_seconds = int(value)
-        elif key == "temporal_stale_threshold_days":
+        if key == "temporal_stale_threshold_days":
             scip.temporal_stale_threshold_days = int(value)
         # P3 settings (AC31-AC34)
         elif key == "scip_reference_limit":

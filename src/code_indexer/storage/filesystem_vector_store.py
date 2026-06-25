@@ -306,9 +306,6 @@ class FilesystemVectorStore:
         self.quantizer = VectorQuantizer(depth_factor=4, reduced_dimensions=64)
         self.matrix_manager = ProjectionMatrixManager()
 
-        # Thread safety for file writes
-        self._write_lock = threading.Lock()
-
         # ID index cache: {collection_name: {point_id: file_path}}
         self._id_index: Dict[str, Dict[str, Path]] = {}
         self._id_index_lock = threading.Lock()
@@ -1088,6 +1085,16 @@ class FilesystemVectorStore:
                             orphan_id
                         )
 
+        # Bug #1206 Fix 1: For temporal collections, accumulate (point_id, payload) rows
+        # so we can call save_metadata_batch ONCE per upsert_points call instead of
+        # once per vector (which caused N connect/commit/fsync cycles under 8 threads).
+        # hash_prefix is deterministic (sha256(point_id)[:16]), so we compute it upfront
+        # and use it for filenames without touching the DB in the per-vector loop.
+        is_temporal = TemporalMetadataStore.is_temporal_collection(collection_name)
+        temporal_batch_rows: List[
+            tuple
+        ] = []  # accumulates (point_id, payload) for batch
+
         # Process all points
         total_points = len(points)
         for idx, point in enumerate(points, 1):
@@ -1151,12 +1158,17 @@ class FilesystemVectorStore:
             dir_path.mkdir(parents=True, exist_ok=True)
 
             # Story #669: Use hash-based filenames for temporal collections (v2 format)
-            # This prevents OSError when point_ids exceed 255 characters
-            if TemporalMetadataStore.is_temporal_collection(collection_name):
-                # V2 format: hash-based filename (28 chars total)
+            # This prevents OSError when point_ids exceed 255 characters.
+            # Bug #1206 Fix 1: compute hash_prefix from the deterministic formula
+            # WITHOUT calling save_metadata per vector.  The DB batch write happens
+            # AFTER all vector files are written (save_metadata_batch call below).
+            if is_temporal:
+                # V2 format: hash-based filename (28 chars total).
+                # hash_prefix is sha256(point_id)[:16] — same as generate_hash_prefix().
                 metadata_store = self._get_temporal_metadata_store()
-                hash_prefix = metadata_store.save_metadata(point_id, payload)
+                hash_prefix = metadata_store.generate_hash_prefix(point_id)
                 vector_file = dir_path / f"vector_{hash_prefix}.json"
+                temporal_batch_rows.append((point_id, payload))
             else:
                 # Original format: point_id with slashes replaced (non-temporal collections)
                 vector_file = dir_path / f"vector_{point_id.replace('/', '_')}.json"
@@ -1206,6 +1218,17 @@ class FilesystemVectorStore:
             with self._path_index_lock:
                 if collection_name in self._path_indexes and file_path:
                     self._path_indexes[collection_name].add_point(file_path, point_id)
+
+        # Bug #1206 Fix 1: flush the accumulated temporal metadata batch in ONE
+        # transaction after all vector files have been written.  This is the
+        # flush-after-success ordering: vectors on disk first, then metadata DB
+        # commit, so a crash between writes leaves vectors without metadata —
+        # the indexer re-indexes on resume (deterministic point_id → hash_prefix
+        # means the re-index OVERWRITEs, no duplicates).
+        if is_temporal and temporal_batch_rows:
+            metadata_store = self._get_temporal_metadata_store()
+            metadata_store.save_metadata_batch(temporal_batch_rows)
+            metadata_store.checkpoint_wal()
 
         # HNSW-001: Watch mode real-time HNSW update
         if watch_mode:
@@ -1488,21 +1511,28 @@ class FilesystemVectorStore:
     def _atomic_write_json(self, file_path: Path, data: Dict[str, Any]) -> None:
         """Atomically write JSON data to file.
 
-        Uses write-to-temp-then-rename pattern for thread safety.
+        Uses write-to-temp-then-rename pattern for atomicity.  Each file write
+        is independent: the OS-level atomic rename guarantees that a reader
+        sees either the old file or the new file, never a partial write.  No
+        process-wide lock is needed — concurrent writes to DISTINCT files
+        proceed in parallel (Bug #1206 Fix 3).
 
         Args:
             file_path: Target file path
             data: Data to serialize as JSON
         """
-        with self._write_lock:
-            # Write to temporary file first
-            tmp_file = file_path.with_suffix(".tmp")
+        # Use a per-call unique tmp filename so concurrent writes to the same
+        # target file each own their tmp file and don't race on rename/delete.
+        tmp_file = file_path.with_name(
+            f"{file_path.stem}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
 
-            with open(tmp_file, "w") as f:
-                json.dump(data, f, indent=2)
+        with open(tmp_file, "w") as f:
+            json.dump(data, f, indent=2)
 
-            # Atomic rename
-            tmp_file.replace(file_path)
+        # Atomic rename — visible to readers only after this completes.
+        # Last writer wins; all intermediate writers produce valid JSON files.
+        tmp_file.replace(file_path)
 
     def load_id_index(self, collection_name: str) -> set:
         """Load ID index and return set of existing point IDs.

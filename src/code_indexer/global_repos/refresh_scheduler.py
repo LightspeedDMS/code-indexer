@@ -38,7 +38,7 @@ from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
     wait_for_nfs_visibility,
 )
-from code_indexer.server.utils.config_manager import ScipConfig, ServerResourceConfig
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -2064,9 +2064,6 @@ class RefreshScheduler:
                     phase="scip",
                     detail="SCIP: generating code intelligence index...",
                 )
-            # Bug #730: apply SCIP generation timeout.  ScipConfig is the canonical
-            # source of truth for this value (default defined in its dataclass).
-            scip_timeout = ScipConfig().scip_generation_timeout_seconds
             try:
                 subprocess.run(
                     scip_command,
@@ -2074,7 +2071,6 @@ class RefreshScheduler:
                     capture_output=True,
                     text=True,
                     check=True,
-                    timeout=scip_timeout,
                 )
                 logger.info("cidx scip generate on source completed successfully")
                 if progress_callback is not None:
@@ -2083,14 +2079,6 @@ class RefreshScheduler:
                         phase="scip",
                         detail="SCIP: complete",
                     )
-            except subprocess.TimeoutExpired as e:
-                logger.error(
-                    f"SCIP indexing on source timed out after {scip_timeout}s for {alias_name}",
-                    exc_info=True,
-                )
-                raise RuntimeError(
-                    f"cidx scip generate timed out after {scip_timeout}s: {e}"
-                ) from e
             except subprocess.CalledProcessError as e:
                 if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
                     logger.warning(

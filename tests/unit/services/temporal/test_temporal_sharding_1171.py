@@ -188,12 +188,18 @@ class TestGetOverlappingShards:
         assert f"{base}-2024Q3" in result
 
     def test_get_overlapping_shards_includes_legacy(self, tmp_path):
-        """Creates legacy dir + shards; all-time query includes legacy at end."""
+        """Creates legacy dir + shards; all-time query includes legacy at end.
+
+        Bug #1207: base dir is only included when hnsw_index.bin is present
+        (real unmirgated monolith). Test updated to reflect corrected behavior.
+        """
         base = "code-indexer-temporal-voyage_code_3"
         (tmp_path / f"{base}-2024Q1").mkdir()
         (tmp_path / f"{base}-2024Q2").mkdir()
-        # Legacy monolithic collection
-        (tmp_path / base).mkdir()
+        # Legacy monolithic collection WITH hnsw_index.bin (real monolith scenario)
+        legacy_dir = tmp_path / base
+        legacy_dir.mkdir()
+        (legacy_dir / "hnsw_index.bin").write_bytes(b"fake_hnsw_data")
 
         result = self.get_overlapping_shards("voyage-code-3", tmp_path, None, None)
 
@@ -218,9 +224,14 @@ class TestGetOverlappingShards:
         ]
 
     def test_get_overlapping_shards_legacy_only(self, tmp_path):
-        """Only legacy dir on disk, all-time query returns legacy."""
+        """Only legacy dir on disk with hnsw_index.bin, all-time query returns legacy.
+
+        Bug #1207: base dir must have hnsw_index.bin to be treated as a real monolith.
+        """
         base = "code-indexer-temporal-voyage_code_3"
-        (tmp_path / base).mkdir()
+        legacy_dir = tmp_path / base
+        legacy_dir.mkdir()
+        (legacy_dir / "hnsw_index.bin").write_bytes(b"fake_hnsw_data")
 
         result = self.get_overlapping_shards("voyage-code-3", tmp_path, None, None)
 
@@ -477,7 +488,10 @@ class TestQueryShardOrder:
         ]
 
     def test_all_time_query_includes_all_shards(self, tmp_path):
-        """All-time query (None start/end) includes all shards plus legacy."""
+        """All-time query (None start/end) includes all shards plus legacy.
+
+        Bug #1207: base dir included only when hnsw_index.bin present (real monolith).
+        """
         from code_indexer.services.temporal.temporal_collection_naming import (
             get_overlapping_shards,
         )
@@ -485,8 +499,10 @@ class TestQueryShardOrder:
         base = "code-indexer-temporal-voyage_code_3"
         for suffix in ["2023Q4", "2024Q1", "2024Q2"]:
             (tmp_path / f"{base}-{suffix}").mkdir()
-        # Add legacy
-        (tmp_path / base).mkdir()
+        # Add legacy with hnsw_index.bin (real monolith scenario)
+        legacy_dir = tmp_path / base
+        legacy_dir.mkdir()
+        (legacy_dir / "hnsw_index.bin").write_bytes(b"fake_hnsw_data")
 
         result = get_overlapping_shards("voyage-code-3", tmp_path, None, None)
 
