@@ -1429,7 +1429,9 @@ class TemporalIndexer:
             future = vector_manager.submit_batch_task(
                 chunk_texts, {"commit_hash": commit.hash}
             )
-            result = future.result(timeout=30)
+            # No per-commit timeout (Bug #1218): the only legitimate timeout is
+            # the per-request outbound embedding-provider HTTP call.
+            result = future.result()
 
             if not result.error and result.embeddings:
                 # Convert timestamp to date (YYYY-MM-DD format)

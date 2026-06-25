@@ -1,9 +1,10 @@
 """
-Regression tests for Phase-3 e2e flake:
+Regression tests for Phase-3 e2e flake (updated for Bug #1218):
 
-  - Bug A: _execute_post_clone_workflow passes NO timeout to run_with_popen_progress.
-    Under concurrent load, cidx index --fts stalls indefinitely; the 300 s e2e
-    poll deadline fires before the job completes.
+  - Bug A (FIXED by Bug #1218): _execute_post_clone_workflow must NOT pass any
+    timeout to run_with_popen_progress.  Overarching job timeouts caused
+    large-repo indexing to be killed mid-flight, leaving a corrupt partial index.
+    The fix removes all per-job timeouts on the indexing+registration+SCIP path.
 
   - Bug B: ActivatedRepoIndexManager._execute_fts_indexing (and _execute_semantic)
     runs "cidx index" in a repo that has no .code-indexer/config.json.  cidx
@@ -11,8 +12,9 @@ Regression tests for Phase-3 e2e flake:
     This occurs when the activated-repo's CoW-cloned .code-indexer dir is absent
     or the init step was skipped.
 
-Fix A: _run_popen (inner closure) must forward a timeout from
-       ScipConfig.indexing_timeout_seconds via run_with_popen_progress(..., timeout=...).
+Fix A (Bug #1218): _run_popen must NOT forward any timeout to
+       run_with_popen_progress. The only legitimate timeouts are per-request
+       outbound embedding-provider HTTP calls.
 
 Fix B: _execute_fts_indexing and _execute_semantic_indexing must check that
        {repo_path}/.code-indexer/config.json exists before running cidx index.
@@ -67,35 +69,33 @@ def golden_manager(tmp_path: Path) -> GoldenRepoManager:
 
 
 # ---------------------------------------------------------------------------
-# Bug A — timeout must be forwarded in _execute_post_clone_workflow
+# Bug A (Bug #1218) — run_with_popen_progress must NOT receive a timeout
 # ---------------------------------------------------------------------------
 
 
 class TestPostCloneWorkflowTimeout:
-    """Bug A: _run_popen must pass timeout= to run_with_popen_progress."""
+    """Bug #1218: _run_popen must NOT pass timeout= to run_with_popen_progress.
 
-    def test_index_call_receives_timeout_argument(
+    Overarching job timeouts on the indexing path were removed because they
+    killed large-repo indexing mid-flight (partial/corrupt index).  The only
+    legitimate timeouts are per-request outbound embedding-provider HTTP calls.
+    """
+
+    def test_index_call_receives_no_timeout_argument(
         self, golden_manager: GoldenRepoManager, tmp_repo: Path
     ) -> None:
-        """run_with_popen_progress called for cidx index must receive a non-None timeout.
+        """run_with_popen_progress called for cidx index must NOT receive a timeout kwarg.
 
-        Before the fix, _run_popen forwarded no timeout (default=None), so a
-        stalled cidx index subprocess would block indefinitely.
+        Bug #1218 removes all overarching per-job timeouts so that large-repo
+        indexing completes without being killed mid-flight.
         """
         captured_kwargs: List[dict] = []
-
-        def _mock_run_with_popen_progress(**kwargs) -> int:
-            captured_kwargs.append(kwargs)
-            # Simulate successful run
-            return 0
 
         mock_subprocess_result = MagicMock()
         mock_subprocess_result.returncode = 0
         mock_subprocess_result.stdout = ""
         mock_subprocess_result.stderr = ""
 
-        # run_with_popen_progress is lazily imported INSIDE _execute_post_clone_workflow,
-        # so we must patch it at the source module, not the golden_repo_manager module.
         def _capture_popen(*args: object, **kw: object) -> int:
             captured_kwargs.append(kw)
             return 0
@@ -124,21 +124,20 @@ class TestPostCloneWorkflowTimeout:
         )
 
         for call_kw in captured_kwargs:
-            timeout_val = call_kw.get("timeout")
-            assert timeout_val is not None, (
-                f"run_with_popen_progress was called without timeout= (got None). "
-                f"Full kwargs: {call_kw}. "
-                "Fix: pass indexing_timeout_seconds from ScipConfig to _run_popen."
+            assert "timeout" not in call_kw, (
+                f"run_with_popen_progress was called WITH a timeout= kwarg: "
+                f"{call_kw.get('timeout')!r}. "
+                "Bug #1218 removed all overarching per-job timeouts on the indexing path."
             )
-            assert isinstance(timeout_val, (int, float)), (
-                f"timeout must be numeric, got {type(timeout_val)}"
-            )
-            assert timeout_val > 0, f"timeout must be > 0, got {timeout_val}"
 
-    def test_timeout_value_is_at_least_60_seconds(
+    def test_index_call_timeout_parameter_absent_not_none(
         self, golden_manager: GoldenRepoManager, tmp_repo: Path
     ) -> None:
-        """Timeout must be a meaningful lower bound (>= 60 s) to handle large repos."""
+        """The timeout kwarg must be fully absent (not just None) in the call.
+
+        Bug #1218: the parameter was removed from run_with_popen_progress entirely,
+        so passing timeout=None would raise TypeError.
+        """
         captured_kwargs: List[dict] = []
 
         mock_subprocess_result = MagicMock()
@@ -169,10 +168,9 @@ class TestPostCloneWorkflowTimeout:
             )
 
         for call_kw in captured_kwargs:
-            timeout_val = call_kw.get("timeout", 0)
-            assert timeout_val >= 60, (
-                f"timeout {timeout_val}s is too small for production indexing. "
-                "Expected >= 60 s (ScipConfig.indexing_timeout_seconds default is 3600)."
+            assert "timeout" not in call_kw, (
+                f"timeout kwarg present (value={call_kw.get('timeout')!r}). "
+                "Bug #1218: the timeout parameter was removed from run_with_popen_progress."
             )
 
 
@@ -283,7 +281,8 @@ class TestActivatedRepoIndexManagerInitGuard:
         fake_result.stdout = ""
         fake_result.stderr = ""
 
-        def _capture_run(args: List[str], repo_path: str, timeout: int) -> MagicMock:
+        # Bug #1218: _run_subprocess_with_telemetry no longer takes a timeout param.
+        def _capture_run(args: List[str], repo_path: str) -> MagicMock:
             captured_calls.append(args)
             return fake_result
 
@@ -314,7 +313,8 @@ class TestActivatedRepoIndexManagerInitGuard:
         fake_result.stdout = ""
         fake_result.stderr = ""
 
-        def _capture_run(args: List[str], repo_path: str, timeout: int) -> MagicMock:
+        # Bug #1218: _run_subprocess_with_telemetry no longer takes a timeout param.
+        def _capture_run(args: List[str], repo_path: str) -> MagicMock:
             captured_calls.append(args)
             return fake_result
 

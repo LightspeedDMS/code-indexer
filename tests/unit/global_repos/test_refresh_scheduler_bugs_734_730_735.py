@@ -4,8 +4,10 @@ Regression tests for Bugs #734, #730, #735 in RefreshScheduler.
 Bug #734: cleanup_stale_write_mode_markers(force=True) at startup (in start()) has no
 try/except — if it raises the scheduler thread is never launched.
 
-Bug #730: subprocess.run() for 'cidx scip generate' in _index_source() has no timeout=
-kwarg — a hung SCIP process blocks the refresh cycle indefinitely.
+Bug #730 (SUPERSEDED by Bug #1218): subprocess.run() for 'cidx scip generate' in
+_index_source() previously had no timeout= kwarg.  Bug #1218 removes ALL overarching
+per-job timeouts on the indexing+SCIP path (they caused large-repo partial/corrupt
+indexes).  The test now asserts the timeout kwarg is ABSENT.
 
 Bug #735: _scheduler_loop() has no exponential backoff on consecutive failures — a
 permanently-broken upstream (e.g. corrupted DB) spams error logs at fixed cadence forever.
@@ -188,34 +190,36 @@ def _find_scip_subprocess_run_call(source: str) -> ast.Call:
 
 class TestBug730ScipGenerateHasTimeout:
     """
-    Bug #730: subprocess.run() for 'cidx scip generate' in _index_source() is
-    called without a timeout= kwarg.  A hung SCIP indexer blocks the thread
-    indefinitely.
+    Bug #730 superseded by Bug #1218.
 
-    Fix: pass timeout=<scip_generation_timeout_seconds> to subprocess.run().
+    Bug #730 originally required a timeout= on the SCIP subprocess.run call.
+    Bug #1218 removes ALL overarching per-job timeouts on the indexing+SCIP path
+    because they killed large-repo indexing mid-flight (partial/corrupt index).
 
-    Verification: AST-parse _index_source() source, locate the exact
-    subprocess.run(scip_command, ...) call node, and assert a 'timeout' keyword
-    argument is present on that specific call.  Unrelated timeout= kwargs
-    elsewhere in the method cannot satisfy this assertion.
+    This class now verifies the ABSENCE of timeout= on subprocess.run(scip_command, ...)
+    to guard against the timeout being re-introduced by well-meaning but incorrect fixes.
     """
 
-    def test_bug_730_scip_generate_has_timeout(self):
+    def test_bug_730_scip_generate_has_no_timeout(self):
         """
-        _index_source() source must contain a subprocess.run(scip_command, ...)
-        call that has a 'timeout' keyword argument.
+        _index_source() source must NOT have a 'timeout' keyword argument on the
+        subprocess.run(scip_command, ...) call (Bug #1218).
+
+        Overarching SCIP timeouts caused large-repo indexing to be killed
+        mid-flight, producing a partial/corrupt index.  The only legitimate
+        timeouts are per-request outbound embedding-provider HTTP calls.
         """
         source = inspect.getsource(RefreshScheduler._index_source)
 
         # AST-parse to find the exact subprocess.run(scip_command, ...) call
         scip_call = _find_scip_subprocess_run_call(source)
 
-        # Check that a 'timeout' keyword argument is present on that call
+        # Check that NO 'timeout' keyword argument is present on that call
         timeout_kwargs = [kw for kw in scip_call.keywords if kw.arg == "timeout"]
-        assert timeout_kwargs, (
-            "subprocess.run(scip_command, ...) in _index_source() is missing the "
-            "'timeout' keyword argument (Bug #730). "
-            "Add timeout=<scip_generation_timeout_seconds> to the call."
+        assert not timeout_kwargs, (
+            "subprocess.run(scip_command, ...) in _index_source() still has a "
+            "'timeout' keyword argument. "
+            "Bug #1218 removes all overarching per-job timeouts on the indexing+SCIP path."
         )
 
 

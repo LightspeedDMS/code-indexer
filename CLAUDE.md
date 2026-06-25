@@ -444,6 +444,21 @@ Server-side query-embed coalescing gated by a self-tuning per-lane concurrency g
 
 -> Deterministic fault-injection gate: `tests/integration/server/test_coalescer_fault_injection_1079.py`.
 
+### Indexing Path Has No Job/Subprocess/Per-File Timeouts (Bug #1218)
+
+The indexing / golden-repo-registration / SCIP-generation path carries NO wall-clock timeout on the whole job, the whole subprocess, or any per-file/per-batch unit. A large repo legitimately takes hours (runtime tracks normal outbound embedding-provider latency); bounding the job on a clock SIGKILLs healthy indexing, and per-file timeout-swallow handlers produce a silent partial index that reports success.
+
+**The ONLY legitimate timeout on this path is the per-request outbound embedding-provider HTTP call** (connect/read on a single POST to Voyage/Cohere) plus its retry/backoff. Those stay (`voyage_ai.py`, `cohere_embedding.py`, `cohere_multimodal.py`, `provider_backoff.py`).
+
+**Key invariants -- NEVER reintroduce:**
+- `run_with_popen_progress` (`services/progress_subprocess_runner.py`) has NO `timeout` parameter, NO watchdog thread, NO `os.killpg(...SIGKILL)`, NO `returncode == -9` detection. Do not add a job/subprocess clock here or at any caller.
+- No `future.result(timeout=...)` + swallow-and-skip on the per-file/per-batch path (`file_chunking_manager.py`, `high_throughput_processor.py`, `temporal/temporal_indexer.py`). A genuine post-retry embedding failure must PROPAGATE and fail the job LOUD -- never `except TimeoutError: skip this file`, never a silent partial index (Messi #2 Anti-Fallback, #13 Anti-Silent-Failure).
+- The removed `ScipConfig` fields `indexing_timeout_seconds`, `scip_generation_timeout_seconds`, `registration_indexing_timeout_seconds` are GONE; both `ScipConfig(**...)` construction sites strip them from old persisted configs (backward compat). Do not re-add.
+- KEEP (NOT a job clock, do not remove): governor acquire, coalescer join, rerankers, BackgroundJobManager SIGTERM/SIGKILL (cancel/shutdown only), and short local-git metadata subprocess bounds (progress-estimate only, not index correctness).
+- **Fail-loud on total failure (anti-silent-failure):** `cidx index` exits NON-ZERO when `files_processed == 0 and failed_files > 0` (`cli.py` index completion block). This propagates through `run_with_popen_progress` (raises `IndexingSubprocessError` on returncode != 0) so a golden-repo registration whose indexing all-fails (e.g. bad provider key) FAILS the registration instead of reporting success with an empty index. The "All files failed to index" message is deliberately distinct from the benign "No files found to index" allowlist so it is not swallowed.
+- **Registration failure cleans up its own clone:** `golden_repo_manager._cleanup_failed_clone(_clone_path_for_cleanup)` runs in all `background_worker` failure paths and removes ONLY the freshly-created clone before re-raising, so a retry never hits "destination path already exists". Without this, a failed registration leaves an orphan clone that permanently blocks retries.
+- **Known residual follow-up (NOT fixed in #1218):** the daemon in-process FTS rebuild (`daemon/service.py`) can still report `status: success` on an all-failed in-process rebuild -- a separate path, tracked separately.
+
 ### Database Migrations Must Be Backward Compatible
 
 Rolling restarts mean old and new nodes share schema during upgrade. MigrationRunner auto-runs on startup.

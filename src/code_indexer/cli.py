@@ -4150,6 +4150,12 @@ def index(
 
         if stats.failed_files > 0:
             console.print(f"⚠️  Failed files: {stats.failed_files}", style="yellow")
+            if stats.files_processed == 0 and stats.failed_files > 0:
+                console.print(
+                    "❌ All files failed to index — index is empty.",
+                    style="red",
+                )
+                sys.exit(1)
 
         # Show final indexing status
         final_status = smart_indexer.get_indexing_status()

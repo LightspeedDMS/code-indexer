@@ -277,18 +277,14 @@ class ScipConfig:
     """
     SCIP indexing configuration (Story #3 - Phase 2, AC9-AC11, AC31-AC34).
 
-    Controls SCIP indexing timeouts, temporal staleness thresholds, and query limits.
+    Controls SCIP indexing staleness thresholds and query limits.
     Migrated from hardcoded constants in activated_repo_index_manager.py and scip_query_engine.py.
+
+    Note (Bug #1218): whole-job and per-subprocess indexing timeouts have been removed.
+    The only legitimate timeout on the indexing path is the per-request outbound
+    embedding-provider HTTP call, which is handled inside the embedding providers.
     """
 
-    # AC9: Indexing timeout in seconds (default 3600s/1 hour, minimum 300s/5 min)
-    indexing_timeout_seconds: int = 3600
-    # Registration-path index timeout (default 240s — deliberately below the 300s e2e
-    # poll deadline so a stuck registration job fails fast with a clear error instead of
-    # an opaque 300s timeout in the poller).  Must stay < e2e poll timeout (300s).
-    registration_indexing_timeout_seconds: int = 240
-    # AC10: SCIP generation timeout in seconds (default 600s/10 min, minimum 60s/1 min)
-    scip_generation_timeout_seconds: int = 600
     # AC11: Temporal staleness threshold in days (default 7 days, minimum 1 day)
     temporal_stale_threshold_days: int = 7
     # AC31: SCIP reference limit (default 100, range 10-10000)
@@ -1731,7 +1727,16 @@ class ServerConfigManager:
         if "scip_config" in config_dict and isinstance(
             config_dict["scip_config"], dict
         ):
-            config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+            # Bug #1218: strip overarching job-timeout fields removed from ScipConfig
+            # so existing config.json / DB rows load cleanly without TypeError.
+            scip_dict = config_dict["scip_config"].copy()
+            for _removed in (
+                "indexing_timeout_seconds",
+                "scip_generation_timeout_seconds",
+                "registration_indexing_timeout_seconds",
+            ):
+                scip_dict.pop(_removed, None)
+            config_dict["scip_config"] = ScipConfig(**scip_dict)
 
         # Story #3 - Phase 2: Convert P2 config dicts (AC12-AC26)
         # Convert nested git_timeouts_config dict to GitTimeoutsConfig
@@ -1818,7 +1823,15 @@ class ServerConfigManager:
         if "scip_config" in config_dict and isinstance(
             config_dict["scip_config"], dict
         ):
-            config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+            # Bug #1218: strip removed overarching timeout fields here too
+            scip_dict_ac2 = config_dict["scip_config"].copy()
+            for _removed in (
+                "indexing_timeout_seconds",
+                "scip_generation_timeout_seconds",
+                "registration_indexing_timeout_seconds",
+            ):
+                scip_dict_ac2.pop(_removed, None)
+            config_dict["scip_config"] = ScipConfig(**scip_dict_ac2)
 
         # Story #15 AC3 Migration: Move Claude CLI settings to claude_integration_config
         claude_settings_keys = [

@@ -1568,16 +1568,6 @@ function saveLlmCredsConfig() {
             <table class="config-table">
                 <tbody>
                     <tr>
-                        <td class="config-label">Indexing Timeout (seconds)</td>
-                        <td class="config-value">{{ config.scip.indexing_timeout_seconds }}</td>
-                        <td class="config-note"><small>Max time for SCIP indexing operations (default: 3600 = 1 hour)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">SCIP Generation Timeout (seconds)</td>
-                        <td class="config-value">{{ config.scip.scip_generation_timeout_seconds }}</td>
-                        <td class="config-note"><small>Max time for SCIP file generation (default: 600 = 10 min)</small></td>
-                    </tr>
-                    <tr>
                         <td class="config-label">Temporal Stale Threshold (days)</td>
                         <td class="config-value">{{ config.scip.temporal_stale_threshold_days }}</td>
                         <td class="config-note"><small>Days before temporal index considered stale (default: 7)</small></td>
@@ -1595,16 +1585,6 @@ function saveLlmCredsConfig() {
             <div class="validation-error">{{ validation_errors.scip }}</div>
             {% endif %}
             <div class="form-grid">
-                <label for="scip-indexing-timeout">
-                    Indexing Timeout (seconds)
-                    <input type="number" id="scip-indexing-timeout" name="indexing_timeout_seconds" value="{{ config.scip.indexing_timeout_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
-                <label for="scip-generation-timeout">
-                    SCIP Generation Timeout (seconds)
-                    <input type="number" id="scip-generation-timeout" name="scip_generation_timeout_seconds" value="{{ config.scip.scip_generation_timeout_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
                 <label for="scip-temporal-stale">
                     Temporal Stale Threshold (days)
                     <input type="number" id="scip-temporal-stale" name="temporal_stale_threshold_days" value="{{ config.scip.temporal_stale_threshold_days }}" min="1">
