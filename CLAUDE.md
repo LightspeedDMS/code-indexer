@@ -627,6 +627,8 @@ cidx watch / watch-stop / stop         # Daemon controls
 
 **Flags** (always `--quiet`): `--limit N` (start 5-10), `--language python`, `--path-filter */tests/*`, `--min-score 0.8`, `--accuracy high`.
 
+Note: `*/tests/*` matches at any depth including root (`tests/foo.py` and `src/tests/foo.py`). `**/tests/**` is equivalent.
+
 ---
 
 ## Performance Rules
