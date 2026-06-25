@@ -142,6 +142,23 @@ def initialize_services() -> Dict[str, Any]:
         extra={"correlation_id": get_correlation_id()},
     )
 
+    # Story #1213 Story 1: build and install the node-level MemoryGovernor.
+    # Governor is consulted by nothing yet (Story 1 scope); wired here so
+    # lifespan.py can start/stop the sampler thread and clear on shutdown.
+    from code_indexer.server.services.memory_governor import (
+        build_memory_governor,
+        set_memory_governor,
+    )
+
+    _memory_governor = build_memory_governor()
+    set_memory_governor(_memory_governor)
+    _memory_governor.start()
+    logger.info(
+        "Story #1213: MemoryGovernor built, installed, and sampler started "
+        "(band=RED until first sample)",
+        extra={"correlation_id": get_correlation_id()},
+    )
+
     _server_hnsw_cache = get_global_cache()
     logger.info(
         f"HNSW index cache initialized (TTL: {_server_hnsw_cache.config.ttl_minutes}min)",
@@ -623,4 +640,5 @@ def initialize_services() -> Dict[str, Any]:
         "_server_fts_cache": _server_fts_cache,
         "scip_audit_repository": scip_audit_repository,
         "latency_tracker": latency_tracker,
+        "memory_governor": _memory_governor,
     }

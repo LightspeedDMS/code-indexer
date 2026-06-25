@@ -3448,6 +3448,26 @@ def make_lifespan(
                 exc_info=True,
             )
 
+        # Story #1213 Story 1: stop the sampler thread then clear the singleton.
+        # stop() must come before clear_memory_governor() so the thread is joined
+        # before the reference is dropped (mirrors other lifecycle service stops).
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.memory_governor import (
+                clear_memory_governor,
+                get_memory_governor,
+            )
+
+            _gov_for_shutdown = get_memory_governor()
+            if _gov_for_shutdown is not None:
+                _gov_for_shutdown.stop(timeout=5.0)
+            clear_memory_governor()
+        except Exception:
+            logger.debug(
+                "MemoryGovernor stop/clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
         # Bug #1181 Perf Fix #2: stop the async touch-flush background thread so
         # it performs a final drain of buffered last_used touches before the cache
         # is cleared.  Must run BEFORE clear_query_embedding_cache() below.
