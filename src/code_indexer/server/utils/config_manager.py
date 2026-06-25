@@ -94,6 +94,38 @@ class CacheConfig:
     repo_config_cache_ttl_seconds: int = 30
     repo_config_cache_max_entries: int = 2048
 
+    # Memory-Pressure-Aware Index-Cache Governor settings (Story #1213 Story 2).
+    # All 8 fields are runtime CacheConfig knobs — hot-reloaded via the Web UI
+    # Config screen without a server restart.  The governor reads them LIVE on
+    # each band decision (mirrors coalesce_enabled / memory_retrieval_enabled).
+    #
+    # memory_governor_enabled:
+    #   False => kill-switch: should_evict_after_shard() always returns True
+    #   (reverts to Bug #1171 evict-after-use — safe, never retain).
+    # memory_governor_yellow_pct / red_pct:
+    #   Entry thresholds for YELLOW / RED bands.
+    #   Invariant: 0 < yellow < red <= 100.
+    # memory_governor_hysteresis_pct:
+    #   Gap subtracted from entry thresholds for band exit.
+    #   Invariant: hysteresis < min(yellow, 100 - red).
+    # memory_governor_red_min_dwell_seconds:
+    #   Minimum seconds in RED before transition to YELLOW is allowed.
+    # memory_governor_sample_interval_seconds:
+    #   Sampler thread sleep between psutil/cgroup reads.
+    # memory_governor_swap_forces_red:
+    #   True => positive pswpin delta forces RED regardless of used_pct.
+    # memory_governor_rss_inflation_factor:
+    #   Multiplier applied to on-disk shard sizes when computing LRU-cap
+    #   eviction budgets (corrects file-size undercount vs. real RSS).
+    memory_governor_enabled: bool = True
+    memory_governor_yellow_pct: float = 70.0
+    memory_governor_red_pct: float = 85.0
+    memory_governor_hysteresis_pct: float = 10.0
+    memory_governor_red_min_dwell_seconds: int = 30
+    memory_governor_sample_interval_seconds: float = 2.0
+    memory_governor_swap_forces_red: bool = True
+    memory_governor_rss_inflation_factor: float = 2.0
+
 
 @dataclass
 class ServerResourceConfig:

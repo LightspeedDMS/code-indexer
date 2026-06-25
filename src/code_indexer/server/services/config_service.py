@@ -396,6 +396,15 @@ class ConfigService:
                 "payload_max_fetch_size_chars": config.cache_config.payload_max_fetch_size_chars,
                 "payload_cache_ttl_seconds": config.cache_config.payload_cache_ttl_seconds,
                 "payload_cleanup_interval_seconds": config.cache_config.payload_cleanup_interval_seconds,
+                # Story #1213 Story 2: memory-governor runtime knobs
+                "memory_governor_enabled": config.cache_config.memory_governor_enabled,
+                "memory_governor_yellow_pct": config.cache_config.memory_governor_yellow_pct,
+                "memory_governor_red_pct": config.cache_config.memory_governor_red_pct,
+                "memory_governor_hysteresis_pct": config.cache_config.memory_governor_hysteresis_pct,
+                "memory_governor_red_min_dwell_seconds": config.cache_config.memory_governor_red_min_dwell_seconds,
+                "memory_governor_sample_interval_seconds": config.cache_config.memory_governor_sample_interval_seconds,
+                "memory_governor_swap_forces_red": config.cache_config.memory_governor_swap_forces_red,
+                "memory_governor_rss_inflation_factor": config.cache_config.memory_governor_rss_inflation_factor,
             },
             # Git operation timeouts
             "timeouts": {
@@ -996,6 +1005,52 @@ class ConfigService:
             cache.payload_cache_ttl_seconds = int(value)
         elif key == "payload_cleanup_interval_seconds":
             cache.payload_cleanup_interval_seconds = int(value)
+        # Story #1213 Story 2: Memory-governor runtime knobs (hot-reload).
+        elif key == "memory_governor_enabled":
+            cache.memory_governor_enabled = _parse_bool(value)
+        elif key == "memory_governor_yellow_pct":
+            new_yellow = float(value)
+            if new_yellow <= 0:
+                raise ValueError(
+                    f"memory_governor_yellow_pct must be > 0, got {new_yellow}"
+                )
+            if new_yellow >= cache.memory_governor_red_pct:
+                raise ValueError(
+                    f"memory_governor_yellow_pct ({new_yellow}) must be less than "
+                    f"memory_governor_red_pct ({cache.memory_governor_red_pct})"
+                )
+            cache.memory_governor_yellow_pct = new_yellow
+        elif key == "memory_governor_red_pct":
+            new_red = float(value)
+            if new_red > 100.0:
+                raise ValueError(
+                    f"memory_governor_red_pct must be <= 100, got {new_red}"
+                )
+            if cache.memory_governor_yellow_pct >= new_red:
+                raise ValueError(
+                    f"memory_governor_red_pct ({new_red}) must be greater than "
+                    f"memory_governor_yellow_pct ({cache.memory_governor_yellow_pct})"
+                )
+            cache.memory_governor_red_pct = new_red
+        elif key == "memory_governor_hysteresis_pct":
+            new_hyst = float(value)
+            yellow = cache.memory_governor_yellow_pct
+            red = cache.memory_governor_red_pct
+            max_allowed = min(yellow, 100.0 - red)
+            if new_hyst >= max_allowed:
+                raise ValueError(
+                    f"memory_governor_hysteresis_pct ({new_hyst}) must be < "
+                    f"min(yellow={yellow}, 100-red={100.0 - red}) = {max_allowed}"
+                )
+            cache.memory_governor_hysteresis_pct = new_hyst
+        elif key == "memory_governor_red_min_dwell_seconds":
+            cache.memory_governor_red_min_dwell_seconds = int(value)
+        elif key == "memory_governor_sample_interval_seconds":
+            cache.memory_governor_sample_interval_seconds = float(value)
+        elif key == "memory_governor_swap_forces_red":
+            cache.memory_governor_swap_forces_red = _parse_bool(value)
+        elif key == "memory_governor_rss_inflation_factor":
+            cache.memory_governor_rss_inflation_factor = float(value)
         else:
             raise ValueError(f"Unknown cache setting: {key}")
 

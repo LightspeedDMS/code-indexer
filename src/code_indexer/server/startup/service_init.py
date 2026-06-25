@@ -142,20 +142,21 @@ def initialize_services() -> Dict[str, Any]:
         extra={"correlation_id": get_correlation_id()},
     )
 
-    # Story #1213 Story 1: build and install the node-level MemoryGovernor.
-    # Governor is consulted by nothing yet (Story 1 scope); wired here so
-    # lifespan.py can start/stop the sampler thread and clear on shutdown.
+    # Story #1213 Story 1/2: build and install the node-level MemoryGovernor.
+    # Story 2: pass get_config_service() so watermarks are read LIVE from the
+    # Web UI config on each tick (hot-reload, no server restart required).
+    from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.services.memory_governor import (
         build_memory_governor,
         set_memory_governor,
     )
 
-    _memory_governor = build_memory_governor()
+    _memory_governor = build_memory_governor(config_service=get_config_service())
     set_memory_governor(_memory_governor)
     _memory_governor.start()
     logger.info(
         "Story #1213: MemoryGovernor built, installed, and sampler started "
-        "(band=RED until first sample)",
+        "(band=RED until first sample; live config_service wired for hot-reload)",
         extra={"correlation_id": get_correlation_id()},
     )
 

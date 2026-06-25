@@ -107,15 +107,23 @@ class MemoryGovernor:
 
     Constructor args:
         readers:               injectable reader object (default: real cgroup/psutil)
-        enabled:               False => should_evict_after_shard() always True (safe)
+        enabled:               Fallback when no config_service is supplied.
+                               Ignored when config_service is set (live read wins).
         start_sampler:         True => start() called in __init__
-        yellow_pct:            entry threshold for YELLOW band (default 70.0)
-        red_pct:               entry threshold for RED band (default 85.0)
-        hysteresis_pct:        gap subtracted from entry thresholds for exit (default 10.0)
+        yellow_pct:            Fallback threshold for YELLOW band (default 70.0).
+                               Ignored when config_service is set (live read wins).
+        red_pct:               Fallback threshold for RED band (default 85.0).
+        hysteresis_pct:        Fallback hysteresis gap (default 10.0).
         red_min_dwell_seconds: minimum seconds to remain in RED before exit (default 30)
         sample_interval_seconds: sampler thread sleep between samples (default 2.0)
-        swap_forces_red:       True => positive pswpin delta forces RED (default True)
+        swap_forces_red:       Fallback swap-in override flag (default True).
         rss_inflation_factor:  multiplier for LRU-cap inflation helper (default 2.0)
+        config_service:        Optional live-config provider.  When set, yellow_pct,
+                               red_pct, hysteresis_pct, swap_forces_red, enabled, and
+                               rss_inflation_factor are all read LIVE from
+                               config_service.get_config().cache_config on every
+                               _tick().  A read failure applies fail-safe RED.
+                               (Story #1213 Story 2 — hot-reload support)
         time_fn:               injectable monotonic clock (default time.monotonic)
     """
 
@@ -132,9 +140,11 @@ class MemoryGovernor:
         sample_interval_seconds: float = 2.0,
         swap_forces_red: bool = True,
         rss_inflation_factor: float = 2.0,
+        config_service: Any = None,
         time_fn: Optional[Callable[[], float]] = None,
     ) -> None:
         self._readers: Any = readers if readers is not None else _MemoryReaders()
+        # Fallback values used when no config_service is set
         self._enabled = enabled
         self._yellow_pct = yellow_pct
         self._red_pct = red_pct
@@ -143,6 +153,9 @@ class MemoryGovernor:
         self._sample_interval_seconds = sample_interval_seconds
         self._swap_forces_red = swap_forces_red
         self._rss_inflation_factor = rss_inflation_factor
+        # Live config provider (Story #1213 Story 2): when set, watermarks are
+        # read from config_service.get_config().cache_config on every _tick().
+        self._config_service: Any = config_service
         self._time_fn: Callable[[], float] = (
             time_fn if time_fn is not None else time.monotonic
         )
@@ -190,15 +203,52 @@ class MemoryGovernor:
     def rss_inflation_factor(self) -> float:
         return self._rss_inflation_factor
 
+    # ------------------------------------------------------------------
+    # Live config helper (Story #1213 Story 2)
+    # ------------------------------------------------------------------
+
+    def _read_live_config(self) -> Optional[Any]:
+        """Return cache_config from config_service, or None on any failure.
+
+        Returns None when:
+        - No config_service is set (CLI/pre-init path — use constructor defaults).
+        - config_service.get_config() raises (fail-safe: callers must apply RED).
+
+        Never raises.
+        """
+        if self._config_service is None:
+            return None
+        try:
+            cfg = self._config_service.get_config()
+            return cfg.cache_config
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "GOV config read failure — fail-safe RED will be applied: %s",
+                exc,
+            )
+            return None
+
     def should_evict_after_shard(self) -> bool:
         """True iff the governor says evict-after-use is required.
 
+        When a config_service is set, reads enabled LIVE from
+        config_service.get_config().cache_config.memory_governor_enabled.
+        Falls back to the constructor value when no config_service is set.
+
         Returns True when:
-        - governor disabled (enabled=False)
+        - governor disabled (live config or constructor)
         - band is RED
         - pre-first-sample (band starts at RED by fail-safe contract)
+        - config_service read fails (fail-safe: treat as disabled/RED)
         """
-        if not self._enabled:
+        if self._config_service is not None:
+            cache_cfg = self._read_live_config()
+            if cache_cfg is None:
+                # Config read failure: fail-safe — treat as evict-required
+                return True
+            if not cache_cfg.memory_governor_enabled:
+                return True
+        elif not self._enabled:
             return True
         return self.band == MemoryBand.RED
 
@@ -344,8 +394,35 @@ class MemoryGovernor:
 
         On any exception from the readers, applies the fail-safe (band = RED).
         Called by the sampler thread; also callable directly in tests.
+
+        Story #1213 Story 2: reads watermarks LIVE from config_service before
+        computing the sample, so config changes take effect on the next tick.
+        If config read fails, fail-safe RED is applied immediately.
         """
         first_tick = self._first_tick
+
+        # --- Live config read (Story #1213 Story 2) ---
+        # Resolve effective watermarks: prefer live config, fall back to
+        # constructor values (CLI/pre-init / no config_service).
+        live_cache = self._read_live_config()
+        if self._config_service is not None and live_cache is None:
+            # config_service is set but read failed — fail-safe
+            self._apply_fail_safe_red()
+            return
+
+        if live_cache is not None:
+            yellow_pct = float(live_cache.memory_governor_yellow_pct)
+            red_pct = float(live_cache.memory_governor_red_pct)
+            hysteresis_pct = float(live_cache.memory_governor_hysteresis_pct)
+            swap_forces_red_cfg = bool(live_cache.memory_governor_swap_forces_red)
+            red_min_dwell = float(live_cache.memory_governor_red_min_dwell_seconds)
+        else:
+            yellow_pct = self._yellow_pct
+            red_pct = self._red_pct
+            hysteresis_pct = self._hysteresis_pct
+            swap_forces_red_cfg = self._swap_forces_red
+            red_min_dwell = self._red_min_dwell_seconds
+
         try:
             sample = self._compute_sample()
         except Exception as exc:  # noqa: BLE001
@@ -362,12 +439,30 @@ class MemoryGovernor:
         self._last_basis = sample.basis
         self._last_pswpin_rate = sample.pswpin_rate
 
-        self._advance_band(sample, first_tick=first_tick)
+        self._advance_band(
+            sample,
+            first_tick=first_tick,
+            yellow_pct=yellow_pct,
+            red_pct=red_pct,
+            hysteresis_pct=hysteresis_pct,
+            swap_forces_red_cfg=swap_forces_red_cfg,
+            red_min_dwell=red_min_dwell,
+        )
         # Clear first-tick flag after successful processing so subsequent
         # ticks accumulate real operational transition counters.
         self._first_tick = False
 
-    def _advance_band(self, sample: MemorySample, *, first_tick: bool = False) -> None:
+    def _advance_band(
+        self,
+        sample: MemorySample,
+        *,
+        first_tick: bool = False,
+        yellow_pct: Optional[float] = None,
+        red_pct: Optional[float] = None,
+        hysteresis_pct: Optional[float] = None,
+        swap_forces_red_cfg: Optional[bool] = None,
+        red_min_dwell: Optional[float] = None,
+    ) -> None:
         """Advance the band state machine based on the current sample.
 
         Cascades transitions within a single tick so that the final band
@@ -378,19 +473,39 @@ class MemoryGovernor:
 
         first_tick: when True, band state is updated but transition counters
             are NOT incremented (pre-init convergence from fail-safe RED).
+
+        yellow_pct / red_pct / hysteresis_pct / swap_forces_red_cfg / red_min_dwell:
+            When provided (by _tick() after a live config read), these override
+            the constructor-frozen values so hot-reloaded watermarks take effect.
+            When None, fall back to constructor values (backward compat / tests
+            that call _advance_band() directly).
         """
-        swap_forces_red = self._swap_forces_red and sample.pswpin_rate > 0
+        _yellow_pct = yellow_pct if yellow_pct is not None else self._yellow_pct
+        _red_pct = red_pct if red_pct is not None else self._red_pct
+        _hysteresis_pct = (
+            hysteresis_pct if hysteresis_pct is not None else self._hysteresis_pct
+        )
+        _swap_forces_red = (
+            swap_forces_red_cfg
+            if swap_forces_red_cfg is not None
+            else self._swap_forces_red
+        )
+        _red_min_dwell = (
+            red_min_dwell if red_min_dwell is not None else self._red_min_dwell_seconds
+        )
+
+        swap_forces_red = _swap_forces_red and sample.pswpin_rate > 0
         used_pct = sample.used_pct
         now = self._time_fn()
-        yellow_exit = self._yellow_pct - self._hysteresis_pct
-        red_exit = self._red_pct - self._hysteresis_pct
+        yellow_exit = _yellow_pct - _hysteresis_pct
+        red_exit = _red_pct - _hysteresis_pct
 
         with self._band_lock:
             # --- RED state ---
             if self._band == MemoryBand.RED:
-                dwell_ok = self._red_min_dwell_seconds <= 0.0 or (
+                dwell_ok = _red_min_dwell <= 0.0 or (
                     self._red_entry_time is not None
-                    and (now - self._red_entry_time) >= self._red_min_dwell_seconds
+                    and (now - self._red_entry_time) >= _red_min_dwell
                 )
                 if used_pct < red_exit and not swap_forces_red and dwell_ok:
                     self._band = MemoryBand.YELLOW
@@ -410,7 +525,7 @@ class MemoryGovernor:
 
             # --- YELLOW state ---
             elif self._band == MemoryBand.YELLOW:
-                if used_pct >= self._red_pct or swap_forces_red:
+                if used_pct >= _red_pct or swap_forces_red:
                     self._band = MemoryBand.RED
                     self._red_entry_time = now
                     if not first_tick:
@@ -428,7 +543,7 @@ class MemoryGovernor:
 
             # --- GREEN state ---
             elif self._band == MemoryBand.GREEN:
-                if used_pct >= self._red_pct or swap_forces_red:
+                if used_pct >= _red_pct or swap_forces_red:
                     # No direct GREEN->RED; step through YELLOW first
                     self._band = MemoryBand.YELLOW
                     if not first_tick:
@@ -439,7 +554,7 @@ class MemoryGovernor:
                         swap_forces_red,
                     )
                     # Cascade: check whether YELLOW should immediately enter RED
-                    if used_pct >= self._red_pct or swap_forces_red:
+                    if used_pct >= _red_pct or swap_forces_red:
                         self._band = MemoryBand.RED
                         self._red_entry_time = now
                         if not first_tick:
@@ -448,7 +563,7 @@ class MemoryGovernor:
                             "GOV-001 band YELLOW->RED used_pct=%.1f (cascade from GREEN)",
                             used_pct,
                         )
-                elif used_pct >= self._yellow_pct:
+                elif used_pct >= _yellow_pct:
                     self._band = MemoryBand.YELLOW
                     if not first_tick:
                         self.counters.green_to_yellow += 1
@@ -509,12 +624,19 @@ def build_memory_governor(
     sample_interval_seconds: float = 2.0,
     swap_forces_red: bool = True,
     rss_inflation_factor: float = 2.0,
+    config_service: Any = None,
 ) -> MemoryGovernor:
     """Build and return a MemoryGovernor with default production readers.
 
     Called from service_init.py after initialize_caches(). The returned
     governor is NOT started here — the caller must call start() and register
     stop() in the lifespan shutdown hook.
+
+    Story #1213 Story 2: when config_service is provided, the governor reads
+    all watermarks LIVE from config_service.get_config().cache_config on each
+    tick so Web UI changes are picked up without a server restart.  The scalar
+    constructor args (yellow_pct etc.) become fallbacks used only when
+    config_service is absent (CLI / unit tests without a config_service).
     """
     gov = MemoryGovernor(
         enabled=enabled,
@@ -526,5 +648,6 @@ def build_memory_governor(
         sample_interval_seconds=sample_interval_seconds,
         swap_forces_red=swap_forces_red,
         rss_inflation_factor=rss_inflation_factor,
+        config_service=config_service,
     )
     return gov
