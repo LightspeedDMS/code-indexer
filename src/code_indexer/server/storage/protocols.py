@@ -275,6 +275,22 @@ class BackgroundJobsBackend(Protocol):
 
     def cleanup_orphaned_jobs_on_startup(self) -> int: ...
 
+    def find_active_job_by_type_and_alias(
+        self,
+        operation_type: str,
+        repo_alias: str,
+    ) -> Optional[str]:
+        """Return job_id of the active (pending/running) row for (operation_type, repo_alias).
+
+        Direct non-paginated lookup — no Python-side filtering, no LIMIT/OFFSET.
+        Called by _find_blocking_active_job_id after a unique-index violation to
+        locate the blocking row without risking a pagination miss (Bug #1220).
+
+        Returns:
+            job_id string if a pending or running row exists, else None.
+        """
+        ...
+
     def close(self) -> None: ...
 
 

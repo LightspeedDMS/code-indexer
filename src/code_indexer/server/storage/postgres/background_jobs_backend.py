@@ -692,6 +692,37 @@ class BackgroundJobsPostgresBackend:
             logger.info("Cleaned up %d orphaned jobs on server startup", count)
         return count
 
+    def find_active_job_by_type_and_alias(
+        self,
+        operation_type: str,
+        repo_alias: str,
+    ) -> Optional[str]:
+        """Return job_id of the active (pending/running) row for (operation_type, repo_alias).
+
+        Direct non-paginated lookup — no Python-side filtering, no LIMIT/OFFSET on
+        the match itself (LIMIT 1 is applied only to cap the result to one row).
+        Called by JobTracker._find_blocking_active_job_id after a unique-index
+        violation to locate the blocking row without risking a pagination miss
+        (Bug #1220).
+
+        Args:
+            operation_type: Operation type to match exactly.
+            repo_alias: Repository alias to match exactly.
+
+        Returns:
+            job_id string if a pending or running row exists, else None.
+        """
+        sql = (
+            "SELECT job_id FROM background_jobs "
+            "WHERE operation_type = %s AND repo_alias = %s "
+            "AND status IN ('pending', 'running') LIMIT 1"
+        )
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (operation_type, repo_alias))
+                row = cur.fetchone()
+        return str(row[0]) if row is not None else None
+
     def close(self) -> None:
         """Close the underlying connection pool."""
         self._pool.close()

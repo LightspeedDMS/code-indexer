@@ -1184,19 +1184,17 @@ class JobTracker:
         lookup) and raises RuntimeError rather than substituting a fallback.
         """
         if self._backend is not None:
-            for status in ("running", "pending"):
-                rows = self._backend.list_jobs(
-                    status=status, operation_type=operation_type
-                )
-                for row in rows:
-                    if row.get("repo_alias") == repo_alias:
-                        # Explicit type narrowing: list_jobs returns
-                        # List[Dict[str, Any]], so row.get("job_id") is Any.
-                        # A well-formed row has a string job_id; guard
-                        # defensively rather than suppress mypy.
-                        candidate = row.get("job_id")
-                        return candidate if isinstance(candidate, str) else None
-            return None
+            # Bug #1220: use the direct backend lookup instead of the paginated
+            # list_jobs + Python repo_alias filter approach.  The paginated path
+            # can miss the blocking row when it falls outside the top-N results,
+            # causing _atomic_insert_or_raise to raise RuntimeError instead of
+            # DuplicateJobError.  find_active_job_by_type_and_alias queries by
+            # (operation_type, repo_alias, status IN pending/running) directly,
+            # with no pagination and no Python-side filtering.
+            result: Optional[str] = self._backend.find_active_job_by_type_and_alias(
+                operation_type, repo_alias
+            )
+            return result
 
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(

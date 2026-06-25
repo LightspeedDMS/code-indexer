@@ -3164,6 +3164,35 @@ class BackgroundJobsSqliteBackend:
             logger.info(f"Cleaned up {count} orphaned jobs on server startup")
         return count
 
+    def find_active_job_by_type_and_alias(
+        self,
+        operation_type: str,
+        repo_alias: str,
+    ) -> Optional[str]:
+        """Return job_id of the active (pending/running) row for (operation_type, repo_alias).
+
+        Direct non-paginated lookup — no Python-side filtering.
+        Called by JobTracker._find_blocking_active_job_id after a unique-index
+        violation to locate the blocking row without risking a pagination miss
+        (Bug #1220).
+
+        Args:
+            operation_type: Operation type to match exactly.
+            repo_alias: Repository alias to match exactly.
+
+        Returns:
+            job_id string if a pending or running row exists, else None.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT job_id FROM background_jobs "
+            "WHERE operation_type = ? AND repo_alias = ? "
+            "AND status IN ('pending', 'running') LIMIT 1",
+            (operation_type, repo_alias),
+        )
+        row = cursor.fetchone()
+        return str(row[0]) if row is not None else None
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
