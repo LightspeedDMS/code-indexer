@@ -5445,8 +5445,10 @@ def query(
                 # Story 2: All temporal results are changes now
                 console.print("   Showing changed chunks only (diff-based indexing)")
 
-            # file_path_filter: use first path_filter entry when only one provided
-            _path_filter_str = list(path_filter)[0] if len(path_filter) == 1 else None
+            # file_path_filter: join all path_filter entries with comma so
+            # _query_single_provider can split them (Bug #1210 — was only
+            # forwarding the first filter and silently dropping the rest).
+            _path_filter_str = ",".join(path_filter) if path_filter else None
 
             temporal_results = _execute_temporal_fusion(
                 config=config_manager.get_config(),
@@ -5456,6 +5458,7 @@ def query(
                 limit=limit,
                 time_range=(start_date, end_date),
                 file_path_filter=_path_filter_str,
+                exclude_path=",".join(exclude_paths) if exclude_paths else None,
                 diff_types=list(diff_types) if diff_types else None,
                 author=author,
                 chunk_type=chunk_type,
