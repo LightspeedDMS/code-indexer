@@ -572,6 +572,27 @@ class ActivatedRepoIndexManager:
         except Exception as e:
             return {"success": False, "error": f"Semantic indexing error: {str(e)}"}
 
+    def run_branch_delta_index(self, repo_path: str) -> None:
+        """Run a synchronous branch-aware incremental semantic reindex.
+
+        Called by ActivatedRepoManager after activation/switch/sync on a
+        non-default branch (Bug #1203).  Uses clear=False so the existing CoW
+        clone index is treated as a starting point and only changed files are
+        re-embedded.
+
+        Args:
+            repo_path: Absolute path to the activated repo clone.
+
+        Raises:
+            RuntimeError: If the indexing subprocess fails or times out.
+        """
+        result = self._execute_semantic_indexing(repo_path, False)
+        if not result.get("success", False):
+            error_detail = result.get("error", "unknown error")
+            raise RuntimeError(
+                f"Branch-delta reindex failed for '{repo_path}': {error_detail}"
+            )
+
     def _execute_fts_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
         """Execute FTS indexing using TantivyIndexManager."""
         try:

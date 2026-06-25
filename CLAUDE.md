@@ -319,6 +319,16 @@ Both logout routes (`GET /logout` via `web_router` and `GET /user/logout` via `u
 
 Write endpoints (`POST .../maintenance/enter|exit`) restricted to loopback (`127.0.0.0/8`, `::1`, `::ffff:127.x.x.x`) via `require_localhost`. MCP enter/exit tools removed. Read endpoints unaffected. Reverse-proxy must NOT forward these externally.
 
+### Activation Branch-Delta Reindex (Bug #1203)
+
+Activation of a golden repo on a NON-DEFAULT branch (and `switch_branch` / `sync_with_golden_repository`) now runs a branch-aware delta semantic reindex as its final phase, via `ActivatedRepoIndexManager.run_branch_delta_index(repo_path)` (public wrapper over `_execute_semantic_indexing(repo_path, clear=False)` -> `cidx index` subprocess -> SmartIndexer git-topology delta). Before #1203 the CoW clone copied the golden's DEFAULT-branch index byte-for-byte and never reindexed, so non-default branches silently served default-branch embeddings for files that differ.
+
+**Key invariants -- NEVER violate:**
+- All three lifecycle sites route through the single helper `ActivatedRepoManager._run_branch_delta_index`. Skip guards: target `branch == golden_repo.default_branch` (CoW index already correct), `user_alias.endswith("-global")` (global repos share the golden's immutable index), or `self._index_manager is None`.
+- `_index_manager` is wired POST-HOC in `startup/lifespan.py` (mirrors the Bug #1044 `_clone_backend` block): `arm._index_manager = ActivatedRepoIndexManager(activated_repo_manager=arm, background_job_manager=...)`. Passing `activated_repo_manager=arm` explicitly avoids the circular-construction default at `activated_repo_index_manager.py:84`. If this assignment is removed, the fix goes INERT (the production ARM falls back to None and silently skips reindex). Guard: `tests/unit/server/startup/test_lifespan_index_manager_wiring_bug1203.py`.
+- After a SUCCESSFUL reindex, `_run_branch_delta_index` invalidates the server in-memory caches for the repo via PREFIX eviction: `get_global_cache().invalidate_prefix(index_base)` and `get_global_id_index_cache().invalidate_prefix(index_base)` where `index_base = {repo_path}/.code-indexer/index`. The HNSW/id-index caches are keyed by the per-COLLECTION path (`{repo}/.code-indexer/index/{collection}`, resolved), NOT the repo root -- a plain `invalidate(repo_path)` matches nothing and silently serves stale results. NO FTS cache invalidation: the server FTS query builds `TantivyIndexManager(fts_index_dir)` directly from disk and does not read `get_global_fts_cache()`, so a fresh per-query manager picks up the rewritten index automatically.
+- Failure is correctness-first: a failed reindex raises `ActivatedRepoError` (activation also `shutil.rmtree`s the freshly-created orphan clone before re-raising). Cache invalidation is non-fatal (WARNING, never fails an already-successful reindex) but runs on the success path.
+
 ### Golden Repo Versioned Path (mutable-vs-immutable -- resolver-accurate)
 
 - **Base clone** (`golden-repos/{alias}/`): mutable -- where git ops and indexing happen

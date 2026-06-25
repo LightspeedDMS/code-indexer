@@ -24,6 +24,11 @@ from .fts_index_cache import (
     FTSIndexCacheEntry,
     FTSIndexCacheStats,
 )
+from .id_index_cache import (
+    IdIndexCache,
+    IdIndexCacheConfig,
+    get_global_id_index_cache,
+)
 from .payload_cache import (
     PayloadCache,
     PayloadCacheConfig,
@@ -392,6 +397,10 @@ __all__ = [
     "reset_global_fts_cache",
     # Combined index memory
     "get_total_index_memory_mb",
+    # id_index cache exports (Bug #1203)
+    "IdIndexCache",
+    "IdIndexCacheConfig",
+    "get_global_id_index_cache",
     # Payload cache exports (Story #679)
     "PayloadCache",
     "PayloadCacheConfig",
