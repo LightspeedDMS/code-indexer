@@ -937,7 +937,13 @@ def _execute_tracked_search(
         limit: must be > 0; raises ValueError otherwise.
 
     Returns:
-        (results, execution_time_ms, timeout_occurred)
+        (results, execution_time_ms, timeout_occurred, effective_strategy)
+
+    Bug #1219: _perform_search returns a 2-tuple (List[QueryResult], str) since
+    Bug #1202.  We must unpack it here — mirroring the isinstance guard in
+    query_user_repositories — so that callers receive List[QueryResult], not the
+    raw tuple.  Backward compat: if a test patches _perform_search to return a
+    plain list the plain list is passed through unchanged.
     """
     if limit <= 0:
         raise ValueError(f"limit must be > 0, got {limit}")
@@ -947,11 +953,18 @@ def _execute_tracked_search(
     start_time = time.time()
     timeout_occurred = False
     ref_incremented = False
+    effective_strategy: str = params.get("query_strategy") or "primary_only"
     try:
         if query_tracker is not None and index_path:
             query_tracker.increment_ref(index_path)
             ref_incremented = True
-        results = _utils.app_module.semantic_query_manager._perform_search(**kwargs)
+        _raw = _utils.app_module.semantic_query_manager._perform_search(**kwargs)
+        # Bug #1219 fix: _perform_search returns (results, effective_strategy).
+        # Unpack gracefully; fall back if a test patches it to return a plain list.
+        if isinstance(_raw, tuple):
+            results, effective_strategy = _raw
+        else:
+            results = _raw
     except TimeoutError as e:
         timeout_occurred = True
         raise Exception(f"Query timed out: {e}") from e
@@ -964,7 +977,7 @@ def _execute_tracked_search(
         if ref_incremented and query_tracker is not None and index_path:
             query_tracker.decrement_ref(index_path)
 
-    return results, execution_time_ms, timeout_occurred
+    return results, execution_time_ms, timeout_occurred, effective_strategy
 
 
 def _search_global_repo(
@@ -990,8 +1003,12 @@ def _search_global_repo(
     effective_limit = _compute_effective_limit(requested_limit, user)
     effective_limit = _compute_rerank_limit(params, requested_limit, effective_limit)
 
-    results, execution_time_ms, timeout_occurred = _execute_tracked_search(
-        params, user, mock_user_repos, effective_limit, index_path=target_path
+    # Bug #1219 fix: _execute_tracked_search now returns a 4-tuple
+    # (results, execution_time_ms, timeout_occurred, effective_strategy).
+    results, execution_time_ms, timeout_occurred, effective_strategy = (
+        _execute_tracked_search(
+            params, user, mock_user_repos, effective_limit, index_path=target_path
+        )
     )
 
     category_map = _load_category_map("search_code")
@@ -1020,6 +1037,10 @@ def _search_global_repo(
                     "reranker_used": rerank_meta["reranker_used"],
                     "reranker_provider": rerank_meta["reranker_provider"],
                     "rerank_time_ms": rerank_meta["rerank_time_ms"],
+                    # AC7 (Bug #1202 / Bug #1219): echo effective routing decision
+                    # on the global-repo path, matching activated-repo parity.
+                    "effective_search_mode": params.get("search_mode", "semantic"),
+                    "effective_query_strategy": effective_strategy,
                 },
             },
         }

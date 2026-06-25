@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.165.0] - 2026-06-25
+
+### Fixed
+- **Regression from #1202: MCP search_code crashed on single global/activated repos (#1219).** #1202 changed `_perform_search` to return a `(results, effective_strategy)` tuple and updated `query_user_repositories`, but missed the second caller `_execute_tracked_search`, so the single `-global` path iterated the tuple and raised `'list' object has no attribute 'to_dict'` on every mode. Unpacked the tuple at the missed call site and threaded the effective-mode echo through the global path. Found on the staging cluster during v10.164.0 validation.
+
 ## [10.164.0] - 2026-06-25
 
 ### Fixed
