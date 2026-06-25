@@ -539,11 +539,14 @@ class MultiSearchService:
                 from ...server.cache.id_index_cache import get_global_id_index_cache
 
                 id_index_cache = get_global_id_index_cache()
+            from ..services.memory_governor import get_memory_governor
+
             vector_store_client = FilesystemVectorStore(
                 base_path=index_dir,
                 project_root=repo_path,
                 hnsw_index_cache=self.hnsw_index_cache,
                 id_index_cache=id_index_cache,
+                memory_governor=get_memory_governor(),
             )
 
             # Execute temporal query via fusion dispatch (Story #640).

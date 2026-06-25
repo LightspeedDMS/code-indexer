@@ -276,6 +276,7 @@ class FilesystemVectorStore:
         hnsw_index_cache: Optional[Any] = None,
         id_index_cache: Optional[Any] = None,
         skip_staleness_check: bool = False,
+        memory_governor: Optional[Any] = None,
     ):
         """Initialize filesystem vector store.
 
@@ -287,6 +288,9 @@ class FilesystemVectorStore:
             skip_staleness_check: When True, skip _compute_file_hash in the git-repo Tier 1
                 branch for immutable versioned snapshots (Bug #1181 Perf Fix #3). Default
                 False preserves byte-identical CLI and mutable-path behavior.
+            memory_governor: Optional MemoryGovernor for Story #1213 Story 3. Server mode
+                passes get_memory_governor(); CLI leaves it None so eviction behavior is
+                byte-identical to Bug #1171.
         """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -338,6 +342,11 @@ class FilesystemVectorStore:
         # Set True by the server layer when project_root is a proven-immutable .versioned path.
         # Default False preserves byte-identical CLI and mutable-path behavior.
         self.skip_staleness_check: bool = skip_staleness_check
+
+        # Story #1213 Story 3: MemoryGovernor reference for conditional eviction.
+        # Server mode injects get_memory_governor() via FilesystemBackend.get_vector_store_client().
+        # CLI/solo leaves this None so eviction is byte-identical to Bug #1171.
+        self.memory_governor: Optional[Any] = memory_governor
 
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}

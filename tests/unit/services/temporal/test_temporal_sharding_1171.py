@@ -979,6 +979,11 @@ class TestHNSWCacheEvictionAfterShard:
         vector_store = Mock()
         vector_store.base_path = base_path
         vector_store.hnsw_index_cache = Mock()
+        # Story #1213 Story 3: governor=None puts this on the CLI/solo #1171 path
+        # (unconditional evict, no counter update). Without this, Mock().memory_governor
+        # returns a plain Mock which passes the "is not None" guard and causes TypeError
+        # when the counter increment is attempted on a Mock attribute.
+        vector_store.memory_governor = None
         invalidated: list = []
         vector_store.hnsw_index_cache.invalidate.side_effect = (
             lambda k: invalidated.append(k)

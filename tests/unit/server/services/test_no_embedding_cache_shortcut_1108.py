@@ -892,7 +892,7 @@ class TestTemporalEntryPointValueFlow:
 
         class _FakeFactory:
             @staticmethod
-            def create(config, project_root, hnsw_cache=None):
+            def create(config, project_root, hnsw_cache=None, memory_governor=None):
                 return _FakeBackend()
 
         monkeypatch.setattr(backend_mod, "BackendFactory", _FakeFactory)

@@ -413,10 +413,13 @@ class SemanticSearchService:
             else:
                 resolved_hnsw_cache = hnsw_cache
 
+            from ..services.memory_governor import get_memory_governor
+
             backend = BackendFactory.create(
                 config=config,
                 project_root=Path(repo_path),
                 hnsw_cache=resolved_hnsw_cache,
+                memory_governor=get_memory_governor(),
             )
             vector_store_client = backend.get_vector_store_client()
 

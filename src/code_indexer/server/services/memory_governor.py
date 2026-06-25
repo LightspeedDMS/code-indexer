@@ -228,6 +228,36 @@ class MemoryGovernor:
             )
             return None
 
+    def maybe_trim(self) -> None:
+        """Best-effort malloc_trim after a cache eviction.
+
+        Called from the temporal dispatch finally-block when the governor has
+        instructed an evict-after-use.  Increments counters.trim_calls regardless
+        of whether the trim actually freed pages (malloc_trim return value is
+        advisory only — never assert it lowered RSS per design §5).
+
+        Never raises: any OS/ctypes error is logged at WARNING and swallowed so
+        an eviction call-site is never interrupted by a trim failure.
+        """
+        try:
+            import ctypes
+            import sys
+
+            if sys.platform == "linux":
+                try:
+                    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+                    libc.malloc_trim(0)
+                except Exception as trim_exc:  # noqa: BLE001
+                    logger.warning(
+                        "GOV maybe_trim: malloc_trim call failed (best-effort, "
+                        "non-glibc or stripped libc): %s",
+                        trim_exc,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GOV maybe_trim failed (best-effort, ignoring): %s", exc)
+        finally:
+            self.counters.trim_calls += 1
+
     def should_evict_after_shard(self) -> bool:
         """True iff the governor says evict-after-use is required.
 
