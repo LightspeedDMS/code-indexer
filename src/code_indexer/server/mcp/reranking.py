@@ -374,6 +374,65 @@ def _tag_and_pool(code_results: list, memory_candidates: list) -> list:
     return pool
 
 
+def extract_rerank_document(result: dict) -> str:
+    """Return the rerank document for a search result — temporal-aware.
+
+    For temporal commit_diff results the document includes BOTH the diff text
+    and the commit message (Bug #1208).  The commit message is appended after
+    the diff body using a clear delimiter so the cross-encoder sees full commit
+    context when scoring diff relevance.
+
+    Concat format (when commit_message present):
+        "{diff_text}\\n\\nCommit: {commit_message}"
+
+    Works with all three result shapes:
+      MCP/REST dict  — {"code_snippet": str, "temporal_context": {"commit_message": str}}
+      CLI funnel dict — {"snippet": str, "_temporal_obj": TemporalSearchResult}
+      Non-temporal   — {"content": str} or {"code_snippet": str}
+
+    Graceful fallback: if commit_message is absent or falsy, returns base text only
+    (no crash).  Non-temporal results are returned unchanged.
+
+    Args:
+        result: A search result dict from any surface (MCP, REST, or CLI).
+
+    Returns:
+        String used as the document text passed to the cross-encoder reranker.
+    """
+    # Extract base text — check top-level keys first, then CLI semantic 'payload' sub-dict.
+    # match_text fallback mirrors old _fts_content_extractor precedence (snippet THEN
+    # match_text): FTS grep-mode (--snippet-lines 0) sets snippet="" with matched text
+    # in match_text (tantivy_index_manager.py:786,1130; also on exception at :982).
+    base: str = (
+        result.get("content")
+        or result.get("code_snippet")
+        or result.get("snippet")
+        or result.get("match_text")
+        or (result.get("payload") or {}).get("content")
+        or ""
+    )
+
+    # --- Attempt to find commit_message from either shape ---
+
+    # MCP/REST shape: temporal_context is a top-level dict key
+    commit_message: str = ""
+    temporal_ctx = result.get("temporal_context")
+    if isinstance(temporal_ctx, dict):
+        commit_message = temporal_ctx.get("commit_message") or ""
+
+    # CLI shape: _temporal_obj is a TemporalSearchResult dataclass
+    if not commit_message:
+        temporal_obj = result.get("_temporal_obj")
+        if temporal_obj is not None:
+            tc = getattr(temporal_obj, "temporal_context", None)
+            if isinstance(tc, dict):
+                commit_message = tc.get("commit_message") or ""
+
+    if commit_message:
+        return f"{base}\n\nCommit: {commit_message}"
+    return base
+
+
 def _tagged_content_extractor(item: dict) -> str:
     """Extract rerank-query-relevant text from a pooled item by its _source_tag.
 

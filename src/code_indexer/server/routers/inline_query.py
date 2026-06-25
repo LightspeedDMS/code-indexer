@@ -34,6 +34,7 @@ from ..app_helpers import (
 from code_indexer.server.mcp.reranking import (
     _apply_reranking_sync as _rest_apply_reranking_sync,
     calculate_overfetch_limit as _rest_calculate_overfetch_limit,
+    extract_rerank_document as _rest_extract_rerank_document,
 )
 
 # Bug #1209: default overfetch multiplier when rerank config is unavailable.
@@ -505,8 +506,7 @@ def register_query_routes(
                     results=results["results"],
                     rerank_query=request.rerank_query,
                     rerank_instruction=request.rerank_instruction,
-                    content_extractor=lambda r: r.get("content", "")
-                    or r.get("code_snippet", ""),
+                    content_extractor=_rest_extract_rerank_document,
                     requested_limit=_requested_limit,
                     config_service=get_config_service(),
                 )

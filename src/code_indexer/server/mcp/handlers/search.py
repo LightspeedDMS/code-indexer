@@ -502,7 +502,7 @@ def _apply_rerank_and_filter(
         results=results,
         rerank_query=rerank_query,
         rerank_instruction=rerank_instruction,
-        content_extractor=lambda r: r.get("content", "") or r.get("code_snippet", ""),
+        content_extractor=_mcp_reranking.extract_rerank_document,
         requested_limit=requested_limit,
         config_service=get_config_service(),
     )
