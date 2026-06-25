@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.164.0] - 2026-06-25
+
+### Fixed
+- **Temporal indexing per-commit save serialization (#1206).** The per-commit save stage serialized all worker threads (per-vector SQLite commit/fsync, per-commit full-file re-sort+rewrite under an exclusive lock, a global write lock around every vector JSON write), starving the embedding pool. Batched SQLite writes (one transaction per upsert batch + WAL checkpoint), amortized O(1) progress flush (in-memory staging + flush every 10 commits + final flush, race-guarded), and removed the global write lock. Per-commit save cost is now amortized constant; crash-durability and the deterministic point_id contract preserved.
+- **Activation never ran branch-aware reindex (#1203).** Activating a golden repo on a non-default branch (and switch_branch / sync_with_golden_repository) CoW-copied the default-branch index and never reindexed, so semantic search returned default-branch embeddings for files that differ. Wired the existing branch-aware delta indexer into all three lifecycle sites (skip for default branch and *-global), and invalidate the in-memory HNSW + id_index caches (prefix eviction) after reindex so the corrected on-disk index is actually served.
+- **Temporal CLI --index-commits left a non-sharded monolith (#1207).** CLI sharding never deleted the base provider dir's monolithic index nor wrote migration_complete.marker, so every temporal query enumerated the marker-less base dir (spurious escalating HNSW-stale warnings + stale-read risk). CLI now runs the shared cleanup after a successful shard run (gated so a partial run never deletes the monolith), and get_overlapping_shards excludes a marker-less base dir with no real monolith (unified predicate).
+- **REST /api/query had no reranking (#1209).** Added rerank_query/rerank_instruction to the REST query model and wired the shared rerank funnel (after fusion, before truncation), achieving parity with MCP/CLI.
+- **Temporal rerank document omitted the commit message (#1208).** commit_diff results were reranked on diff text only. A single shared content extractor (used by MCP, REST, CLI) now includes the commit message for temporal commit_diff results.
+- **fts/hybrid silently ignored on dual-provider repos (#1202).** When both embedding providers were configured, the auto-parallel default preempted the FTS branch, so search_mode=fts/hybrid ran semantic fusion instead. Gated the auto-parallel default on search_mode==semantic; added effective_search_mode/effective_query_strategy echo and fts/hybrid overflow metadata to the response.
+- **CLI temporal query dropped --exclude-path and extra --path-filter values (#1210).** Now forwards exclude_path and all path filters to the temporal fusion call (parity with the server temporal path).
+- **Documented path glob matched only nested paths (#1211).** A leading-star-slash pattern is normalized so it matches a directory segment at any depth including root-level, fixing silent under-filtering (symmetric for include and exclude).
+- **VoyageMultimodalClient missing get_provider_name (#1212).** Multi-index queries including a multimodal collection silently dropped the multimodal contribution via a swallowed AttributeError; the method now exists.
+- **Multi-provider temporal indexing showed no progress for additional providers (#1205).** Each additional provider now renders its own live progress display (the primary pass is unchanged).
+- **repository_status omitted next_refresh and enable_scip for global repos (#1204).** Added both fields from the already-loaded record (no extra query), eliminating the need to pull the bulk list_global_repos for a single repo.
+- **Indexing/registration/SCIP path carried job/subprocess/per-file timeouts (#1218).** Removed all overarching wall-clock timeouts (job, subprocess watchdog, per-file/per-batch) and their swallow-and-skip handlers; only the per-outbound-embedding-HTTP-call timeout + retry remain. A genuine post-retry failure now fails the job loud (no silent partial index); cidx index exits non-zero on total failure so a failed registration fails and cleans up its orphan clone instead of reporting success with an empty index.
+
 ## [10.163.0] - 2026-06-24
 
 ### Fixed
