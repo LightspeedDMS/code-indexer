@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.166.0] - 2026-06-25
+
+### Added
+- **Memory-Pressure-Aware Index-Cache Governor (Epic #1213).** Temporal queries fan out over time-sharded HNSW indexes, and Bug #1171 unconditionally evicts each shard's HNSW after use to prevent a production swap death-spiral, at the cost of reloading every shard from disk/NFS on every query. A new node-aware, cgroup-aware MemoryGovernor makes that eviction conditional on a memory-pressure band: GREEN (memory comfortable) retains shards across queries for fast warm temporal queries; YELLOW proactively evicts LRU to a floor and trims; RED reverts to the exact Bug #1171 evict-after-use. Fail-safe is RED (the band starts RED and any signal error / kill-switch reverts to the proven-safe evict), so the swap-spiral guard is never weakened. CLI/solo and the RED/disabled/errored server paths are byte-identical to #1171. Eight Web-UI-tunable, hot-reloaded watermark settings (no env vars). Observability: GET /api/admin/memory-governor + an MCP twin return a per-process snapshot (band, used_pct, basis cgroup_v2/v1/host, pswpin_rate, counters, live watermarks, pid); GOV-001..005 structured records land in the server log store (front-door queryable via admin_logs_query and sqlite3). Validated solo (local) with GREEN-retain / RED-#1171 / YELLOW-degrade proven by config hot-reload and a real balloon crossing RED with swap flat.
+
 ## [10.165.0] - 2026-06-25
 
 ### Fixed
