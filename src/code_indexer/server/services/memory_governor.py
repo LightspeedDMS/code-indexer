@@ -23,6 +23,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
 
+# Minimum seconds between successive GOV-002 log entries (rate-limit guard).
+_GOV002_MIN_INTERVAL_SECONDS = 5.0
+
+# Floor entry count for YELLOW proactive LRU eviction: retain at least this
+# many (hottest) HNSW entries so repeated queries stay warm.
+_YELLOW_LRU_FLOOR = 1
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -174,6 +181,13 @@ class MemoryGovernor:
         # pswpin baseline for delta computation (None until first sample)
         self._prev_pswpin: Optional[int] = None
 
+        # Rate-limiting state for GOV-002 log entries
+        self._gov002_last_log_time: float = 0.0
+
+        # Cache reference for YELLOW proactive LRU eviction (Story 4).
+        # Set via attach_cache(); None until service_init wires it.
+        self._attached_cache: Optional[Any] = None
+
         # On the very first tick we cascade to the correct band WITHOUT
         # incrementing transition counters (pre-init convergence, not a
         # real operational transition).  Cleared to False in _tick() after
@@ -202,6 +216,20 @@ class MemoryGovernor:
     @property
     def rss_inflation_factor(self) -> float:
         return self._rss_inflation_factor
+
+    @property
+    def last_used_pct(self) -> float:
+        """Most-recently sampled used_pct (0.0 before the first tick)."""
+        return getattr(self, "_last_used_pct", 0.0)
+
+    def attach_cache(self, cache: Any) -> None:
+        """Attach a cache for YELLOW proactive LRU eviction (Story 4).
+
+        Called from service_init after initialize_caches() so the sampler
+        can call evict_lru_to_floor() on each YELLOW tick.  None-safe: if
+        never called the YELLOW eviction path is skipped silently.
+        """
+        self._attached_cache = cache
 
     # ------------------------------------------------------------------
     # Live config helper (Story #1213 Story 2)
@@ -282,11 +310,29 @@ class MemoryGovernor:
             return True
         return self.band == MemoryBand.RED
 
-    def get_stats(self) -> dict:
-        """Return a snapshot dict for the admin endpoint (Story 4)."""
+    def get_snapshot(self) -> dict:
+        """Return the full §3.5 snapshot dict for the admin endpoint (Story 4).
+
+        All counter fields are top-level (not nested) for direct REST serialisation.
+        """
         with self._band_lock:
             band = self._band
+
+        # Read swap usage.  psutil is a hard dependency in server mode but may
+        # be absent in minimal test environments — tolerate ImportError silently.
+        # Any other (unexpected) error is logged at WARNING so it is visible.
+        swap_used_mb: float = 0.0
+        try:
+            import psutil
+
+            swap_used_mb = psutil.swap_memory().used / (1024 * 1024)
+        except ImportError:
+            pass  # psutil not installed — swap_used_mb stays 0.0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GOV get_snapshot: swap_memory() read failed: %s", exc)
+
         return {
+            # Signal fields
             "band": band.value,
             "used_pct": getattr(self, "_last_used_pct", 0.0),
             "effective_limit_mb": getattr(self, "_last_effective_limit", 0)
@@ -295,18 +341,94 @@ class MemoryGovernor:
             // (1024 * 1024),
             "basis": getattr(self, "_last_basis", "unknown"),
             "pswpin_rate": getattr(self, "_last_pswpin_rate", 0),
+            "swap_used_mb": swap_used_mb,
+            # Transition counters (flat)
+            "green_to_yellow": self.counters.green_to_yellow,
+            "yellow_to_red": self.counters.yellow_to_red,
+            "red_to_yellow": self.counters.red_to_yellow,
+            "yellow_to_green": self.counters.yellow_to_green,
+            # Action counters (flat)
+            "shards_evicted_after_use": self.counters.shards_evicted_after_use,
+            "lru_evictions": self.counters.lru_evictions,
+            "trim_calls": self.counters.trim_calls,
+            # Config echoes
             "enabled": self._enabled,
-            "counters": {
-                "green_to_yellow": self.counters.green_to_yellow,
-                "yellow_to_red": self.counters.yellow_to_red,
-                "red_to_yellow": self.counters.red_to_yellow,
-                "yellow_to_green": self.counters.yellow_to_green,
-                "shards_evicted_after_use": self.counters.shards_evicted_after_use,
-                "lru_evictions": self.counters.lru_evictions,
-                "trim_calls": self.counters.trim_calls,
-            },
+            "yellow_pct": self._yellow_pct,
+            "red_pct": self._red_pct,
+            "hysteresis_pct": self._hysteresis_pct,
+            "red_min_dwell_seconds": self._red_min_dwell_seconds,
+            "sample_interval_seconds": self._sample_interval_seconds,
+            "swap_forces_red": self._swap_forces_red,
+            "rss_inflation_factor": self._rss_inflation_factor,
+            # Process identity
             "pid": os.getpid(),
         }
+
+    def get_stats(self) -> dict:
+        """Backward-compatible alias for get_snapshot()."""
+        return self.get_snapshot()
+
+    # ------------------------------------------------------------------
+    # Structured log helpers (GOV-002 / GOV-003 / GOV-004)
+    # ------------------------------------------------------------------
+
+    def log_gov002_evict(self, *, shard: str, freed_mb: float) -> None:
+        """Emit GOV-002 when a shard is evicted after use (RED band action).
+
+        Rate-limited to at most one entry per _GOV002_MIN_INTERVAL_SECONDS to
+        prevent log storms during sustained RED pressure.
+        """
+        now = time.monotonic()
+        if now - self._gov002_last_log_time < _GOV002_MIN_INTERVAL_SECONDS:
+            return
+        self._gov002_last_log_time = now
+        logger.warning(
+            "GOV-002 evict_after_use shard=%s freed_mb=%.1f band=%s",
+            shard,
+            freed_mb,
+            self.band.value,
+        )
+
+    def log_gov003_lru_evict(self, *, count: int, freed_mb: float) -> None:
+        """Emit GOV-003 when proactive LRU eviction runs (YELLOW band action)."""
+        logger.info(
+            "GOV-003 lru_evict count=%d freed_mb=%.1f band=%s",
+            count,
+            freed_mb,
+            self.band.value,
+        )
+
+    def log_gov004_trim(self, *, released: bool) -> None:
+        """Emit GOV-004 after a malloc_trim attempt."""
+        logger.info(
+            "GOV-004 malloc_trim released=%s band=%s",
+            released,
+            self.band.value,
+        )
+
+    def evict_lru_to_floor(self, cache: Any, *, floor_entries: int) -> None:
+        """Evict entries from `cache` down to `floor_entries` (YELLOW proactive action).
+
+        Calls `cache.get_stats()["size"]` to determine current occupancy, then
+        calls `cache.evict_lru_entries(n)` with the deficit count.  Does nothing
+        when size <= floor_entries.  Increments `lru_evictions` by the count
+        returned by the cache and always calls `maybe_trim()`.
+
+        Never raises: all cache errors are logged at WARNING and swallowed so
+        the caller's hot path is never interrupted.
+        """
+        try:
+            stats = cache.get_stats()
+            # HNSWIndexCacheStats is a dataclass — use attribute access, NOT subscript.
+            size = stats.cached_repositories
+            to_evict = size - floor_entries
+            if to_evict > 0:
+                evicted = cache.evict_lru_entries(to_evict)
+                self.counters.lru_evictions += evicted if evicted is not None else 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GOV evict_lru_to_floor: cache error (best-effort): %s", exc)
+        finally:
+            self.maybe_trim()
 
     def start(self) -> None:
         """Start the sampler thread if not already running."""
@@ -478,6 +600,33 @@ class MemoryGovernor:
             swap_forces_red_cfg=swap_forces_red_cfg,
             red_min_dwell=red_min_dwell,
         )
+
+        # Emit GOV-005 when swap-in activity forced the band to RED.
+        # Checked after _advance_band() so the band reflects the transition.
+        if (
+            swap_forces_red_cfg
+            and sample.pswpin_rate > 0
+            and self.band == MemoryBand.RED
+        ):
+            logger.warning(
+                "GOV-005 swap_forced_red pswpin_rate=%d used_pct=%.1f",
+                sample.pswpin_rate,
+                sample.used_pct,
+            )
+
+        # YELLOW proactive LRU eviction (Story 4 Critical 2).
+        # When the band is YELLOW and a cache has been attached via attach_cache(),
+        # evict the least-recently-used entries down to _YELLOW_LRU_FLOOR so the
+        # hottest entries are retained.  Skipped silently when no cache is attached
+        # (CLI/solo / pre-lifespan-wiring).
+        if self.band == MemoryBand.YELLOW and self._attached_cache is not None:
+            before_lru = self.counters.lru_evictions
+            self.evict_lru_to_floor(
+                self._attached_cache, floor_entries=_YELLOW_LRU_FLOOR
+            )
+            evicted_this_tick = self.counters.lru_evictions - before_lru
+            self.log_gov003_lru_evict(count=evicted_this_tick, freed_mb=0.0)
+
         # Clear first-tick flag after successful processing so subsequent
         # ticks accumulate real operational transition counters.
         self._first_tick = False
@@ -541,13 +690,13 @@ class MemoryGovernor:
                     self._band = MemoryBand.YELLOW
                     if not first_tick:
                         self.counters.red_to_yellow += 1
-                    logger.debug("GOV-001 band RED->YELLOW used_pct=%.1f", used_pct)
+                    logger.info("GOV-001 band RED->YELLOW used_pct=%.1f", used_pct)
                     # Cascade: check whether YELLOW should also exit to GREEN
                     if used_pct < yellow_exit:
                         self._band = MemoryBand.GREEN
                         if not first_tick:
                             self.counters.yellow_to_green += 1
-                        logger.debug(
+                        logger.info(
                             "GOV-001 band YELLOW->GREEN used_pct=%.1f (cascade from RED)",
                             used_pct,
                         )
@@ -560,7 +709,7 @@ class MemoryGovernor:
                     self._red_entry_time = now
                     if not first_tick:
                         self.counters.yellow_to_red += 1
-                    logger.debug(
+                    logger.warning(
                         "GOV-001 band YELLOW->RED used_pct=%.1f swap=%s",
                         used_pct,
                         swap_forces_red,
@@ -569,7 +718,7 @@ class MemoryGovernor:
                     self._band = MemoryBand.GREEN
                     if not first_tick:
                         self.counters.yellow_to_green += 1
-                    logger.debug("GOV-001 band YELLOW->GREEN used_pct=%.1f", used_pct)
+                    logger.info("GOV-001 band YELLOW->GREEN used_pct=%.1f", used_pct)
 
             # --- GREEN state ---
             elif self._band == MemoryBand.GREEN:
@@ -578,7 +727,7 @@ class MemoryGovernor:
                     self._band = MemoryBand.YELLOW
                     if not first_tick:
                         self.counters.green_to_yellow += 1
-                    logger.debug(
+                    logger.info(
                         "GOV-001 band GREEN->YELLOW used_pct=%.1f swap=%s",
                         used_pct,
                         swap_forces_red,
@@ -589,7 +738,7 @@ class MemoryGovernor:
                         self._red_entry_time = now
                         if not first_tick:
                             self.counters.yellow_to_red += 1
-                        logger.debug(
+                        logger.warning(
                             "GOV-001 band YELLOW->RED used_pct=%.1f (cascade from GREEN)",
                             used_pct,
                         )
@@ -597,7 +746,7 @@ class MemoryGovernor:
                     self._band = MemoryBand.YELLOW
                     if not first_tick:
                         self.counters.green_to_yellow += 1
-                    logger.debug("GOV-001 band GREEN->YELLOW used_pct=%.1f", used_pct)
+                    logger.info("GOV-001 band GREEN->YELLOW used_pct=%.1f", used_pct)
 
     def _apply_fail_safe_red(self) -> None:
         """Force band to RED (fail-safe on reader error)."""

@@ -1901,6 +1901,29 @@ handle_manage_group_repos.__mcp_requires_session_key__ = True  # type: ignore[at
 
 
 # =============================================================================
+# Memory Governor stats (Story 4)
+# =============================================================================
+
+
+def handle_get_memory_governor_stats(
+    args: Dict[str, Any], user: User
+) -> Dict[str, Any]:
+    """Return the §3.5 memory-governor snapshot via MCP.
+
+    Returns the full snapshot when the governor is active, or a minimal
+    not-active response when the governor has not been initialised.
+    Never raises.
+    """
+    from code_indexer.server.services.memory_governor import get_memory_governor
+
+    gov = get_memory_governor()
+    if gov is None:
+        return {"enabled": False, "band": None, "active": False}
+    snapshot: Dict[str, Any] = gov.get_snapshot()
+    return snapshot
+
+
+# =============================================================================
 # Registration
 # =============================================================================
 
@@ -1938,3 +1961,4 @@ def _register(registry: dict) -> None:
     # are localhost-only and auto-updater driven, not exposed via MCP.
     registry["get_maintenance_status"] = handle_get_maintenance_status
     registry["trigger_dependency_analysis"] = handle_trigger_dependency_analysis
+    registry["get_memory_governor_stats"] = handle_get_memory_governor_stats

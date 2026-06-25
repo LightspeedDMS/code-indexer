@@ -446,11 +446,15 @@ def _query_shards_raw(
                 if _should_evict:
                     _shard_path = Path(vector_store.base_path) / shard_name
                     _hnsw_cache.invalidate(str(_shard_path.resolve()))
-                    # Only update governor counters/trim when governor is healthy;
+                    # Only update governor counters/trim/log when governor is healthy;
                     # a broken governor must not prevent the eviction from completing.
                     if _gov is not None and _gov_healthy:
                         _gov.counters.shards_evicted_after_use += 1
                         _gov.maybe_trim()
+                        # GOV-002: emitted from the dispatch evict call-site (Story 4).
+                        # freed_mb=0.0 is best-effort — no expensive size computation
+                        # on the eviction hot path.
+                        _gov.log_gov002_evict(shard=shard_name, freed_mb=0.0)
 
     return results_by_shard
 

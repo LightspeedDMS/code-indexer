@@ -165,6 +165,8 @@ def initialize_services() -> Dict[str, Any]:
         f"HNSW index cache initialized (TTL: {_server_hnsw_cache.config.ttl_minutes}min)",
         extra={"correlation_id": get_correlation_id()},
     )
+    # Story 4: wire HNSW cache into governor for YELLOW proactive LRU eviction.
+    _memory_governor.attach_cache(_server_hnsw_cache)
 
     # Initialize server-side FTS cache for FTS query performance
     _server_fts_cache = get_global_fts_cache()
