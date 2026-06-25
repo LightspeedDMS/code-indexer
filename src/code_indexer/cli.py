@@ -3499,6 +3499,7 @@ def index(
                     )
                     _orig_provider = config.embedding_provider
                     _extra_temporal_indexer = None
+                    _extra_indexing_result = None
                     try:
                         # Health check before indexing (audit fix A1)
                         _extra_embedding = _EPF.create(
@@ -3519,27 +3520,36 @@ def index(
                             vector_store,
                             collection_name=_extra_coll_name,
                         )
+                        # Bug #1205: start a fresh display for this provider so
+                        # progress renders during index_commits (Option B fix).
+                        rich_live_manager.start_bottom_display()
                         _extra_indexing_result = _extra_temporal_indexer.index_commits(
                             all_branches=all_branches,
                             max_commits=max_commits,
                             since_date=since_date,
                             progress_callback=_make_offset_callback(
                                 progress_callback,
-                                _extra_idx + 1,
-                                _num_temporal_providers,
+                                0,
+                                1,
                             ),
                             reconcile=reconcile,
                         )
-                        console.print(
-                            f"✅ {_extra_provider}: "
-                            f"{_extra_indexing_result.total_commits} commits",
-                            style="green",
-                        )
                     finally:
+                        # Bug #1205: stop the display before printing the completion
+                        # line so a bare console.print does not interleave with an
+                        # active Rich Live display.  Placed in finally so the display
+                        # is always torn down even if index_commits raises.
+                        rich_live_manager.stop_display()
                         if _extra_temporal_indexer is not None:
                             _extra_temporal_indexer.close()
                         config.embedding_provider = _orig_provider  # type: ignore[assignment]
                         config_manager._config = config
+                        if _extra_indexing_result is not None:
+                            console.print(
+                                f"✅ {_extra_provider}: "
+                                f"{_extra_indexing_result.total_commits} commits",
+                                style="green",
+                            )
 
                 sys.exit(0)
 
