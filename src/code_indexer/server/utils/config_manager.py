@@ -23,6 +23,7 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
         "login_security_config",  # Story #557 - removed in cleanup Story #682
         "mfa_config",  # Story #558 - removed in cleanup Story #682
         "auth_config",  # Story #3 Phase 2 AC36 - removed in cleanup Story #683
+        "launch_restart_generation",  # Story #1195/#1198 - runtime DB key written into config.json by auto-updater; not a bootstrap ServerConfig field
     }
 )
 
