@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.0.0] - 2026-06-26
+
+Major release. Consolidates the reliability, cluster-resilience, and Query-Analytics work from the 10.16x-10.17x series (CI-token decrypt de-spam, corrupt index/HNSW self-heal, cluster OIDC shared state, memory-governor swap threshold, config-strip noise, dangling-symlink startup resilience, and shadow-mode cache-hit instrumentation).
+
+### Fixed
+- **Interrupted query-analytics exports stay stuck `pending` forever (#1228).** Export jobs interrupted by a worker death / restart / infra outage were never reconciled to `failed` -- the export records are not covered by the BackgroundJobManager startup orphan-reconciliation, so they showed as perpetually in-progress in the Analytics export history (e.g. the 3 exports orphaned during the node-23 NFS outage). Added `reconcile_orphaned_exports()` on both export backends (SQLite + PostgreSQL) and the service: a bulk `UPDATE status='failed' WHERE status IN ('pending','running') AND created_at < now - 300s`, wired fail-soft into startup right after the existing `fail_orphaned_jobs` block. Cluster-safe: `created_at` is stamped at work-start (queue delay never inflates age), the export workload is hard-bounded (50k-row cap, finishes well under the 300s window), and `update_export` writes status unconditionally so a false-positive self-heals (a live worker's completion overwrites `failed`->`completed`). Terminal rows untouched; idempotent; no schema change. Clears existing stuck exports on the next deploy.
+
 ## [10.172.0] - 2026-06-26
 
 ### Fixed

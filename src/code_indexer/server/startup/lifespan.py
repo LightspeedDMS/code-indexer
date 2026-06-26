@@ -1774,6 +1774,22 @@ def make_lifespan(
             except Exception as _oe:
                 logger.warning("Startup: orphaned job cleanup failed: %s", _oe)
 
+            # Bug #1228: reconcile orphaned query-analytics exports.
+            # Server restart kills export worker threads but leaves rows in
+            # pending/running forever.  Mirror the fail_orphaned_jobs pattern:
+            # fail-soft, log the count, never block startup.
+            _qae_svc = getattr(app.state, "query_analytics_export_service", None)
+            if _qae_svc is not None:
+                try:
+                    _export_orphan_count = _qae_svc.reconcile_orphaned_exports()
+                    if _export_orphan_count:
+                        logger.info(
+                            "Startup: failed %d orphaned pending/running export(s)",
+                            _export_orphan_count,
+                        )
+                except Exception as _eoe:
+                    logger.warning("Startup: orphaned export cleanup failed: %s", _eoe)
+
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
                     DepMapHealthDetector,
