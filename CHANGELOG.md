@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.171.0] - 2026-06-26
+
+### Changed
+- **Analytics export date filter now uses a UTC datetime picker instead of a raw epoch.** The Query Analytics Export page made the admin type a UTC epoch number into the From/To filter (`type="number"`, placeholder "e.g. 1750000000") -- non-intuitive. Both inputs are now `type="datetime-local"` pickers labeled "(UTC)" with a "Times are interpreted as UTC" note; the client converts the picked UTC datetime to epoch seconds (`Date.parse(value + 'Z') / 1000`) before submitting. The backend is unchanged -- `POST /api/admin/search-events/export` still receives `from_timestamp`/`to_timestamp` as float epoch seconds; only the UI input format and client-side conversion changed. Everything stays UTC.
+
 ## [10.170.0] - 2026-06-26
 
 ### Fixed
