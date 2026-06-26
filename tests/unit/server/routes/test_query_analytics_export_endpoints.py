@@ -4,6 +4,7 @@ Endpoints under test:
   POST /api/admin/search-events/export      -> 202 {job_id}
   GET  /api/admin/search-events/exports     -> 200 [{id, status, ...}]
   GET  /api/admin/search-events/exports/{id}/download -> 200 file / 404 / 409
+  GET  /analytics-export                    -> 200 rendered HTML page
 
 Auth: FastAPI dependency_overrides with mock admin user (no real credentials).
 Unauthenticated requests return exactly HTTP 401.
@@ -12,7 +13,7 @@ Unauthenticated requests return exactly HTTP 401.
 import threading
 import time
 import uuid
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -591,3 +592,105 @@ class TestDownloadExport:
         finally:
             app.dependency_overrides.clear()
             app.state.query_analytics_export_service = None
+
+
+# ---------------------------------------------------------------------------
+# Tests: GET /analytics-export page render (datetime-local UX fix)
+# ---------------------------------------------------------------------------
+
+
+def _make_admin_session_mock():
+    """Return a mock SessionManager whose get_session() returns an admin session.
+
+    The analytics_export_page route calls:
+      1. _require_admin_session(request) -> get_session_manager().get_session(request)
+      2. get_csrf_token_from_cookie(request) -> _get_csrf_serializer() ->
+             get_session_manager()._serializer.secret_key
+      3. set_csrf_cookie(response, ...) -> _get_csrf_serializer() -> same path
+
+    We patch code_indexer.server.web.routes.get_session_manager to return this
+    mock so the route renders the template without redirecting to login or
+    raising AttributeError on _serializer.secret_key.
+    """
+    session = MagicMock()
+    session.role = "admin"
+    session.username = "testadmin"
+    session.csrf_token = "test_csrf"
+
+    # _get_csrf_serializer() accesses session_manager._serializer.secret_key
+    # It must be a real string for URLSafeTimedSerializer to accept it.
+    serializer_mock = MagicMock()
+    serializer_mock.secret_keys = ["test-secret-key-for-csrf-unit-tests"]
+    serializer_mock.secret_key = "test-secret-key-for-csrf-unit-tests"
+
+    session_manager = MagicMock()
+    session_manager.get_session.return_value = session
+    session_manager._serializer = serializer_mock
+    return session_manager
+
+
+class TestAnalyticsExportPageRender:
+    """GET /analytics-export must render datetime-local pickers (not raw epoch inputs).
+
+    These tests verify the UX fix: the From/To filter inputs are
+    type="datetime-local" (datetime pickers) instead of type="number"
+    (raw UTC epoch number fields).
+    """
+
+    def _get_page_html(self) -> str:
+        """Render GET /admin/analytics-export with a mocked admin session and return HTML."""
+        from code_indexer.server.app import app
+
+        with patch(
+            "code_indexer.server.web.routes.get_session_manager",
+            return_value=_make_admin_session_mock(),
+        ):
+            http_client = TestClient(app, raise_server_exceptions=True)
+            resp = http_client.get("/admin/analytics-export")
+        assert resp.status_code == 200, (
+            f"Expected 200 from /admin/analytics-export, got {resp.status_code}: {resp.text[:300]}"
+        )
+        return resp.text
+
+    def test_page_renders_200(self):
+        """GET /admin/analytics-export returns HTTP 200 with an authenticated admin session."""
+        self._get_page_html()  # asserts 200 internally
+
+    def test_from_input_is_datetime_local(self):
+        """The From filter input must be type=\"datetime-local\", not type=\"number\"."""
+        html = self._get_page_html()
+        assert 'id="from_timestamp"' in html, (
+            "from_timestamp input not found in rendered HTML"
+        )
+        assert 'type="datetime-local"' in html, (
+            'Expected type="datetime-local" in rendered analytics-export HTML. '
+            "The From/To epoch number inputs should have been replaced with datetime pickers."
+        )
+
+    def test_to_input_is_datetime_local(self):
+        """Both From and To inputs must use type=\"datetime-local\"."""
+        html = self._get_page_html()
+        assert 'id="to_timestamp"' in html, (
+            "to_timestamp input not found in rendered HTML"
+        )
+        count = html.count('type="datetime-local"')
+        assert count >= 2, (
+            f'Expected at least 2 type="datetime-local" inputs (From and To), '
+            f"found {count} in rendered HTML."
+        )
+
+    def test_no_raw_epoch_number_inputs(self):
+        """The rendered HTML must NOT contain the old epoch placeholder text.
+
+        This is the regression guard: the old epoch number inputs with their
+        specific placeholder values must be gone after the datetime-local fix.
+        """
+        html = self._get_page_html()
+        assert 'placeholder="e.g. 1750000000"' not in html, (
+            "Old epoch placeholder 'e.g. 1750000000' found in rendered HTML. "
+            "The from_timestamp input was not updated to datetime-local."
+        )
+        assert 'placeholder="e.g. 1759999999"' not in html, (
+            "Old epoch placeholder 'e.g. 1759999999' found in rendered HTML. "
+            "The to_timestamp input was not updated to datetime-local."
+        )

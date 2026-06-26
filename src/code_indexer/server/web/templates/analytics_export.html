@@ -15,16 +15,15 @@
         <form id="export-filter-form">
             <div class="grid">
                 <label>
-                    From (UTC epoch or leave blank)
-                    <input type="number" id="from_timestamp" name="from_timestamp" step="any"
-                           placeholder="e.g. 1750000000">
+                    From (UTC) — leave blank for no lower bound
+                    <input type="datetime-local" id="from_timestamp" name="from_timestamp" step="1">
                 </label>
                 <label>
-                    To (UTC epoch or leave blank)
-                    <input type="number" id="to_timestamp" name="to_timestamp" step="any"
-                           placeholder="e.g. 1759999999">
+                    To (UTC) — leave blank for no upper bound
+                    <input type="datetime-local" id="to_timestamp" name="to_timestamp" step="1">
                 </label>
             </div>
+            <small style="color:var(--muted-color,#888)">Times are interpreted as UTC.</small>
             <div class="grid">
                 <label>
                     User
@@ -158,7 +157,10 @@ function getFilters() {
     for (const [k, v] of fd.entries()) {
         if (!v || v === 'all') continue;
         if (k === 'from_timestamp' || k === 'to_timestamp') {
-            body[k] = parseFloat(v);
+            // datetime-local gives a naive string like "2026-06-26T14:30" (no timezone).
+            // Append 'Z' to treat it as UTC, then convert to epoch seconds for the backend.
+            const ms = Date.parse(v + 'Z');
+            if (!Number.isNaN(ms)) { body[k] = ms / 1000; }
         } else {
             body[k] = v;
         }
