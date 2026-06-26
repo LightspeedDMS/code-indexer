@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.170.0] - 2026-06-26
+
+### Fixed
+- **Corrupt HNSW index also wedges golden-repo refresh (#1223 follow-up).** Staging validation of v10.169.0 showed the first #1223 fix was partial: it self-heals a corrupt/0-byte `collection_meta.json`, but the same crashed rebuild also leaves a corrupt/partial HNSW index `.bin` (and a stale `.tmp_hnsw_*.tmp`), so after the meta heals the refresh fails one step later with hnswlib's "Index seems to be corrupted or unsupported". Extended the self-heal to the index, same index-time-recover / query-time-raise principle: `load_for_incremental_update` now catches the corruption RuntimeError, discards the corrupt `.bin` + orphaned temp files, and returns the existing no-index sentinel so the caller does a clean full rebuild; `rebuild_from_vectors` cleans orphaned `.tmp_hnsw_*.tmp`. A tight classifier (`_is_corrupt_index_error`) prevents a healthy index from ever being discarded, and the discard is path-safe/idempotent. Query-time load sites are unchanged (a corrupt index still raises on query — no silent serving of an empty index). Composes with the meta fix so a repo with both a 0-byte meta and a corrupt `.bin` fully self-heals on its next refresh, no manual cleanup.
+- **Latency tracker logged WARNING on expected shutdown DB-close (#1227).** `DependencyLatencyTracker` logged a WARNING ("database closed -- writer thread terminating") on every server shutdown -- an expected, gracefully-handled teardown condition (the daemon writer's DB is closed during shutdown; it already sets its stop event and terminates cleanly). Changed that closed-db branch in `_flush_buffer` and `_prune_stale` from WARNING to DEBUG; control flow is unchanged and the genuine consecutive-failures ERROR path is untouched, so no real failure is hidden.
+
 ## [10.169.0] - 2026-06-26
 
 ### Fixed
