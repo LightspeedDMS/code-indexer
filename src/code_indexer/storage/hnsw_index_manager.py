@@ -28,6 +28,63 @@ except ImportError:
     HNSWLIB_AVAILABLE = False
 
 
+# ---------------------------------------------------------------------------
+# Corruption helpers (Bug #1223 extension)
+# ---------------------------------------------------------------------------
+
+
+def _is_corrupt_index_error(exc: BaseException) -> bool:
+    """Return True if *exc* is hnswlib's corrupt-index RuntimeError.
+
+    hnswlib raises RuntimeError("Index seems to be corrupted or unsupported")
+    for both truncated and garbage binary files.  Match is case-insensitive and
+    substring-based so minor hnswlib version wording differences are tolerated.
+
+    Returns False for any non-RuntimeError or for unrelated RuntimeErrors such
+    as the "contiguous 2D array" query error.
+    """
+    if not isinstance(exc, RuntimeError):
+        return False
+    return "corrupted or unsupported" in str(exc).lower()
+
+
+def discard_corrupt_index(collection_path: Path) -> None:
+    """Remove a corrupt hnsw_index.bin and any stale .tmp_hnsw_*.tmp files.
+
+    This is the INDEX-TIME recovery helper.  It MUST NOT be called from the
+    query path — queries have no data to rebuild from and must raise on
+    corruption so the operator is alerted.
+
+    Removes:
+      - ``collection_path / hnsw_index.bin``  (if it exists)
+      - All ``collection_path / .tmp_hnsw_*.tmp`` files (orphaned from a
+        crashed ``save_index`` temp+rename sequence)
+
+    Does NOT remove vector JSON files, collection_meta.json, or any other
+    collection data.  Safe to call when .bin is absent (no-op).
+    """
+    index_file = collection_path / HNSWIndexManager.INDEX_FILENAME
+    if index_file.exists():
+        try:
+            index_file.unlink()
+        except OSError as e:
+            logger.warning(
+                "discard_corrupt_index: could not remove corrupt index %s: %s",
+                index_file,
+                e,
+            )
+
+    for stale_tmp in collection_path.glob(".tmp_hnsw_*.tmp"):
+        try:
+            stale_tmp.unlink()
+        except OSError as e:
+            logger.warning(
+                "discard_corrupt_index: could not remove stale temp file %s: %s",
+                stale_tmp,
+                e,
+            )
+
+
 class HNSWIndexManager:
     """Manages HNSW index for fast approximate nearest neighbor search.
 
@@ -375,6 +432,21 @@ class HNSWIndexManager:
         with open(meta_file) as f:
             metadata = json.load(f)
             expected_dim = metadata.get("vector_dim", self.vector_dim)
+
+        # Clean up orphaned .tmp_hnsw_*.tmp files left by a previous crashed
+        # save_index (index-time path only — always safe here because we are
+        # about to write a fresh index via BackgroundIndexRebuilder anyway).
+        # The corrupt .bin (if any) is NOT removed here; BackgroundIndexRebuilder
+        # replaces it atomically via temp+os.replace.
+        for stale_tmp in collection_path.glob(".tmp_hnsw_*.tmp"):
+            try:
+                stale_tmp.unlink()
+            except OSError as e:
+                logger.warning(
+                    "rebuild_from_vectors: could not remove stale temp file %s: %s",
+                    stale_tmp,
+                    e,
+                )
 
         # Scan all vector JSON files
         vector_files = list(collection_path.rglob("vector_*.json"))
@@ -825,8 +897,23 @@ class HNSWIndexManager:
             # No existing index - return empty mappings
             return None, {}, {}, 0
 
-        # Load HNSW index
-        index = self.load_index(collection_path, max_elements=1000000)
+        # Load HNSW index — on corruption (index-time path only) discard and
+        # return None so the caller falls back to a full rebuild from vectors.
+        # This is safe here because the caller (incremental update / indexing
+        # pipeline) is about to write a fresh index anyway.
+        # The query-time load_index() path does NOT call this method and still
+        # raises on corruption so operators are alerted.
+        try:
+            index = self.load_index(collection_path, max_elements=1000000)
+        except RuntimeError as exc:
+            if not _is_corrupt_index_error(exc):
+                raise
+            logger.warning(
+                "Corrupt HNSW index discarded at %s, rebuilding from scratch",
+                collection_path,
+            )
+            discard_corrupt_index(collection_path)
+            return None, {}, {}, 0
 
         # Load ID mappings from metadata
         label_to_id = self._load_id_mapping(collection_path)
