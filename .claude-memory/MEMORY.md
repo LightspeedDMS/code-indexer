@@ -28,8 +28,10 @@
 
 - [feedback_run_tests_with_timeout_and_monitor.md](feedback_run_tests_with_timeout_and_monitor.md) - NEVER launch tests without --timeout and active monitoring; know expected duration before running; fast-automation ≤10min, server-fast ≤15min, unit files ≤30s
 - [feedback_faithful_db_mocks.md](feedback_faithful_db_mocks.md) - DB mocks must mirror the real driver; psycopg3 executemany is on the cursor NOT the connection; unfaithful FakeConn certified silent-no-op writes — verify storage writes against real PG
+- [feedback_review_local_and_staging_logs_after_testing.md](feedback_review_local_and_staging_logs_after_testing.md) - After testing, ALWAYS audit BOTH local and staging logs; if a pattern points to a bug, file AND fix it (don't just report)
 
 ## Workflow Preferences
+- [feedback_autonomous_overnight_file_fix_iterate.md](feedback_autonomous_overnight_file_fix_iterate.md) - Work autonomously (no triage questions); every defect found = file + fix + iterate until staging logs are clean; clean logs is the bar
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - ALWAYS switch to development branch before committing — never commit on master/staging
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it
 - [feedback_lint_before_commit.md](feedback_lint_before_commit.md) - Run ruff check/format/mypy BEFORE staging — pre-commit hook is safety net, not primary
