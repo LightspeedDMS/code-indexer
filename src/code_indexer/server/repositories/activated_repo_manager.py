@@ -7,6 +7,7 @@ Supports copy-on-write cloning, branch management, and integration with backgrou
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.cache import get_global_cache, get_global_id_index_cache
+from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 
 import json
 import os
@@ -132,7 +133,9 @@ class ActivatedRepoManager:
         # admin-controlled top-level path is safe to resolve; per-user/alias
         # subpaths underneath still get O_NOFOLLOW protection.
         configured_path = os.path.join(self.data_dir, "activated-repos")
-        os.makedirs(configured_path, exist_ok=True)
+        # Bug #1229: use safe helper so a dangling CoW/NFS symlink does not
+        # crash the worker with FileExistsError on startup.
+        _safe_makedirs_cow(configured_path)
         self.activated_repos_dir = os.path.realpath(configured_path)
 
         # Cluster mode: PostgreSQL connection pool (Bug #587)
