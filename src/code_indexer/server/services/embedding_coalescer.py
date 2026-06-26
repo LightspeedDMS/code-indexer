@@ -956,8 +956,26 @@ class EmbeddingCoalescer:
                 vec = unique_vectors[idx]
                 # Issue #1159: Future now holds (vec, EmbeddingCacheMetadata) so
                 # submit() can return real cache telemetry to callers.
+                # Bug #1230: for shadow-mode, consult _shadow_blobs (pre-write
+                # lookup results) to correctly report key_found=True on HITs.
+                # _shadow_blobs is built BEFORE the cache writes for this dispatch,
+                # so a non-None blob means the key existed pre-dispatch (genuine HIT).
+                # On-mode HITs short-circuit before reaching here (~line 676).
+                _is_shadow_hit = (
+                    cache_mode == "shadow"
+                    and _shadow_blobs is not None
+                    and not k.startswith(_NONE_KEY_PREFIX)
+                    and _shadow_blobs.get(k) is not None
+                )
                 e.fut.set_result(
-                    (vec, _make_miss_meta(cache_mode, _dispatch_latency_ms))
+                    (
+                        vec,
+                        # _is_shadow_hit is only True when cache_mode == "shadow",
+                        # so "shadow" literal satisfies _make_hit_meta's str param.
+                        _make_hit_meta("shadow", _dispatch_latency_ms)
+                        if _is_shadow_hit
+                        else _make_miss_meta(cache_mode, _dispatch_latency_ms),
+                    )
                 )
 
                 # Per-requestor audit_ctx for shadow HITs (own random draw per entry).
