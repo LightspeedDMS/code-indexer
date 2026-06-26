@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.172.0] - 2026-06-26
+
+### Fixed
+- **Dangling CoW/NFS symlink crash-looped every worker at startup (#1229).** When a CoW/NFS storage node is down, `golden-repos`/`activated-repos` (symlinks onto `/mnt/cow-storage`) become dangling, and the manager `__init__`'s `os.makedirs(path, exist_ok=True)` raises `FileExistsError` on a dangling symlink (`exist_ok` only suppresses the error for an existing directory) — crashing every uvicorn worker in a tight loop and turning a single storage-node outage into a full app-layer outage on every node. Added `server/utils/cow_utils._safe_makedirs_cow()`: on a dangling symlink it logs one rate-limited degraded-mode WARNING and returns without touching the link (preserving Bug #1052), so the worker starts and serves non-CoW traffic; otherwise it behaves exactly like `os.makedirs(path, exist_ok=True)`. Wired into the two `__init__` crash-loop sites only; operational makedirs sites still fail loudly (anti-fallback).
+- **Shadow-mode cache HITS never recorded on Query Analytics (#1230).** Shadow-mode query-embedding cache hits were structurally always `voyage_cache_hit=False` (and `cohere_cache_hit`) in the search-event log / analytics export, making shadow's "would-serve rate" invisible. `EmbeddingCoalescer._dispatch()` set every coalesced caller's returned metadata to miss unconditionally; the hit was counted on the metrics layer but never threaded onto the metadata that becomes the search-event field. Now the per-entry metadata reflects a real shadow hit using the pre-write `_shadow_blobs` lookup — a genuinely-new shadow query can never be a false-positive hit (the lookup provably precedes all cache writes in the single-threaded dispatcher). On-mode unaffected; provider-agnostic (voyage + cohere lanes).
+
 ## [10.171.0] - 2026-06-26
 
 ### Changed

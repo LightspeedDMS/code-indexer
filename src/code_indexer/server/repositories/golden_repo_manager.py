@@ -6,6 +6,7 @@ Golden repositories are stored in ~/.cidx-server/data/golden-repos/ with metadat
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 
 import errno
 import json
@@ -173,8 +174,9 @@ class GoldenRepoManager:
             resource_config = ServerResourceConfig()
         self.resource_config = resource_config
 
-        # Ensure directory structure exists
-        os.makedirs(self.golden_repos_dir, exist_ok=True)
+        # Ensure directory structure exists (Bug #1229: use safe helper so a
+        # dangling CoW/NFS symlink does not crash the worker with FileExistsError)
+        _safe_makedirs_cow(self.golden_repos_dir)
 
         # Thread safety for concurrent operations (Story #620 Priority 2A)
         self._operation_lock = threading.Lock()
