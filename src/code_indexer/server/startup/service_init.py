@@ -240,6 +240,16 @@ def initialize_services() -> Dict[str, Any]:
 
     elevated_session_manager.set_sqlite_path(str(db_path))
 
+    # Bug #1224: Configure OIDC StateManager default SQLite path so all
+    # StateManager() instances subsequently constructed in lifespan.py
+    # (and late-init cluster paths) automatically use the shared cidx_server.db
+    # instead of a per-instance default, giving cross-worker state sharing.
+    from code_indexer.server.auth.oidc.state_manager import (
+        configure_sqlite_path as _cfg_oidc_sqlite,
+    )
+
+    _cfg_oidc_sqlite(str(db_path))
+
     # Bug #577: Wire DelegationJobTracker with SQLite path for standalone mode
     from code_indexer.server.services.delegation_job_tracker import (
         DelegationJobTracker,
