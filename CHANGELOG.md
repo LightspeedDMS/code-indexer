@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.168.0] - 2026-06-25
+
+### Fixed
+- **Repeating APP-GENERAL-061 "Failed to decrypt github token" warning flood (#1222).** `CITokenManager.get_token()` (SQLite/PostgreSQL branch) catches every decrypt failure, logs `APP-GENERAL-061` at WARNING, and returns `None` while preserving the undecryptable ciphertext in the DB for recovery -- correct behavior, but because `create_token_manager()` is built fresh at every call site (not a singleton), every CI/CD credential check re-read the same bad row and re-emitted an identical WARNING (85 times in one staging delta) with no self-healing short of token replacement. Added a process-local, lock-guarded log-once memo keyed by `(platform, sha256(ciphertext))`: the first distinct undecryptable ciphertext logs WARNING as before, repeats are downgraded to DEBUG (not silenced), and a successful decrypt for the platform clears the memo so a genuinely new bad ciphertext after a rotation warns once again. Raw token material is never stored or logged -- only the SHA-256 of the ciphertext. Logging hygiene only: no behavior/contract change, no DB schema/migration; the functional path (treat as unconfigured, preserve ciphertext) is unchanged. The JSON-file path (`APP-GENERAL-062`, which deletes the row and already self-heals) is untouched.
+
 ## [10.167.0] - 2026-06-25
 
 ### Fixed
