@@ -1051,6 +1051,14 @@ class ConfigService:
             cache.memory_governor_swap_forces_red = _parse_bool(value)
         elif key == "memory_governor_rss_inflation_factor":
             cache.memory_governor_rss_inflation_factor = float(value)
+        elif key == "memory_governor_swap_pswpin_red_threshold":
+            new_thr = int(value)
+            if new_thr < 0:
+                raise ValueError(
+                    f"memory_governor_swap_pswpin_red_threshold must be >= 0 "
+                    f"(non-negative), got {new_thr}"
+                )
+            cache.memory_governor_swap_pswpin_red_threshold = new_thr
         else:
             raise ValueError(f"Unknown cache setting: {key}")
 

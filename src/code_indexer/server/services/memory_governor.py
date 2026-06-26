@@ -123,8 +123,12 @@ class MemoryGovernor:
         hysteresis_pct:        Fallback hysteresis gap (default 10.0).
         red_min_dwell_seconds: minimum seconds to remain in RED before exit (default 30)
         sample_interval_seconds: sampler thread sleep between samples (default 2.0)
-        swap_forces_red:       Fallback swap-in override flag (default True).
-        rss_inflation_factor:  multiplier for LRU-cap inflation helper (default 2.0)
+        swap_forces_red:               Fallback swap-in override flag (default True).
+        swap_pswpin_red_threshold:     Minimum swap-in rate (pages/interval) required
+                                       to force RED via the swap_forces_red path.
+                                       Default 100: above idle OS noise (1-3) but
+                                       well below a death-spiral (observed 3630).
+        rss_inflation_factor:          multiplier for LRU-cap inflation helper (default 2.0)
         config_service:        Optional live-config provider.  When set, yellow_pct,
                                red_pct, hysteresis_pct, swap_forces_red, enabled, and
                                rss_inflation_factor are all read LIVE from
@@ -146,6 +150,7 @@ class MemoryGovernor:
         red_min_dwell_seconds: float = 30.0,
         sample_interval_seconds: float = 2.0,
         swap_forces_red: bool = True,
+        swap_pswpin_red_threshold: int = 100,
         rss_inflation_factor: float = 2.0,
         config_service: Any = None,
         time_fn: Optional[Callable[[], float]] = None,
@@ -159,6 +164,7 @@ class MemoryGovernor:
         self._red_min_dwell_seconds = float(red_min_dwell_seconds)
         self._sample_interval_seconds = sample_interval_seconds
         self._swap_forces_red = swap_forces_red
+        self._swap_pswpin_red_threshold = swap_pswpin_red_threshold
         self._rss_inflation_factor = rss_inflation_factor
         # Live config provider (Story #1213 Story 2): when set, watermarks are
         # read from config_service.get_config().cache_config on every _tick().
@@ -351,6 +357,9 @@ class MemoryGovernor:
                 live_cfg.memory_governor_sample_interval_seconds
             )
             echo_swap_forces_red = bool(live_cfg.memory_governor_swap_forces_red)
+            echo_swap_pswpin_threshold = int(
+                live_cfg.memory_governor_swap_pswpin_red_threshold
+            )
             echo_rss_inflation = float(live_cfg.memory_governor_rss_inflation_factor)
         else:
             echo_enabled = self._enabled
@@ -360,6 +369,7 @@ class MemoryGovernor:
             echo_red_min_dwell = self._red_min_dwell_seconds
             echo_sample_interval = self._sample_interval_seconds
             echo_swap_forces_red = self._swap_forces_red
+            echo_swap_pswpin_threshold = self._swap_pswpin_red_threshold
             echo_rss_inflation = self._rss_inflation_factor
 
         return {
@@ -390,6 +400,7 @@ class MemoryGovernor:
             "red_min_dwell_seconds": echo_red_min_dwell,
             "sample_interval_seconds": echo_sample_interval,
             "swap_forces_red": echo_swap_forces_red,
+            "swap_pswpin_red_threshold": echo_swap_pswpin_threshold,
             "rss_inflation_factor": echo_rss_inflation,
             # Process identity
             "pid": os.getpid(),
@@ -598,12 +609,16 @@ class MemoryGovernor:
             red_pct = float(live_cache.memory_governor_red_pct)
             hysteresis_pct = float(live_cache.memory_governor_hysteresis_pct)
             swap_forces_red_cfg = bool(live_cache.memory_governor_swap_forces_red)
+            swap_pswpin_threshold = int(
+                live_cache.memory_governor_swap_pswpin_red_threshold
+            )
             red_min_dwell = float(live_cache.memory_governor_red_min_dwell_seconds)
         else:
             yellow_pct = self._yellow_pct
             red_pct = self._red_pct
             hysteresis_pct = self._hysteresis_pct
             swap_forces_red_cfg = self._swap_forces_red
+            swap_pswpin_threshold = self._swap_pswpin_red_threshold
             red_min_dwell = self._red_min_dwell_seconds
 
         try:
@@ -629,14 +644,17 @@ class MemoryGovernor:
             red_pct=red_pct,
             hysteresis_pct=hysteresis_pct,
             swap_forces_red_cfg=swap_forces_red_cfg,
+            swap_pswpin_red_threshold=swap_pswpin_threshold,
             red_min_dwell=red_min_dwell,
         )
 
         # Emit GOV-005 when swap-in activity forced the band to RED.
         # Checked after _advance_band() so the band reflects the transition.
+        # Only fires when pswpin_rate meets the configured minimum threshold
+        # (default 100) so trivial OS noise does not spam the log.
         if (
             swap_forces_red_cfg
-            and sample.pswpin_rate > 0
+            and sample.pswpin_rate >= swap_pswpin_threshold
             and self.band == MemoryBand.RED
         ):
             logger.warning(
@@ -671,6 +689,7 @@ class MemoryGovernor:
         red_pct: Optional[float] = None,
         hysteresis_pct: Optional[float] = None,
         swap_forces_red_cfg: Optional[bool] = None,
+        swap_pswpin_red_threshold: Optional[int] = None,
         red_min_dwell: Optional[float] = None,
     ) -> None:
         """Advance the band state machine based on the current sample.
@@ -684,7 +703,8 @@ class MemoryGovernor:
         first_tick: when True, band state is updated but transition counters
             are NOT incremented (pre-init convergence from fail-safe RED).
 
-        yellow_pct / red_pct / hysteresis_pct / swap_forces_red_cfg / red_min_dwell:
+        yellow_pct / red_pct / hysteresis_pct / swap_forces_red_cfg /
+        swap_pswpin_red_threshold / red_min_dwell:
             When provided (by _tick() after a live config read), these override
             the constructor-frozen values so hot-reloaded watermarks take effect.
             When None, fall back to constructor values (backward compat / tests
@@ -700,11 +720,18 @@ class MemoryGovernor:
             if swap_forces_red_cfg is not None
             else self._swap_forces_red
         )
+        _swap_pswpin_threshold = (
+            swap_pswpin_red_threshold
+            if swap_pswpin_red_threshold is not None
+            else self._swap_pswpin_red_threshold
+        )
         _red_min_dwell = (
             red_min_dwell if red_min_dwell is not None else self._red_min_dwell_seconds
         )
 
-        swap_forces_red = _swap_forces_red and sample.pswpin_rate > 0
+        swap_forces_red = (
+            _swap_forces_red and sample.pswpin_rate >= _swap_pswpin_threshold
+        )
         used_pct = sample.used_pct
         now = self._time_fn()
         yellow_exit = _yellow_pct - _hysteresis_pct

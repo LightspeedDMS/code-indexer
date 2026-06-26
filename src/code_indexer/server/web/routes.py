@@ -6531,6 +6531,18 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
+        # Validate memory governor swap-in threshold (Bug #1225)
+        swap_threshold = data.get("memory_governor_swap_pswpin_red_threshold")
+        if swap_threshold is not None:
+            try:
+                val_int = int(swap_threshold)
+                if val_int < 0:
+                    return "Memory Governor Swap Pswpin Red Threshold must be a non-negative integer"
+            except (ValueError, TypeError):
+                return (
+                    "Memory Governor Swap Pswpin Red Threshold must be a valid integer"
+                )
+
     elif section == "timeouts":
         # Validate timeout values (must be positive integers)
         for field in [
