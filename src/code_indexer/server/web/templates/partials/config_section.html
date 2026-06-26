@@ -1716,6 +1716,11 @@ function saveLlmCredsConfig() {
                         <td class="config-note"><small>Any swap-in activity forces RED band immediately</small></td>
                     </tr>
                     <tr>
+                        <td class="config-label">Memory Governor Swap Pswpin Red Threshold</td>
+                        <td class="config-value">{{ config.cache.memory_governor_swap_pswpin_red_threshold }}</td>
+                        <td class="config-note"><small>Min swap-in pages/interval to force RED (default 100; ignores OS idle noise, catches death-spirals)</small></td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Memory Governor RSS Inflation Factor</td>
                         <td class="config-value">{{ config.cache.memory_governor_rss_inflation_factor }}</td>
                         <td class="config-note"><small>Multiplier for on-disk shard size when computing LRU eviction budget</small></td>
@@ -1813,6 +1818,11 @@ function saveLlmCredsConfig() {
                     Memory Governor Swap Forces Red
                     <input type="checkbox" id="cache-gov-swap" name="memory_governor_swap_forces_red" value="true" {% if config.cache.memory_governor_swap_forces_red %}checked{% endif %}>
                     <small>Any swap-in activity forces RED band immediately</small>
+                </label>
+                <label for="cache-gov-swap-threshold">
+                    Memory Governor Swap Pswpin Red Threshold
+                    <input type="number" id="cache-gov-swap-threshold" name="memory_governor_swap_pswpin_red_threshold" value="{{ config.cache.memory_governor_swap_pswpin_red_threshold }}" min="0">
+                    <small>Min swap-in pages/interval to force RED (default 100; ignores idle noise, catches death-spirals)</small>
                 </label>
                 <label for="cache-gov-rss">
                     Memory Governor RSS Inflation Factor

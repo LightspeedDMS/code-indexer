@@ -453,8 +453,7 @@ class FilesystemVectorStore:
             metadata["subdirectory"] = subdirectory
 
         metadata_path = collection_path / "collection_meta.json"
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
+        self._atomic_write_json(metadata_path, metadata, fsync=True)
 
         # Initialize ID index for this collection
         with self._id_index_lock:
@@ -465,18 +464,33 @@ class FilesystemVectorStore:
     def collection_exists(
         self, collection_name: str, subdirectory: Optional[str] = None
     ) -> bool:
-        """Check if collection exists.
+        """Check if collection exists and has a valid metadata file.
+
+        A collection is considered to exist only when its ``collection_meta.json``
+        is present, non-empty, parses as JSON, and contains a ``vector_size``
+        field.  An empty or corrupt file (e.g. from a crashed write) returns
+        False so the indexing path recreates the collection cleanly (Bug #1223
+        Defect B self-heal).
 
         Args:
             collection_name: Name of the collection
             subdirectory: Optional subdirectory path (e.g., "multimodal_index")
 
         Returns:
-            True if collection exists
+            True if collection exists with a valid metadata file
         """
         collection_path = self._get_collection_path(collection_name, subdirectory)
         metadata_path = collection_path / "collection_meta.json"
-        return metadata_path.exists()
+        if not metadata_path.exists():
+            return False
+        try:
+            content = metadata_path.read_text()
+            if not content.strip():
+                return False
+            meta = json.loads(content)
+            return "vector_size" in meta
+        except (json.JSONDecodeError, OSError):
+            return False
 
     def list_collections(self) -> List[str]:
         """List all collections.
@@ -1517,7 +1531,9 @@ class FilesystemVectorStore:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return None
 
-    def _atomic_write_json(self, file_path: Path, data: Dict[str, Any]) -> None:
+    def _atomic_write_json(
+        self, file_path: Path, data: Dict[str, Any], fsync: bool = False
+    ) -> None:
         """Atomically write JSON data to file.
 
         Uses write-to-temp-then-rename pattern for atomicity.  Each file write
@@ -1526,9 +1542,18 @@ class FilesystemVectorStore:
         process-wide lock is needed — concurrent writes to DISTINCT files
         proceed in parallel (Bug #1206 Fix 3).
 
+        On any exception the ``.tmp`` file is cleaned up so no orphans
+        accumulate (Bug #1223 Defect A).
+
         Args:
             file_path: Target file path
             data: Data to serialize as JSON
+            fsync: If True, call ``f.flush()`` + ``os.fsync()`` before the
+                rename to ensure the data is durable on disk before the old
+                file is replaced.  Use True for critical metadata files
+                (e.g. ``collection_meta.json``).  Leave False (default) for
+                high-frequency per-vector data files where fsync would be a
+                performance bottleneck (Bug #1223 perf fix).
         """
         # Use a per-call unique tmp filename so concurrent writes to the same
         # target file each own their tmp file and don't race on rename/delete.
@@ -1536,12 +1561,22 @@ class FilesystemVectorStore:
             f"{file_path.stem}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
 
-        with open(tmp_file, "w") as f:
-            json.dump(data, f, indent=2)
+        try:
+            with open(tmp_file, "w") as f:
+                json.dump(data, f, indent=2)
+                if fsync:
+                    f.flush()
+                    os.fsync(f.fileno())
 
-        # Atomic rename — visible to readers only after this completes.
-        # Last writer wins; all intermediate writers produce valid JSON files.
-        tmp_file.replace(file_path)
+            # Atomic rename — visible to readers only after this completes.
+            # Last writer wins; all intermediate writers produce valid JSON files.
+            tmp_file.replace(file_path)
+        except Exception:
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def load_id_index(self, collection_name: str) -> set:
         """Load ID index and return set of existing point IDs.
@@ -3609,9 +3644,8 @@ class FilesystemVectorStore:
                 # Update unique_file_count
                 metadata["unique_file_count"] = unique_file_count
 
-                # Save metadata atomically
-                with open(meta_file, "w") as f:
-                    json.dump(metadata, f, indent=2)
+                # Save metadata atomically (Bug #1223: use atomic write helper)
+                self._atomic_write_json(meta_file, metadata, fsync=True)
 
                 self.logger.debug(
                     f"Updated collection metadata: {unique_file_count} unique files"

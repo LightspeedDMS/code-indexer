@@ -69,7 +69,13 @@ CGROUP_V1_UNLIMITED_SENTINEL = 9223372036854771712  # common Linux "no limit" va
 # ---------------------------------------------------------------------------
 
 PSWPIN_BASELINE = 100
-PSWPIN_AFTER_SWAP_ACTIVITY = 105  # delta = 5 => forces RED
+# delta = 100 => meets default threshold (memory_governor_swap_pswpin_red_threshold=100)
+# and forces RED.  Before Bug #1225 this was 105 (delta=5), which forced RED under
+# the old `> 0` rule.  After the fix only deltas >= threshold trigger RED.
+PSWPIN_AFTER_SWAP_ACTIVITY = 200  # delta = 100 => forces RED (meets default threshold)
+PSWPIN_BELOW_THRESHOLD = (
+    PSWPIN_BASELINE + 5
+)  # delta = 5 => below default threshold, no RED
 PSWPIN_STABLE_HIGH = 500  # high absolute but no delta
 PSWPIN_FIRST_SAMPLE_HIGH = 999  # large on first sample (delta treated as 0)
 

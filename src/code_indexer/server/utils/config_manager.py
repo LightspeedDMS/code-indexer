@@ -23,6 +23,7 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
         "login_security_config",  # Story #557 - removed in cleanup Story #682
         "mfa_config",  # Story #558 - removed in cleanup Story #682
         "auth_config",  # Story #3 Phase 2 AC36 - removed in cleanup Story #683
+        "launch_restart_generation",  # Story #1195/#1198 - runtime DB key written into config.json by auto-updater; not a bootstrap ServerConfig field
     }
 )
 
@@ -124,6 +125,14 @@ class CacheConfig:
     memory_governor_red_min_dwell_seconds: int = 30
     memory_governor_sample_interval_seconds: float = 2.0
     memory_governor_swap_forces_red: bool = True
+    # memory_governor_swap_pswpin_red_threshold:
+    #   Minimum swap-in rate (pages/interval) required to force RED via the
+    #   swap_forces_red path.  Staging observed idle OS noise of 1-3 pages/interval
+    #   vs. a genuine death-spiral at 3630 pages/interval (Bug #1171).  Default of
+    #   100 is well above idle noise and far below any observed spiral, so trivial
+    #   page-in activity no longer thrashes GREEN<->RED while real memory pressure
+    #   still triggers the guard immediately.
+    memory_governor_swap_pswpin_red_threshold: int = 100
     memory_governor_rss_inflation_factor: float = 2.0
 
 

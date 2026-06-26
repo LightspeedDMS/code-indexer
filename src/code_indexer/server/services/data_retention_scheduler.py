@@ -241,6 +241,10 @@ class DataRetentionScheduler:
             failed_tables=failed_tables,
         )
 
+        oidc_state_deleted = self._safe_prune_oidc_state_tokens(
+            failed_tables=failed_tables,
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
@@ -249,6 +253,7 @@ class DataRetentionScheduler:
             "background_jobs_deleted": background_jobs_deleted,
             "token_blacklist_deleted": token_blacklist_deleted,
             "elevated_sessions_deleted": elevated_sessions_deleted,
+            "oidc_state_deleted": oidc_state_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
@@ -257,6 +262,7 @@ class DataRetentionScheduler:
                 + background_jobs_deleted
                 + token_blacklist_deleted
                 + elevated_sessions_deleted
+                + oidc_state_deleted
             ),
             "failed_tables": failed_tables,
         }
@@ -336,6 +342,10 @@ class DataRetentionScheduler:
             failed_tables=failed_tables,
         )
 
+        oidc_state_deleted = self._safe_prune_oidc_state_tokens(
+            failed_tables=failed_tables,
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
@@ -344,6 +354,7 @@ class DataRetentionScheduler:
             "background_jobs_deleted": background_jobs_deleted,
             "token_blacklist_deleted": token_blacklist_deleted,
             "elevated_sessions_deleted": elevated_sessions_deleted,
+            "oidc_state_deleted": oidc_state_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
@@ -352,6 +363,7 @@ class DataRetentionScheduler:
                 + background_jobs_deleted
                 + token_blacklist_deleted
                 + elevated_sessions_deleted
+                + oidc_state_deleted
             ),
             "failed_tables": failed_tables,
         }
@@ -514,6 +526,41 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append("elevated_sessions")
+            return 0
+
+    def _safe_prune_oidc_state_tokens(
+        self,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from oidc_state_tokens (Bug #1224).
+
+        TTL is already encoded in each row's expires_at column, so deletion
+        predicate is simply expires_at <= NOW().
+
+        Uses oidc_routes.state_manager (the instance wired with the PG pool
+        in cluster mode, or the shared-SQLite instance in solo mode) so the
+        correct backend is pruned.  Returns 0 when SSO is not configured
+        (state_manager is None).
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'oidc_state_tokens' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.auth.oidc import routes as oidc_routes
+
+            mgr = oidc_routes.state_manager
+            if mgr is None:
+                return 0
+            return int(mgr.prune_expired())
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'oidc_state_tokens' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("oidc_state_tokens")
             return 0
 
     # ------------------------------------------------------------------
