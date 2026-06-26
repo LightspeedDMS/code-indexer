@@ -62,6 +62,13 @@ _UPDATE_ALLOWED = frozenset(
     }
 )
 
+# Staleness threshold for orphan reconciliation (Bug #1228).
+# Exports still in pending/running after this many seconds are considered orphaned.
+# A real export (50k-row DB query + Excel write) completes in seconds to ~2 minutes.
+# 300 seconds (5 min) gives ample margin for legitimate in-flight exports on other
+# cluster nodes while definitively catching hours-old stuck exports from node deaths.
+_DEFAULT_ORPHAN_THRESHOLD_SECONDS = 300.0
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -263,6 +270,35 @@ class QueryAnalyticsExportSqliteBackend:
         finally:
             conn.close()
 
+    def reconcile_orphaned_exports(
+        self,
+        threshold_seconds: float = _DEFAULT_ORPHAN_THRESHOLD_SECONDS,
+        error: str = "interrupted by worker restart",
+    ) -> int:
+        """Mark stale pending/running exports as failed (Bug #1228).
+
+        Cluster-safe predicate: only affects exports whose created_at is older
+        than threshold_seconds ago.  A legitimately-running export on another
+        cluster node (started seconds/minutes ago) is NOT within the orphan
+        window.  Exports that have been stuck for hours (e.g. after an NFS
+        outage that killed the owning worker) are definitively caught.
+
+        Returns the number of rows transitioned to 'failed'.
+        """
+        cutoff_ts = time.time() - threshold_seconds
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "UPDATE query_analytics_exports "
+                "SET status = 'failed', error_message = ? "
+                "WHERE status IN ('pending', 'running') AND created_at < ?",
+                (error, cutoff_ts),
+            )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # PostgreSQL backend
@@ -342,6 +378,30 @@ class QueryAnalyticsExportPostgresBackend:
             count = _delete_expired_rows(rows, conn, "%s")
             conn.commit()
             return count
+
+    def reconcile_orphaned_exports(
+        self,
+        threshold_seconds: float = _DEFAULT_ORPHAN_THRESHOLD_SECONDS,
+        error: str = "interrupted by worker restart",
+    ) -> int:
+        """Mark stale pending/running exports as failed (Bug #1228).
+
+        Cluster-safe: only affects exports whose created_at is older than
+        threshold_seconds ago, preserving legitimately-running exports on
+        other cluster nodes.
+
+        Returns the number of rows transitioned to 'failed'.
+        """
+        cutoff_ts = time.time() - threshold_seconds
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE query_analytics_exports "
+                "SET status = 'failed', error_message = %s "
+                "WHERE status IN ('pending', 'running') AND created_at < %s",
+                (error, cutoff_ts),
+            )
+            conn.commit()
+            return int(cur.rowcount)
 
 
 # ---------------------------------------------------------------------------
@@ -536,3 +596,26 @@ class QueryAnalyticsExportService:
     def evict_old_exports(self, now_ts: float) -> int:
         """Delegate eviction to the backend."""
         return cast(int, self._backend.evict_old_exports(now_ts=now_ts))
+
+    def reconcile_orphaned_exports(
+        self,
+        threshold_seconds: float = _DEFAULT_ORPHAN_THRESHOLD_SECONDS,
+        error: str = "interrupted by worker restart",
+    ) -> int:
+        """Reconcile orphaned exports: transition stale pending/running rows to failed.
+
+        Delegates to the backend.  Cluster-safe: only affects exports whose
+        created_at is older than threshold_seconds ago (default 300 s / 5 min).
+
+        Called on server startup to clear exports left stuck by worker death,
+        server restart, or infrastructure outage (Bug #1228).
+
+        Returns the number of rows transitioned to 'failed'.
+        """
+        return cast(
+            int,
+            self._backend.reconcile_orphaned_exports(
+                threshold_seconds=threshold_seconds,
+                error=error,
+            ),
+        )
