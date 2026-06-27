@@ -345,3 +345,187 @@ class TestTimeoutBranchLocalIndexError:
         assert status.failed_requests >= 1, (
             "Timeout must be recorded as a failure (cause is ambiguous at timeout)"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestCorruptIndexNotSinbinProvider  (GAP A fix — Bug #1236)
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptIndexNotSinbinProvider:
+    """A corrupt-but-present HNSW index is a LOCAL storage failure.
+
+    hnswlib raises RuntimeError("Index seems to be corrupted or unsupported")
+    when it opens a truncated or garbage .bin file.  Before the GAP A fix,
+    that RuntimeError propagated straight to the parallel-dispatch handler,
+    which reclassified it as a provider failure and called
+    record_call(success=False), sin-binning the embedding provider.
+
+    After the fix, filesystem_vector_store.search() catches the corrupt-index
+    RuntimeError on the load_index() path and re-raises it as
+    LocalIndexNotFoundError so the dispatch guard skips sin-binning.
+    """
+
+    def test_corrupt_index_error_not_sinbinned_voyage(
+        self, manager, repo_path, health_monitor
+    ):
+        """voyage-ai raising corrupt-index RuntimeError must not sin-bin the provider."""
+        from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
+        from code_indexer.storage.hnsw_index_manager import _is_corrupt_index_error
+
+        # Simulate the error that hnswlib raises on a corrupt .bin
+        corrupt_exc = RuntimeError("Index seems to be corrupted or unsupported")
+        assert _is_corrupt_index_error(corrupt_exc), (
+            "Precondition: _is_corrupt_index_error must recognise this error"
+        )
+
+        # The search() method should reclassify this as LocalIndexNotFoundError
+        # before it reaches the dispatch handler.  We simulate that by injecting
+        # a LocalIndexNotFoundError (the post-fix shape) directly — but we also
+        # add a separate test that verifies the search() path itself does the
+        # reclassification (test_search_reclassifies_corrupt_index_as_local below).
+        def raising_voyage(*args, **kwargs):
+            if kwargs.get("provider_name") == "voyage-ai":
+                raise LocalIndexNotFoundError(
+                    "HNSW index is corrupt for collection 'main'. "
+                    "Run: cidx index --rebuild-index"
+                )
+            return _fast_search(*args, **kwargs)
+
+        with patch.object(manager, "_search_with_provider", side_effect=raising_voyage):
+            with _patch_health_monitor(health_monitor):
+                _run_parallel_query(manager, repo_path)
+
+        status = health_monitor.get_health("voyage-ai").get("voyage-ai")
+        # Either no record at all OR zero failures (provider health untouched)
+        if status is not None:
+            assert status.failed_requests == 0, (
+                f"Corrupt index must NOT sin-bin voyage-ai; "
+                f"got failed_requests={status.failed_requests}"
+            )
+
+    def test_search_reclassifies_corrupt_index_as_local(self, tmp_path):
+        """filesystem_vector_store.search() must raise LocalIndexNotFoundError for corrupt .bin.
+
+        This is the REAL production path test: we exercise FilesystemVectorStore.search()
+        with a corrupt hnsw_index.bin on disk and confirm the exception is reclassified
+        as LocalIndexNotFoundError (not a bare RuntimeError).
+        """
+        import json
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+            LocalIndexNotFoundError,
+        )
+        from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
+
+        # Build a minimal collection: collection_meta.json + corrupt hnsw_index.bin
+        # base_path is the index directory; collections live directly under it
+        index_dir = tmp_path / ".code-indexer" / "index"
+        coll_path = index_dir / "main"
+        coll_path.mkdir(parents=True)
+        (coll_path / "collection_meta.json").write_text(
+            json.dumps(
+                {
+                    "collection_name": "main",
+                    "vector_size": 4,
+                    "hnsw_indexed_count": 1,
+                }
+            )
+        )
+        # A corrupt binary (not a valid hnswlib index)
+        (coll_path / HNSWIndexManager.INDEX_FILENAME).write_bytes(b"\x00\xff\xde\xad")
+
+        store = FilesystemVectorStore(base_path=index_dir)
+
+        fake_provider = MagicMock()
+        fake_provider.generate_embedding.return_value = [0.1, 0.2, 0.3, 0.4]
+        fake_provider.get_provider_name.return_value = "voyage-ai"
+
+        with pytest.raises(LocalIndexNotFoundError):
+            store.search(
+                collection_name="main",
+                query="test",
+                embedding_provider=fake_provider,
+                limit=5,
+            )
+
+
+# ---------------------------------------------------------------------------
+# TestMissingCollectionMetaNotSinbinProvider  (GAP A fix — Bug #1236)
+# ---------------------------------------------------------------------------
+
+
+class TestMissingCollectionMetaNotSinbinProvider:
+    """A missing collection_meta.json is a LOCAL storage failure.
+
+    FilesystemVectorStore.search() opens collection_meta.json just after
+    collection_exists() returns True (the check only looks for the directory).
+    If the file is absent (e.g. half-written clone, NFS hiccup), open() raises
+    FileNotFoundError.  Before the GAP A fix, that propagated to the dispatch
+    handler as a generic exception and sin-binned the provider.
+
+    After the fix, search() catches the FileNotFoundError on that local read
+    and re-raises it as LocalIndexNotFoundError.
+    """
+
+    def test_missing_collection_meta_not_sinbinned_voyage(
+        self, manager, repo_path, health_monitor
+    ):
+        """voyage-ai raising LocalIndexNotFoundError (from missing meta) must not sin-bin."""
+        from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
+
+        def raising_voyage(*args, **kwargs):
+            if kwargs.get("provider_name") == "voyage-ai":
+                raise LocalIndexNotFoundError(
+                    "collection_meta.json missing for collection 'main'. "
+                    "Run: cidx index --rebuild-index"
+                )
+            return _fast_search(*args, **kwargs)
+
+        with patch.object(manager, "_search_with_provider", side_effect=raising_voyage):
+            with _patch_health_monitor(health_monitor):
+                _run_parallel_query(manager, repo_path)
+
+        status = health_monitor.get_health("voyage-ai").get("voyage-ai")
+        if status is not None:
+            assert status.failed_requests == 0, (
+                f"Missing collection_meta.json must NOT sin-bin voyage-ai; "
+                f"got failed_requests={status.failed_requests}"
+            )
+
+    def test_search_reclassifies_missing_meta_as_local(self, tmp_path):
+        """filesystem_vector_store.search() must raise LocalIndexNotFoundError when
+        collection_meta.json is missing at the point search() opens it.
+
+        collection_exists() reads the file, so to simulate the TOCTOU race where
+        the file disappears between the exists-check and the open(), we patch
+        collection_exists() to return True while keeping the file absent on disk.
+        That exercises the open() call in search() which raises FileNotFoundError —
+        the fix must catch that and re-raise as LocalIndexNotFoundError.
+        """
+        from code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+            LocalIndexNotFoundError,
+        )
+
+        index_dir = tmp_path / ".code-indexer" / "index"
+        index_dir.mkdir(parents=True)
+
+        store = FilesystemVectorStore(base_path=index_dir)
+
+        fake_provider = MagicMock()
+        fake_provider.generate_embedding.return_value = [0.1, 0.2, 0.3, 0.4]
+        fake_provider.get_provider_name.return_value = "voyage-ai"
+
+        # Patch collection_exists() so search() proceeds past the early-return guard
+        # even though collection_meta.json does not exist on disk.  This simulates
+        # the TOCTOU race: the file existed when the check ran but is gone by the
+        # time search() calls open().
+        with patch.object(store, "collection_exists", return_value=True):
+            with pytest.raises(LocalIndexNotFoundError):
+                store.search(
+                    collection_name="main",
+                    query="test",
+                    embedding_provider=fake_provider,
+                    limit=5,
+                )
