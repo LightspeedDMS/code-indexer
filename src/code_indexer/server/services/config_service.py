@@ -26,6 +26,7 @@ from ..auto_update.deployment_executor import (
     APPLIED_LAUNCH_CONFIG_PATH,
     LAUNCH_CONFIG_PATH,
     RESTART_SIGNAL_PATH,
+    read_execstart_flags,
 )
 
 logger = logging.getLogger(__name__)
@@ -2387,12 +2388,93 @@ class ConfigService:
             )
         return 0
 
+    def _resolve_one_bind_value(
+        self,
+        key: str,
+        execstart: dict,
+        raw_config: dict,
+        config_value: Any,
+    ) -> Any:
+        """Resolve one launch bind key (host/port/workers) with ExecStart precedence.
+
+        Bug #1232: The live ExecStart is the authoritative bind truth. Precedence:
+          1. execstart[key] — always wins when present (parsed from live ExecStart).
+          2. raw_config[key] — explicit operator value in config.json (no ExecStart).
+          3. config_value — ServerConfig default; last resort, logs a WARNING.
+
+        When execstart[key] contradicts an explicit raw_config[key], the ExecStart
+        value wins and a structured WARNING is logged describing the old/new.
+        """
+        exec_val = execstart.get(key)
+        raw_val = raw_config.get(key)  # None when key is absent from config.json
+
+        if exec_val is not None:
+            if raw_val is not None and raw_val != exec_val:
+                logger.warning(
+                    "ConfigService: launch '%s' contradiction — "
+                    "config.json=%r, live ExecStart=%r; "
+                    "preferring live ExecStart value (Bug #1232)",
+                    key,
+                    raw_val,
+                    exec_val,
+                )
+            return exec_val
+
+        if raw_val is not None:
+            # Explicitly set by operator in config.json; no ExecStart to contradict.
+            return config_value  # already correctly typed by get_config()
+
+        # Neither ExecStart nor explicit config.json — use ServerConfig default.
+        logger.warning(
+            "ConfigService: launch '%s' not found in live ExecStart or config.json; "
+            "using ServerConfig default %r (Bug #1232)",
+            key,
+            config_value,
+        )
+        return config_value
+
+    def _resolve_launch_bind_values(self, config: "ServerConfig") -> tuple:
+        """Return (host, port, workers) for launch.json via ExecStart-first precedence.
+
+        Bug #1232: reads the raw config.json dict (to detect explicit operator keys)
+        and the live systemd ExecStart (via read_execstart_flags) and applies
+        _resolve_one_bind_value for each of host, port, workers.
+        """
+        raw_config: dict = {}
+        try:
+            config_path = Path(self.config_manager.config_file_path)
+            if config_path.exists():
+                raw_config = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "ConfigService: unable to read raw config.json for launch bind "
+                "resolution; falling back to ExecStart/default precedence: %s",
+                exc,
+            )
+
+        execstart = read_execstart_flags()
+
+        host: Any = self._resolve_one_bind_value(
+            "host", execstart, raw_config, config.host
+        )
+        port: Any = self._resolve_one_bind_value(
+            "port", execstart, raw_config, config.port
+        )
+        workers: Any = self._resolve_one_bind_value(
+            "workers", execstart, raw_config, config.workers
+        )
+        return host, port, workers
+
     def materialize_launch_config(self) -> bool:
         """Write launch.json with current target launch parameters.
 
         Story #1198 AC1: Materializes {workers, log_level, host, port,
         target_restart_generation} to LAUNCH_CONFIG_PATH atomically via
         tempfile + os.replace.  Does NOT write applied_launch.json.
+
+        Bug #1232: host/port/workers are resolved via _resolve_launch_bind_values
+        which prefers the live ExecStart over config.json defaults to prevent
+        --host 0.0.0.0 from being overwritten by the ServerConfig default 127.0.0.1.
 
         Returns:
             True on success, False on any failure (fail-soft — never raises).
@@ -2403,11 +2485,12 @@ class ConfigService:
         try:
             config = self.get_config()
             target_generation = self._read_raw_launch_generation()
+            host, port, workers = self._resolve_launch_bind_values(config)
             payload = {
-                "workers": config.workers,
+                "workers": workers,
                 "log_level": config.log_level,
-                "host": config.host,
-                "port": config.port,
+                "host": host,
+                "port": port,
                 "target_restart_generation": target_generation,
             }
             launch_path = LAUNCH_CONFIG_PATH
