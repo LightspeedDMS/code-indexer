@@ -1728,7 +1728,7 @@ class CIDXDaemonService(Service):
                 return []
 
             tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.open_for_search()
+            tantivy_manager.initialize_index(create_new=False)
 
             # Extract FTS search parameters
             limit = kwargs.get("limit", 10)
