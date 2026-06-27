@@ -1549,31 +1549,63 @@ class ServerConfigManager:
         """
         return ServerConfig(server_dir=str(self.server_dir))
 
+    def _atomic_write_json(
+        self, config_dict: dict, trailing_newline: bool = False
+    ) -> None:
+        """Write config_dict as JSON to config.json atomically.
+
+        Bug #1231: write to a temp file in the SAME directory as config.json,
+        flush+fsync for durability, then os.replace() for an atomic rename.
+        On any exception (including a failed os.replace) the temp file is
+        unlinked before re-raising so no corrupt partial file is ever left behind.
+
+        Args:
+            config_dict: dict to serialise as JSON with indent=2.
+            trailing_newline: if True append a bare '\\n' after the JSON
+                (save_config_dict byte-identical contract).
+        """
+        import tempfile
+
+        self.server_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.config_file_path.parent, prefix=".cfg_tmp_"
+        )
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(config_dict, fh, indent=2)
+                if trailing_newline:
+                    fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self.config_file_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
     def save_config(self, config: ServerConfig) -> None:
         """
         Save configuration to file.
 
+        Atomic write via _atomic_write_json (Bug #1231): original config.json
+        is never truncated before the new content is durable.
+
         Args:
             config: ServerConfig object to save
         """
-        # Ensure server directory exists
-        self.server_dir.mkdir(parents=True, exist_ok=True)
-
-        # Convert config to dictionary and save as JSON
-        config_dict = asdict(config)
-
-        with open(self.config_file_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
+        self._atomic_write_json(asdict(config), trailing_newline=False)
 
     def save_config_dict(self, config_dict: dict) -> None:
         """Save a dict (not full ServerConfig) to config.json.
 
+        Atomic write via _atomic_write_json (Bug #1231).  Appends a trailing
+        '\\n' to preserve byte-identical output with the pre-fix implementation.
+
         Used by Story #578 to write bootstrap-only keys in cluster mode.
         """
-        self.server_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.config_file_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
-            f.write("\n")
+        self._atomic_write_json(config_dict, trailing_newline=True)
 
     def load_config(self) -> Optional[ServerConfig]:
         """
