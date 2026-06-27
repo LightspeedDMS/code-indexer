@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.4.0] - 2026-06-27
+
+### Fixed
+- **#1234 (corrected): pip-capability probe checked the wrong pip.** The v11.3.0 #1234 fix probed `python -m pip --version` WITHOUT sudo (resolving the service user's `~/.local` pip, e.g. 26.0.1) while the actual hnswlib/pybind11 install runs `sudo python -m pip install ...` (resolving root's SYSTEM pip, e.g. 21.3.1 on stock Rocky 9). The probe therefore reported "supports --break-system-packages" and the sudo install still failed with "no such option", aborting the auto-update at the hnswlib build. Caught on a live Rocky 9 VM (non-sudo pip 26.0.1 vs sudo pip 21.3.1). Fix: `_pip_supports_break_system_packages(python_path, use_sudo)` now probes with the SAME sudo context the install uses (both `build_custom_hnswlib` and `pip_install` call it with `use_sudo=True`); added a belt-and-suspenders retry-without-flag fallback when an install still returns "no such option: --break-system-packages". No behavior change when the install-context pip is >= 23.0.1.
+
 ## [11.3.0] - 2026-06-27
 
 Production/staging-reported correctness fixes for single-server multi-worker deployments (auto-reported by Neo + PreProdServer), found while hardening the upgrade-test release.
