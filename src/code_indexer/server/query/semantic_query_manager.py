@@ -2398,7 +2398,7 @@ class SemanticQueryManager:
 
             # Initialize Tantivy manager
             tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=False)
+            tantivy_manager.open_for_search()
 
             # Handle fuzzy flag
             effective_edit_distance = edit_distance

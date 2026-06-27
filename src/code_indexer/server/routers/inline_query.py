@@ -272,7 +272,7 @@ def register_query_routes(
                         tantivy_manager = TantivyIndexManager(
                             repo_path / ".code-indexer" / "tantivy_index"
                         )
-                        tantivy_manager.initialize_index(create_new=False)
+                        tantivy_manager.open_for_search()
 
                         # Handle fuzzy flag
                         edit_dist = request.edit_distance

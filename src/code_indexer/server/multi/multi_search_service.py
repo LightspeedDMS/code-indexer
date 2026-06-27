@@ -456,7 +456,7 @@ class MultiSearchService:
 
             # Initialize FTS manager and search
             tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=False)
+            tantivy_manager.open_for_search()
 
             # Convert language filter to list if present
             languages = [request.language] if request.language else None
