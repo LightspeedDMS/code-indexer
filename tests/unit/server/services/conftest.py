@@ -5,6 +5,7 @@ Story #310: JobTracker Class, TrackedJob Dataclass, Schema Migration (Epic #261 
 """
 
 import sqlite3
+from contextlib import ExitStack
 from unittest.mock import patch
 
 import pytest
@@ -55,11 +56,28 @@ def tracker(db_path):
 
 @pytest.fixture(autouse=True)
 def _disable_pace_maker_guard():
-    with patch("code_indexer.server.services.claude_invoker.enforce_pace_maker_config"):
-        with patch(
-            "code_indexer.server.services.research_assistant_service.enforce_pace_maker_config"
-        ):
-            yield
+    """Disable pace-maker enforcement during tests.
+
+    The research_assistant_service patch is conditional: the module requires
+    optional dependencies (e.g. bleach) that may not be installed in all
+    environments, and unittest.mock.patch only resolves a dotted path once the
+    target module is already an attribute of its parent package (i.e. imported).
+    If the module is unavailable or not yet imported, skip that patch — it is
+    safe to do so because tests that actually exercise ResearchAssistantService
+    will import the module themselves, which makes the attribute available.
+    """
+    import sys
+
+    research_svc_key = "code_indexer.server.services.research_assistant_service"
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "code_indexer.server.services.claude_invoker.enforce_pace_maker_config"
+            )
+        )
+        if research_svc_key in sys.modules:
+            stack.enter_context(patch(f"{research_svc_key}.enforce_pace_maker_config"))
+        yield
 
 
 @pytest.fixture

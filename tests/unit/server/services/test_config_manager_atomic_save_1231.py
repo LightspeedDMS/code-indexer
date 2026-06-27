@@ -287,3 +287,79 @@ class TestSuccessPathCleanup:
                 f"Temp file {p} must be in same dir as config.json ({server_dir}) "
                 "for atomic os.replace — cross-device rename is not atomic"
             )
+
+
+# ---------------------------------------------------------------------------
+# File-mode preservation tests (Bug #1231 code-review regression)
+# ---------------------------------------------------------------------------
+
+
+class TestFileModePreservation:
+    """_atomic_write_json must preserve existing file mode and use 0o644 on fresh create.
+
+    Bug: tempfile.mkstemp creates files with mode 0600.  After os.replace the
+    resulting config.json is 0600.  In deployments where the server and the
+    auto-updater run as different OS users (Bug #879), a 0600 file owned by one
+    user is unreadable by the other.
+    """
+
+    def test_resave_preserves_mode_0644(self, tmp_path: Path) -> None:
+        """Existing config.json at 0644 -> re-save -> mode still 0644."""
+        import os
+
+        server_dir = tmp_path / "server"
+        mgr = _make_manager(server_dir)
+
+        config_path = server_dir / "config.json"
+        mgr.save_config_dict({"server_dir": str(server_dir), "host": "127.0.0.1"})
+        os.chmod(config_path, 0o644)
+
+        # Re-save: must preserve 0644, NOT create 0600 via mkstemp default
+        mgr.save_config_dict({"server_dir": str(server_dir), "host": "192.168.1.1"})
+
+        actual_mode = os.stat(config_path).st_mode & 0o777
+        assert actual_mode == 0o644, (
+            f"Bug #1231: re-save must preserve existing 0644 mode. "
+            f"Got: {oct(actual_mode)}"
+        )
+
+    def test_resave_preserves_mode_0640(self, tmp_path: Path) -> None:
+        """Existing config.json at 0640 -> re-save -> mode preserved as 0640.
+
+        This proves true preservation, not a hardcoded 0644.
+        """
+        import os
+
+        server_dir = tmp_path / "server"
+        mgr = _make_manager(server_dir)
+
+        config_path = server_dir / "config.json"
+        mgr.save_config_dict({"server_dir": str(server_dir), "host": "127.0.0.1"})
+        os.chmod(config_path, 0o640)
+
+        # Re-save: must preserve 0640
+        mgr.save_config_dict({"server_dir": str(server_dir), "host": "10.0.0.1"})
+
+        actual_mode = os.stat(config_path).st_mode & 0o777
+        assert actual_mode == 0o640, (
+            f"Bug #1231: re-save must preserve existing 0640 mode (true preservation, "
+            f"not a hardcoded 0644). Got: {oct(actual_mode)}"
+        )
+
+    def test_fresh_create_mode_is_0644(self, tmp_path: Path) -> None:
+        """Fresh create (no pre-existing config.json) -> mode is 0644, NOT 0600."""
+        import os
+
+        server_dir = tmp_path / "server"
+        mgr = _make_manager(server_dir)
+
+        config_path = server_dir / "config.json"
+        assert not config_path.exists(), "Precondition: file must not exist before test"
+
+        mgr.save_config_dict({"server_dir": str(server_dir), "host": "127.0.0.1"})
+
+        actual_mode = os.stat(config_path).st_mode & 0o777
+        assert actual_mode == 0o644, (
+            f"Bug #1231: fresh create must use mode 0644, not mkstemp default 0600. "
+            f"Got: {oct(actual_mode)}"
+        )

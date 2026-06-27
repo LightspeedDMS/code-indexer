@@ -2422,7 +2422,14 @@ class ConfigService:
 
         if raw_val is not None:
             # Explicitly set by operator in config.json; no ExecStart to contradict.
-            return config_value  # already correctly typed by get_config()
+            # Bootstrap-only assumption: host/port/workers are read from config.json by
+            # ServerConfigManager before the DB is available, so config_value (the
+            # already-typed ServerConfig field) equals raw_val in practice.  Returning
+            # config_value rather than raw_val is intentional — it carries the correct
+            # Python type from get_config().  If a non-bootstrap key were ever added to
+            # this resolver, raw_val vs config_value could diverge; add a new resolver
+            # path rather than reusing this one.
+            return config_value  # typed by get_config(); safe for bootstrap-only keys
 
         # Neither ExecStart nor explicit config.json — use ServerConfig default.
         logger.warning(

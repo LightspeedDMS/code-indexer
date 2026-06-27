@@ -1577,6 +1577,15 @@ class ServerConfigManager:
                     fh.write("\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+            # Preserve existing file mode so the auto-updater (which may run as
+            # a different OS user — see Bug #879) can still read config.json.
+            # mkstemp always creates files at 0600; we must correct that before
+            # the atomic rename.
+            if self.config_file_path.exists():
+                target_mode = os.stat(self.config_file_path).st_mode & 0o777
+            else:
+                target_mode = 0o644  # faithful to the prior umask-default behaviour
+            os.chmod(tmp_path, target_mode)
             os.replace(tmp_path, self.config_file_path)
         except Exception:
             try:
