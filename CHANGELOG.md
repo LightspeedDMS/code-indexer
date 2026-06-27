@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.2.0] - 2026-06-27
+
+Multi-worker hardening + deploy-robustness fixes, found by a full end-to-end upgrade test (release v10.141.0 -> staging) on a fresh Rocky 9 VM running uvicorn with 4 workers.
+
+### Fixed
+- **Concurrent FTS queries fail with Tantivy `LockBusy` under multi-worker (#1233).** Every server FTS query called `TantivyIndexManager.initialize_index(create_new=False)`, which creates a Tantivy `IndexWriter` and takes the exclusive `.tantivy-writer.lock`. Under multi-worker uvicorn (separate processes, enabled by the #1167 workers un-pin) concurrent FTS reads from different workers collided on that lock -> ~67% HTTP 500 (12 concurrent -> 8 failed; sequential clean). Added `TantivyIndexManager.open_for_search()` -- a read-only path that opens the index via `Index.open` + a reader and NEVER creates a writer/takes the writer lock -- and wired it into the three server FTS read sites (`server/query/semantic_query_manager.py`, `server/routers/inline_query.py`, `server/multi/multi_search_service.py`). The write/commit path (golden-repo CoW cleanup) still uses the writer. Search results are unchanged; the daemon FTS path was already correct (it reuses a cached searcher) and is unchanged.
+- **Auto-update hnswlib build assumes pip>=23 (`--break-system-packages`) -> deploy fails on stock Rocky 9 (#1234).** The deployer's hnswlib/pybind11 rebuild ran `pip install --break-system-packages` against the system python; on a fresh Rocky 9 box (system pip 21.3.1) that flag does not exist, so the auto-update deploy failed at the build step and never completed. Added `_pip_supports_break_system_packages()` (parses `pip --version`, true only for pip>=23.0.1, fail-safe false) and made the flag conditional at all three `pip install` sites in `deployment_executor.py`. No behavior change on pip>=23.
+
 ## [11.1.0] - 2026-06-27
 
 Upgrade-safety hardening of the DB-centralized runtime-config path (the feature that moves bootstrap settings into the database), found by a focused architecture review of the automatic auto-updater upgrade path.
