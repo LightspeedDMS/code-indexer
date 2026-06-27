@@ -959,15 +959,26 @@ class DeploymentExecutor:
             )
             return False
 
-    def _pip_supports_break_system_packages(self, python_path: str) -> bool:
-        """Return True if the given pip installation supports --break-system-packages.
+    def _pip_supports_break_system_packages(
+        self, python_path: str, use_sudo: bool = False
+    ) -> bool:
+        """Return True if the pip that will run the install supports --break-system-packages.
 
         The flag was introduced in pip 23.0.1.  On stock Rocky 9 the system pip
         is 21.3.1, which rejects the flag with "no such option", causing the
         hnswlib build step to fail (Bug #1234).
 
+        IMPORTANT (live-VM fix): the probe MUST use the same privilege context as
+        the install.  Both build_custom_hnswlib and pip_install run their installs
+        via ``sudo python3 -m pip install ...``.  On Rocky 9 the non-sudo user pip
+        may be 26.x (probe would return True) while the sudo/system pip is 21.3.1
+        (should return False).  Pass ``use_sudo=True`` when the corresponding
+        install command starts with ``sudo``.
+
         Args:
             python_path: Path to the Python interpreter whose pip to probe.
+            use_sudo: When True, prefix the pip --version probe with ``sudo`` so
+                      the probe resolves the same pip binary the install will use.
 
         Returns:
             True if pip version >= 23.0.1, False otherwise or on any error.
@@ -975,8 +986,14 @@ class DeploymentExecutor:
             the flag is silently omitted rather than breaking the install.
         """
         try:
+            cmd = (["sudo"] if use_sudo else []) + [
+                python_path,
+                "-m",
+                "pip",
+                "--version",
+            ]
             result = subprocess.run(
-                [python_path, "-m", "pip", "--version"],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -1119,7 +1136,13 @@ class DeploymentExecutor:
 
         try:
             python_path = self._get_server_python()
-            break_sys_pkg = self._pip_supports_break_system_packages(python_path)
+            # Probe with use_sudo=True: both installs below run via sudo, so we must
+            # check the SAME pip binary (system pip) that sudo will resolve.
+            # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
+            # True) while the actual sudo install used the system pip (21.3.1, False).
+            break_sys_pkg = self._pip_supports_break_system_packages(
+                python_path, use_sudo=True
+            )
 
             # Install pybind11 first - required because setup.py imports it at module level
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
@@ -1133,6 +1156,24 @@ class DeploymentExecutor:
                 text=True,
                 timeout=120,
             )
+
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                pybind_result.returncode != 0
+                and "--break-system-packages" in pybind11_cmd
+                and "no such option" in pybind_result.stderr
+            ):
+                logger.warning(
+                    "pybind11 install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in pybind11_cmd if c != "--break-system-packages"]
+                pybind_result = subprocess.run(
+                    retry_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
 
             if pybind_result.returncode != 0:
                 logger.error(
@@ -1160,6 +1201,25 @@ class DeploymentExecutor:
                 text=True,
                 timeout=300,  # 5 minute timeout for compilation
             )
+
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                result.returncode != 0
+                and "--break-system-packages" in hnswlib_cmd
+                and "no such option" in result.stderr
+            ):
+                logger.warning(
+                    "hnswlib install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in hnswlib_cmd if c != "--break-system-packages"]
+                result = subprocess.run(
+                    retry_cmd,
+                    cwd=hnswlib_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
 
             if result.returncode != 0:
                 logger.error(
@@ -1736,9 +1796,13 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
+            # Probe with use_sudo=True: the install runs via sudo, so the probe must
+            # check the same pip binary (system pip) that sudo will resolve.
+            # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
+            # True) while the actual sudo install used the system pip (21.3.1, False).
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
             pip_cmd = ["sudo", python_path, "-m", "pip", "install"]
-            if self._pip_supports_break_system_packages(python_path):
+            if self._pip_supports_break_system_packages(python_path, use_sudo=True):
                 pip_cmd.append("--break-system-packages")
             pip_cmd.extend(["-e", "."])
             result = subprocess.run(
@@ -1747,6 +1811,24 @@ class DeploymentExecutor:
                 capture_output=True,
                 text=True,
             )
+
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                result.returncode != 0
+                and "--break-system-packages" in pip_cmd
+                and "no such option" in result.stderr
+            ):
+                logger.warning(
+                    "pip install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
+                result = subprocess.run(
+                    retry_cmd,
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                )
 
             if result.returncode != 0:
                 logger.error(
