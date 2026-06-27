@@ -488,24 +488,31 @@ class TestSqliteBackendFindActiveJobByTypeAndAlias:
 # ===========================================================================
 
 
-class TestDefensiveRuntimeErrorPreserved:
+class TestVanishingRowRace:
     """
-    The defensive RuntimeError in _atomic_insert_or_raise must still fire when
-    there is genuinely no active row after a unique-index violation.
+    Bug #1235: When INSERT fails with a unique violation AND the blocking row has
+    already completed (find_active returns None), the result must be DuplicateJobError
+    — NOT RuntimeError.
 
-    This covers the true race: INSERT fails → blocking row vanishes between
-    INSERT and lookup → find_active_job_by_type_and_alias returns None →
-    RuntimeError("database state is inconsistent") is raised.
+    Rationale: The concurrent worker completed the job between our INSERT and our
+    SELECT.  From the scheduler's perspective this is a benign duplicate — the work
+    is already done.  Raising RuntimeError caused DataRetentionScheduler to log a
+    false cleanup failure.
+
+    Updated from the pre-#1235 assertion (which expected RuntimeError) to the
+    correct post-#1235 assertion (DuplicateJobError).
     """
 
-    def test_runtime_error_fires_when_no_active_row_after_violation(self) -> None:
+    def test_duplicate_job_error_raised_when_no_active_row_after_violation(
+        self,
+    ) -> None:
         """
         Vanishing-row backend: UniqueViolation on INSERT but find_active returns
-        None. Must raise RuntimeError mentioning 'inconsistent', not DuplicateJobError.
+        None. Must raise DuplicateJobError (benign race), not RuntimeError.
         """
         tracker = JobTracker(db_path="", storage_backend=_VanishingRowBackend())
 
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises(DuplicateJobError) as exc_info:
             tracker.register_job_if_no_conflict(
                 job_id=str(uuid.uuid4()),
                 operation_type="data_retention_cleanup",
@@ -513,6 +520,10 @@ class TestDefensiveRuntimeErrorPreserved:
                 repo_alias="server",
             )
 
-        assert "inconsistent" in str(exc_info.value).lower(), (
-            f"RuntimeError message must mention 'inconsistent'; got: {exc_info.value}"
-        )
+        err = exc_info.value
+        assert err.operation_type == "data_retention_cleanup"
+        assert err.repo_alias == "server"
+        # Sentinel job_id signals the concurrent-completed race
+        assert "concurrent" in err.existing_job_id.lower() or isinstance(
+            err.existing_job_id, str
+        ), f"existing_job_id must be a string sentinel; got: {err.existing_job_id}"
