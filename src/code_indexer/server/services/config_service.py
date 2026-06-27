@@ -215,6 +215,7 @@ class ConfigService:
         else:
             # First boot or pre-migration: seed DB from config.json
             config = self.get_config()
+            self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
             runtime_dict = self._extract_runtime_dict(config)
             if runtime_dict:
                 self._save_runtime_to_sqlite(runtime_dict)
@@ -2388,64 +2389,20 @@ class ConfigService:
             )
         return 0
 
-    def _resolve_one_bind_value(
-        self,
-        key: str,
-        execstart: dict,
-        raw_config: dict,
-        config_value: Any,
-    ) -> Any:
-        """Resolve one launch bind key (host/port/workers) with ExecStart precedence.
+    def _backfill_launch_keys_from_execstart(self, config: "ServerConfig") -> None:
+        """Gap-fill host/port/workers from the live ExecStart at first-boot seed.
 
-        Bug #1232: The live ExecStart is the authoritative bind truth. Precedence:
-          1. execstart[key] — always wins when present (parsed from live ExecStart).
-          2. raw_config[key] — explicit operator value in config.json (no ExecStart).
-          3. config_value — ServerConfig default; last resort, logs a WARNING.
+        Bug #1232 correct fix layer: called ONLY at first-boot centralization
+        (initialize_runtime_db / _seed_runtime_to_pg), NOT in materialize_launch_config.
 
-        When execstart[key] contradicts an explicit raw_config[key], the ExecStart
-        value wins and a structured WARNING is logged describing the old/new.
-        """
-        exec_val = execstart.get(key)
-        raw_val = raw_config.get(key)  # None when key is absent from config.json
+        Precedence — gap-fill only, never overrides explicit config.json values:
+          1. key present in config.json  → leave config value unchanged (operator intent).
+          2. key absent from config.json → fill from live ExecStart when available.
+          3. neither config.json nor ExecStart → keep ServerConfig default + WARNING.
 
-        if exec_val is not None:
-            if raw_val is not None and raw_val != exec_val:
-                logger.warning(
-                    "ConfigService: launch '%s' contradiction — "
-                    "config.json=%r, live ExecStart=%r; "
-                    "preferring live ExecStart value (Bug #1232)",
-                    key,
-                    raw_val,
-                    exec_val,
-                )
-            return exec_val
-
-        if raw_val is not None:
-            # Explicitly set by operator in config.json; no ExecStart to contradict.
-            # Bootstrap-only assumption: host/port/workers are read from config.json by
-            # ServerConfigManager before the DB is available, so config_value (the
-            # already-typed ServerConfig field) equals raw_val in practice.  Returning
-            # config_value rather than raw_val is intentional — it carries the correct
-            # Python type from get_config().  If a non-bootstrap key were ever added to
-            # this resolver, raw_val vs config_value could diverge; add a new resolver
-            # path rather than reusing this one.
-            return config_value  # typed by get_config(); safe for bootstrap-only keys
-
-        # Neither ExecStart nor explicit config.json — use ServerConfig default.
-        logger.warning(
-            "ConfigService: launch '%s' not found in live ExecStart or config.json; "
-            "using ServerConfig default %r (Bug #1232)",
-            key,
-            config_value,
-        )
-        return config_value
-
-    def _resolve_launch_bind_values(self, config: "ServerConfig") -> tuple:
-        """Return (host, port, workers) for launch.json via ExecStart-first precedence.
-
-        Bug #1232: reads the raw config.json dict (to detect explicit operator keys)
-        and the live systemd ExecStart (via read_execstart_flags) and applies
-        _resolve_one_bind_value for each of host, port, workers.
+        Mutates the passed config object AND self._config so that the subsequent
+        _extract_runtime_dict (seeds the DB row) and _strip_config_file_to_bootstrap
+        (which re-reads via get_config()) both see the corrected values.
         """
         raw_config: dict = {}
         try:
@@ -2454,23 +2411,36 @@ class ConfigService:
                 raw_config = json.loads(config_path.read_text())
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning(
-                "ConfigService: unable to read raw config.json for launch bind "
-                "resolution; falling back to ExecStart/default precedence: %s",
+                "ConfigService: unable to read raw config.json for ExecStart "
+                "backfill at first-boot seed; skipping gap-fill: %s",
                 exc,
             )
+            return
 
         execstart = read_execstart_flags()
 
-        host: Any = self._resolve_one_bind_value(
-            "host", execstart, raw_config, config.host
-        )
-        port: Any = self._resolve_one_bind_value(
-            "port", execstart, raw_config, config.port
-        )
-        workers: Any = self._resolve_one_bind_value(
-            "workers", execstart, raw_config, config.workers
-        )
-        return host, port, workers
+        for key in ("host", "port", "workers"):
+            if key in raw_config:
+                # Explicit operator value in config.json — leave as-is.
+                continue
+            exec_val = execstart.get(key)
+            if exec_val is not None:
+                # Gap-fill from ExecStart (key absent from config.json).
+                setattr(config, key, exec_val)
+            else:
+                # Neither config.json nor ExecStart — keep ServerConfig default.
+                logger.warning(
+                    "ConfigService: launch key '%s' absent from config.json and "
+                    "live ExecStart; seeding runtime DB with ServerConfig default "
+                    "%r (Bug #1232)",
+                    key,
+                    getattr(config, key),
+                )
+
+        # Publish mutated config so _extract_runtime_dict and
+        # _strip_config_file_to_bootstrap (which calls get_config()) both see
+        # the corrected values.
+        self._config = config
 
     def materialize_launch_config(self) -> bool:
         """Write launch.json with current target launch parameters.
@@ -2479,9 +2449,11 @@ class ConfigService:
         target_restart_generation} to LAUNCH_CONFIG_PATH atomically via
         tempfile + os.replace.  Does NOT write applied_launch.json.
 
-        Bug #1232: host/port/workers are resolved via _resolve_launch_bind_values
-        which prefers the live ExecStart over config.json defaults to prevent
-        --host 0.0.0.0 from being overwritten by the ServerConfig default 127.0.0.1.
+        Bug #1232: host/port/workers come directly from the desired state
+        (self._config), which reflects the admin's intent. Gap-filling from the
+        live ExecStart happens ONLY at first-boot seed via
+        _backfill_launch_keys_from_execstart(), NOT here — so admin changes via
+        the Web UI are always honored.
 
         Returns:
             True on success, False on any failure (fail-soft — never raises).
@@ -2492,12 +2464,11 @@ class ConfigService:
         try:
             config = self.get_config()
             target_generation = self._read_raw_launch_generation()
-            host, port, workers = self._resolve_launch_bind_values(config)
             payload = {
-                "workers": workers,
+                "workers": config.workers,
                 "log_level": config.log_level,
-                "host": host,
-                "port": port,
+                "host": config.host,
+                "port": config.port,
                 "target_restart_generation": target_generation,
             }
             launch_path = LAUNCH_CONFIG_PATH
@@ -2793,6 +2764,7 @@ class ConfigService:
         """Seed PG server_config table from current config (first boot)."""
         assert self._pool is not None
         config = self.get_config()
+        self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
         runtime_dict = self._extract_runtime_dict(config)
 
         from psycopg.rows import dict_row
