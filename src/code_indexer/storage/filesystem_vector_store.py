@@ -28,6 +28,20 @@ from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
 
+
+class LocalIndexNotFoundError(RuntimeError):
+    """Raised when a local HNSW index file is missing for a collection.
+
+    This is a storage-layer error: the embedding provider completed successfully
+    but the on-disk HNSW index does not exist.  Callers that discriminate between
+    provider failures and local-storage failures (e.g. the parallel-query health
+    monitor) must catch this exception type separately from generic provider errors
+    so that a missing local index does not sin-bin the embedding provider.
+
+    Remediation: run ``cidx index --rebuild-index`` in the affected repository.
+    """
+
+
 # Story #1110 (S6 Chunk B): module-level lazy references so tests can patch them
 # at `code_indexer.storage.filesystem_vector_store.*`.  Both are server-only; the
 # CLI path never enters the `if parallel_executor is not None` branch with these
@@ -2748,7 +2762,7 @@ class FilesystemVectorStore:
 
         # Validate results
         if hnsw_index is None:
-            raise RuntimeError(
+            raise LocalIndexNotFoundError(
                 f"HNSW index not found for collection '{collection_name}'. "
                 f"Run: cidx index --rebuild-index"
             )
