@@ -301,6 +301,46 @@ class TantivyIndexManager:
             logger.error(f"Failed to initialize Tantivy index: {e}")
             raise
 
+    def open_for_search(self) -> None:
+        """Open the Tantivy index for read-only search WITHOUT creating an IndexWriter.
+
+        This is the correct entry point for the server FTS query path.  The server
+        creates one TantivyIndexManager per query across potentially many concurrent
+        uvicorn workers (separate OS processes).  Using initialize_index() on that
+        path is wrong because it always calls self._index.writer(...) which takes the
+        exclusive .tantivy-writer.lock — causing LockBusy failures when multiple
+        workers attempt concurrent FTS reads (Bug #1233).
+
+        Invariants:
+          - self._index is set so search() works normally.
+          - self._schema is set so _build_search_query() works normally.
+          - self._writer remains None — the writer lockfile is NEVER acquired.
+
+        Raises:
+            FileNotFoundError: If the index directory does not exist.
+            RuntimeError: If the Tantivy index cannot be opened (e.g. corrupted).
+        """
+        if not self.index_dir.exists():
+            raise FileNotFoundError(
+                f"FTS index directory does not exist: {self.index_dir}"
+            )
+
+        try:
+            # Open existing index without creating/recreating the schema or writer.
+            self._index = self._tantivy.Index.open(str(self.index_dir))
+            # Rebuild the schema from scratch so _build_search_query() has a valid
+            # schema object — tantivy-py's Index.open() does not expose the schema
+            # directly in a way compatible with our query-building helpers.
+            self._create_schema()
+        except Exception as e:
+            logger.error(f"Failed to open Tantivy index for search: {e}")
+            raise RuntimeError(f"Cannot open FTS index at {self.index_dir}: {e}") from e
+
+        # Explicitly ensure writer is not set (defensive — _create_schema never
+        # touches _writer, but make the invariant visible).
+        assert self._writer is None, "open_for_search() must never create a writer"
+        logger.debug(f"Opened Tantivy index for read-only search at {self.index_dir}")
+
     def get_writer_heap_size(self) -> int:
         """
         Get the configured writer heap size.

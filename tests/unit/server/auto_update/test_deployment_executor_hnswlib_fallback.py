@@ -186,13 +186,22 @@ class TestBuildCustomHnswlibWithPath:
             ),
             patch.object(executor, "_ensure_build_dependencies", return_value=True),
         ):
-            mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
+            # Return a valid pip --version string so the capability probe works.
+            # Call order (Bug #1234 fix probes pip --version ONCE at the top):
+            #   [0] pip --version probe  (single probe, result reused for both installs)
+            #   [1] pybind11 install
+            #   [2] hnswlib install      <- assert cwd here
+            mock_run.return_value = Mock(
+                returncode=0,
+                stderr="",
+                stdout="pip 23.1 from /usr/local/lib/python3/dist-packages/pip (python 3.9)\n",
+            )
 
             result = executor.build_custom_hnswlib(hnswlib_path=custom_path)
 
             assert result is True
-            # Verify pip install ran in custom_path
-            pip_install_call = mock_run.call_args_list[1]  # Second call after pybind11
+            # Verify pip install ran in custom_path (index 2 = hnswlib install)
+            pip_install_call = mock_run.call_args_list[2]
             assert pip_install_call[1]["cwd"] == custom_path
 
     def test_build_custom_hnswlib_uses_default_path_when_none(
@@ -210,13 +219,22 @@ class TestBuildCustomHnswlibWithPath:
             ),
             patch.object(executor, "_ensure_build_dependencies", return_value=True),
         ):
-            mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
+            # Return a valid pip --version string so the capability probe works.
+            # Call order (Bug #1234 fix probes pip --version ONCE at the top):
+            #   [0] pip --version probe  (single probe, result reused for both installs)
+            #   [1] pybind11 install
+            #   [2] hnswlib install      <- assert cwd here
+            mock_run.return_value = Mock(
+                returncode=0,
+                stderr="",
+                stdout="pip 23.1 from /usr/local/lib/python3/dist-packages/pip (python 3.9)\n",
+            )
 
             result = executor.build_custom_hnswlib(hnswlib_path=None)
 
             assert result is True
-            # Verify pip install ran in default_path
-            pip_install_call = mock_run.call_args_list[1]
+            # Verify pip install ran in default_path (index 2 = hnswlib install)
+            pip_install_call = mock_run.call_args_list[2]
             assert pip_install_call[1]["cwd"] == default_path
 
 

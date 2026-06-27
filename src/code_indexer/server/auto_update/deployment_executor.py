@@ -959,6 +959,57 @@ class DeploymentExecutor:
             )
             return False
 
+    def _pip_supports_break_system_packages(self, python_path: str) -> bool:
+        """Return True if the given pip installation supports --break-system-packages.
+
+        The flag was introduced in pip 23.0.1.  On stock Rocky 9 the system pip
+        is 21.3.1, which rejects the flag with "no such option", causing the
+        hnswlib build step to fail (Bug #1234).
+
+        Args:
+            python_path: Path to the Python interpreter whose pip to probe.
+
+        Returns:
+            True if pip version >= 23.0.1, False otherwise or on any error.
+            Conservatively returns False on any parse/subprocess failure so that
+            the flag is silently omitted rather than breaking the install.
+        """
+        try:
+            result = subprocess.run(
+                [python_path, "-m", "pip", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return False
+
+            # Output format: "pip X.Y.Z from /path (python N.M)"
+            parts = result.stdout.strip().split()
+            if len(parts) < 2 or parts[0] != "pip":
+                return False
+
+            raw_version = parts[1]
+            # Parse major.minor.patch (or major.minor) — ignore pre/post suffixes
+            version_parts = raw_version.split(".")
+            major = int(version_parts[0])
+            minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+            patch = int(version_parts[2]) if len(version_parts) > 2 else 0
+
+            # Minimum version that supports --break-system-packages: 23.0.1
+            if major > 23:
+                return True
+            if major == 23:
+                if minor > 0:
+                    return True
+                if minor == 0 and patch >= 1:
+                    return True
+            return False
+
+        except Exception:
+            # Swallow all errors — conservatively omit the flag
+            return False
+
     def _ensure_build_dependencies(self) -> bool:
         """Ensure C++ build dependencies are installed for compiling hnswlib.
 
@@ -1068,19 +1119,16 @@ class DeploymentExecutor:
 
         try:
             python_path = self._get_server_python()
+            break_sys_pkg = self._pip_supports_break_system_packages(python_path)
 
             # Install pybind11 first - required because setup.py imports it at module level
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+            pybind11_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            if break_sys_pkg:
+                pybind11_cmd.append("--break-system-packages")
+            pybind11_cmd.append("pybind11")
             pybind_result = subprocess.run(
-                [
-                    "sudo",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--break-system-packages",
-                    "pybind11",
-                ],
+                pybind11_cmd,
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -1101,18 +1149,12 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+            hnswlib_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            if break_sys_pkg:
+                hnswlib_cmd.append("--break-system-packages")
+            hnswlib_cmd.extend(["--force-reinstall", "--no-deps", "."])
             result = subprocess.run(
-                [
-                    "sudo",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--break-system-packages",
-                    "--force-reinstall",
-                    "--no-deps",
-                    ".",
-                ],
+                hnswlib_cmd,
                 cwd=hnswlib_path,
                 capture_output=True,
                 text=True,
@@ -1695,17 +1737,12 @@ class DeploymentExecutor:
         try:
             python_path = self._get_server_python()
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+            pip_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            if self._pip_supports_break_system_packages(python_path):
+                pip_cmd.append("--break-system-packages")
+            pip_cmd.extend(["-e", "."])
             result = subprocess.run(
-                [
-                    "sudo",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--break-system-packages",
-                    "-e",
-                    ".",
-                ],
+                pip_cmd,
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,

@@ -16,10 +16,29 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .connection_pool import ConnectionPool
+
+# ---------------------------------------------------------------------------
+# Deadlock retry constants (Bug #1235 GAP B)
+# ---------------------------------------------------------------------------
+
+# PG SQLSTATE codes that indicate a transient locking conflict — safe to retry.
+_RETRYABLE_PG_SQLSTATES = frozenset(
+    {
+        "40P01",  # deadlock_detected
+        "40001",  # serialization_failure
+    }
+)
+
+# Maximum retry attempts for update_job on a transient PG locking failure.
+_UPDATE_JOB_MAX_RETRIES = 3
+
+# Base backoff in seconds; each retry waits attempt_index * _UPDATE_JOB_BACKOFF_BASE.
+_UPDATE_JOB_BACKOFF_BASE = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -383,9 +402,51 @@ class BackgroundJobsPostgresBackend:
             params.append(executing_node)
 
         sql = f"UPDATE background_jobs SET {', '.join(updates)} {where}"
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
+
+        # Bug #1235 GAP B: PG deadlock/serialization failures on background_jobs
+        # writes are transient under multi-worker concurrent access.  Retry up to
+        # _UPDATE_JOB_MAX_RETRIES times with a fresh connection each attempt.
+        # Non-retryable errors propagate immediately without retry.
+        #
+        # Detection: psycopg3 exposes the SQLSTATE as exc.sqlstate on its error
+        # classes.  We also accept the instance-level attribute for forward compat.
+        def _is_retryable(exc: BaseException) -> bool:
+            """Return True if *exc* is a transient PG locking error worth retrying."""
+            sqlstate = getattr(exc, "sqlstate", None)
+            if sqlstate in _RETRYABLE_PG_SQLSTATES:
+                return True
+            # Fallback: check via psycopg error class names (import may fail in tests)
+            try:
+                import psycopg.errors as _pge
+
+                return isinstance(
+                    exc, (_pge.DeadlockDetected, _pge.SerializationFailure)
+                )
+            except ImportError:
+                return False
+
+        last_exc: Optional[BaseException] = None
+        for attempt in range(_UPDATE_JOB_MAX_RETRIES):
+            try:
+                with self._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql, params)
+                return  # success — exit retry loop
+            except Exception as exc:
+                if not _is_retryable(exc):
+                    raise  # non-transient — propagate immediately
+                last_exc = exc
+                if attempt < _UPDATE_JOB_MAX_RETRIES - 1:
+                    logger.warning(
+                        "update_job: PG deadlock/serialization on attempt %d "
+                        "(job_id=%s, sqlstate=%s); retrying",
+                        attempt + 1,
+                        job_id,
+                        getattr(exc, "sqlstate", type(exc).__name__),
+                    )
+                    time.sleep((attempt + 1) * _UPDATE_JOB_BACKOFF_BASE)
+        # All retries exhausted — re-raise the last deadlock/serialization error
+        raise last_exc  # type: ignore[misc]
 
     def fail_orphaned_jobs(self, error: str = "Orphaned by server restart") -> int:
         """Mark all running/pending jobs as failed. Called on startup."""

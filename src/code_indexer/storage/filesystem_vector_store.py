@@ -28,6 +28,20 @@ from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 from .hnsw_stale_logger import log_hnsw_stale
 
+
+class LocalIndexNotFoundError(RuntimeError):
+    """Raised when a local HNSW index file is missing for a collection.
+
+    This is a storage-layer error: the embedding provider completed successfully
+    but the on-disk HNSW index does not exist.  Callers that discriminate between
+    provider failures and local-storage failures (e.g. the parallel-query health
+    monitor) must catch this exception type separately from generic provider errors
+    so that a missing local index does not sin-bin the embedding provider.
+
+    Remediation: run ``cidx index --rebuild-index`` in the affected repository.
+    """
+
+
 # Story #1110 (S6 Chunk B): module-level lazy references so tests can patch them
 # at `code_indexer.storage.filesystem_vector_store.*`.  Both are server-only; the
 # CLI path never enters the `if parallel_executor is not None` branch with these
@@ -2553,10 +2567,20 @@ class FilesystemVectorStore:
         if not self.collection_exists(collection_name, subdirectory):
             return ([], timing) if return_timing else []
 
-        # Load metadata to get vector size
+        # Load metadata to get vector size.
+        # A missing collection_meta.json (TOCTOU race, half-written clone, NFS hiccup)
+        # is a LOCAL storage failure — not a provider failure.  Catch FileNotFoundError
+        # here and re-raise as LocalIndexNotFoundError so the parallel-dispatch handler
+        # in semantic_query_manager.py skips sin-binning the embedding provider.
         meta_file = collection_path / "collection_meta.json"
-        with open(meta_file) as f:
-            metadata = json.load(f)
+        try:
+            with open(meta_file) as f:
+                metadata = json.load(f)
+        except FileNotFoundError as exc:
+            raise LocalIndexNotFoundError(
+                f"collection_meta.json missing for collection '{collection_name}'. "
+                f"Run: cidx index --rebuild-index"
+            ) from exc
 
         # === CHECK HNSW STALENESS ===
         # Bug #668: NEVER rebuild HNSW during a query. Rebuilding is the indexer's
@@ -2599,10 +2623,26 @@ class FilesystemVectorStore:
                 cache_key = str(collection_path.resolve())
 
                 def hnsw_loader():
-                    """Loader function for cache miss."""
-                    index = hnsw_manager.load_index(
-                        collection_path, max_elements=100000
-                    )
+                    """Loader function for cache miss.
+
+                    Bug #1236 GAP A: a corrupt .bin raises RuntimeError from hnswlib.
+                    Reclassify as LocalIndexNotFoundError so the parallel-dispatch
+                    handler in semantic_query_manager.py does NOT sin-bin the provider.
+                    """
+                    from .hnsw_index_manager import _is_corrupt_index_error as _cic
+
+                    try:
+                        index = hnsw_manager.load_index(
+                            collection_path, max_elements=100000
+                        )
+                    except RuntimeError as _exc:
+                        if _cic(_exc):
+                            raise LocalIndexNotFoundError(
+                                f"HNSW index is corrupt for collection "
+                                f"'{collection_name}'. "
+                                f"Run: cidx index --rebuild-index"
+                            ) from _exc
+                        raise
                     # Load ID mapping from metadata for cache entry
                     id_mapping = hnsw_manager._load_id_mapping(collection_path)
                     return index, id_mapping
@@ -2612,10 +2652,23 @@ class FilesystemVectorStore:
                     cache_key, hnsw_loader
                 )
             else:
-                # No cache - load directly (original behavior)
-                hnsw_index = hnsw_manager.load_index(
-                    collection_path, max_elements=100000
-                )
+                # No cache - load directly (original behavior).
+                # Bug #1236 GAP A: a corrupt .bin raises RuntimeError from hnswlib.
+                # Reclassify as LocalIndexNotFoundError so the parallel-dispatch handler
+                # in semantic_query_manager.py does NOT sin-bin the embedding provider.
+                from .hnsw_index_manager import _is_corrupt_index_error as _cic
+
+                try:
+                    hnsw_index = hnsw_manager.load_index(
+                        collection_path, max_elements=100000
+                    )
+                except RuntimeError as _exc:
+                    if _cic(_exc):
+                        raise LocalIndexNotFoundError(
+                            f"HNSW index is corrupt for collection '{collection_name}'. "
+                            f"Run: cidx index --rebuild-index"
+                        ) from _exc
+                    raise
 
             hnsw_load_ms = (time.time() - t_hnsw) * 1000
 
@@ -2748,7 +2801,7 @@ class FilesystemVectorStore:
 
         # Validate results
         if hnsw_index is None:
-            raise RuntimeError(
+            raise LocalIndexNotFoundError(
                 f"HNSW index not found for collection '{collection_name}'. "
                 f"Run: cidx index --rebuild-index"
             )

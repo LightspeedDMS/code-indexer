@@ -57,6 +57,14 @@ class TrackedJob:
 
 
 # ---------------------------------------------------------------------------
+# Sentinel job_id used by _atomic_insert_or_raise when a unique-violation fires
+# but the blocking row has already completed (fell outside the partial-index
+# predicate) by the time the follow-up SELECT runs.  Callers (e.g.
+# DataRetentionScheduler) see a DuplicateJobError — not a RuntimeError — so they
+# skip silently, which is correct: the concurrent worker already ran the job.
+CONCURRENT_COMPLETED_SENTINEL = "(concurrent-completed)"
+
+
 # DuplicateJobError exception
 # ---------------------------------------------------------------------------
 
@@ -1077,10 +1085,24 @@ class JobTracker:
             job.operation_type, job.repo_alias
         )
         if existing_id is None:
-            raise RuntimeError(
-                f"atomic insert raised IntegrityError for "
-                f"({job.operation_type}, {job.repo_alias}) but no active row "
-                f"was found in the lookup; database state is inconsistent"
+            # Bug #1235: The blocking row completed between our INSERT and our
+            # SELECT — a benign race under PG multi-worker.  The concurrent
+            # worker already ran the operation; treat it as a duplicate so the
+            # caller (e.g. DataRetentionScheduler) skips silently rather than
+            # crashing with RuntimeError.  We use a sentinel job_id because the
+            # actual job_id is no longer visible (it fell outside the partial
+            # index predicate when it completed).
+            logger.debug(
+                "atomic insert raised unique-violation for (%s, %s) but no "
+                "active row is visible — concurrent worker completed the job "
+                "between INSERT and SELECT; treating as benign duplicate",
+                job.operation_type,
+                job.repo_alias,
+            )
+            raise DuplicateJobError(
+                operation_type=job.operation_type,
+                repo_alias=job.repo_alias,
+                existing_job_id=CONCURRENT_COMPLETED_SENTINEL,
             )
         raise DuplicateJobError(
             operation_type=job.operation_type,

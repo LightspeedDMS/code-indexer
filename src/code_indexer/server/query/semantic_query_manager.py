@@ -7,6 +7,7 @@ background job integration, and proper resource management.
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.storage.filesystem_vector_store import LocalIndexNotFoundError
 
 import contextvars
 import json
@@ -1417,12 +1418,18 @@ class SemanticQueryManager:
                                 _e,
                                 extra=get_log_extra("QUERY-STRATEGY-002"),
                             )
-                            # Bug #678: record failure so health monitor can sinbin the provider
-                            _health_monitor.record_call(
-                                provider_name,
-                                latency_ms=_latency_ms,
-                                success=False,
-                            )
+                            # Bug #1236: LocalIndexNotFoundError is a local storage
+                            # problem — the embedding provider completed successfully
+                            # and must NOT be sin-binned.  Only genuine provider
+                            # failures (HTTP errors, rate limits, timeouts, etc.)
+                            # should record a failure against the provider health.
+                            if not isinstance(_e, LocalIndexNotFoundError):
+                                # Bug #678: record failure so health monitor can sinbin the provider
+                                _health_monitor.record_call(
+                                    provider_name,
+                                    latency_ms=_latency_ms,
+                                    success=False,
+                                )
                 except concurrent.futures.TimeoutError:
                     # Bug #678: capture unfinished futures BEFORE cancel() so the
                     # done() check below correctly identifies them — cancel() marks
@@ -2398,7 +2405,7 @@ class SemanticQueryManager:
 
             # Initialize Tantivy manager
             tantivy_manager = TantivyIndexManager(fts_index_dir)
-            tantivy_manager.initialize_index(create_new=False)
+            tantivy_manager.open_for_search()
 
             # Handle fuzzy flag
             effective_edit_distance = edit_distance
