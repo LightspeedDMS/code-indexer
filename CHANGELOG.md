@@ -12,6 +12,9 @@ Major release. Consolidates the reliability, cluster-resilience, and Query-Analy
 ### Fixed
 - **Interrupted query-analytics exports stay stuck `pending` forever (#1228).** Export jobs interrupted by a worker death / restart / infra outage were never reconciled to `failed` -- the export records are not covered by the BackgroundJobManager startup orphan-reconciliation, so they showed as perpetually in-progress in the Analytics export history (e.g. the 3 exports orphaned during the node-23 NFS outage). Added `reconcile_orphaned_exports()` on both export backends (SQLite + PostgreSQL) and the service: a bulk `UPDATE status='failed' WHERE status IN ('pending','running') AND created_at < now - 300s`, wired fail-soft into startup right after the existing `fail_orphaned_jobs` block. Cluster-safe: `created_at` is stamped at work-start (queue delay never inflates age), the export workload is hard-bounded (50k-row cap, finishes well under the 300s window), and `update_export` writes status unconditionally so a false-positive self-heals (a live worker's completion overwrites `failed`->`completed`). Terminal rows untouched; idempotent; no schema change. Clears existing stuck exports on the next deploy.
 
+### Removed
+- **Retired orphaned config-migration scripts (cluster-config-migrate.sh, config_migration_helper.py, verify_config_migration.py).** Runtime config is migrated automatically at server startup (unified config model; file=bootstrap-only), so the manual one-time scripts from Story #578 are obsolete and were removed. They carried a stale BOOTSTRAP_KEYS set that diverged from config_service.py and could strip pre-DB bootstrap keys (clone_backend/cow_daemon) on cow-daemon clusters.
+
 ## [10.172.0] - 2026-06-26
 
 ### Fixed
