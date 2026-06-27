@@ -1942,6 +1942,21 @@ class DeploymentExecutor:
         )
 
     @staticmethod
+    def _read_flag(line: str, flag: str) -> "Optional[str]":
+        """Extract the value of a flag from an ExecStart line (Bug #1232).
+
+        Uses the same bounded-token regex as _rewrite_flag so '--workers 1'
+        is never confused with '--workers 10'.
+
+        Returns the string value following flag, or None if flag is absent.
+        """
+        import re as _re
+
+        bounded = _re.compile(r"(?<!\S)" + _re.escape(flag) + r"\s+(\S+)")
+        m = bounded.search(line)
+        return m.group(1) if m else None
+
+    @staticmethod
     def _rewrite_flag(line: str, flag: str, value: str) -> tuple:
         """Token-bounded in-place flag rewrite (Bug #1183 idiom).
 
@@ -4437,3 +4452,50 @@ class DeploymentExecutor:
             return False
 
         return self._build_xray_cli(rust_dir, env)
+
+
+def read_execstart_flags(service_name: str = "cidx-server") -> dict:
+    """Read host/port/workers from the live systemd ExecStart line (Bug #1232).
+
+    Reuses DeploymentExecutor._is_cidx_execstart (detection) and
+    DeploymentExecutor._read_flag (bounded-token extraction) so there is
+    exactly ONE ExecStart parser in the codebase.
+
+    Returns a dict containing any subset of 'host' (str), 'port' (int),
+    'workers' (int) that were found.  Returns an empty dict when:
+      - the service file does not exist,
+      - it cannot be read (OSError),
+      - it contains no cidx ExecStart line.
+
+    Values for 'port' and 'workers' are coerced to int; entries with
+    non-integer values are omitted rather than raising.
+    """
+    service_path = SYSTEMD_UNIT_DIR / f"{service_name}.service"
+    if not service_path.exists():
+        return {}
+    try:
+        lines = service_path.read_text().split("\n")
+    except OSError:
+        return {}
+
+    result: dict = {}
+    for line in lines:
+        if not DeploymentExecutor._is_cidx_execstart(line):
+            continue
+        host = DeploymentExecutor._read_flag(line, "--host")
+        if host is not None:
+            result["host"] = host
+        port_str = DeploymentExecutor._read_flag(line, "--port")
+        if port_str is not None:
+            try:
+                result["port"] = int(port_str)
+            except ValueError:
+                pass
+        workers_str = DeploymentExecutor._read_flag(line, "--workers")
+        if workers_str is not None:
+            try:
+                result["workers"] = int(workers_str)
+            except ValueError:
+                pass
+        break  # only the first cidx ExecStart line matters
+    return result

@@ -26,6 +26,7 @@ from ..auto_update.deployment_executor import (
     APPLIED_LAUNCH_CONFIG_PATH,
     LAUNCH_CONFIG_PATH,
     RESTART_SIGNAL_PATH,
+    read_execstart_flags,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,6 +215,7 @@ class ConfigService:
         else:
             # First boot or pre-migration: seed DB from config.json
             config = self.get_config()
+            self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
             runtime_dict = self._extract_runtime_dict(config)
             if runtime_dict:
                 self._save_runtime_to_sqlite(runtime_dict)
@@ -2387,12 +2389,71 @@ class ConfigService:
             )
         return 0
 
+    def _backfill_launch_keys_from_execstart(self, config: "ServerConfig") -> None:
+        """Gap-fill host/port/workers from the live ExecStart at first-boot seed.
+
+        Bug #1232 correct fix layer: called ONLY at first-boot centralization
+        (initialize_runtime_db / _seed_runtime_to_pg), NOT in materialize_launch_config.
+
+        Precedence — gap-fill only, never overrides explicit config.json values:
+          1. key present in config.json  → leave config value unchanged (operator intent).
+          2. key absent from config.json → fill from live ExecStart when available.
+          3. neither config.json nor ExecStart → keep ServerConfig default + WARNING.
+
+        Mutates the passed config object AND self._config so that the subsequent
+        _extract_runtime_dict (seeds the DB row) and _strip_config_file_to_bootstrap
+        (which re-reads via get_config()) both see the corrected values.
+        """
+        raw_config: dict = {}
+        try:
+            config_path = Path(self.config_manager.config_file_path)
+            if config_path.exists():
+                raw_config = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "ConfigService: unable to read raw config.json for ExecStart "
+                "backfill at first-boot seed; skipping gap-fill: %s",
+                exc,
+            )
+            return
+
+        execstart = read_execstart_flags()
+
+        for key in ("host", "port", "workers"):
+            if key in raw_config:
+                # Explicit operator value in config.json — leave as-is.
+                continue
+            exec_val = execstart.get(key)
+            if exec_val is not None:
+                # Gap-fill from ExecStart (key absent from config.json).
+                setattr(config, key, exec_val)
+            else:
+                # Neither config.json nor ExecStart — keep ServerConfig default.
+                logger.warning(
+                    "ConfigService: launch key '%s' absent from config.json and "
+                    "live ExecStart; seeding runtime DB with ServerConfig default "
+                    "%r (Bug #1232)",
+                    key,
+                    getattr(config, key),
+                )
+
+        # Publish mutated config so _extract_runtime_dict and
+        # _strip_config_file_to_bootstrap (which calls get_config()) both see
+        # the corrected values.
+        self._config = config
+
     def materialize_launch_config(self) -> bool:
         """Write launch.json with current target launch parameters.
 
         Story #1198 AC1: Materializes {workers, log_level, host, port,
         target_restart_generation} to LAUNCH_CONFIG_PATH atomically via
         tempfile + os.replace.  Does NOT write applied_launch.json.
+
+        Bug #1232: host/port/workers come directly from the desired state
+        (self._config), which reflects the admin's intent. Gap-filling from the
+        live ExecStart happens ONLY at first-boot seed via
+        _backfill_launch_keys_from_execstart(), NOT here — so admin changes via
+        the Web UI are always honored.
 
         Returns:
             True on success, False on any failure (fail-soft — never raises).
@@ -2703,6 +2764,7 @@ class ConfigService:
         """Seed PG server_config table from current config (first boot)."""
         assert self._pool is not None
         config = self.get_config()
+        self._backfill_launch_keys_from_execstart(config)  # Bug #1232: gap-fill
         runtime_dict = self._extract_runtime_dict(config)
 
         from psycopg.rows import dict_row
