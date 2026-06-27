@@ -378,3 +378,155 @@ class TestRealPgConcurrencyBarrier:
             assert not errors, f"Unexpected exceptions in iteration: {errors}"
             assert len([r for r in results if r[0] == "success"]) == 1
             assert len([r for r in results if r[0] == "duplicate"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestSentinelConstant  (GAP C — Bug #1235 NIT)
+# ---------------------------------------------------------------------------
+
+
+class TestSentinelConstant:
+    """job_tracker must export CONCURRENT_COMPLETED_SENTINEL as a module-level constant.
+
+    The magic string "(concurrent-completed)" is used both at the raise site in
+    _atomic_insert_or_raise and in test assertions.  A module-level constant
+    couples producer and consumer without brittle string duplication.
+    """
+
+    def test_sentinel_constant_importable(self):
+        """CONCURRENT_COMPLETED_SENTINEL must be importable from job_tracker."""
+        from code_indexer.server.services.job_tracker import (
+            CONCURRENT_COMPLETED_SENTINEL,
+        )
+
+        assert isinstance(CONCURRENT_COMPLETED_SENTINEL, str)
+        assert len(CONCURRENT_COMPLETED_SENTINEL) > 0
+
+    def test_sentinel_constant_used_at_raise_site(self):
+        """_atomic_insert_or_raise must use CONCURRENT_COMPLETED_SENTINEL (not a magic string)."""
+        from code_indexer.server.services.job_tracker import (
+            CONCURRENT_COMPLETED_SENTINEL,
+        )
+
+        # Race case: violation fires, blocking row already completed (lookup returns None)
+        tracker = _make_backend_tracker(
+            _FakeBackend(inject_violation=True, blocking_job_id=None)
+        )
+
+        with pytest.raises(DuplicateJobError) as exc_info:
+            tracker._atomic_insert_or_raise(_make_job("sentinel-test"))
+
+        assert exc_info.value.existing_job_id == CONCURRENT_COMPLETED_SENTINEL, (
+            f"Raise site must use CONCURRENT_COMPLETED_SENTINEL constant; "
+            f"got {exc_info.value.existing_job_id!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestDeadlockRetryOnUpdateJob  (GAP B — Bug #1235)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_pg_backend():
+    """Return (backend, mock_cur) with BackgroundJobsPostgresBackend wired to a mock pool."""
+    from unittest.mock import MagicMock
+
+    from code_indexer.server.storage.postgres.background_jobs_backend import (
+        BackgroundJobsPostgresBackend,
+    )
+
+    backend = BackgroundJobsPostgresBackend.__new__(BackgroundJobsPostgresBackend)
+    backend._pool = MagicMock()
+
+    mock_cur = MagicMock()
+    mock_cur.__enter__ = lambda s: mock_cur
+    mock_cur.__exit__ = MagicMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = lambda s: mock_conn
+    mock_conn.__exit__ = MagicMock(return_value=False)
+    mock_conn.cursor.return_value = mock_cur
+    backend._pool.connection.return_value = mock_conn
+
+    return backend, mock_cur
+
+
+class TestDeadlockRetryOnUpdateJob:
+    """BackgroundJobsPostgresBackend.update_job must retry on PG deadlock errors.
+
+    PG deadlocks (SQLSTATE 40P01) on background_jobs UPDATE are transient.
+    Retrying up to 3 times with small backoff must produce overall success.
+    The SQLite path and non-deadlock errors must not be affected.
+    """
+
+    @pytest.fixture
+    def deadlock_exc(self):
+        """Return a real psycopg DeadlockDetected instance, or skip if unavailable."""
+        try:
+            import psycopg.errors
+
+            return psycopg.errors.DeadlockDetected("deadlock detected")
+        except ImportError:
+            pytest.skip("psycopg not installed")
+
+    def test_deadlock_on_first_attempt_succeeds_on_retry(self, deadlock_exc):
+        """DeadlockDetected on attempt 1, succeeds on attempt 2 -> overall success, no exception."""
+        backend, mock_cur = _make_mock_pg_backend()
+
+        attempt = {"n": 0}
+
+        def execute_side_effect(sql, params):
+            attempt["n"] += 1
+            if attempt["n"] == 1:
+                raise deadlock_exc
+
+        mock_cur.execute.side_effect = execute_side_effect
+
+        # Must not raise
+        backend.update_job("job-123", status="completed")
+
+        assert mock_cur.execute.call_count >= 2, (
+            "update_job must retry on deadlock; execute called only once"
+        )
+
+    def test_deadlock_on_all_attempts_raises_after_bounded_retries(self, deadlock_exc):
+        """DeadlockDetected on every attempt -> raises after bounded retries (no infinite loop)."""
+        backend, mock_cur = _make_mock_pg_backend()
+        mock_cur.execute.side_effect = deadlock_exc
+
+        with pytest.raises(Exception) as exc_info:
+            backend.update_job("job-456", status="completed")
+
+        assert mock_cur.execute.call_count >= 2, (
+            f"Must retry before raising; called only {mock_cur.execute.call_count} time(s)"
+        )
+        assert "deadlock" in str(exc_info.value).lower() or (
+            type(exc_info.value).__name__ == "DeadlockDetected"
+        )
+
+    def test_non_deadlock_error_not_retried(self):
+        """A non-deadlock error must NOT be retried — propagates immediately on first attempt."""
+        backend, mock_cur = _make_mock_pg_backend()
+
+        class _OtherError(Exception):
+            pass
+
+        mock_cur.execute.side_effect = _OtherError("network error")
+
+        with pytest.raises(_OtherError):
+            backend.update_job("job-789", status="failed")
+
+        assert mock_cur.execute.call_count == 1, (
+            f"Non-deadlock errors must not be retried; called {mock_cur.execute.call_count} time(s)"
+        )
+
+    def test_sqlite_update_job_unaffected(self, tmp_path):
+        """SQLite-backed tracker update_status path works normally (no retry machinery there)."""
+        tracker = _make_sqlite_tracker(str(tmp_path / "retry_test.db"))
+        job = _make_job("sqlite-update-job")
+        tracker._atomic_insert_or_raise(job)
+        # Register into in-memory so update_status can find it
+        with tracker._lock:
+            tracker._active_jobs[job.job_id] = job
+        # Must succeed without error — SQLite path has no deadlock retry
+        tracker.update_status(job.job_id, status="running")

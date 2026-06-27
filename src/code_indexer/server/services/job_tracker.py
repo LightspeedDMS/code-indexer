@@ -57,6 +57,14 @@ class TrackedJob:
 
 
 # ---------------------------------------------------------------------------
+# Sentinel job_id used by _atomic_insert_or_raise when a unique-violation fires
+# but the blocking row has already completed (fell outside the partial-index
+# predicate) by the time the follow-up SELECT runs.  Callers (e.g.
+# DataRetentionScheduler) see a DuplicateJobError — not a RuntimeError — so they
+# skip silently, which is correct: the concurrent worker already ran the job.
+CONCURRENT_COMPLETED_SENTINEL = "(concurrent-completed)"
+
+
 # DuplicateJobError exception
 # ---------------------------------------------------------------------------
 
@@ -1094,7 +1102,7 @@ class JobTracker:
             raise DuplicateJobError(
                 operation_type=job.operation_type,
                 repo_alias=job.repo_alias,
-                existing_job_id="(concurrent-completed)",
+                existing_job_id=CONCURRENT_COMPLETED_SENTINEL,
             )
         raise DuplicateJobError(
             operation_type=job.operation_type,
