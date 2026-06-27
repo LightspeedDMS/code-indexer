@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.3.0] - 2026-06-27
+
+Production/staging-reported correctness fixes for single-server multi-worker deployments (auto-reported by Neo + PreProdServer), found while hardening the upgrade-test release.
+
+### Fixed
+- **A single repo's missing/corrupt local index sin-bins the embedding provider cluster-wide (#1236).** The parallel-dispatch failure handler recorded ANY provider-task exception as a provider failure (`record_call(success=False)`), including local-storage errors raised AFTER the embedding call already succeeded -- so one un-indexed (or corrupt-indexed, or missing-`collection_meta.json`) repo flipped voyage-ai/cohere to `down` and every semantic query for EVERY repo skipped that provider for the sin-bin window. Introduced `LocalIndexNotFoundError` (raised by `filesystem_vector_store` for absent HNSW, corrupt HNSW via `_is_corrupt_index_error`, and missing `collection_meta.json`); the dispatch handler now skips provider-health recording for it. Genuine provider failures (HTTP/rate-limit/timeout) still sin-bin (Bug #678 preserved). The timeout branch is unchanged (cause genuinely ambiguous at timeout; a local index error surfaces via the except branch, not timeout).
+- **PostgreSQL multi-worker data-retention duplicate-claim race surfaced as a cleanup error (#1235).** Under multiple uvicorn workers on PostgreSQL, concurrent `data_retention_cleanup` claims race on the `idx_active_job_per_repo` partial unique index. The intended `DuplicateJobError` skip was not reliable: when the blocking active row completed between the unique violation and the follow-up lookup, `_atomic_insert_or_raise` raised `RuntimeError` (escaping the scheduler as a false failure); separately, `complete_job()` could deadlock on `background_jobs`. Now the vanished-row race deterministically yields `DuplicateJobError` (sentinel `existing_job_id`), and `BackgroundJobsPostgresBackend.update_job` retries on PG deadlock/serialization (40P01/40001) with bounded backoff. SQLite single-worker path unchanged.
+
 ## [11.2.0] - 2026-06-27
 
 Multi-worker hardening + deploy-robustness fixes, found by a full end-to-end upgrade test (release v10.141.0 -> staging) on a fresh Rocky 9 VM running uvicorn with 4 workers.
