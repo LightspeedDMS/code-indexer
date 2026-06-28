@@ -151,26 +151,43 @@ def _batch_get_commit_timestamps(
             text=True,
             timeout=60,
         )
-        if proc.returncode != 0 and not proc.stdout:
-            # git returned error and produced no output (e.g. repo not initialised)
-            return {}
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # Expected format: "<40-char-sha> <ISO-8601-strict>"
-            # e.g.  "2421d586942eb5c4eca700fbf6bfc0c99af679ef 2024-03-15T10:22:44+00:00"
-            space_idx = line.index(" ")
-            sha = line[:space_idx]
-            ts_str = line[space_idx + 1 :]
-            dt = datetime.fromisoformat(ts_str).astimezone(timezone.utc)
-            result[sha] = dt
     except Exception as exc:
         logger.warning(
             "Migration: git log failed for %s: %s — timestamps unavailable",
             repo_path,
             exc,
         )
+        return result
+
+    if proc.returncode != 0 and not proc.stdout:
+        # git returned error and produced no output (e.g. repo not initialised)
+        return result
+
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            # Expected format: "<40-char-sha> <ISO-8601-strict>"
+            # e.g.  "2421d586942eb5c4eca700fbf6bfc0c99af679ef 2024-03-15T10:22:44+00:00"
+            # git 2.x emits trailing Z for UTC commits (e.g. "2026-03-25T05:18:38Z").
+            # Python 3.9 fromisoformat() cannot parse the Z suffix — only 3.11+ can.
+            # Normalise Z -> +00:00 before parsing so all Python 3.x versions work.
+            space_idx = line.index(" ")
+            sha = line[:space_idx]
+            ts_str = line[space_idx + 1 :]
+            if ts_str.endswith("Z"):
+                ts_str = ts_str[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts_str).astimezone(timezone.utc)
+            result[sha] = dt
+        except Exception as exc:
+            logger.debug(
+                "Migration: skipping unparseable git log line %r for %s: %s",
+                line,
+                repo_path,
+                exc,
+            )
+
     return result
 
 

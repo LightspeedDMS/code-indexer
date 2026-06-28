@@ -853,3 +853,179 @@ class TestMigrationWithEmptyJsonFilesUsesGit:
             and any(d.name.endswith(f"Q{q}") for q in range(1, 5))
         ]
         assert len(quarterly_shards) == 1
+
+
+# ---------------------------------------------------------------------------
+# Bug #1237: Python 3.9 cannot parse git %cI Z-suffix for UTC commits
+# ---------------------------------------------------------------------------
+
+
+class TestBatchGetCommitTimestampsZSuffixBug1237:
+    """Bug #1237: git %cI emits Z for UTC commits; Python 3.9 cannot parse it."""
+
+    def test_z_suffix_timestamp_parsed_to_utc_datetime(self, tmp_path):
+        """A git log line with Z-suffix ISO timestamp must parse to UTC datetime.
+
+        On Python 3.9, datetime.fromisoformat('2026-03-25T05:18:38Z') raises
+        ValueError because the Z suffix is only supported from Python 3.11.
+        This test FAILS on the unfixed code.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from code_indexer.services.temporal.temporal_migration_service import (
+            _batch_get_commit_timestamps,
+        )
+
+        sha = "a" * 40
+        # git 2.x emits this format for UTC commits (Z suffix, not +00:00)
+        fake_stdout = f"{sha} 2026-03-25T05:18:38Z\n"
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = fake_stdout
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+
+        with patch(
+            "code_indexer.services.temporal.temporal_migration_service.subprocess.run",
+            return_value=proc,
+        ):
+            result = _batch_get_commit_timestamps(repo_path, {sha})
+
+        assert sha in result, (
+            "SHA with Z-suffix timestamp was not returned — Bug #1237: "
+            "datetime.fromisoformat cannot parse 'Z' on Python 3.9"
+        )
+        dt = result[sha]
+        assert dt is not None
+        assert dt.tzinfo is not None, "Result must be timezone-aware"
+        assert dt.year == 2026
+        assert dt.month == 3
+        assert dt.day == 25
+        assert dt.hour == 5
+        assert dt.minute == 18
+        assert dt.second == 38
+
+    def test_per_line_resilience_garbage_does_not_abort_batch(self, tmp_path):
+        """One garbage timestamp line must not discard all other valid timestamps.
+
+        Current code: try/except wraps the whole loop, so one ValueError from a
+        Z-suffix (or any other garbage) aborts the entire batch and returns {}.
+        After fix: try/except is per-line, so only the bad line is skipped.
+        This test FAILS on the unfixed code because the outer except returns {}.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from code_indexer.services.temporal.temporal_migration_service import (
+            _batch_get_commit_timestamps,
+        )
+
+        sha_z = "a" * 40
+        sha_offset = "b" * 40
+        sha_garbage = "c" * 40
+
+        # Mix: valid Z, garbage, valid +00:00 offset
+        fake_stdout = (
+            f"{sha_z} 2026-03-25T05:18:38Z\n"
+            f"{sha_garbage} NOT_A_VALID_TIMESTAMP_AT_ALL\n"
+            f"{sha_offset} 2024-05-10T12:00:00+00:00\n"
+        )
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = fake_stdout
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+
+        with patch(
+            "code_indexer.services.temporal.temporal_migration_service.subprocess.run",
+            return_value=proc,
+        ):
+            result = _batch_get_commit_timestamps(
+                repo_path, {sha_z, sha_offset, sha_garbage}
+            )
+
+        assert sha_z in result, (
+            "Valid Z-suffix SHA was discarded due to garbage line — "
+            "outer try/except is aborting the whole batch"
+        )
+        assert sha_offset in result, (
+            "Valid +00:00 offset SHA was discarded due to garbage line"
+        )
+        assert sha_garbage not in result, "Garbage SHA should not appear in result"
+
+
+class TestFullMigrationZSuffixProductionScenario:
+    """Bug #1237: End-to-end — Z-suffix git timestamps + empty JSON -> shards created."""
+
+    def test_full_migration_with_z_suffix_and_empty_json_creates_shards(self, tmp_path):
+        """Production scenario: git %cI emits Z, JSON payloads are empty.
+
+        Before fix: _batch_get_commit_timestamps raises on Z -> returns {} ->
+        _build_quarter_buckets falls back to JSON -> JSON is empty {} ->
+        all vectors skipped -> no quarterly shards created.
+
+        After fix: Z parsed correctly -> sha_timestamps populated ->
+        vectors bucketed by quarter -> quarterly shards created.
+
+        This test FAILS on the unfixed code (0 shards instead of 3).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from code_indexer.services.temporal.temporal_migration_service import (
+            run_temporal_migration,
+        )
+
+        # Create real git repo (before mock) to obtain 3 real 40-char SHAs
+        repo_path, shas = _make_git_repo_with_commits(tmp_path, 3)
+
+        # Build monolithic collection with empty JSON payloads (production format)
+        index_path = tmp_path / "index"
+        index_path.mkdir()
+        dim = 4
+        vectors = np.random.rand(3, dim).astype(np.float32)
+        collection_name = "code-indexer-temporal-voyage_code_3"
+
+        _build_monolithic_collection_empty_json(
+            index_path=index_path,
+            collection_name=collection_name,
+            vectors=vectors,
+            sha_list=shas,
+        )
+
+        # Mock subprocess.run so git log emits Z-suffixed timestamps in 3 quarters
+        fake_stdout = (
+            f"{shas[0]} 2024-01-15T10:00:00Z\n"  # 2024Q1
+            f"{shas[1]} 2024-04-20T10:00:00Z\n"  # 2024Q2
+            f"{shas[2]} 2024-07-15T10:00:00Z\n"  # 2024Q3
+        )
+
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = fake_stdout
+
+        with patch(
+            "code_indexer.services.temporal.temporal_migration_service.subprocess.run",
+            return_value=proc,
+        ):
+            run_temporal_migration(
+                index_path=index_path,
+                repo_alias="test-repo",
+                repo_path=repo_path,
+                progress_callback=None,
+            )
+
+        quarterly_shards = [
+            d
+            for d in index_path.iterdir()
+            if d.is_dir()
+            and d.name.startswith("code-indexer-temporal-")
+            and any(d.name.endswith(f"Q{q}") for q in range(1, 5))
+        ]
+        assert len(quarterly_shards) == 3, (
+            f"Expected 3 quarterly shards from Z-suffix UTC timestamps with empty "
+            f"JSON payloads, got {len(quarterly_shards)}. "
+            f"Bug #1237: Z-suffix caused sha_timestamps={{}} -> all vectors skipped"
+        )
