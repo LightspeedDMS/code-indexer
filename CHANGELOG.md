@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.5.0] - 2026-06-28
+
+### Fixed
+- **Temporal monolithic→quarterly-shard migration discarded ALL git timestamps on Python 3.9 → broke migration of pre-11 indexes with empty payloads (#1237).** The v11 startup migration (#1172) derives each commit's quarter from `git log --format=%cI`, but git 2.x emits a trailing `Z` for UTC commits (e.g. `2026-03-25T05:18:38Z`), which Python 3.9's `datetime.fromisoformat()` cannot parse. The git-timestamp helper wrapped the whole batch in one try/except, so a single unparseable line returned `{}` ("timestamps unavailable") and the migration fell back to per-payload `commit_timestamp` (epoch). Production temporal payloads are empty, so the fallback skipped every vector → incomplete/empty shards → temporal index not usable after upgrade. Fix: normalize a trailing `Z` to `+00:00` before `fromisoformat` (Py3.9-compatible; offset forms unchanged), and parse each git-log line in its own try/except so one bad timestamp skips only that commit instead of aborting the whole batch. Now git timestamps are available for all UTC commits and any pre-11 monolithic temporal index migrates cleanly into the correct quarterly shards. Validated by unit tests including the empty-payload production scenario (git Z-timestamps → shards created); live upgrade re-test on a v10.141.0 monolithic index (spanning 2020–2024) performed on the test VM.
+
 ## [11.4.0] - 2026-06-27
 
 ### Fixed
