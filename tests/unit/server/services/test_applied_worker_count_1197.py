@@ -40,7 +40,9 @@ class TestResolverBasicBehavior:
         )
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result == 4, (
             f"Resolver must return APPLIED (4) from applied_launch.json, not TARGET (8). Got {result}"
@@ -58,7 +60,9 @@ class TestResolverBasicBehavior:
         )
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result == 4, f"CRITICAL-C2: must return APPLIED=4, got {result}"
         assert result != 8, "Resolver must NOT return the saved TARGET (8)"
@@ -76,7 +80,9 @@ class TestResolverBasicBehavior:
         )
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result == 3, f"Fallback to config.json: expected 3, got {result}"
 
@@ -87,7 +93,9 @@ class TestResolverBasicBehavior:
         )
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result == 1, f"Default fallback: expected 1, got {result}"
 
@@ -103,7 +111,9 @@ class TestResolverFailSoftBehavior:
         (tmp_path / "applied_launch.json").write_text("INVALID {{{{")
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result == 1, f"Corrupt applied_launch.json must return 1, got {result}"
 
@@ -120,7 +130,9 @@ class TestResolverFailSoftBehavior:
         )
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result == 2, (
             f"Missing workers key → config.json fallback → expected 2, got {result}"
@@ -134,7 +146,9 @@ class TestResolverFailSoftBehavior:
         (tmp_path / "applied_launch.json").write_text(json.dumps({"workers": 0}))
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result >= 1, f"Resolver must enforce minimum 1, got {result}"
 
@@ -148,7 +162,9 @@ class TestResolverFailSoftBehavior:
         (tmp_path / "applied_launch.json").write_text(json.dumps({"workers": -3}))
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result >= 1, f"Resolver must enforce minimum 1 on negative, got {result}"
 
@@ -160,7 +176,9 @@ class TestResolverFailSoftBehavior:
         (tmp_path / "applied_launch.json").write_text(json.dumps({"workers": "four"}))
 
         result = get_applied_worker_count(
-            data_dir=str(tmp_path), config_dir=str(tmp_path)
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
         )
         assert result == 1, f"Non-int workers must fall back to 1, got {result}"
 
@@ -178,7 +196,7 @@ class TestResolverEnvBasedResolution:
         monkeypatch.setenv("CIDX_DATA_DIR", str(tmp_path))
         (tmp_path / "applied_launch.json").write_text(json.dumps({"workers": 6}))
 
-        result = get_applied_worker_count()
+        result = get_applied_worker_count(unit_file=tmp_path / "nonexistent.service")
         assert result == 6, f"Must use CIDX_DATA_DIR env, got {result}"
 
     def test_resolver_no_args_does_not_raise(
@@ -189,10 +207,162 @@ class TestResolverEnvBasedResolution:
             get_applied_worker_count,
         )
 
-        # Point to a non-existent dir so we exercise the safe fallback
+        # Point both data and unit-file dirs to non-existent paths so all
+        # priorities fall through to the default, host-independent of any
+        # real /etc/systemd/system/cidx-server.service on the test machine.
         monkeypatch.setenv("CIDX_DATA_DIR", "/nonexistent-path-xyz-1197")
+        monkeypatch.setenv("SYSTEMD_UNIT_DIR", "/nonexistent-path-xyz-1197")
         result = get_applied_worker_count()
         assert result == 1, f"No-args safe fallback must return 1, got {result}"
+
+
+class TestExecStartPriority1239:
+    """Bug #1239: live systemd ExecStart is the new Priority 1 for applied worker count.
+
+    Root cause: on first v11 auto-update deploy from 10.141.0, the unit file has
+    no --workers token (uvicorn default = 1 worker), but applied_launch.json is
+    absent so the old Priority 2 (config.json workers=4) was used, silently
+    under-resourcing the single running worker by 4x until the next Web-UI restart.
+
+    After the fix, Priority 1 reads the live ExecStart:
+      - ExecStart present with --workers N  -> return N
+      - ExecStart present, no --workers     -> return 1 (uvicorn default = ground truth)
+      - ExecStart unreadable/absent         -> fall through to Priority 2 (applied_launch.json)
+    """
+
+    # Minimal unit-file content; _is_cidx_execstart requires "uvicorn" in line
+    _EXECSTART_WITH_WORKERS = (
+        "ExecStart=/usr/bin/python3 -m uvicorn code_indexer.server.app:app "
+        "--host 0.0.0.0 --port 8001 --workers {workers}"
+    )
+    _EXECSTART_NO_WORKERS = (
+        "ExecStart=/usr/bin/python3 -m uvicorn code_indexer.server.app:app "
+        "--host 0.0.0.0 --port 8001"
+    )
+
+    def _write_unit_file(self, path: Path, execstart_line: str) -> None:
+        path.write_text(f"[Service]\n{execstart_line}\n")
+
+    def test_execstart_no_workers_returns_1_not_config_value(
+        self, tmp_path: Path
+    ) -> None:
+        """CORE REGRESSION GUARD (Bug #1239).
+
+        First-deploy case: ExecStart exists but has NO --workers token.
+        config.json says workers=4, but uvicorn was launched with 1 (default).
+        Resolver MUST return 1, NOT 4.
+        """
+        from code_indexer.server.services.applied_worker_count import (
+            get_applied_worker_count,
+        )
+
+        unit_file = tmp_path / "cidx-server.service"
+        self._write_unit_file(unit_file, self._EXECSTART_NO_WORKERS)
+        (tmp_path / "config.json").write_text(json.dumps({"workers": 4}))
+
+        result = get_applied_worker_count(
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=unit_file,
+        )
+        assert result == 1, (
+            f"Bug #1239 regression: ExecStart found but no --workers token "
+            f"must return 1 (uvicorn default), not config.json workers=4. Got {result}"
+        )
+
+    def test_execstart_with_workers_4_returns_4(self, tmp_path: Path) -> None:
+        """ExecStart has --workers 4 -> returns 4 (ExecStart is Priority 1)."""
+        from code_indexer.server.services.applied_worker_count import (
+            get_applied_worker_count,
+        )
+
+        unit_file = tmp_path / "cidx-server.service"
+        self._write_unit_file(unit_file, self._EXECSTART_WITH_WORKERS.format(workers=4))
+        # applied_launch.json would have been Priority 1 before this fix
+        (tmp_path / "applied_launch.json").write_text(json.dumps({"workers": 8}))
+        (tmp_path / "config.json").write_text(json.dumps({"workers": 16}))
+
+        result = get_applied_worker_count(
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=unit_file,
+        )
+        assert result == 4, (
+            f"ExecStart --workers 4 must be Priority 1 "
+            f"(beats applied_launch=8, config=16). Got {result}"
+        )
+
+    def test_execstart_absent_falls_through_to_applied_launch(
+        self, tmp_path: Path
+    ) -> None:
+        """ExecStart absent + applied_launch.json workers=3 -> returns 3 (Priority 2 preserved)."""
+        from code_indexer.server.services.applied_worker_count import (
+            get_applied_worker_count,
+        )
+
+        (tmp_path / "applied_launch.json").write_text(json.dumps({"workers": 3}))
+
+        result = get_applied_worker_count(
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
+        )
+        assert result == 3, (
+            f"ExecStart absent -> fall through to applied_launch.json workers=3. Got {result}"
+        )
+
+    def test_execstart_absent_no_applied_launch_falls_through_to_config(
+        self, tmp_path: Path
+    ) -> None:
+        """ExecStart absent + no applied_launch.json + config.json workers=2 -> returns 2 (Priority 3)."""
+        from code_indexer.server.services.applied_worker_count import (
+            get_applied_worker_count,
+        )
+
+        (tmp_path / "config.json").write_text(json.dumps({"workers": 2}))
+
+        result = get_applied_worker_count(
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
+        )
+        assert result == 2, (
+            f"ExecStart absent, no applied_launch -> config.json workers=2. Got {result}"
+        )
+
+    def test_nothing_available_returns_1(self, tmp_path: Path) -> None:
+        """No ExecStart, no applied_launch.json, no config.json -> returns 1 (default)."""
+        from code_indexer.server.services.applied_worker_count import (
+            get_applied_worker_count,
+        )
+
+        result = get_applied_worker_count(
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=tmp_path / "nonexistent.service",
+        )
+        assert result == 1, f"No sources available -> default 1. Got {result}"
+
+    def test_fail_soft_unreadable_unit_file_falls_through(self, tmp_path: Path) -> None:
+        """Fail-soft: error reading unit file must fall through, never propagate."""
+        from code_indexer.server.services.applied_worker_count import (
+            get_applied_worker_count,
+        )
+
+        # A directory at the unit_file path -> read_text() raises IsADirectoryError
+        unit_file = tmp_path / "cidx-server.service"
+        unit_file.mkdir()
+        (tmp_path / "applied_launch.json").write_text(json.dumps({"workers": 3}))
+
+        result = get_applied_worker_count(
+            data_dir=str(tmp_path),
+            config_dir=str(tmp_path),
+            unit_file=unit_file,
+        )
+        assert result == 3, (
+            f"Fail-soft: unreadable unit file must fall through to "
+            f"applied_launch.json workers=3. Got {result}"
+        )
 
 
 class TestConsumersReroutedToResolver:
