@@ -43,6 +43,9 @@ MIGRATING_SUFFIX = ".migrating"
 # HNSW construction parameters (match existing code defaults).
 _HNSW_M = 16
 _HNSW_EF_CONSTRUCTION = 200
+# Maximum SHAs per git log call to avoid E2BIG on large repos (Bug #1238).
+# At 41 bytes/SHA (40 hex + space), 1000 SHAs ≈ 41 KB — well within ARG_MAX.
+_SHA_CHUNK_SIZE = 1000
 # Upper bound on element count when loading a monolithic HNSW index.
 _MAX_MONOLITHIC_ELEMENTS = 2_000_000
 # Default vector dimension and space when metadata is missing.
@@ -142,51 +145,59 @@ def _batch_get_commit_timestamps(
     # git log --no-walk accepts multiple SHA arguments; output one line per SHA.
     # Use %cI (strict ISO 8601 with T separator, e.g. "2024-03-15T10:22:44+00:00")
     # NOT %ci (space format rejected by datetime.fromisoformat on Python 3.9).
+    # Bug #1238: chunk SHAs to avoid E2BIG on large repos.
+    # At ~41 bytes/SHA, _SHA_CHUNK_SIZE=1000 -> ~41 KB per call, well under ARG_MAX.
     result: Dict[str, datetime] = {}
-    try:
-        proc = subprocess.run(
-            ["git", "log", "--no-walk", "--format=%H %cI"] + sorted(shas),
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Migration: git log failed for %s: %s — timestamps unavailable",
-            repo_path,
-            exc,
-        )
-        return result
+    sorted_shas = sorted(shas)
 
-    if proc.returncode != 0 and not proc.stdout:
-        # git returned error and produced no output (e.g. repo not initialised)
-        return result
-
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for chunk_start in range(0, len(sorted_shas), _SHA_CHUNK_SIZE):
+        chunk = sorted_shas[chunk_start : chunk_start + _SHA_CHUNK_SIZE]
         try:
-            # Expected format: "<40-char-sha> <ISO-8601-strict>"
-            # e.g.  "2421d586942eb5c4eca700fbf6bfc0c99af679ef 2024-03-15T10:22:44+00:00"
-            # git 2.x emits trailing Z for UTC commits (e.g. "2026-03-25T05:18:38Z").
-            # Python 3.9 fromisoformat() cannot parse the Z suffix — only 3.11+ can.
-            # Normalise Z -> +00:00 before parsing so all Python 3.x versions work.
-            space_idx = line.index(" ")
-            sha = line[:space_idx]
-            ts_str = line[space_idx + 1 :]
-            if ts_str.endswith("Z"):
-                ts_str = ts_str[:-1] + "+00:00"
-            dt = datetime.fromisoformat(ts_str).astimezone(timezone.utc)
-            result[sha] = dt
+            proc = subprocess.run(
+                ["git", "log", "--no-walk", "--format=%H %cI"] + chunk,
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
         except Exception as exc:
-            logger.debug(
-                "Migration: skipping unparseable git log line %r for %s: %s",
-                line,
+            logger.warning(
+                "Migration: git log failed for %s (chunk %d-%d): %s — skipping chunk",
                 repo_path,
+                chunk_start,
+                chunk_start + len(chunk),
                 exc,
             )
+            continue
+
+        if proc.returncode != 0 and not proc.stdout:
+            # git returned error with no output (e.g. repo not initialised)
+            continue
+
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                # Expected format: "<40-char-sha> <ISO-8601-strict>"
+                # e.g.  "2421d586942eb5c4eca700fbf6bfc0c99af679ef 2024-03-15T10:22:44+00:00"
+                # git 2.x emits trailing Z for UTC commits (e.g. "2026-03-25T05:18:38Z").
+                # Python 3.9 fromisoformat() cannot parse the Z suffix — only 3.11+ can.
+                # Normalise Z -> +00:00 before parsing so all Python 3.x versions work.
+                space_idx = line.index(" ")
+                sha = line[:space_idx]
+                ts_str = line[space_idx + 1 :]
+                if ts_str.endswith("Z"):
+                    ts_str = ts_str[:-1] + "+00:00"
+                dt = datetime.fromisoformat(ts_str).astimezone(timezone.utc)
+                result[sha] = dt
+            except Exception as exc:
+                logger.debug(
+                    "Migration: skipping unparseable git log line %r for %s: %s",
+                    line,
+                    repo_path,
+                    exc,
+                )
 
     return result
 
@@ -344,7 +355,7 @@ def _build_quarter_buckets(
     label_to_point_id: Dict[int, str],
     point_id_to_rel_path: Dict[str, str],
     sha_timestamps: Optional[Dict[str, datetime]] = None,
-) -> Dict[str, List[Tuple[int, str, Path]]]:
+) -> Tuple[Dict[str, List[Tuple[int, str, Path]]], Dict[str, int]]:
     """Group vectors into quarterly buckets based on commit timestamp.
 
     Timestamp resolution strategy (primary → fallback):
@@ -360,10 +371,20 @@ def _build_quarter_buckets(
             each JSON file.
 
     Returns:
-        Dict mapping quarter_str (e.g. "2024Q3") to list of
-        (label, point_id, src_json_path) tuples.
+        Tuple of (buckets, drop_counts) where:
+        - buckets maps quarter_str (e.g. "2024Q3") to list of
+          (label, point_id, src_json_path) tuples.
+        - drop_counts maps drop reason to count:
+            "missing_id_index"    — point_id not in id_index.bin (structural orphan)
+            "missing_json"        — id_index entry exists but JSON file gone (structural orphan)
+            "timestamp_unresolved"— both git and payload timestamps absent (recoverable)
     """
     buckets: Dict[str, List[Tuple[int, str, Path]]] = {}
+    drop_counts: Dict[str, int] = {
+        "missing_id_index": 0,
+        "missing_json": 0,
+        "timestamp_unresolved": 0,
+    }
     _sha_ts = sha_timestamps or {}
 
     for label, point_id in label_to_point_id.items():
@@ -374,6 +395,7 @@ def _build_quarter_buckets(
                 point_id,
                 collection_path.name,
             )
+            drop_counts["missing_id_index"] += 1
             continue
 
         src_json = collection_path / rel_path
@@ -383,6 +405,7 @@ def _build_quarter_buckets(
                 src_json,
                 point_id,
             )
+            drop_counts["missing_json"] += 1
             continue
 
         try:
@@ -404,6 +427,7 @@ def _build_quarter_buckets(
                         src_json,
                         point_id,
                     )
+                    drop_counts["timestamp_unresolved"] += 1
                     continue
                 dt = datetime.fromtimestamp(int(commit_ts), tz=timezone.utc)
 
@@ -412,11 +436,12 @@ def _build_quarter_buckets(
             logger.warning(
                 "Migration: error processing %s: %s — skipping", src_json, exc
             )
+            drop_counts["timestamp_unresolved"] += 1
             continue
 
         buckets.setdefault(q, []).append((label, point_id, src_json))
 
-    return buckets
+    return buckets, drop_counts
 
 
 def _build_one_shard(
@@ -577,7 +602,7 @@ def _migrate_one_collection(
                     collection_name,
                 )
 
-        quarter_buckets = _build_quarter_buckets(
+        quarter_buckets, drop_counts = _build_quarter_buckets(
             collection_path,
             label_to_point_id,
             point_id_to_rel_path,
@@ -586,6 +611,38 @@ def _migrate_one_collection(
 
         total_shards = len(quarter_buckets)
         total_vectors = sum(len(v) for v in quarter_buckets.values())
+
+        structural_orphans = (
+            drop_counts["missing_id_index"] + drop_counts["missing_json"]
+        )
+        timestamp_unresolved = drop_counts["timestamp_unresolved"]
+
+        # Bug #1238 (reason-aware guard):
+        # - timestamp_unresolved > 0: recoverable — git lookup failed or payloads empty.
+        #   Raise and preserve the monolith so the caller can fix git and re-run.
+        # - structural orphans only (missing id_index / JSON file): permanently gone.
+        #   Raising would deadlock migration forever on one corrupt entry and block all
+        #   sibling collections.  Log a loud WARNING and proceed with the rest.
+        if timestamp_unresolved > 0:
+            raise RuntimeError(
+                f"Migration aborted for {collection_name}: "
+                f"{timestamp_unresolved} of {len(label_to_point_id)} vector(s) have "
+                f"unresolved commit timestamps (git lookup returned no results and JSON "
+                f"payloads contain no commit_timestamp). "
+                f"Monolithic index preserved — fix git access and re-run."
+            )
+
+        if structural_orphans > 0:
+            logger.warning(
+                "Migration: %d structural orphan(s) in %s will be skipped "
+                "(missing_id_index=%d, missing_json=%d) — entries are permanently "
+                "unrecoverable; proceeding with migration of resolvable vectors.",
+                structural_orphans,
+                collection_name,
+                drop_counts["missing_id_index"],
+                drop_counts["missing_json"],
+            )
+
         vectors_migrated = 0
 
         for shard_idx, q_str in enumerate(sorted(quarter_buckets.keys())):
