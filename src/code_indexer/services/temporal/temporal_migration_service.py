@@ -409,12 +409,15 @@ def _build_quarter_buckets(
             continue
 
         try:
-            # Primary: use git-derived timestamps (production data has empty JSON).
+            # Primary: prefer git-derived commit timestamps (authoritative).
             sha = _extract_sha_from_point_id(point_id)
             dt: Optional[datetime] = _sha_ts.get(sha) if sha else None
 
             if dt is None:
-                # Fallback: read commit_timestamp from JSON payload (test data).
+                # Fallback: every temporal payload carries payload.commit_timestamp
+                # (written unconditionally by the indexer since v7.x; required by
+                # temporal query filtering), so this resolves every vector even when
+                # the git lookup fails (e.g. ARG_MAX/E2BIG on a very large SHA set).
                 with open(src_json) as f:
                     payload_data = json.load(f)
                 commit_ts = payload_data.get("payload", {}).get("commit_timestamp")
