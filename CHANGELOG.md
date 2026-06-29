@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.7.0] - 2026-06-29
+
+### Fixed
+- **#1240: temporal migration flooded the SQLite logs.db (one WARNING per skipped point) -> "database is locked" storm on large corrupt indexes.** `_build_quarter_buckets` logged a WARNING for every skipped point across all three drop paths (missing_id_index, missing_json, timestamp_unresolved). On a large repo with a partially-corrupt temporal index (production `evolution`: ~1,914 orphans in one collection; ~34,000 migration log rows total) this overwhelmed the single-node SQLite log store and surfaced as Logs-DB lock-contention events on the dashboard. Fix: demote the four per-point `logger.warning` calls in `_build_quarter_buckets` to `logger.debug`; the per-collection aggregate summary WARNING (which reports the counts: structural orphans, missing_id_index, missing_json) is retained, so operators keep the actionable signal while the per-point detail moves to DEBUG. drop_counts accounting, the reason-aware guard, and all bucketing behavior are unchanged. (Root-cause logging-architecture follow-up tracked in #1241: fully-async batched log writer.)
+
 ## [11.6.0] - 2026-06-28
 
 ### Fixed
