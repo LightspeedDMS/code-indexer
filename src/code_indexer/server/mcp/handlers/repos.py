@@ -1865,7 +1865,6 @@ def _run_provider_subprocess(
             all_stderr=all_stderr,
             cwd=actual_path,
             env=env,
-            timeout=None,
             error_label=f"provider {phase_name}",
         )
         stdout_out = "".join(all_stdout)

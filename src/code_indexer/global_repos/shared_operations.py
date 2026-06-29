@@ -199,6 +199,13 @@ class GlobalRepoOperations:
             "enable_temporal": repo.get(
                 "enable_temporal", False
             ),  # Default to False for legacy repos
+            # Bug #1204: next_refresh and enable_scip are in the already-loaded record
+            # (both SQLite and PG backends SELECT these columns in get_repo/get_global_repo).
+            # No extra DB query — values come directly from the record fetched above.
+            "next_refresh": repo.get("next_refresh"),  # None when not scheduled
+            "enable_scip": repo.get(
+                "enable_scip", False
+            ),  # Default False for legacy repos
         }
 
     def get_config(self) -> Dict[str, Any]:

@@ -72,6 +72,15 @@ def seed_provider_config(repo_path: str) -> None:
         if value is not None:
             _set_dot_path(disk_config, dot_path, value)
 
+    # Story #1158 - AC2: Write temporal keys unconditionally — null must propagate.
+    # These are NOT in SEEDED_KEYS because the None-filter loop above would swallow None.
+    for dot_path in (
+        "voyage_ai.temporal_parallel_requests",
+        "cohere.temporal_parallel_requests",
+    ):
+        temporal_val = _resolve_dot_path(server_values, dot_path)
+        _set_dot_path(disk_config, dot_path, temporal_val)
+
     _atomic_write(config_file, disk_config)
 
 
@@ -115,11 +124,27 @@ def _get_server_provider_values() -> Dict[str, Any]:
         server_cfg = get_config_service().get_config()
         indexing = getattr(server_cfg, "indexing_config", None)
         if indexing is not None:
+            # Overlay timeout fields (pre-existing)
             for attr in ("voyage_ai_timeout", "cohere_timeout"):
                 val = getattr(indexing, attr, None)
                 if val is not None:
                     provider = "voyage_ai" if "voyage" in attr else "cohere"
                     result[provider]["timeout"] = val
+
+            # Story #1158 - AC1: Overlay embedding parallelism when set
+            for field_name, provider_key in (
+                ("voyage_ai_parallel_requests", "voyage_ai"),
+                ("cohere_parallel_requests", "cohere"),
+            ):
+                val = getattr(indexing, field_name, None)
+                if val is not None:
+                    result[provider_key]["parallel_requests"] = val
+
+            # Story #1158 - AC2: Propagate temporal parallelism unconditionally
+            # None must reach config.json as null — do NOT skip None here
+            temporal_val = getattr(indexing, "temporal_parallel_requests", None)
+            result["voyage_ai"]["temporal_parallel_requests"] = temporal_val
+            result["cohere"]["temporal_parallel_requests"] = temporal_val
     except Exception as exc:
         logger.debug(
             "Config seeding: server config unavailable, using defaults: %s", exc

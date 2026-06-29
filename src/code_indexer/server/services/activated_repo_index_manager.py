@@ -42,10 +42,6 @@ class ActivatedRepoIndexManager:
     # Valid index types
     VALID_INDEX_TYPES = ["semantic", "fts", "temporal", "scip"]
 
-    # Timeout constants
-    INDEXING_TIMEOUT_SECONDS = 3600  # 1 hour for semantic/FTS/temporal
-    SCIP_TIMEOUT_SECONDS = 600  # 10 minutes for SCIP
-
     # Status detection constants
     STALE_THRESHOLD_DAYS = 7  # Temporal index stale after 7 days
     BYTES_PER_MB = 1024 * 1024  # Bytes to megabytes conversion
@@ -90,21 +86,18 @@ class ActivatedRepoIndexManager:
 
     def _load_scip_config(self) -> None:
         """
-        Load SCIP configuration from ConfigService (Story #3 Phase 2 AC9-AC11).
+        Load SCIP configuration from ConfigService (Story #3 Phase 2 AC11).
 
-        Updates instance-level timeout and threshold attributes from ConfigService.
+        Updates instance-level threshold attributes from ConfigService.
         Falls back to class-level defaults if ConfigService is unavailable.
+
+        Note (Bug #1218): indexing_timeout_seconds and scip_generation_timeout_seconds
+        have been removed — no whole-job timeout is applied on the indexing path.
         """
         try:
             config_service = get_config_service()
             config = config_service.get_config()
             if config.scip_config is not None:
-                self.INDEXING_TIMEOUT_SECONDS = (
-                    config.scip_config.indexing_timeout_seconds
-                )
-                self.SCIP_TIMEOUT_SECONDS = (
-                    config.scip_config.scip_generation_timeout_seconds
-                )
                 self.STALE_THRESHOLD_DAYS = (
                     config.scip_config.temporal_stale_threshold_days
                 )
@@ -520,12 +513,14 @@ class ActivatedRepoIndexManager:
         self,
         args: List[str],
         repo_path: str,
-        timeout: int,
     ) -> "subprocess.CompletedProcess[str]":
         """Run a cidx subprocess with provider-config seeding and health-event draining.
 
         Bug #678: Seeds config before the subprocess starts and drains health events
         in a finally block so telemetry is collected even when the command fails.
+
+        Note (Bug #1218): no whole-job timeout is applied. The only legitimate timeout
+        is the per-request outbound embedding-provider HTTP call.
         """
         self._seed_telemetry(repo_path)
         try:
@@ -534,7 +529,6 @@ class ActivatedRepoIndexManager:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=timeout,
             )
         finally:
             self._drain_telemetry(repo_path)
@@ -556,7 +550,6 @@ class ActivatedRepoIndexManager:
             result = self._run_subprocess_with_telemetry(
                 ["cidx", "index"],
                 repo_path,
-                self.INDEXING_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -567,10 +560,29 @@ class ActivatedRepoIndexManager:
 
             return {"success": True, "message": "Semantic indexing completed"}
 
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Semantic indexing timed out"}
         except Exception as e:
             return {"success": False, "error": f"Semantic indexing error: {str(e)}"}
+
+    def run_branch_delta_index(self, repo_path: str) -> None:
+        """Run a synchronous branch-aware incremental semantic reindex.
+
+        Called by ActivatedRepoManager after activation/switch/sync on a
+        non-default branch (Bug #1203).  Uses clear=False so the existing CoW
+        clone index is treated as a starting point and only changed files are
+        re-embedded.
+
+        Args:
+            repo_path: Absolute path to the activated repo clone.
+
+        Raises:
+            RuntimeError: If the indexing subprocess fails or times out.
+        """
+        result = self._execute_semantic_indexing(repo_path, False)
+        if not result.get("success", False):
+            error_detail = result.get("error", "unknown error")
+            raise RuntimeError(
+                f"Branch-delta reindex failed for '{repo_path}': {error_detail}"
+            )
 
     def _execute_fts_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
         """Execute FTS indexing using TantivyIndexManager."""
@@ -582,7 +594,6 @@ class ActivatedRepoIndexManager:
             result = self._run_subprocess_with_telemetry(
                 args,
                 repo_path,
-                self.INDEXING_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -593,8 +604,6 @@ class ActivatedRepoIndexManager:
 
             return {"success": True, "message": "FTS indexing completed"}
 
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "FTS indexing timed out"}
         except Exception as e:
             return {"success": False, "error": f"FTS indexing error: {str(e)}"}
 
@@ -608,7 +617,6 @@ class ActivatedRepoIndexManager:
             result = self._run_subprocess_with_telemetry(
                 args,
                 repo_path,
-                self.INDEXING_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -619,8 +627,6 @@ class ActivatedRepoIndexManager:
 
             return {"success": True, "message": "Temporal indexing completed"}
 
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Temporal indexing timed out"}
         except Exception as e:
             return {"success": False, "error": f"Temporal indexing error: {str(e)}"}
 
@@ -636,7 +642,6 @@ class ActivatedRepoIndexManager:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=self.SCIP_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -647,8 +652,6 @@ class ActivatedRepoIndexManager:
 
             return {"success": True, "message": "SCIP generation completed"}
 
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "SCIP generation timed out"}
         except Exception as e:
             return {"success": False, "error": f"SCIP generation error: {str(e)}"}
 

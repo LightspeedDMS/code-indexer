@@ -1916,6 +1916,21 @@ class CIDXDaemonService(Service):
                     info=f"Complete: {indexed_count} indexed, {failed_count} failed",
                 )
 
+            # Total-failure guard (Bug #1218 residual): if no files were indexed
+            # but some failed, this is a complete failure — report it loudly.
+            if indexed_count == 0 and failed_count > 0:
+                error_msg = (
+                    f"FTS rebuild failed: all {failed_count} file(s) failed to index. "
+                    "Check file permissions and content encoding."
+                )
+                logger.error(error_msg)
+                return {
+                    "status": "error",
+                    "error": error_msg,
+                    "files_indexed": 0,
+                    "files_failed": failed_count,
+                }
+
             return {
                 "status": "success",
                 "files_indexed": indexed_count,

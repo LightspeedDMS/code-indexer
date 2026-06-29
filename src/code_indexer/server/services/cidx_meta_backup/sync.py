@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
@@ -50,6 +51,20 @@ class CidxMetaBackupSync:
     def _stderr_or_stdout(result: subprocess.CompletedProcess) -> str:
         return (result.stderr or result.stdout or "").strip()
 
+    def _rebase_in_progress(self) -> bool:
+        """Return True when git has stopped mid-rebase with state on disk.
+
+        A non-zero rebase exit code does NOT always mean a conflict stopped it.
+        git may fail before creating any state (dirty working tree, invalid
+        upstream, pre-rebase hook, lock contention, etc.).  We only enter the
+        conflict-resolution path when git has actually written its rebase-state
+        directory, meaning there is a rebase to --continue or --abort.
+        """
+        git_dir = Path(self.cidx_meta_path) / ".git"
+        return (git_dir / "rebase-merge").is_dir() or (
+            git_dir / "rebase-apply"
+        ).is_dir()
+
     def sync(self) -> SyncResult:
         status = self._git("status", "--porcelain")
         local_committed = False
@@ -74,6 +89,13 @@ class CidxMetaBackupSync:
 
         rebase_result = self._git("rebase", f"origin/{self.branch}", check=False)
         if rebase_result.returncode != 0:
+            if not self._rebase_in_progress():
+                # Rebase failed before creating any state (pre-rebase hook, dirty
+                # working tree, invalid upstream, lock contention, etc.).  There is
+                # nothing to --continue or --abort; surface the original failure.
+                raise RuntimeError(
+                    "rebase failed: " + self._stderr_or_stdout(rebase_result)
+                )
             conflict_files = self._git(
                 "diff", "--name-only", "--diff-filter=U", check=False
             ).stdout.splitlines()

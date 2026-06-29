@@ -19,7 +19,7 @@ CIDX uses a three-tier repository topology to support multi-user code indexing w
 - Single remote: `origin` pointing to GitHub/GitLab URL
 - Updated via `git pull` or `cidx refresh`
 - Serves as CoW clone source for activated repos
-- Metadata stored in SQLite database (Story #702) and legacy `{data_dir}/golden-repos/metadata.json`
+- Metadata stored in SQLite database and legacy `{data_dir}/golden-repos/metadata.json`
 
 **Creation**:
 ```python
@@ -42,7 +42,7 @@ git clone {repo_url} {clone_path}
 - SCIP call graphs (if supported language)
 - Multiple versions coexist (temporal queries)
 - Alias naming: `{repo-name}-global`
-- Registry stored in SQLite database (Story #702) via `GlobalReposSqliteBackend` and legacy `{data_dir}/golden-repos/global_registry.json`
+- Registry stored in SQLite database via `GlobalReposSqliteBackend` and legacy `{data_dir}/golden-repos/global_registry.json`
 
 **Creation**:
 ```python
@@ -62,7 +62,7 @@ versioned_path = f"{golden_repos_dir}/.versioned/{alias}/v_{timestamp}/"
 
 **Characteristics**:
 - CoW cloned from golden repos (fast, space-efficient)
-- Dual remote model (Story #636):
+- Dual remote model:
   - `origin`: GitHub/GitLab URL (for push/pull)
   - `golden`: Local golden repo path (for sync)
 - Per-user isolation (no cross-user interference)
@@ -94,13 +94,13 @@ CIDX currently supports TWO storage models due to evolutionary architecture:
 
 ### Current State
 
-**Flat Structure Repos** (13 repos):
+**Flat Structure Repos** (legacy):
 - Created before versioned storage implementation
 - Stored directly in `golden-repos/{alias}/`
 - Metadata `clone_path` matches actual filesystem location
 - No global indexing (golden-only)
 
-**Versioned Structure Repos** (12 repos):
+**Versioned Structure Repos** (current):
 - Created with global activation enabled
 - Stored in `.versioned/{repo}/v_{timestamp}/`
 - Metadata `clone_path` points to flat structure (STALE)
@@ -127,7 +127,7 @@ def get_actual_repo_path(self, alias: str) -> str:
 ```
 
 **Usage**:
-- Migration code (Story #636)
+- Migration code
 - Git operations requiring golden repo access
 - Global registry path lookups
 - Any code trusting metadata paths
@@ -142,7 +142,7 @@ def get_actual_repo_path(self, alias: str) -> str:
 - Snapshot isolation
 
 **Cons**:
-- Migration complexity for 13 flat repos
+- Migration complexity for existing flat repos
 - Storage overhead for versions
 - Breaking change for existing code
 
@@ -231,7 +231,7 @@ if not resolved.startswith(os.path.realpath(golden_repos_dir)):
     "repo_name": "repo-alias",
     "alias_name": "repo-alias-global",
     "repo_url": "git@github.com:user/repo.git",
-    "index_path": "/data/golden-repos/repo-alias",  // May be stale
+    "target_path": "/data/golden-repos/repo-alias",  // May be stale
     "created_at": "2025-01-01T00:00:00Z"
   }
 }
@@ -289,7 +289,4 @@ When testing repository operations:
 
 ## References
 
-- **Story #636**: Dual remote model for activated repositories
-- **Issue #639**: Bug fixes for path resolution and migration
-- **Topology Bugs Document**: `/tmp/topology-bugs.md`
 - **Implementation**: `src/code_indexer/server/repositories/golden_repo_manager.py`

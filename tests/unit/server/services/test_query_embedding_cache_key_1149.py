@@ -519,7 +519,7 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
                 "code_indexer.server.services.governed_call.governed_query_embedding",
                 return_value=live_vec,
             ):
-                result = coalesced_query_embedding(provider, long_text)
+                result, _meta = coalesced_query_embedding(provider, long_text)
 
             # Live path returned
             assert result == live_vec
@@ -601,7 +601,7 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
                 "code_indexer.server.services.governed_call.governed_query_embedding",
                 return_value=live_vec,
             ):
-                result = coalesced_query_embedding(provider, long_text)
+                result, _meta = coalesced_query_embedding(provider, long_text)
 
             assert result == live_vec
 
@@ -658,7 +658,7 @@ class TestScenario4NoneKeyGuardedAtCallBoundary:
                 )
 
                 # Should not raise even when the key is None (over-cap)
-                result = coalesced_query_embedding(provider, long_text)
+                result, _meta = coalesced_query_embedding(provider, long_text)
                 assert result == live_vec
 
             # No row must have been written

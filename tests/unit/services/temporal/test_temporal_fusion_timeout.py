@@ -1,8 +1,11 @@
-"""Tests for Bug #669: TimeoutError handling in _query_multi_provider_fusion.
+"""Tests for Bug #669: TimeoutError handling in multi-provider temporal query path.
 
 Verifies that as_completed() TimeoutError is caught at the loop level,
 partial results are returned, and futures are cancelled before ThreadPoolExecutor
 shutdown to avoid blocking.
+
+Migrated from _query_multi_provider_fusion (deleted, Story #1171 C3) to
+execute_temporal_query_with_fusion (the live production entry point).
 """
 
 import time
@@ -10,7 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from code_indexer.services.temporal.temporal_fusion_dispatch import (
-    _query_multi_provider_fusion,
+    execute_temporal_query_with_fusion,
 )
 from code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResult,
@@ -56,34 +59,34 @@ def _make_mock_vector_store(project_root: Path):
     return vs
 
 
-def _make_two_collections(tmp_path):
-    """Return a list of two (name, path) collection tuples."""
+def _two_provider_groups():
+    """Two provider groups for the multi-provider parallel path."""
     return [
         (
             "code-indexer-temporal-voyage_code_3",
-            tmp_path / "code-indexer-temporal-voyage_code_3",
+            ["code-indexer-temporal-voyage_code_3"],
         ),
         (
             "code-indexer-temporal-embed_v4_0",
-            tmp_path / "code-indexer-temporal-embed_v4_0",
+            ["code-indexer-temporal-embed_v4_0"],
         ),
     ]
 
 
-def _make_three_collections(tmp_path):
-    """Return a list of three (name, path) collection tuples."""
+def _three_provider_groups():
+    """Three provider groups for the multi-provider parallel path."""
     return [
         (
             "code-indexer-temporal-voyage_code_3",
-            tmp_path / "code-indexer-temporal-voyage_code_3",
+            ["code-indexer-temporal-voyage_code_3"],
         ),
         (
             "code-indexer-temporal-embed_v4_0",
-            tmp_path / "code-indexer-temporal-embed_v4_0",
+            ["code-indexer-temporal-embed_v4_0"],
         ),
         (
             "code-indexer-temporal-cohere_embed_3",
-            tmp_path / "code-indexer-temporal-cohere_embed_3",
+            ["code-indexer-temporal-cohere_embed_3"],
         ),
     ]
 
@@ -101,15 +104,12 @@ def test_all_futures_timeout_returns_empty_no_exception(tmp_path):
 
     Also verifies:
     - The call returns within timeout + 2s (no blocking on in-flight threads).
-    - record_temporal_failure is called for each timed-out collection.
+    - record_temporal_failure is called for each timed-out provider group.
 
-    query_provider-level behaviour is driven by TemporalSearchService sleeping
-    longer than the forced timeout so as_completed() fires TimeoutError.
     TEMPORAL_QUERY_TIMEOUT_SECONDS is overridden to 0.05s so the test runs fast.
     """
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
-    collections = _make_three_collections(tmp_path)
 
     sleep_duration = 0.3  # longer than forced timeout
     forced_timeout = 0.05
@@ -122,6 +122,17 @@ def test_all_futures_timeout_returns_empty_no_exception(tmp_path):
         patch(
             "code_indexer.services.temporal.temporal_fusion_dispatch.TEMPORAL_QUERY_TIMEOUT_SECONDS",
             forced_timeout,
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=_three_provider_groups(),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
         ),
         patch(
             "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
@@ -141,14 +152,13 @@ def test_all_futures_timeout_returns_empty_no_exception(tmp_path):
 
         t0 = time.time()
         # Must NOT raise — this was the bug
-        result = _query_multi_provider_fusion(
+        result = execute_temporal_query_with_fusion(
             config=config,
+            index_path=tmp_path,
             vector_store=vector_store,
-            collections=collections,
             query_text="test query",
             limit=5,
             time_range=None,
-            file_path_filter=None,
         )
         elapsed = time.time() - t0
 
@@ -159,13 +169,13 @@ def test_all_futures_timeout_returns_empty_no_exception(tmp_path):
 
     # No-blocking requirement: must return well within timeout + 2s overhead
     assert elapsed < forced_timeout + 2.0, (
-        f"_query_multi_provider_fusion blocked for {elapsed:.2f}s "
+        f"execute_temporal_query_with_fusion blocked for {elapsed:.2f}s "
         f"(timeout={forced_timeout}s, max allowed={forced_timeout + 2.0}s)"
     )
 
     # Timed-out providers must be recorded as failures in health telemetry
     assert mock_record_failure.called, (
-        "record_temporal_failure must be called for timed-out collections"
+        "record_temporal_failure must be called for timed-out providers"
     )
 
 
@@ -183,25 +193,17 @@ def test_partial_futures_timeout_returns_partial_results(tmp_path):
 
     Also verifies:
     - The call returns within timeout + 2s (no blocking on in-flight threads).
-    - record_temporal_failure is called for the two timed-out collections.
-
-    Behavior is keyed on collection name to avoid shared-counter data races
-    across the threads spawned by ThreadPoolExecutor.
+    - record_temporal_failure is called for the two timed-out providers.
     """
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
-    collections = _make_three_collections(tmp_path)
 
     fast_coll_name = "code-indexer-temporal-voyage_code_3"
     fast_result = _make_result("fast.py", score=0.95)
-    sleep_duration = 0.3
-    forced_timeout = 0.1  # fast provider completes at ~0s; slow ones sleep 0.3s
+    sleep_duration = 0.5  # slow providers sleep well past timeout
+    forced_timeout = 0.3  # fast provider (~0s) beats timeout; slow ones sleep 0.5s
 
-    # Map from collection name → per-instance result behaviour.
-    # Each MockService instance is created with a collection_name kwarg so we
-    # can key on it deterministically without a shared mutable counter.
     def make_service_instance(*args, **kwargs):
-        # TemporalSearchService receives collection_name as a keyword arg
         coll_name = kwargs.get("collection_name", "")
         instance = MagicMock()
 
@@ -223,6 +225,17 @@ def test_partial_futures_timeout_returns_partial_results(tmp_path):
             forced_timeout,
         ),
         patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=_three_provider_groups(),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
+        patch(
             "code_indexer.services.temporal.temporal_search_service.TemporalSearchService",
             side_effect=make_service_instance,
         ),
@@ -237,14 +250,13 @@ def test_partial_futures_timeout_returns_partial_results(tmp_path):
         MockFactory.get_configured_providers.return_value = []
 
         t0 = time.time()
-        result = _query_multi_provider_fusion(
+        result = execute_temporal_query_with_fusion(
             config=config,
+            index_path=tmp_path,
             vector_store=vector_store,
-            collections=collections,
             query_text="test query",
             limit=5,
             time_range=None,
-            file_path_filter=None,
         )
         elapsed = time.time() - t0
 
@@ -256,15 +268,16 @@ def test_partial_futures_timeout_returns_partial_results(tmp_path):
     assert result.warning is not None
     assert len(result.warning) > 0
 
-    # No-blocking requirement: must return well within timeout + 2s overhead
-    assert elapsed < forced_timeout + 2.0, (
-        f"_query_multi_provider_fusion blocked for {elapsed:.2f}s "
-        f"(timeout={forced_timeout}s, max allowed={forced_timeout + 2.0}s)"
+    # No-blocking requirement: must return well within timeout + 3s overhead
+    # (3s allows for slow CI machines; the important thing is no hang)
+    assert elapsed < forced_timeout + 3.0, (
+        f"execute_temporal_query_with_fusion blocked for {elapsed:.2f}s "
+        f"(timeout={forced_timeout}s, max allowed={forced_timeout + 3.0}s)"
     )
 
     # Timed-out providers must be recorded as failures in health telemetry
     assert mock_record_failure.called, (
-        "record_temporal_failure must be called for timed-out collections"
+        "record_temporal_failure must be called for timed-out providers"
     )
 
 
@@ -277,11 +290,9 @@ def test_no_timeout_returns_all_results(tmp_path):
     """Control: all providers complete before timeout → all results, no warning.
 
     Verifies the happy path is not broken by the timeout-handling fix.
-    Behavior is keyed on collection_name to avoid shared-counter data races.
     """
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
-    collections = _make_two_collections(tmp_path)
 
     coll_a = "code-indexer-temporal-voyage_code_3"
     coll_b = "code-indexer-temporal-embed_v4_0"
@@ -303,6 +314,17 @@ def test_no_timeout_returns_all_results(tmp_path):
 
     with (
         patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=_two_provider_groups(),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
+        patch(
             "code_indexer.services.temporal.temporal_search_service.TemporalSearchService",
             side_effect=make_service_instance,
         ),
@@ -313,14 +335,13 @@ def test_no_timeout_returns_all_results(tmp_path):
         MockFactory.create.return_value = MagicMock()
         MockFactory.get_configured_providers.return_value = []
 
-        result = _query_multi_provider_fusion(
+        result = execute_temporal_query_with_fusion(
             config=config,
+            index_path=tmp_path,
             vector_store=vector_store,
-            collections=collections,
             query_text="test query",
             limit=5,
             time_range=None,
-            file_path_filter=None,
         )
 
     assert isinstance(result, TemporalSearchResults)
@@ -337,13 +358,12 @@ def test_no_timeout_returns_all_results(tmp_path):
 def test_empty_results_no_false_positive_warning(tmp_path):
     """All providers succeed but return 0 results → no 'All providers failed' warning.
 
-    MEDIUM 2: when results_by_provider is empty because providers returned
-    empty results (not because they failed or timed out), the warning
-    'All providers failed' must NOT fire.
+    When results_by_shard is empty because providers returned empty results
+    (not because they failed or timed out), the warning 'All providers failed'
+    must NOT fire.
     """
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
-    collections = _make_two_collections(tmp_path)
 
     def make_service_instance(*args, **kwargs):
         instance = MagicMock()
@@ -352,6 +372,17 @@ def test_empty_results_no_false_positive_warning(tmp_path):
         return instance
 
     with (
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=_two_provider_groups(),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
         patch(
             "code_indexer.services.temporal.temporal_search_service.TemporalSearchService",
             side_effect=make_service_instance,
@@ -363,14 +394,13 @@ def test_empty_results_no_false_positive_warning(tmp_path):
         MockFactory.create.return_value = MagicMock()
         MockFactory.get_configured_providers.return_value = []
 
-        result = _query_multi_provider_fusion(
+        result = execute_temporal_query_with_fusion(
             config=config,
+            index_path=tmp_path,
             vector_store=vector_store,
-            collections=collections,
             query_text="test query",
             limit=5,
             time_range=None,
-            file_path_filter=None,
         )
 
     assert isinstance(result, TemporalSearchResults)

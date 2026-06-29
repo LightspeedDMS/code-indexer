@@ -10,7 +10,6 @@ Complete guide to searching code with CIDX across all search modes and query par
   - [Full-Text Search (FTS)](#full-text-search-fts)
   - [Regex Search](#regex-search)
   - [Hybrid Search](#hybrid-search)
-- [Multi-Provider Query Strategy](#multi-provider-query-strategy)
 - [Query Parameters](#query-parameters)
 - [Filtering](#filtering)
 - [Temporal Queries](#temporal-queries)
@@ -170,78 +169,9 @@ cidx query "user validation tests" --fts --semantic --regex
 
 **Performance**: Combined time of both modes
 
-## Multi-Provider Query Strategy
-
-When multiple embedding providers are configured (e.g., VoyageAI and Cohere), the `--strategy` flag controls how CIDX routes queries across providers. The `--score-fusion` flag controls how results from multiple providers are merged when using the `parallel` strategy.
-
-### Strategy Options
-
-| Strategy | Behavior |
-|----------|----------|
-| `primary_only` | Query the primary provider only (default) |
-| `failover` | Query primary; if it fails, automatically fall back to the secondary provider |
-| `parallel` | Query all configured providers simultaneously and fuse the results |
-| `specific` | Query a single named provider via `--provider` |
-
-### CLI Usage
-
-```bash
-# Default: primary provider only
-cidx query "auth logic" --strategy primary_only
-
-# Auto-failover to secondary provider on error
-cidx query "auth logic" --strategy failover
-
-# Query all providers, fuse results
-cidx query "auth logic" --strategy parallel
-
-# Query all providers with explicit score fusion method
-cidx query "auth logic" --strategy parallel --score-fusion rrf
-
-# Target a specific provider by name
-cidx query "auth logic" --strategy specific --provider cohere
-```
-
-### Score Fusion (parallel strategy only)
-
-When `--strategy parallel` is used, results from each provider are merged using a score fusion algorithm:
-
-| Fusion Method | Description |
-|---------------|-------------|
-| `rrf` | Reciprocal Rank Fusion (default) -- ranks results by combining inverse rank positions across providers |
-| `multiply` | Multiplies normalized scores from each provider |
-| `average` | Averages normalized scores from each provider |
-
-```bash
-# Reciprocal Rank Fusion (default)
-cidx query "database connection" --strategy parallel --score-fusion rrf
-
-# Multiplicative fusion
-cidx query "database connection" --strategy parallel --score-fusion multiply
-
-# Average fusion
-cidx query "database connection" --strategy parallel --score-fusion average
-```
-
-### Result Attribution
-
-Each result includes a `source_provider` field indicating which embedding provider produced it. This is present in all strategy modes.
-
-```
-source_provider: voyage-ai    # Result from VoyageAI
-source_provider: cohere       # Result from Cohere
-```
-
-### When to Use Each Strategy
-
-- **primary_only**: Single-provider setup, or when you want deterministic results from one provider.
-- **failover**: Production environments where availability matters more than result diversity.
-- **parallel**: When you want the broadest recall by combining results from multiple embedding models.
-- **specific**: When you need results from a particular provider (e.g., comparing provider quality).
-
 ## Query Parameters
 
-CIDX supports **28 query parameters** (23 CLI + 5 API-only) across CLI, REST API, and MCP interfaces.
+CIDX supports query parameters across CLI, REST API, and MCP interfaces.
 
 ### Core Parameters
 
@@ -264,7 +194,7 @@ cidx query "search text" --limit 20 --min-score 0.7
 | **path_filter** | --path-filter PATTERN | string | None | Include files matching glob pattern |
 | **exclude_language** | --exclude-language LANG | string | None | Exclude specified language |
 | **exclude_path** | --exclude-path PATTERN | string | None | Exclude files matching glob pattern |
-| **file_extensions** | N/A (API-only) | array | None | Filter by file extensions |
+| **file_extensions** | --file-extensions EXTS | array | None | Filter by file extensions |
 
 **Supported Languages**:
 python, javascript, typescript, java, c, cpp, csharp, go, rust, kotlin, swift, ruby, php, lua, groovy, pascal, sql, html, css, yaml, xml, markdown, and more
@@ -274,6 +204,10 @@ python, javascript, typescript, java, c, cpp, csharp, go, rust, kotlin, swift, r
 - `**` - Match any path segments
 - `?` - Match single character
 - `[seq]` - Match character class
+
+Note: patterns starting with `*/` match at any depth including the repository root.
+`*/tests/*` matches both `tests/foo.py` (root) and `src/tests/foo.py` (nested).
+`**/tests/**` is equivalent and also accepted.
 
 **Examples**:
 ```bash
@@ -800,188 +734,38 @@ cidx query "anything" --time-range-all --quiet
 - **Operating Modes**: [Operating Modes](operating-modes.md)
 - **Main Documentation**: [README](../README.md)
 
----
-
-## Fact-Check Summary
-
-**Verification Scope**: All technical claims, parameter specifications, performance metrics, and code examples validated against CIDX implementation.
-
-### Corrections Made
-
-1. **Missing --repo and --repos Parameters** (2025-01-20):
-   - **Issue**: Parameters existed in CLI but were not documented
-   - **Corrected**: Added to parameter reference table
-   - **Source**: `src/code_indexer/cli.py` lines 4426-4433
-   - **--repo**: Query a global repository by alias (remote mode)
-   - **--repos**: Query multiple repositories, comma-separated (remote mode)
-
-2. **min_score Default Value** (2025-01-20):
-   - **Original**: Default documented as 0.5
-   - **Corrected**: Default is None (Optional[float] with no default)
-   - **Source**: `src/code_indexer/cli.py` line 4446
-
-3. **Parameter Count** (2025-01-20):
-   - **Original**: "23 Query Parameters Total"
-   - **Corrected**: 25 parameters (added --repo and --repos)
-
-4. **Temporal Index File Location** (2025-12-31):
-   - **Original**: `.code-indexer/index/*/temporal_chunks.json`
-   - **Corrected**: `.code-indexer/index/*/temporal_meta.json`
-   - **Source**: Verified in `src/code_indexer/services/temporal/temporal_indexer.py` line 155-156 and actual file existence at `/home/jsbattig/Dev/code-indexer/.code-indexer/index/code-indexer-temporal/temporal_meta.json`
-   - **Note**: `temporal_chunks.json` never existed - the metadata file is `temporal_meta.json`, while individual temporal vectors are stored as separate `.json` files in the quantized directory structure
-
-### Verified Claims
-
-#### Search Mode Claims (Lines 44-171)
-
-✅ **Semantic Search Performance** (~20ms):
-- **Status**: UNVERIFIED - No direct benchmark evidence found in codebase
-- **Classification**: Uncertain claim requiring manual testing
-- **Recommendation**: Consider adding benchmark suite or removing specific timing claim
-
-✅ **FTS Performance** (<100ms, 1.36x faster than grep):
-- **Status**: ACCURATE
-- **Source**: `docs/CHANGELOG.md` lines reporting "1.36x faster than grep on indexed codebases (measured on 11,859-file repo)"
-- **Supporting Evidence**: Test suite `tests/unit/services/test_daemon_fts_cache_performance.py` validates <100ms cache hit performance
-
-✅ **Regex Performance** (10-50x faster than grep):
-- **Status**: ACCURATE
-- **Source**: `src/code_indexer/services/cidx_instruction_builder.py` line 101: "Regex pattern matching (10-50x faster than grep)"
-- **Attribution**: Token-based regex via Tantivy, not arbitrary line-based regex like grep
-
-✅ **Hybrid Search Mode**:
-- **Status**: ACCURATE
-- **Source**: `src/code_indexer/server/query/semantic_query_manager.py` implements hybrid mode combining FTS + semantic search
-- **CLI Implementation**: `src/code_indexer/cli.py` lines 1547-1552 correctly handle `--fts --semantic` flags to set `search_mode = "hybrid"`
-
-#### Query Parameters (Lines 173-766)
-
-✅ **25 Query Parameters Total**:
-- **Status**: ACCURATE (corrected 2025-01-20)
-- **Source**: `src/code_indexer/cli.py` query command definition (lines 4311-4464)
-- **Breakdown**: 20 CLI-exposed parameters + 5 API-only parameters (at_commit, include_removed, show_evolution, evolution_limit, file_extensions)
-- **Note**: Added --repo and --repos parameters (remote mode support) previously missing from documentation
-
-✅ **Parameter Names and Defaults**:
-- **Status**: ACCURATE
-- **Verification**: Cross-referenced all CLI flags in `cidx query --help` output against documented parameters
-- **Confirmed**: All default values, parameter types, and CLI flag names match implementation
-
-✅ **FTS Parameter Constraints**:
-- **Status**: ACCURATE
-- **Source**: `src/code_indexer/cli.py` validates `--regex` requires `--fts` mode (lines ~1560-1570)
-- **Mutex Constraint**: `--regex` and `--fuzzy` are mutually exclusive (documented correctly)
-
-#### Supported Languages (Line 200)
-
-✅ **Language List**:
-- **Status**: ACCURATE
-- **Source**: `src/code_indexer/utils/yaml_utils.py` lines 10-56 define `DEFAULT_LANGUAGE_MAPPINGS`
-- **Verified Languages**: python, javascript, typescript, java, c, cpp, csharp, go, rust, kotlin, swift, ruby, php, lua, groovy, pascal, sql, html, css, yaml, xml, markdown
-- **Additional Languages**: Documented list includes all languages from default mappings plus aliases (c++, shell, bash, powershell, batch, dockerfile, makefile, cmake, text, log, csv)
-
-#### Glob Pattern Syntax (Line 203-206)
-
-✅ **Pattern Syntax**:
-- **Status**: ACCURATE
-- **CLI Help Verification**: `--exclude-path` help text explicitly states "Supports glob patterns (*, **, ?, [seq])"
-- **All documented patterns**: `*`, `**`, `?`, `[seq]` are confirmed as valid glob syntax
-
-#### Temporal Query Features (Lines 293-340)
-
-✅ **Temporal Parameters**:
-- **Status**: ACCURATE
-- **CLI Flags Verified**: `--time-range`, `--time-range-all`, `--diff-type`, `--author`, `--chunk-type` all present in `cidx query --help`
-- **API-Only Parameters**: at_commit, include_removed, show_evolution, evolution_limit correctly identified as API-only
-
-✅ **Diff Types** (added, modified, deleted, renamed, binary):
-- **Status**: ACCURATE
-- **Source**: `src/code_indexer/services/temporal/temporal_indexer.py` handles all five diff types
-- **Special Handling**: Code explicitly skips binary and renamed files (metadata only) at line ~150
-
-✅ **Chunk Types** (commit_message, commit_diff):
-- **Status**: ACCURATE
-- **Source**: `src/code_indexer/query/QUERY_PARAMETERS.md` line 73 defines enum values
-- **CLI Implementation**: `--chunk-type` flag accepts these exact values
-
-### Performance Claims Attribution
-
-- **~20ms semantic search**: UNCERTAIN - No benchmark evidence found, recommend manual testing or claim removal
-- **<100ms FTS queries**: VERIFIED via test suite and daemon cache performance tests
-- **1.36x faster than grep**: VERIFIED in CHANGELOG.md with measured benchmark on 11,859-file repository
-- **10-50x faster regex**: VERIFIED in instruction builder, attributed to token-based matching vs line-based grep
-
-### Sources Consulted
-
-**Implementation Files**:
-- `src/code_indexer/cli.py` - CLI parameter definitions and validation
-- `src/code_indexer/query/QUERY_PARAMETERS.md` - Authoritative parameter inventory
-- `src/code_indexer/server/query/semantic_query_manager.py` - Search mode implementation
-- `src/code_indexer/services/temporal/temporal_indexer.py` - Temporal indexing logic
-- `src/code_indexer/utils/yaml_utils.py` - Language mappings
-
-**Documentation**:
-- `docs/CHANGELOG.md` - Performance benchmarks and version history
-- `cidx query --help` - Current CLI interface specification
-
-**Test Suites**:
-- `tests/unit/services/test_daemon_fts_cache_performance.py` - FTS performance validation
-- `tests/unit/query/test_query_parameter_parity.py` - Parameter consistency tests
-
-**Git Repository**:
-- Verified temporal index files in `.code-indexer/index/code-indexer-temporal/`
-- Confirmed file structure matches documented paths
-
-### Fact-Checking Methodology
-
-1. **Parameter Validation**: Cross-referenced all 23 parameters against CLI help output, REST API schema (SemanticQueryRequest), and MCP schema (TOOL_REGISTRY)
-2. **Performance Claims**: Searched codebase for benchmark data, test suites, and performance measurements
-3. **Language Support**: Verified against language mapper default mappings and CLI help text
-4. **Code Examples**: Validated syntax against actual CLI implementation and flag parsing logic
-5. **File Paths**: Confirmed temporal index file structure through filesystem inspection and source code analysis
-
-### Confidence Levels
-
-- **High Confidence (✅)**: Parameter names, defaults, language support, glob syntax, temporal features, hybrid search - all verified against implementation
-- **Medium Confidence (?)**: ~20ms semantic search performance - no benchmark evidence, requires manual testing
-- **Corrections Applied**: 1 factual error corrected (temporal index file path)
-
-**Fact-checker**: Claude Opus 4.5 (fact-checking agent)
-
----
-
 ## Parameter Reference
 
-Complete list of all 28 query parameters with CLI flags, types, and defaults. For implementation details, see [QUERY_PARAMETERS.md](../src/code_indexer/query/QUERY_PARAMETERS.md).
+Complete list of CLI query parameters with flags, types, and defaults.
 
 | Parameter | CLI Flag | Type | Default | Modes | Description |
 |-----------|----------|------|---------|-------|-------------|
 | query | QUERY | string | required | All | Search query text |
 | limit | --limit | int | 10 | All | Max results (1-100) |
-| min_score | --min-score | float | None | All | Min similarity (0.0-1.0) |
-| language | --language | string | None | All | Filter by language |
-| path_filter | --path-filter | string | None | All | Include path pattern |
-| exclude_language | --exclude-language | string | None | All | Exclude language |
-| exclude_path | --exclude-path | string | None | All | Exclude path pattern |
+| min_score | --min-score | float | None | All | Minimum similarity score (0.0-1.0) |
+| language | --language | string (multiple) | None | All | Filter by programming language |
+| path_filter | --path-filter | string (multiple) | None | All | Include files matching glob pattern |
+| exclude_language | --exclude-language | string (multiple) | None | All | Exclude language |
+| exclude_path | --exclude-path | string (multiple) | None | All | Exclude path pattern |
+| file_extensions | --file-extensions | string | None | All | Filter by extensions (comma-separated, e.g. "py,js,ts") |
 | search_mode | --fts / --semantic | enum | semantic | All | semantic/fts/hybrid |
 | accuracy | --accuracy | enum | balanced | All | fast/balanced/high |
 | case_sensitive | --case-sensitive | bool | false | FTS | Case-sensitive match |
+| case_insensitive | --case-insensitive | bool | false | FTS | Case-insensitive match |
 | fuzzy | --fuzzy | bool | false | FTS | Typo tolerance |
 | edit_distance | --edit-distance | int | 0 | FTS | Fuzzy tolerance (0-3) |
 | snippet_lines | --snippet-lines | int | 5 | FTS | Context lines (0-50) |
 | regex | --regex | bool | false | FTS | Regex pattern |
-| time_range | --time-range | string | None | Temporal | Date range |
-| diff_type | --diff-type | string | None | Temporal | Diff type filter |
+| rerank_query | --rerank-query | string | None | All | Reranker query (requires API key) |
+| rerank_instruction | --rerank-instruction | string | None | All | Reranker instruction hint |
+| time_range | --time-range | string | None | Temporal | Date range filter |
+| diff_type | --diff-type | string (multiple) | None | Temporal | Diff type filter (can be specified multiple times) |
 | author | --author | string | None | Temporal | Author filter |
 | chunk_type | --chunk-type | enum | None | Temporal | commit_message/commit_diff |
 | repo | --repo | string | None | Remote | Query global repo by alias |
 | repos | --repos | string | None | Remote | Query multiple repos (comma-separated) |
-| strategy | --strategy | enum | primary_only | Multi-Provider | primary_only/failover/parallel/specific |
-| score_fusion | --score-fusion | enum | rrf | Multi-Provider | rrf/multiply/average (parallel only) |
-| provider | --provider | string | None | Multi-Provider | Target provider name (specific only) |
 
-**API-Only Parameters** (not in CLI):
-- file_extensions (array) - Filter by extensions
+**API-Only Parameters** (not available as CLI flags):
 - at_commit (string) - Query at specific commit
 - include_removed (bool) - Include removed files
 - show_evolution (bool) - Show code evolution

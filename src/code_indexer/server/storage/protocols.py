@@ -275,6 +275,22 @@ class BackgroundJobsBackend(Protocol):
 
     def cleanup_orphaned_jobs_on_startup(self) -> int: ...
 
+    def find_active_job_by_type_and_alias(
+        self,
+        operation_type: str,
+        repo_alias: str,
+    ) -> Optional[str]:
+        """Return job_id of the active (pending/running) row for (operation_type, repo_alias).
+
+        Direct non-paginated lookup — no Python-side filtering, no LIMIT/OFFSET.
+        Called by _find_blocking_active_job_id after a unique-index violation to
+        locate the blocking row without risking a pagination miss (Bug #1220).
+
+        Returns:
+            job_id string if a pending or running row exists, else None.
+        """
+        ...
+
     def close(self) -> None: ...
 
 
@@ -999,6 +1015,23 @@ class PayloadCacheBackend(Protocol):
         """
         ...
 
+    def store_batch(
+        self,
+        entries: List[Tuple[str, str, str, int]],
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Store multiple payload cache entries in ONE atomic transaction.
+
+        Bug #1181: Batch all per-query stores to avoid N fsync'd commits.
+        The facade (PayloadCache) is the sole handle authority — it generates
+        UUID4 handles and passes them in via entries.
+
+        Args:
+            entries: List of (cache_handle, content, preview, ttl_seconds) tuples.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+        ...
+
     def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
         """Retrieve a cache entry by handle, or None if missing or expired.
 
@@ -1641,7 +1674,11 @@ class QueryEmbeddingCacheBackend(Protocol):
     voyage-code-3 (1024 dims) vector and a cohere embed-v4.0 (1536 dims)
     vector for the *same* query text occupy separate rows.
 
-    Store access is SYNCHRONOUS DB-direct — no RAM layer, no async writer.
+    The ``last_used`` touch on cache hits is ASYNC/BEST-EFFORT (Bug #1181 Perf Fix #2):
+    ``record_hit`` buffers touches in a coalescing in-process dict and a background
+    thread drains them via ``touch_last_used_batch`` every ~5 seconds.  The hot query
+    path performs ZERO synchronous DB writes on a cache hit.  Approximate LRU is
+    acceptable — touches may be coalesced or delayed.
     """
 
     def lookup(
@@ -1698,7 +1735,11 @@ class QueryEmbeddingCacheBackend(Protocol):
         dimension: int,
         last_used: float,
     ) -> None:
-        """Update last_used for an existing row (synchronous on hit).
+        """Update last_used for an existing row (kept for direct callers/tests).
+
+        NOTE: The hot cache-hit path uses ``touch_last_used_batch`` via the
+        async flusher (Bug #1181 Perf Fix #2).  This single-row method is
+        retained for compatibility and direct testing.
 
         Args:
             cache_key: SHA-256 hex string.
@@ -1706,6 +1747,27 @@ class QueryEmbeddingCacheBackend(Protocol):
             model: Model name.
             dimension: Embedding dimension.
             last_used: New last_used epoch seconds.
+        """
+        ...
+
+    def touch_last_used_batch(
+        self,
+        items: "List[Tuple[str, str, str, int, float]]",
+    ) -> None:
+        """Update last_used for multiple rows in a single batch transaction.
+
+        Bug #1181 Perf Fix #2: the async touch flusher drains the coalescing
+        buffer by calling this method with all accumulated (cache_key, provider,
+        model, dimension, last_used) tuples.  A single transaction reduces WAL
+        lock contention on SQLite and uses SET LOCAL synchronous_commit=off on
+        PostgreSQL (ephemeral LRU bookkeeping — safe).
+
+        Implementations MUST be fail-open: log a WARNING on any error and never
+        raise.  Empty list must be a no-op (no DB round-trip).
+
+        Args:
+            items: List of (cache_key, provider, model, dimension, last_used)
+                tuples.  May be empty (no-op).
         """
         ...
 

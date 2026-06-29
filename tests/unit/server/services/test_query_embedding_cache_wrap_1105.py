@@ -29,7 +29,7 @@ Control-flow decision tree
 from __future__ import annotations
 
 import struct
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from unittest.mock import MagicMock
 
 import pytest
@@ -94,10 +94,11 @@ class _FakeConfigService:
 
 
 class _FakeCoalescer:
-    """Coalescer spy that returns LIVE_VEC (simulating the live path).
+    """Coalescer spy that returns (LIVE_VEC, EmbeddingCacheMetadata()) (simulating the live path).
 
     Story #1147 3c: submit() now accepts no_embedding_cache_shortcut and
     audit_ctx kwargs (forwarded by coalesced_query_embedding on Path A).
+    Story #1159: submit() now returns (vec, meta) tuple so Path A can propagate metadata.
     """
 
     def __init__(self) -> None:
@@ -110,9 +111,11 @@ class _FakeCoalescer:
         *,
         no_embedding_cache_shortcut: bool = False,
         audit_ctx=None,
-    ) -> List[float]:
+    ) -> Tuple[List[float], object]:
+        from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
+
         self.submitted.append(text)
-        return LIVE_VEC
+        return (LIVE_VEC, EmbeddingCacheMetadata())
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +221,7 @@ class TestNoRegistryBypassesCache:
             governed_call, "governed_query_embedding", _fake_governed, raising=False
         )
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
@@ -254,7 +257,7 @@ class TestKillSwitchBypassesCache:
 
         monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         # Cache HIT must return the cached vector, not the live one
@@ -293,7 +296,7 @@ class TestKillSwitchBypassesCache:
             governed_call, "governed_query_embedding", _fake_governed, raising=False
         )
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
@@ -338,7 +341,7 @@ class TestLaneAbsentBypassesCache:
 
         monkeypatch.setattr(governed_call, "_compute_live", _fake_live)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         # Cache HIT must return the cached vector
@@ -373,7 +376,7 @@ class TestLaneAbsentBypassesCache:
             governed_call, "governed_query_embedding", _fake_governed, raising=False
         )
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
@@ -397,7 +400,7 @@ class TestCacheNoneBypassesCache:
 
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: None)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
@@ -425,7 +428,7 @@ class TestCacheDisabledForProviderBypassesCache:
         cache = _make_cache(enabled=False)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
@@ -444,7 +447,7 @@ class TestCacheDisabledForProviderBypassesCache:
         cache = _make_cache(enabled=True, voyage_mode="off")
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
         assert result == LIVE_VEC
@@ -482,7 +485,7 @@ class TestOnModeHit:
         cache = _make_cache(enabled=True, voyage_mode="on", hit_bytes=cached_bytes)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
 
@@ -513,7 +516,7 @@ class TestOnModeMiss:
         cache = _make_cache(enabled=True, voyage_mode="on", hit_bytes=None)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
 
@@ -544,7 +547,7 @@ class TestShadowModeHit:
         cache = _make_cache(enabled=True, voyage_mode="shadow", hit_bytes=cached_bytes)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
 
@@ -574,7 +577,7 @@ class TestShadowModeMiss:
         cache = _make_cache(enabled=True, voyage_mode="shadow", hit_bytes=None)
         monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
 
-        result = governed_call.coalesced_query_embedding(
+        result, _meta = governed_call.coalesced_query_embedding(
             _FakeVoyageProvider(), TEST_TEXT
         )
 
@@ -660,11 +663,15 @@ class TestAnchorTokenDialThroughWrap:
         q1 = "find authentication middleware"
         q2 = "authentication find middleware"  # same tokens, different order
 
-        result1 = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), q1)
+        result1, _meta = governed_call.coalesced_query_embedding(
+            _FakeVoyageProvider(), q1
+        )
         assert result1 == LIVE_VEC
         assert live_call_count[0] == 1, "First call must go live (MISS)"
 
-        result2 = governed_call.coalesced_query_embedding(_FakeVoyageProvider(), q2)
+        result2, _meta = governed_call.coalesced_query_embedding(
+            _FakeVoyageProvider(), q2
+        )
         # anchor=0 collapses both to the same key -> HIT -> cached vec returned
         assert result2 == pytest.approx(LIVE_VEC, abs=1e-4)
         assert live_call_count[0] == 1, (

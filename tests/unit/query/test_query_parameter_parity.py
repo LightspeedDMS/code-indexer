@@ -69,6 +69,9 @@ ALL_PARAMETERS = {
     # Omni-search parameters (Story #521)
     "aggregation_mode",
     "exclude_patterns",
+    # Reranker parameters (Bug #1209: added to REST for CLI+REST+MCP parity)
+    "rerank_query",
+    "rerank_instruction",
 }
 
 # CLI-specific: subset of parameters (some temporal params are API-only)
@@ -174,22 +177,23 @@ class TestQueryParameterParity:
 
     def test_total_parameter_count(self):
         """Verify total number of expected query parameters."""
-        # Should have exactly 26 query parameters (excluding repository_alias, async_query)
-        # Updated from 24 to 26 after adding omni-search parameters (aggregation_mode, exclude_patterns)
-        assert len(ALL_PARAMETERS) == 26, (
-            f"Expected 26 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
+        # Should have exactly 28 query parameters (excluding repository_alias, async_query)
+        # Updated from 26 to 28 after Bug #1209 added rerank_query and rerank_instruction
+        # to REST for full CLI+REST+MCP parity
+        assert len(ALL_PARAMETERS) == 28, (
+            f"Expected 28 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
         )
 
-        # CLI should have 20 parameters (subset of all parameters)
-        # Updated from 19 to 20: file_extensions now exposed in CLI (Story #653)
-        assert len(CLI_EXPECTED_PARAMETERS) == 20, (
-            f"Expected 20 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
+        # CLI should have 22 parameters (subset of all parameters)
+        # Updated from 20 to 22: rerank_query and rerank_instruction now in CLI+REST+MCP (Bug #1209)
+        assert len(CLI_EXPECTED_PARAMETERS) == 22, (
+            f"Expected 22 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
         )
 
-        # REST/MCP should have all 26 parameters
-        # Updated from 24 to 26 after adding omni-search parameters
-        assert len(API_EXPECTED_PARAMETERS) == 26, (
-            f"Expected 26 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
+        # REST/MCP should have all 28 parameters
+        # Updated from 26 to 28 after Bug #1209 added rerank_query and rerank_instruction
+        assert len(API_EXPECTED_PARAMETERS) == 28, (
+            f"Expected 28 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
         )
 
     def test_cli_has_all_parameters(self):
@@ -289,15 +293,15 @@ class TestQueryParameterParity:
         # MCP-only parameters (not in REST, but intentionally MCP-only)
         # response_format: Story #582 - omni-search result grouping (flat vs grouped)
         normalized_expected.add("response_format")
-        # Story #653: reranker parameters exposed in MCP (REST parity pending)
-        normalized_expected.add("rerank_query")
-        normalized_expected.add("rerank_instruction")
         # Story #653: provider selection and fusion strategy (MCP-only for now)
         normalized_expected.add("preferred_provider")
         normalized_expected.add("query_strategy")
         normalized_expected.add("score_fusion")
         # Story #1108: per-request server query-embedding-cache shortcut (REST + MCP).
         normalized_expected.add("no_embedding_cache_shortcut")
+        # NOTE: rerank_query and rerank_instruction were MCP-only before Bug #1209;
+        # they are now in API_EXPECTED_PARAMETERS (CLI+REST+MCP parity) and need no
+        # special exception here.
 
         extra = mcp_params - normalized_expected
 
@@ -310,12 +314,11 @@ class TestQueryParameterParity:
 
         # MCP-only parameters that are intentionally not in REST
         # response_format: Story #582 - omni-search result grouping
-        # rerank_query, rerank_instruction: Story #653 - reranker (REST parity pending)
         # preferred_provider, query_strategy, score_fusion: Story #653 - provider/fusion (MCP-only)
+        # NOTE: rerank_query and rerank_instruction were MCP-only before Bug #1209;
+        # they are now full parity params (CLI+REST+MCP) and no longer listed here.
         mcp_only_params = {
             "response_format",
-            "rerank_query",
-            "rerank_instruction",
             "preferred_provider",
             "query_strategy",
             "score_fusion",

@@ -16,6 +16,7 @@ def mock_config():
     config = MagicMock()
     config.temporal.diff_context_lines = 3
     config.voyage_ai.parallel_requests = 2
+    config.voyage_ai.temporal_parallel_requests = None
     config.embedding_provider = "voyage-ai"
     # Mock voyage_ai config for EmbeddingProviderFactory
     config.voyage_ai.model = "voyage-code-3"

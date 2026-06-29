@@ -19,7 +19,6 @@ import copy
 import logging
 import os
 import time
-import concurrent.futures
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -610,9 +609,12 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 # FAST FILE SUBMISSION - No more I/O delays
                 # CRITICAL FIX: Get collection name for regular indexing
                 # When temporal collection exists, regular indexing needs explicit collection_name
-                collection_name = self.vector_store_client.resolve_collection_name(
-                    self.config, self.embedding_provider
-                )
+                # Compute directly from embedding_provider (same logic as
+                # FilesystemVectorStore.resolve_collection_name) so callers that use a
+                # lightweight vector-store client (e.g. test doubles) do not need to
+                # implement resolve_collection_name.
+                _raw_model = self.embedding_provider.get_current_model()
+                collection_name = _raw_model.replace("/", "_").replace(":", "_")
 
                 for file_path in files:
                     if self.cancelled:
@@ -652,12 +654,6 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 # Collect file-level results
                 completed_files = 0
 
-                # SIMPLE FIX: Use reasonable timeout for all file results
-                # No aggressive graduated timeouts that cause false failures
-                file_result_timeout = (
-                    600.0  # 10 minutes - reasonable for file completion
-                )
-
                 for file_future in as_completed(file_futures):
                     # SIMPLE BETWEEN-FILES-ONLY CANCELLATION:
                     # Check cancellation only between files, never during file processing
@@ -669,8 +665,10 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                         break
 
                     try:
-                        # SIMPLE FIX: Use reasonable timeout for all file results
-                        file_result = file_future.result(timeout=file_result_timeout)
+                        # No per-file timeout (Bug #1218): the only legitimate
+                        # timeout is the per-request outbound embedding-provider
+                        # HTTP call, handled inside the embedding providers.
+                        file_result = file_future.result()
 
                         if file_result.success:
                             stats.files_processed += 1
@@ -749,23 +747,6 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                             stats.failed_files += 1
                             logger.error(f"File processing failed: {file_result.error}")
 
-                    except concurrent.futures.TimeoutError:
-                        # Check if cancelled during timeout
-                        with self._cancellation_lock:
-                            if self.cancelled:
-                                logger.info(
-                                    "File result timeout during cancellation - expected behavior"
-                                )
-                                # Cancel the future and continue to next
-                                file_future.cancel()
-                                continue
-
-                        # Real timeout - legitimate slow processing with reasonable timeout
-                        logger.warning(
-                            f"File processing timeout after {file_result_timeout}s - very slow embedding provider or extremely large file"
-                        )
-                        stats.failed_files += 1
-                        continue
                     except Exception as e:
                         logger.error(f"Failed to get file result: {e}")
                         stats.failed_files += 1

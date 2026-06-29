@@ -68,6 +68,35 @@ class _SyncExecutor:
         pass
 
 
+class _DeferringExecutor:
+    """
+    Queues submitted callables without running them.
+
+    Used by dedup tests so the job stays in 'pending' state in the DB while a
+    second scheduler attempts to register the same repo — exactly modeling the
+    real multi-worker scenario where worker-2 dispatches before worker-1's
+    background thread has completed.
+    """
+
+    def __init__(self) -> None:
+        self.queued: list = []
+
+    def submit(self, fn, *args, **kwargs) -> Future:
+        self.queued.append((fn, args, kwargs))
+        fut: Future = Future()
+        fut.set_result(None)  # placeholder — task not yet run
+        return fut
+
+    def run_all(self) -> None:
+        """Run all queued tasks; exceptions propagate to surface real failures."""
+        for fn, args, kwargs in self.queued:
+            fn(*args, **kwargs)
+        self.queued.clear()
+
+    def shutdown(self, wait: bool = True) -> None:
+        pass
+
+
 class _StubScheduler:
     def acquire_write_lock(self, key: str, owner_name: str) -> bool:
         return True
@@ -818,4 +847,187 @@ class TestSingleErrorLogOnQuarantineEntry:
         ]
         assert len(error_records) == 0, (
             f"Expected 0 ERROR logs below threshold, got {len(error_records)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Story #1162: Cross-worker dedup via register_job_if_no_conflict
+# ---------------------------------------------------------------------------
+
+
+def _build_scheduler_with_real_job_tracker(
+    tmp_path: Path,
+    alias: str,
+    batch_runner_factory,
+    *,
+    db_path: Path,
+) -> tuple:
+    """
+    Thin wrapper around _build_scheduler that replaces the stub _job_tracker
+    with a real JobTracker backed by db_path AND swaps in a _DeferringExecutor.
+
+    The _DeferringExecutor keeps submitted tasks queued (not yet run) so the
+    registered job stays in 'pending' state in the DB while a second scheduler
+    attempts to claim the same repo — exactly the multi-worker race window.
+
+    Returns (sched, deferred_executor) so tests can call executor.run_all()
+    after both schedulers have attempted registration.
+    """
+    from code_indexer.server.services.job_tracker import JobTracker
+
+    # Build with the stub tracker first (establishes all other real dependencies)
+    sched = _build_scheduler(tmp_path, alias, batch_runner_factory)
+
+    # Re-initialize the caller-provided shared db_path for the real JobTracker.
+    DatabaseSchema(str(db_path)).initialize_database()
+
+    # Swap stub tracker for a real one backed by the shared db_path
+    sched._job_tracker = JobTracker(str(db_path))  # type: ignore[attr-defined]
+
+    # Swap the sync executor for a deferring one so the job stays pending
+    # when the second scheduler runs (simulates real async background thread).
+    deferred_executor = _DeferringExecutor()
+    sched._executor = deferred_executor  # type: ignore[attr-defined]
+
+    return sched, deferred_executor
+
+
+class TestCrossWorkerDedup1162:
+    """
+    AC1/AC2: Two schedulers sharing a real SQLite DB must dispatch exactly one
+    lifecycle invocation for the same stale repo via register_job_if_no_conflict
+    + idx_active_job_per_repo (no in-process lock — DB is sole arbiter).
+
+    AC3: DuplicateJobError must log at DEBUG ("already claimed by another worker")
+    and continue — it must NOT emit 'JobTracker registration failed' WARNING.
+    """
+
+    def test_two_schedulers_dispatch_exactly_one_invocation(
+        self, tmp_path: Path
+    ) -> None:
+        """Two schedulers sharing one DB dispatch exactly one lifecycle invocation."""
+        alias = "repo-dedup-1162"
+        repo_path = tmp_path / "repos" / alias
+        repo_path.mkdir(parents=True, exist_ok=True)
+        _write_metadata(repo_path, "sha-dedup")
+        _write_existing_md(tmp_path / "cidx-meta", alias)
+
+        db_path = tmp_path / "shared.db"
+        invocation_count = 0
+
+        def _runner_factory() -> Any:
+            nonlocal invocation_count
+            invocation_count += 1
+            runner = MagicMock()
+            runner.run = lambda a: None
+            return runner
+
+        sched1, exec1 = _build_scheduler_with_real_job_tracker(
+            tmp_path, alias, _runner_factory, db_path=db_path
+        )
+        sched2, exec2 = _build_scheduler_with_real_job_tracker(
+            tmp_path, alias, _runner_factory, db_path=db_path
+        )
+        _set_stale(sched1, alias, str(repo_path), last_known_commit="old-sha")
+        _set_stale(sched2, alias, str(repo_path), last_known_commit="old-sha")
+
+        # Both schedulers attempt registration while the job is still pending
+        sched1._run_loop_single_pass()
+        sched2._run_loop_single_pass()
+
+        # Now run the deferred tasks to count actual lifecycle invocations
+        exec1.run_all()
+        exec2.run_all()
+
+        assert invocation_count == 1, (
+            f"Expected exactly 1 lifecycle invocation across two schedulers, "
+            f"got {invocation_count}. DB dedup gate must prevent double-dispatch."
+        )
+
+    def test_duplicate_does_not_emit_registration_failed_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """DuplicateJobError must log DEBUG (skip), not WARNING 'registration failed'."""
+        alias = "repo-dedup-warn-1162"
+        repo_path = tmp_path / "repos" / alias
+        repo_path.mkdir(parents=True, exist_ok=True)
+        _write_metadata(repo_path, "sha-warn")
+        _write_existing_md(tmp_path / "cidx-meta", alias)
+        db_path = tmp_path / "warn.db"
+
+        def _runner_factory() -> Any:
+            runner = MagicMock()
+            runner.run = lambda a: None
+            return runner
+
+        sched1, exec1 = _build_scheduler_with_real_job_tracker(
+            tmp_path, alias, _runner_factory, db_path=db_path
+        )
+        sched2, exec2 = _build_scheduler_with_real_job_tracker(
+            tmp_path, alias, _runner_factory, db_path=db_path
+        )
+        _set_stale(sched1, alias, str(repo_path), last_known_commit="old-sha")
+        _set_stale(sched2, alias, str(repo_path), last_known_commit="old-sha")
+
+        scheduler_logger = "code_indexer.server.services.description_refresh_scheduler"
+        with caplog.at_level(logging.DEBUG, logger=scheduler_logger):
+            sched1._run_loop_single_pass()
+            sched2._run_loop_single_pass()
+
+        warning_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "registration failed" in r.message
+        ]
+        assert len(warning_records) == 0, (
+            f"DuplicateJobError must NOT produce 'registration failed' WARNING. "
+            f"Got: {[r.message for r in warning_records]}"
+        )
+
+        debug_skip = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and alias in r.message
+            and any(
+                kw in r.message
+                for kw in ("already claimed", "another worker", "skipping")
+            )
+        ]
+        assert len(debug_skip) >= 1, (
+            f"Expected DEBUG skip log for {alias}. "
+            f"DEBUG: {[r.message for r in caplog.records if r.levelno == logging.DEBUG]}"
+        )
+        exec1.run_all()
+        exec2.run_all()
+
+
+class TestSingleWorkerRegression1162:
+    """AC3: Single scheduler dispatches exactly once — no regression from the change."""
+
+    def test_single_scheduler_dispatches_exactly_once(self, tmp_path: Path) -> None:
+        alias = "repo-single-1162"
+        repo_path = tmp_path / "repos" / alias
+        repo_path.mkdir(parents=True, exist_ok=True)
+        _write_metadata(repo_path, "sha-single")
+        _write_existing_md(tmp_path / "cidx-meta", alias)
+        db_path = tmp_path / "single.db"
+        invocation_count = 0
+
+        def _runner_factory() -> Any:
+            nonlocal invocation_count
+            invocation_count += 1
+            runner = MagicMock()
+            runner.run = lambda a: None
+            return runner
+
+        sched, executor = _build_scheduler_with_real_job_tracker(
+            tmp_path, alias, _runner_factory, db_path=db_path
+        )
+        _set_stale(sched, alias, str(repo_path), last_known_commit="old-sha")
+        sched._run_loop_single_pass()
+        executor.run_all()
+
+        assert invocation_count == 1, (
+            f"Single scheduler must dispatch exactly 1 invocation, got {invocation_count}"
         )

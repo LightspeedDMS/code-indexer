@@ -64,6 +64,9 @@ UNASSIGNED_CATEGORY_PRIORITY = (
 # Discovery enrichment limit (Story #754): max clone_urls per enrich request
 MAX_ENRICH_CLONE_URLS = 50
 
+# Story #1157: Result cache for background discovery jobs.
+# Maps job_id -> result_holder dict. Consumed read-once via .pop().
+
 # Story #885 Phase 5b (A7b): minimum gap between outer and shell lifecycle timeouts.
 # outer_timeout_seconds must be >= shell_timeout_seconds + LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS
 # so the Python-level watchdog always outlives the shell kill budget.
@@ -83,6 +86,8 @@ RESTART_REQUIRED_FIELDS = [
     "max_concurrent_background_jobs",  # BackgroundJobManager thread pool size (singleton init)
     "subprocess_max_workers",  # Subprocess executor pool size (singleton init)
     "dependency_map_enabled",  # Dependency map scheduler (background thread init)
+    "workers",  # Uvicorn worker count — read at uvicorn startup; applied by auto-updater on next deploy
+    "log_level",  # Log level — read at uvicorn startup; Story #1195 AC1
 ]
 
 
@@ -221,6 +226,10 @@ _VALID_CONFIG_SECTIONS = (
     "pace_maker",
     # Story #1107 S3 - Query embedding cache LRU cap + Web UI config section
     "query_embedding_cache",
+    # Story #1159 - Search event log data retention config
+    "search_event_log",
+    # Issue #1160 - Export retention config
+    "export",
 )
 
 
@@ -359,12 +368,60 @@ def get_csrf_token_from_cookie(request: Request) -> Optional[str]:
 # See login_router below for unified login implementation
 
 
+def _extract_jti_from_request(request: Request) -> "Optional[str]":
+    """Extract the JWT jti claim from an incoming request.
+
+    Checks the Authorization: Bearer <token> header first, then falls back
+    to the CIDX_SESSION_COOKIE cookie.  Returns None (never raises) when:
+      - no token is present
+      - the token is malformed or expired (expected at logout time)
+      - jwt_manager is not initialized
+      - any unexpected error occurs (logged at DEBUG)
+    """
+    from ..auth.dependencies import CIDX_SESSION_COOKIE
+    from ..auth import dependencies as _deps
+    from ..auth.jwt_manager import TokenExpiredError, InvalidTokenError
+
+    try:
+        _jm = _deps.jwt_manager
+        if _jm is None:
+            return None
+
+        # Try Authorization header first (REST/MCP clients)
+        token: Optional[str] = None
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer ") :]
+
+        # Fall back to session cookie (Web UI)
+        if not token:
+            token = request.cookies.get(CIDX_SESSION_COOKIE)
+
+        if not token:
+            return None
+
+        payload = _jm.validate_token(token)
+        return payload.get("jti")
+
+    except (TokenExpiredError, InvalidTokenError):
+        # Expected: token is expired or malformed; jti cannot be extracted.
+        # This is normal — the client's token may already be invalid.
+        return None
+    except Exception:
+        logger.debug(
+            "_extract_jti_from_request: unexpected error extracting jti",
+            exc_info=True,
+        )
+        return None
+
+
 @web_router.get("/logout")
 def logout(request: Request):
     """
     Logout and clear session.
 
     Redirects to unified login page after clearing session.
+    Story #1163: also blacklists the JWT jti for cross-worker revocation.
     """
     # Story #923 AC8: revoke any elevation window for this session
     from code_indexer.server.auth.elevated_session_manager import (
@@ -381,6 +438,24 @@ def logout(request: Request):
                 session_key,
                 exc_info=True,
             )
+
+    # Story #1163 AC1: blacklist the JWT jti so all workers/nodes reject it.
+    # Non-fatal — any failure here must not block the logout redirect.
+    try:
+        jti = _extract_jti_from_request(request)
+        if jti:
+            from code_indexer.server.app import get_token_blacklist
+
+            get_token_blacklist().add(jti)
+        else:
+            logger.warning(
+                "logout: could not extract jti from request; token revocation skipped"
+            )
+    except Exception:
+        logger.warning(
+            "logout: failed to blacklist jti; proceeding with session clear",
+            exc_info=True,
+        )
 
     session_manager = get_session_manager()
     response = RedirectResponse(
@@ -6332,6 +6407,25 @@ def _get_current_config() -> dict:
         "cidx_meta_backup": settings.get(
             "cidx_meta_backup", {"enabled": False, "remote_url": ""}
         ),
+        # Bug #1179: search_event_log section was missing, causing Jinja
+        # UndefinedError (HTTP 500) on every admin Config page render.
+        # Both fields are rendered inside the same <details id="section-search_event_log">
+        # block (template lines 2440/2445/2464/2471), so they are merged here
+        # into one dict under the "search_event_log" key.
+        # search_event_log_retention_days comes from settings["search_event_log"]
+        # (Issue #1159); export_retention_days comes from settings["export"]
+        # (Issue #1160).
+        "search_event_log": {
+            **settings.get(
+                "search_event_log",
+                {"search_event_log_retention_days": 90},
+            ),
+            **{
+                "export_retention_days": settings.get("export", {}).get(
+                    "export_retention_days", 30
+                )
+            },
+        },
     }
 
 
@@ -6358,8 +6452,8 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
         if workers is not None:
             try:
                 workers_int = int(workers)
-                if workers_int < 1:
-                    return "Workers must be a positive number"
+                if workers_int < 1 or workers_int > 64:
+                    return "Workers must be between 1 and 64"
             except (ValueError, TypeError):
                 return "Workers must be a valid number"
 
@@ -6437,6 +6531,18 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
+        # Validate memory governor swap-in threshold (Bug #1225)
+        swap_threshold = data.get("memory_governor_swap_pswpin_red_threshold")
+        if swap_threshold is not None:
+            try:
+                val_int = int(swap_threshold)
+                if val_int < 0:
+                    return "Memory Governor Swap Pswpin Red Threshold must be a non-negative integer"
+            except (ValueError, TypeError):
+                return (
+                    "Memory Governor Swap Pswpin Red Threshold must be a valid integer"
+                )
+
     elif section == "timeouts":
         # Validate timeout values (must be positive integers)
         for field in [
@@ -6496,6 +6602,40 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Batch size must be a positive number"
             except (ValueError, TypeError):
                 return "Batch size must be a valid number"
+
+        # Story #1158 - AC1: Embedding API parallelism (required when present, range 1-32)
+        _PARALLEL_MIN = 1
+        _PARALLEL_MAX = 32
+        for field_name in ("voyage_ai_parallel_requests", "cohere_parallel_requests"):
+            if field_name not in data:
+                continue
+            raw = data[field_name]
+            if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+                label = field_name.replace("_", " ").title()
+                return f"{label} is required"
+            try:
+                val_int = int(raw)
+                if val_int < _PARALLEL_MIN or val_int > _PARALLEL_MAX:
+                    label = field_name.replace("_", " ").title()
+                    return (
+                        f"{label} must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
+                    )
+            except (ValueError, TypeError):
+                label = field_name.replace("_", " ").title()
+                return f"{label} must be a valid number"
+
+        # Story #1158 - AC2: Temporal git-diff parallelism (optional, range 1-32 when provided)
+        if "temporal_parallel_requests" in data:
+            temporal_raw = data["temporal_parallel_requests"]
+            if temporal_raw is not None and not (
+                isinstance(temporal_raw, str) and temporal_raw.strip() == ""
+            ):
+                try:
+                    temporal_int = int(temporal_raw)
+                    if temporal_int < _PARALLEL_MIN or temporal_int > _PARALLEL_MAX:
+                        return f"Temporal Parallel Requests must be between {_PARALLEL_MIN} and {_PARALLEL_MAX}"
+                except (ValueError, TypeError):
+                    return "Temporal Parallel Requests must be a valid number"
 
     elif section == "query":
         for field in ["default_limit", "max_limit", "timeout"]:
@@ -6650,24 +6790,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             MIN_SCIP_CALLCHAIN_LIMIT,
             MAX_SCIP_CALLCHAIN_LIMIT,
         )
-
-        indexing_timeout = data.get("indexing_timeout_seconds")
-        if indexing_timeout is not None:
-            try:
-                timeout_int = int(indexing_timeout)
-                if timeout_int < 60:
-                    return "Indexing Timeout must be at least 60 seconds"
-            except (ValueError, TypeError):
-                return "Indexing Timeout must be a valid number"
-
-        scip_timeout = data.get("scip_generation_timeout_seconds")
-        if scip_timeout is not None:
-            try:
-                timeout_int = int(scip_timeout)
-                if timeout_int < 60:
-                    return "SCIP Generation Timeout must be at least 60 seconds"
-            except (ValueError, TypeError):
-                return "SCIP Generation Timeout must be a valid number"
 
         stale_threshold = data.get("temporal_stale_threshold_days")
         if stale_threshold is not None:
@@ -7346,6 +7468,28 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             if anchor_int < 0:
                 return f"{anchor_field} must be >= 0"
 
+    elif section == "search_event_log":
+        # Story #1159: Search event log data retention configuration.
+        retention_days_val = data.get("search_event_log_retention_days")
+        if retention_days_val is not None:
+            try:
+                retention_days_int = int(retention_days_val)
+            except (ValueError, TypeError):
+                return "search_event_log_retention_days must be a valid integer"
+            if retention_days_int < 1 or retention_days_int > 3650:
+                return "search_event_log_retention_days must be between 1 and 3650"
+
+    elif section == "export":
+        # Issue #1160: Export file retention configuration.
+        export_days_val = data.get("export_retention_days")
+        if export_days_val is not None:
+            try:
+                export_days_int = int(export_days_val)
+            except (ValueError, TypeError):
+                return "export_retention_days must be a valid integer"
+            if export_days_int < 1 or export_days_int > 3650:
+                return "export_retention_days must be between 1 and 3650"
+
     return None
 
 
@@ -7548,6 +7692,27 @@ def auto_discovery_page(request: Request):
     return response
 
 
+@web_router.get("/analytics-export", response_class=HTMLResponse)
+def analytics_export_page(request: Request):
+    """Query Analytics Export page — filter and export search event data to Excel."""
+    session = _require_admin_session(request)
+    if not session:
+        return _create_login_redirect(request)
+
+    csrf_token = get_csrf_token_from_cookie(request) or generate_csrf_token()
+    response = templates.TemplateResponse(
+        "analytics_export.html",
+        {
+            "request": request,
+            "current_page": "analytics-export",
+            "show_nav": True,
+            "csrf_token": csrf_token,
+        },
+    )
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
 def _load_hidden_ids(show_hidden: bool):
     """Load hidden discovery repo identifiers (Story #719)."""
     try:
@@ -7617,6 +7782,126 @@ def discovery_all(
             )
         )
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@web_router.post(
+    "/api/discovery/{platform}/start",
+    dependencies=[Depends(dependencies.require_elevation())],
+)
+async def discovery_start(
+    request: Request,
+    platform: str,
+):
+    """Start a background discovery job for the given platform (Story #1157).
+
+    Returns job_id immediately. Client polls GET /api/jobs/{job_id} for progress.
+    Deduplicates: if a PENDING or RUNNING job of the same type exists, returns it.
+    """
+    session = _require_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    provider, err = _resolve_provider(request, platform)
+    if err is not None:
+        return err
+    if not provider.is_configured():
+        return JSONResponse(
+            {"error": f"{platform.capitalize()} token not configured"}, status_code=422
+        )
+
+    bgm = _get_background_job_manager()
+    if bgm is None:
+        return JSONResponse(
+            {"error": "Background job manager unavailable"}, status_code=503
+        )
+
+    from code_indexer.server.repositories.background_jobs import JobStatus
+
+    op_type = f"{platform}_discovery"
+
+    # Manual dedup: repo_alias=None bypasses BGM atomic DB gate
+    with bgm._lock:
+        for job in bgm.jobs.values():
+            if job.operation_type == op_type and job.status in (
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+            ):
+                return JSONResponse({"job_id": job.job_id, "existing": True})
+
+    indexed_urls = provider._get_indexed_canonical_urls()
+    _, all_hidden = _load_hidden_ids(show_hidden=False)
+
+    payload_cache = getattr(request.app.state, "payload_cache", None)
+    job_id_holder: dict = {}
+
+    def _worker(progress_callback=None):  # type: ignore[misc]
+        result = provider.discover_all_repositories(
+            indexed_urls=indexed_urls,
+            hidden_identifiers=all_hidden,
+            progress_callback=progress_callback,
+        )
+        jid = job_id_holder.get("job_id")
+        if jid and payload_cache is not None:
+            payload_cache.store_with_key(f"discovery:{jid}", json.dumps(result))
+        return {
+            "total_source": result["total_source"],
+            "total_unregistered": result["total_unregistered"],
+            "result_ready": True,
+        }
+
+    job_id = bgm.submit_job(
+        op_type,
+        _worker,
+        submitter_username=session.username,
+        repo_alias=None,
+    )
+    job_id_holder["job_id"] = job_id
+    return JSONResponse({"job_id": job_id, "existing": False})
+
+
+@web_router.get("/api/discovery/{platform}/result/{job_id}")
+async def discovery_result(
+    request: Request,
+    platform: str,
+    job_id: str,
+):
+    """Return the full discovery result for a completed job (Story #1157).
+
+    Result lives in PayloadCache (TTL-based, not read-once). Re-reads within TTL return 200.
+    Auth required.
+    """
+    session = _require_admin_session(request)
+    if session is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    payload_cache = getattr(request.app.state, "payload_cache", None)
+    if payload_cache is None:
+        return JSONResponse({"error": "Payload cache unavailable"}, status_code=503)
+
+    cache_key = f"discovery:{job_id}"
+    if not payload_cache.has_key(cache_key):
+        return JSONResponse({"error": "Result not found or expired"}, status_code=404)
+
+    # Accumulate all pages — PayloadCache.retrieve() returns one page at a time
+    chunks: list = []
+    page = 0
+    try:
+        while True:
+            cache_result = payload_cache.retrieve(cache_key, page=page)
+            chunks.append(cache_result.content)
+            if not cache_result.has_more:
+                break
+            page += 1
+    except Exception:
+        logger.error(
+            "Failed to retrieve discovery result for %s", cache_key, exc_info=True
+        )
+        return JSONResponse(
+            {"error": "Failed to retrieve discovery result"}, status_code=500
+        )
+
+    data = json.loads("".join(chunks))
+    return JSONResponse(data)
 
 
 @web_router.post(
@@ -8552,9 +8837,57 @@ async def update_config_section(
                 success_message=f"{section.title()} configuration saved successfully",
             )
 
-        # Update all settings without validating (batch update)
+        # Story #1195 AC2: Read pre-change host/port BEFORE any mutation (Opus nit).
+        # This snapshot is the authoritative "what was persisted" value so the
+        # guardrail compares the incoming form value against the ORIGINAL, not an
+        # already-mutated in-memory config.
+        _pre_change_config = config_service.get_config()
+
+        # Story #1195 AC2: Server-side host/port confirmation guardrail.
+        # Client-side modal is UX-only; a direct POST bypasses it, so enforcement
+        # MUST be server-side.  HAProxy and firewall are bound to the existing
+        # host/port — a silent change would sever cluster connectivity.
+        # Guardrail fires ONLY when host or port TRULY differs from the persisted
+        # value AND the explicit confirm flag is absent from the form submission.
+        if section == "server":
+            _incoming_host = str(data.get("host", _pre_change_config.host))
+            _incoming_port_raw = data.get("port", str(_pre_change_config.port))
+            try:
+                _incoming_port = int(str(_incoming_port_raw))
+            except (ValueError, TypeError):
+                _incoming_port = _pre_change_config.port
+            _host_changed = _incoming_host != _pre_change_config.host
+            _port_changed = _incoming_port != _pre_change_config.port
+            _confirm_flag = bool(data.get("confirm_host_port_change", ""))
+            if (_host_changed or _port_changed) and not _confirm_flag:
+                return _create_config_page_response(
+                    request,
+                    session,
+                    error_message=(
+                        "Changing host or port requires explicit confirmation — "
+                        "HAProxy backend and firewall port-lock warning. "
+                        "Please confirm the change via the confirmation dialog."
+                    ),
+                )
+
+        # Strip the confirm flag from data before passing to update_setting
+        # (it is a UI-only field, not a config key).
+        data.pop("confirm_host_port_change", None)
+
+        # Update all settings without validating (batch update).
+        # Bug #1180: the search_event_log UI section renders two fields that
+        # belong to different config categories:
+        #   - search_event_log_retention_days -> category "search_event_log"
+        #   - export_retention_days           -> category "export"
+        # Without this override, every key is sent under the URL section name,
+        # causing _update_search_event_log_setting to raise ValueError on
+        # export_retention_days.
+        _section_key_category_overrides: dict = {}
+        if section == "search_event_log":
+            _section_key_category_overrides = {"export_retention_days": "export"}
         for key, value in data.items():
-            config_service.update_setting(section, key, value, skip_validation=True)
+            category = _section_key_category_overrides.get(key, section)
+            config_service.update_setting(category, key, value, skip_validation=True)
 
         # Validate configuration
         config = config_service.get_config()
@@ -9486,6 +9819,7 @@ def user_logout(request: Request):
     Logout and clear session for user portal.
 
     Redirects to unified login page after clearing session.
+    Story #1163: also blacklists the JWT jti for cross-worker revocation.
     """
     # Story #923 AC8: revoke any elevation window for this session
     from code_indexer.server.auth.elevated_session_manager import (
@@ -9502,6 +9836,24 @@ def user_logout(request: Request):
                 session_key,
                 exc_info=True,
             )
+
+    # Story #1163 AC1: blacklist the JWT jti so all workers/nodes reject it.
+    # Non-fatal — any failure here must not block the logout redirect.
+    try:
+        jti = _extract_jti_from_request(request)
+        if jti:
+            from code_indexer.server.app import get_token_blacklist
+
+            get_token_blacklist().add(jti)
+        else:
+            logger.warning(
+                "user_logout: could not extract jti from request; token revocation skipped"
+            )
+    except Exception:
+        logger.warning(
+            "user_logout: failed to blacklist jti; proceeding with session clear",
+            exc_info=True,
+        )
 
     session_manager = get_session_manager()
     response = RedirectResponse(
@@ -11195,7 +11547,34 @@ def restart_server(request: Request) -> JSONResponse:
     username = session.username
     logger.info(f"Server restart requested by {username}")
 
-    # Schedule delayed restart on background thread
+    # Story #1200 AC7: branch on cluster vs solo mode.
+    #
+    # Cluster (PG pool present): bump launch_restart_generation only.
+    # The bumping node does NOT synchronously write restart.signal here — its
+    # own check_pending_launch_restart() poll (running every interval) detects
+    # target > applied and signals itself (MAJOR-M3 / FIX-2).  All other nodes
+    # are signalled by their own poll loops independently.
+    #
+    # Solo: retain the existing single-node restart path (materialize + signal /
+    # os.execv).  Do NOT bump the generation in solo mode (FIX-5).
+    config_svc = get_config_service()
+    if config_svc._pool is not None:
+        # Cluster mode: bump generation, let per-poll check handle restart.signal
+        config_svc.bump_launch_restart_generation()
+        with _restart_lock:
+            _restart_in_progress = False
+        return JSONResponse(
+            status_code=202,
+            content={
+                "message": (
+                    "Cluster restart requested: generation bumped. "
+                    "All nodes will restart via the auto-updater."
+                )
+            },
+        )
+
+    # Solo mode: materialize launch config then schedule single-node restart
+    config_svc.materialize_launch_config()
     _schedule_delayed_restart(delay=2)
 
     # Return 202 Accepted immediately

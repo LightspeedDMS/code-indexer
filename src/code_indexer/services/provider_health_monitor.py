@@ -277,6 +277,7 @@ class ProviderHealthMonitor:
         signature here. The constructor itself validates all keys at runtime.
         """
         mismatch_warning: Optional[str] = None
+        mismatch_debug: Optional[str] = None
         with cls._lock:
             if cls._instance is None:
                 # **kwargs typed as `object` cannot match __init__'s typed params statically;
@@ -286,7 +287,8 @@ class ProviderHealthMonitor:
             # Singleton already exists — check for persistence_path mismatch.
             if persistence_path is not None:
                 existing_path = cls._instance._persistence_path
-                if existing_path != persistence_path:
+                if existing_path is not None and existing_path != persistence_path:
+                    # Two different non-None paths competing: genuinely dangerous.
                     # Collect message inside lock; emit outside so logging I/O
                     # does not extend lock hold time and pytest caplog captures it.
                     mismatch_warning = (
@@ -294,9 +296,20 @@ class ProviderHealthMonitor:
                         f"singleton already exists with path={existing_path}, "
                         f"ignoring requested path={persistence_path}"
                     )
+                elif existing_path is None:
+                    # Benign ordering: singleton created before CLI persistence was
+                    # configured (e.g. semantic_query_manager before cli.py).
+                    # No data is lost — a path=None singleton never loaded sin-bin state.
+                    mismatch_debug = (
+                        "ProviderHealthMonitor.get_instance(): singleton has no "
+                        f"persistence path; ignoring requested path={persistence_path} "
+                        "(singleton was created before CLI persistence was configured)"
+                    )
             instance = cls._instance
         if mismatch_warning is not None:
             logger.warning(mismatch_warning)
+        if mismatch_debug is not None:
+            logger.debug(mismatch_debug)
         return instance
 
     @classmethod

@@ -299,7 +299,7 @@ class RegexSearchService:
         pcre2: bool = False,
     ) -> tuple:
         """Search using ripgrep with JSON output and timeout protection."""
-        cmd = ["rg", "--json", pattern]
+        cmd = ["rg", "--json", "-e", pattern]
 
         if multiline:
             cmd.extend(["--multiline", "--multiline-dotall"])
@@ -322,7 +322,7 @@ class RegexSearchService:
         cmd.extend(["-g", "!.code-indexer/**"])
         cmd.extend(["-g", "!.git/**"])
 
-        cmd.append(str(search_path))
+        cmd.extend(["--", str(search_path)])
 
         # Create temp file for output
         temp_fd, temp_path = tempfile.mkstemp(suffix=".txt", prefix="rg_search_")

@@ -413,10 +413,13 @@ class SemanticSearchService:
             else:
                 resolved_hnsw_cache = hnsw_cache
 
+            from ..services.memory_governor import get_memory_governor
+
             backend = BackendFactory.create(
                 config=config,
                 project_root=Path(repo_path),
                 hnsw_cache=resolved_hnsw_cache,
+                memory_governor=get_memory_governor(),
             )
             vector_store_client = backend.get_vector_store_client()
 
@@ -500,12 +503,28 @@ class SemanticSearchService:
                     coalesced_query_embedding,
                 )
 
-                query_embedding = coalesced_query_embedding(
+                query_embedding, _embed_meta = coalesced_query_embedding(
                     embedding_service,
                     query,
                     embedding_purpose="query",
                     no_embedding_cache_shortcut=no_embedding_cache_shortcut,
                 )
+                # Story #1159 Root Cause 4: write embedding-cache metadata to the
+                # active SearchEventContext so voyage cache fields are recorded.
+                from code_indexer.server.services.search_event_context import (
+                    _search_event_ctx,
+                )
+
+                _event_ctx = _search_event_ctx.get(None)
+                if _event_ctx is not None:
+                    if "cohere" in embedding_service.get_provider_name().lower():
+                        _event_ctx.cohere_cache_hit = _embed_meta.key_found
+                        _event_ctx.cohere_cache_mode = _embed_meta.cache_mode
+                        _event_ctx.cohere_latency_ms = _embed_meta.provider_latency_ms
+                    else:
+                        _event_ctx.voyage_cache_hit = _embed_meta.key_found
+                        _event_ctx.voyage_cache_mode = _embed_meta.cache_mode
+                        _event_ctx.voyage_latency_ms = _embed_meta.provider_latency_ms
                 search_results = vector_store_client.search(
                     query_vector=query_embedding,
                     limit=limit,

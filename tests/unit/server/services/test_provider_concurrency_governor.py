@@ -541,3 +541,171 @@ class TestCoalesceKBoundsSeed:
         limiter = g._limiters["voyage:embed"]
         limiter.set_limit(999)
         assert limiter.limit == 32, "explicit construction must keep default K_MAX=32"
+
+
+# ---------------------------------------------------------------------------
+# Story #1165 — Per-Worker Embedding Governor Concurrency Scaling
+#
+# query_provider_max_concurrency is the PER-NODE total provider-concurrency
+# budget. The governor divides it by config.workers at construction
+# (auto-seed path only) so combined embedding pressure across all workers
+# on a node stays within the configured budget.
+# ---------------------------------------------------------------------------
+
+
+class _FakeConfigWithWorkers:
+    """ServerConfig stub exposing the fields the governor reads for #1165."""
+
+    def __init__(
+        self,
+        *,
+        k_min: int = 8,
+        k_max: int = 32,
+        max_concurrency: int = 8,
+        workers: int = 1,
+    ):
+        self.coalesce_k_min = k_min
+        self.coalesce_k_max = k_max
+        self.query_provider_max_concurrency = max_concurrency
+        self.workers = workers
+
+
+def _patch_config_workers(cfg):
+    """Patch get_config_service AND the applied-worker-count resolver.
+
+    Story #1197 rerouted _read_config_workers() through the file-based
+    applied_worker_count resolver instead of get_config_service().workers.
+    Both patches are required so TestWorkerConcurrencyScaling tests inject
+    the desired worker count into the governor.
+    """
+    workers = getattr(cfg, "workers", 1)
+    # Ensure max(1, workers) discipline matches the real resolver behaviour.
+    applied_workers = max(1, workers) if isinstance(workers, int) else 1
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            return_value=_FakeConfigService(cfg),
+        )
+    )
+    stack.enter_context(
+        patch(
+            # The governor imports via `from ... import get_applied_worker_count`
+            # inside a try block (local import), so we must patch the name in
+            # the source module, not in the governor's namespace.
+            "code_indexer.server.services.applied_worker_count.get_applied_worker_count",
+            return_value=applied_workers,
+        )
+    )
+    return stack
+
+
+class TestWorkerConcurrencyScaling:
+    """Story #1165: per-worker seed = per_node_seed // workers (floor k_min)."""
+
+    def setup_method(self):
+        ProviderConcurrencyGovernor.reset_instance()
+
+    def teardown_method(self):
+        ProviderConcurrencyGovernor.reset_instance()
+
+    def test_ac1_four_workers_divides_seed(self):
+        """AC1: workers=4, max_concurrency=32 -> each worker gets seed 8 (32//4)."""
+        cfg = _FakeConfigWithWorkers(k_min=8, k_max=32, max_concurrency=32, workers=4)
+        with _patch_config_workers(cfg):
+            g = ProviderConcurrencyGovernor()  # auto-seed path (no explicit arg)
+        for lane in LANES:
+            assert g.current_k[lane] == 8, (
+                f"AC1 failed for lane {lane}: expected 8 (32//4), got {g.current_k[lane]}"
+            )
+
+    def test_ac2_one_worker_unchanged(self):
+        """AC2: workers=1, max_concurrency=32 -> seed 32 (identical to today)."""
+        cfg = _FakeConfigWithWorkers(k_min=8, k_max=32, max_concurrency=32, workers=1)
+        with _patch_config_workers(cfg):
+            g = ProviderConcurrencyGovernor()
+        for lane in LANES:
+            assert g.current_k[lane] == 32, (
+                f"AC2 failed for lane {lane}: workers=1 must be identical to today, "
+                f"expected 32, got {g.current_k[lane]}"
+            )
+
+    def test_ac3_over_division_floor_is_k_min(self):
+        """AC3: workers=4, max_concurrency=8 -> 8//4=2, floored to k_min=8."""
+        cfg = _FakeConfigWithWorkers(k_min=8, k_max=32, max_concurrency=8, workers=4)
+        with _patch_config_workers(cfg):
+            g = ProviderConcurrencyGovernor()
+        for lane in LANES:
+            assert g.current_k[lane] == 8, (
+                f"AC3 failed for lane {lane}: 8//4=2 must floor to k_min=8, "
+                f"got {g.current_k[lane]}"
+            )
+
+    def test_misconfig_workers_zero_treated_as_one(self):
+        """workers=0 -> _read_config_workers returns 1 -> full per-node seed."""
+        cfg = _FakeConfigWithWorkers(k_min=8, k_max=32, max_concurrency=32, workers=0)
+        with _patch_config_workers(cfg):
+            g = ProviderConcurrencyGovernor()
+        # workers=0 invalid -> treated as 1 -> seed = 32//1 clamped to [8,32]=32
+        for lane in LANES:
+            assert g.current_k[lane] == 32, (
+                f"misconfig workers=0 failed for lane {lane}: expected 32, "
+                f"got {g.current_k[lane]}"
+            )
+
+    def test_misconfig_workers_negative_treated_as_one(self):
+        """workers=-3 -> _read_config_workers returns 1 -> full per-node seed."""
+        cfg = _FakeConfigWithWorkers(k_min=8, k_max=32, max_concurrency=32, workers=-3)
+        with _patch_config_workers(cfg):
+            g = ProviderConcurrencyGovernor()
+        for lane in LANES:
+            assert g.current_k[lane] == 32, (
+                f"misconfig workers=-3 failed for lane {lane}: expected 32, "
+                f"got {g.current_k[lane]}"
+            )
+
+    def test_explicit_construction_not_divided_by_workers(self):
+        """Explicit max_concurrency arg bypasses worker-division (tests unaffected)."""
+        cfg = _FakeConfigWithWorkers(k_min=8, k_max=32, max_concurrency=32, workers=4)
+        with _patch_config_workers(cfg):
+            # Explicit construction: max_concurrency=20 is NOT divided by workers.
+            g = ProviderConcurrencyGovernor(max_concurrency=20)
+        for lane in LANES:
+            assert g.current_k[lane] == 20, (
+                f"explicit construction must not be divided by workers: "
+                f"expected 20, got {g.current_k[lane]}"
+            )
+
+    def test_read_config_workers_fallback_when_config_raises(self):
+        """_read_config_workers returns 1 (no division) when config raises."""
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service",
+            side_effect=RuntimeError("config not initialized"),
+        ):
+            g = ProviderConcurrencyGovernor()  # auto-seed path
+        # Both reads fail: concurrency=K_MIN=8, workers=1; seed=8//1=8 clamped=8.
+        for lane in LANES:
+            assert g.current_k[lane] == 8, (
+                f"fallback failed for lane {lane}: expected K_MIN=8, "
+                f"got {g.current_k[lane]}"
+            )
+
+    def test_read_config_workers_fallback_when_field_absent(self):
+        """_read_config_workers returns 1 when the 'workers' field is absent."""
+
+        class _ConfigNoWorkers:
+            query_provider_max_concurrency = 32
+            coalesce_k_min = 8
+            coalesce_k_max = 32
+            # no 'workers' attribute
+
+        with _patch_config_workers(_ConfigNoWorkers()):
+            g = ProviderConcurrencyGovernor()
+        # workers absent -> _read_config_workers returns 1 -> seed=32//1=32
+        for lane in LANES:
+            assert g.current_k[lane] == 32, (
+                f"absent workers field failed for lane {lane}: expected 32, "
+                f"got {g.current_k[lane]}"
+            )

@@ -10,8 +10,9 @@ Legacy format (backward compat): code-indexer-temporal
 
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,146 @@ def resolve_temporal_collection_from_config(config) -> str:
     """
     model_name = get_model_name_for_provider(config.embedding_provider, config)
     return resolve_temporal_collection_name(model_name)
+
+
+_MONTH_TO_QUARTER = {
+    1: 1,
+    2: 1,
+    3: 1,
+    4: 2,
+    5: 2,
+    6: 2,
+    7: 3,
+    8: 3,
+    9: 3,
+    10: 4,
+    11: 4,
+    12: 4,
+}
+
+
+def quarter_suffix(commit_timestamp: datetime) -> str:
+    """Return e.g. '2024Q3' for a datetime in 2024 Q3."""
+    q = _MONTH_TO_QUARTER[commit_timestamp.month]
+    return f"{commit_timestamp.year}Q{q}"
+
+
+def get_shard_collection_name(model_name: str, commit_timestamp: datetime) -> str:
+    """Return 'code-indexer-temporal-{model_slug}-{YYYY}Q{N}'."""
+    base = resolve_temporal_collection_name(model_name)
+    return f"{base}-{quarter_suffix(commit_timestamp)}"
+
+
+def is_sharded_temporal_collection(collection_name: str) -> bool:
+    """Return True iff the name ends with -{YYYY}Q{N} (e.g. -2024Q3)."""
+    return bool(re.search(r"-\d{4}Q[1-4]$", collection_name))
+
+
+def get_quarter_range(year: int, quarter: int) -> Tuple[datetime, datetime]:
+    """Return (start_inclusive, end_exclusive) for the given quarter in UTC.
+
+    Q1: Jan1-Apr1, Q2: Apr1-Jul1, Q3: Jul1-Oct1, Q4: Oct1-(next year)Jan1
+    """
+    start_month = (quarter - 1) * 3 + 1
+    start = datetime(year, start_month, 1, tzinfo=timezone.utc)
+    if quarter == 4:
+        end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        end = datetime(year, start_month + 3, 1, tzinfo=timezone.utc)
+    return start, end
+
+
+def has_real_monolith(coll_dir: Path) -> bool:
+    """Return True iff the directory contains a real monolithic HNSW that has not been migrated.
+
+    A collection directory is considered a real monolith when ALL of:
+    - ``hnsw_index.bin`` exists inside the directory (there is actual data to query)
+    - ``migration_complete.marker`` does NOT exist (migration has not already run)
+
+    This is the single source-of-truth predicate shared by:
+    - ``get_overlapping_shards()`` (query fan-out — Bug #1207 Fix 2)
+    - ``_needs_temporal_migration()`` in temporal_migration_service (server-startup gate)
+
+    Using a single predicate prevents the two callers from drifting apart (anti-duplication).
+
+    Args:
+        coll_dir: Path to the collection directory (e.g. index/code-indexer-temporal-X/).
+
+    Returns:
+        True if the collection contains a real unmigrated monolithic HNSW.
+    """
+    from code_indexer.services.temporal.temporal_migration_service import (
+        MIGRATION_COMPLETE_MARKER,
+    )
+
+    coll_dir = Path(coll_dir)
+    if not coll_dir.is_dir():
+        return False
+    if (coll_dir / MIGRATION_COMPLETE_MARKER).exists():
+        return False
+    return (coll_dir / "hnsw_index.bin").exists()
+
+
+def get_overlapping_shards(
+    model_name: str,
+    index_path: Path,
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> List[str]:
+    """Return collection names whose date range overlaps [start, end].
+
+    Includes quarterly shards that overlap the range AND the legacy monolithic
+    collection if it exists on disk.  Returns shards in ascending chronological
+    order (lexicographic on YYYYQN suffix), with legacy collection appended last.
+    None start or end means open-ended (all time on that side).
+    """
+    base_name = resolve_temporal_collection_name(model_name)
+    index_path = Path(index_path)
+    if not index_path.exists():
+        return []
+
+    def _utc(dt: Optional[datetime]) -> Optional[datetime]:
+        if dt is None:
+            return None
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    norm_start = _utc(start)
+    norm_end = _utc(end)
+
+    shards: List[str] = []
+    has_legacy = False
+
+    for entry in index_path.iterdir():
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        # Quarterly shard: base_name-YYYYQN
+        m = re.match(rf"^{re.escape(base_name)}-(\d{{4}})Q([1-4])$", name)
+        if m:
+            year, quarter = int(m.group(1)), int(m.group(2))
+            shard_start, shard_end = get_quarter_range(year, quarter)
+            # Ranges overlap unless one ends at or before the other starts
+            overlaps = True
+            if norm_end is not None and norm_end <= shard_start:
+                overlaps = False
+            if norm_start is not None and norm_start >= shard_end:
+                overlaps = False
+            if overlaps:
+                shards.append(name)
+        elif name == base_name:
+            # Include as legacy monolith ONLY when a real unmirgated HNSW is present.
+            # Bug #1207 Fix 2: the original marker-absence-only check incorrectly included
+            # the base dir after CLI sharding (when HNSW was never written there to begin
+            # with, or was already deleted), causing spurious HNSW-stale warnings and
+            # potential stale-read mixing.  has_real_monolith() requires hnsw_index.bin
+            # to exist AND migration_complete.marker to be absent.
+            if has_real_monolith(entry):
+                has_legacy = True
+
+    shards.sort()  # YYYYQN is lexicographically == chronologically
+    if has_legacy:
+        shards.append(base_name)
+    return shards
 
 
 def get_temporal_collections(config, index_path: Path) -> List[Tuple[str, Path]]:

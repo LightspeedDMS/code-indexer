@@ -47,6 +47,42 @@ from code_indexer.server.services.provider_concurrency_governor import (
 )
 from code_indexer.services.provider_backoff import execute_with_backoff
 
+
+# Deferred import — avoids circular imports at module load time.
+# EmbeddingCacheMetadata is defined in governed_call.py which imports from
+# this module transitively via query_embedding_cache.  The import is safe
+# inside functions and the submit() / _dispatch() hot path.
+def _make_empty_meta() -> "Any":
+    """Return an EmbeddingCacheMetadata() with all-None fields (import deferred)."""
+    from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
+
+    return EmbeddingCacheMetadata()
+
+
+def _make_hit_meta(cache_mode: str, provider_latency_ms: Optional[int] = None) -> "Any":
+    """Return EmbeddingCacheMetadata for a cache HIT."""
+    from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
+
+    return EmbeddingCacheMetadata(
+        key_found=True,
+        cache_mode=cache_mode,
+        provider_latency_ms=provider_latency_ms,
+    )
+
+
+def _make_miss_meta(
+    cache_mode: Optional[str], provider_latency_ms: Optional[int]
+) -> "Any":
+    """Return EmbeddingCacheMetadata for a cache MISS."""
+    from code_indexer.server.services.governed_call import EmbeddingCacheMetadata
+
+    return EmbeddingCacheMetadata(
+        key_found=False,
+        cache_mode=cache_mode,
+        provider_latency_ms=provider_latency_ms,
+    )
+
+
 # Module dependency decision (Story #1146, intentional):
 # embedding_coalescer -> query_embedding_cache is the ACCEPTED import direction.
 # query_embedding_cache MUST NOT import embedding_coalescer (no circular import).
@@ -177,7 +213,9 @@ class _Entry:
     ) -> None:
         self.text = text
         self.embedding_purpose = embedding_purpose
-        self.fut: "Future[List[float]]" = Future()
+        # Future now holds (List[float], EmbeddingCacheMetadata) tuples so
+        # submit() can return real cache telemetry to every caller (Issue #1159).
+        self.fut: "Future[Tuple[List[float], Any]]" = Future()
         self.audit_ctx: Optional[Dict[str, Any]] = audit_ctx
         self.no_embedding_cache_shortcut: bool = no_embedding_cache_shortcut
 
@@ -269,7 +307,9 @@ class EmbeddingCoalescer:
         # resolution_container is a 1-element list [None]; the HIT-owner fills
         # it with cached_blob upon a successful on-mode cache HIT so that
         # joiners can correctly populate their audit_ctx (see submit()).
-        self._inflight_keys: Dict[str, "Tuple[Future[List[float]], list]"] = {}
+        self._inflight_keys: Dict[
+            str, "Tuple[Future[Tuple[List[float], Any]], list]"
+        ] = {}
 
         # Observability counters (Phase E). Read for metrics/logging — the
         # coalescing ratio is texts_coalesced / batches_dispatched. Incremented
@@ -316,7 +356,7 @@ class EmbeddingCoalescer:
         *,
         no_embedding_cache_shortcut: bool = False,
         audit_ctx: Optional[Dict[str, Any]] = None,
-    ) -> List[float]:
+    ) -> "Tuple[List[float], Any]":
         """Submit one text; block until its embedding vector is available.
 
         Story #1147: Lock-free pre-enqueue cache check. Cache I/O runs BEFORE
@@ -371,7 +411,7 @@ class EmbeddingCoalescer:
         # Story #1148 single-flight state for this submit call.
         _am_inflight_owner: bool = False
         _inflight_key: Optional[str] = None
-        _owned_future: "Optional[Future[List[float]]]" = None
+        _owned_future: "Optional[Future[Tuple[List[float], Any]]]" = None
 
         # --- Story #1147 3b + Story #1148: combined pre-enqueue path ---
         if cache is not None:
@@ -433,7 +473,7 @@ class EmbeddingCoalescer:
                         #   - None     -> owner served a LIVE vector -> leave
                         #     audit_ctx untouched (no cached blob to compare;
                         #     a "live vs live" audit is meaningless, Messi #2).
-                        _join_fut: "Optional[Future[List[float]]]" = None
+                        _join_fut: "Optional[Future[Tuple[List[float], Any]]]" = None
                         _join_resolution_container: "Optional[list]" = None
                         _resolution_container: "list" = [None]  # owner fills on HIT
                         with self._inflight_lock:
@@ -451,9 +491,13 @@ class EmbeddingCoalescer:
 
                         if _join_fut is not None:
                             # JOINER: await owner's result (bounded wait, no metric).
-                            result_vec = _join_fut.result(
+                            # Future now holds (vec, meta) tuple (Issue #1159 fix).
+                            # Joiners discard owner meta — HIT/MISS timing belongs
+                            # to the owner request, not joiners.
+                            join_result = _join_fut.result(
                                 timeout=_INFLIGHT_JOIN_TIMEOUT
                             )
+                            result_vec, _ = join_result
                             # Per-requestor audit_ctx draw: populate ONLY when the
                             # owner resolved via on-mode cache HIT (has cached_blob).
                             # A live-resolution joiner has no cached_blob to compare
@@ -487,7 +531,7 @@ class EmbeddingCoalescer:
                                             _ae,
                                         )
                                 # Live-resolution joiner: leave audit_ctx untouched.
-                            return result_vec
+                            return (result_vec, _make_empty_meta())
 
                         # --- Step 2: OWNER — LOCK-FREE cache lookup (outside _inflight_lock). ---
                         # on-mode: genuine pre-existing HITs complete the owned Future with
@@ -608,7 +652,12 @@ class EmbeddingCoalescer:
                                     _owned_future is not None
                                     and not _owned_future.done()
                                 ):
-                                    _owned_future.set_result(_hit_vec)
+                                    # Issue #1159: set (vec, meta) tuple so joiners
+                                    # can unpack it; _cache_mode is always set here
+                                    # (we are in the on-mode HIT block).
+                                    _owned_future.set_result(
+                                        (_hit_vec, _make_hit_meta(_cache_mode))
+                                    )
                                 with self._inflight_lock:
                                     # _inflight_key is always non-None here:
                                     # _am_inflight_owner=True implies line 429
@@ -622,7 +671,9 @@ class EmbeddingCoalescer:
                                 _owned_future = None
 
                         if _hit_vec is not None:
-                            return _hit_vec
+                            # Issue #1159: return (vec, meta) tuple; _cache_mode is
+                            # set here (on-mode HIT block).
+                            return (_hit_vec, _make_hit_meta(_cache_mode))
 
         # --- No cache / MISS (owner) / shadow (owner) / bypass / off / disabled ---
         entry = _Entry(
@@ -646,9 +697,10 @@ class EmbeddingCoalescer:
                 and _owned_future is not None
             ):
                 try:
-                    result_vec = entry.fut.result()
+                    # entry.fut now holds (vec, meta) tuple (Issue #1159).
+                    result_vec, result_meta = entry.fut.result()
                     if not _owned_future.done():
-                        _owned_future.set_result(result_vec)
+                        _owned_future.set_result((result_vec, result_meta))
                 except BaseException as _ex:  # noqa: BLE001
                     if not _owned_future.done():
                         try:
@@ -659,7 +711,7 @@ class EmbeddingCoalescer:
                 finally:
                     with self._inflight_lock:
                         self._inflight_keys.pop(_inflight_key, None)
-                return result_vec
+                return (result_vec, result_meta)
             return entry.fut.result()
 
         # Dispatcher path: run live embed, write cache, complete owned future.
@@ -790,15 +842,25 @@ class EmbeddingCoalescer:
             embedding_coalescer -> query_embedding_cache.
         query_embedding_cache MUST NOT import embedding_coalescer.
         """
+        import time as _time_mod
+
         sealed = False
         # Snapshot structures set on the FIRST do_call invocation (under lock).
         unique_texts: Optional[List[str]] = None
         key_to_first_idx: Optional[Dict[str, int]] = None
         entry_keys: Optional[List[str]] = None
         purpose: Optional[str] = None
+        # Wall-clock latency for the provider HTTP call (set by do_call).
+        _dispatch_latency_ms: Optional[int] = None
 
         def do_call() -> List[List[float]]:
-            nonlocal sealed, unique_texts, key_to_first_idx, entry_keys, purpose
+            nonlocal \
+                sealed, \
+                unique_texts, \
+                key_to_first_idx, \
+                entry_keys, \
+                purpose, \
+                _dispatch_latency_ms
             with self._lock:
                 if not sealed:
                     sealed = True
@@ -843,9 +905,11 @@ class EmbeddingCoalescer:
 
             if unique_texts is None:  # pragma: no cover - set on first attempt
                 raise RuntimeError("coalescer batch snapshot missing")
+            _t0 = _time_mod.monotonic()
             result: List[List[float]] = self._provider.get_embeddings_batch(
                 unique_texts, retry=False, embedding_purpose=purpose or "query"
             )
+            _dispatch_latency_ms = int((_time_mod.monotonic() - _t0) * 1000)
             return result
 
         try:
@@ -890,7 +954,29 @@ class EmbeddingCoalescer:
             for e, k in zip(my_batch, entry_keys):
                 idx = key_to_first_idx[k]
                 vec = unique_vectors[idx]
-                e.fut.set_result(vec)
+                # Issue #1159: Future now holds (vec, EmbeddingCacheMetadata) so
+                # submit() can return real cache telemetry to callers.
+                # Bug #1230: for shadow-mode, consult _shadow_blobs (pre-write
+                # lookup results) to correctly report key_found=True on HITs.
+                # _shadow_blobs is built BEFORE the cache writes for this dispatch,
+                # so a non-None blob means the key existed pre-dispatch (genuine HIT).
+                # On-mode HITs short-circuit before reaching here (~line 676).
+                _is_shadow_hit = (
+                    cache_mode == "shadow"
+                    and _shadow_blobs is not None
+                    and not k.startswith(_NONE_KEY_PREFIX)
+                    and _shadow_blobs.get(k) is not None
+                )
+                e.fut.set_result(
+                    (
+                        vec,
+                        # _is_shadow_hit is only True when cache_mode == "shadow",
+                        # so "shadow" literal satisfies _make_hit_meta's str param.
+                        _make_hit_meta("shadow", _dispatch_latency_ms)
+                        if _is_shadow_hit
+                        else _make_miss_meta(cache_mode, _dispatch_latency_ms),
+                    )
+                )
 
                 # Per-requestor audit_ctx for shadow HITs (own random draw per entry).
                 if (

@@ -10,8 +10,6 @@ Covers:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from code_indexer.services.temporal.temporal_collection_naming import (
     TEMPORAL_COLLECTION_PREFIX,
     sanitize_model_name,
@@ -104,6 +102,7 @@ def _assert_success_recorded(
             "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
         ) as mock_factory,
     ):
+        mock_factory.get_configured_providers.return_value = ["voyage-ai"]
         mock_factory.create.return_value = MagicMock()
         mock_svc = MagicMock()
         mock_svc.query_temporal.return_value = mock_results
@@ -136,18 +135,20 @@ def _assert_failure_recorded(
             "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
         ) as mock_factory,
     ):
+        mock_factory.get_configured_providers.return_value = ["voyage-ai"]
         mock_factory.create.return_value = MagicMock()
         mock_svc = MagicMock()
         mock_svc.query_temporal.side_effect = RuntimeError("embedding unavailable")
         mock_svc_cls.return_value = mock_svc
-        with pytest.raises(RuntimeError, match="embedding unavailable"):
-            execute_temporal_query_with_fusion(
-                config=config,
-                index_path=index_path,
-                vector_store=mock_vector_store,
-                query_text="search",
-                limit=5,
-            )
+        # Story #1171: dispatch fault-tolerates per-shard failures (catch + record + continue)
+        # rather than re-raising. Call without pytest.raises — failure IS recorded in monitor.
+        execute_temporal_query_with_fusion(
+            config=config,
+            index_path=index_path,
+            vector_store=mock_vector_store,
+            query_text="search",
+            limit=5,
+        )
     status = monitor.get_health(health_key).get(health_key)
     assert status is not None, (
         "record_temporal_failure NOT called: no health data after failed query"
@@ -171,7 +172,9 @@ def _run_indexer_and_capture_thread_count(
     mock_config = MagicMock()
     mock_config.embedding_provider = provider
     mock_config.cohere.parallel_requests = cohere_parallel
+    mock_config.cohere.temporal_parallel_requests = None
     mock_config.voyage_ai.parallel_requests = voyage_parallel
+    mock_config.voyage_ai.temporal_parallel_requests = None
     mock_config.voyage_ai.max_concurrent_batches_per_commit = 10
     mock_config.voyage_ai.model = "voyage-code-3"
     mock_config.cohere.model = "embed-v4.0"
@@ -375,7 +378,13 @@ def test_filter_healthy_wired_in_dispatch(tmp_path):
         healthy_collection = "code-indexer-temporal-voyage_code_3"
         unhealthy_collection = "code-indexer-temporal-embed_v4_0"
         (index_path / healthy_collection).mkdir()
+        (index_path / healthy_collection / "hnsw_index.bin").write_bytes(
+            b"fake_hnsw_data"
+        )
         (index_path / unhealthy_collection).mkdir()
+        (index_path / unhealthy_collection / "hnsw_index.bin").write_bytes(
+            b"fake_hnsw_data"
+        )
 
         monitor = ProviderHealthMonitor.get_instance()
         health_key = make_temporal_health_key(unhealthy_collection)
@@ -402,6 +411,7 @@ def test_filter_healthy_wired_in_dispatch(tmp_path):
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
             ) as mock_factory,
         ):
+            mock_factory.get_configured_providers.return_value = ["voyage-ai"]
             mock_factory.create.return_value = MagicMock()
             execute_temporal_query_with_fusion(
                 config=config,
@@ -433,6 +443,7 @@ def test_record_success_failure_wired(tmp_path):
     index_path.mkdir()
     collection_name = "code-indexer-temporal-voyage_code_3"
     (index_path / collection_name).mkdir()
+    (index_path / collection_name / "hnsw_index.bin").write_bytes(b"fake_hnsw_data")
 
     mock_vector_store = MagicMock()
     mock_vector_store.project_root = tmp_path

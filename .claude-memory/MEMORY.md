@@ -11,6 +11,7 @@
 - [feedback_no_secrets_in_memory.md](feedback_no_secrets_in_memory.md) - NEVER write IPs, secrets, credentials, topology into memory files — they are versioned
 - [feedback_own_all_repo_changes.md](feedback_own_all_repo_changes.md) - NEVER revert other subagents' changes — own ALL changes found in repo
 - [feedback_no_rogue_agents.md](feedback_no_rogue_agents.md) - Never frame unexpected repo state as "rogue/sabotaging agents" — default explanation is user changed it
+- [feedback_cluster_aware_state_only.md](feedback_cluster_aware_state_only.md) - NEVER use module-level dicts or per-node RAM for cross-request state — use PayloadCache (app.state.payload_cache) or shared DB; HAProxy affinity is not a substitute
 
 ## Quality Standards
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero
@@ -25,12 +26,18 @@
 
 - [feedback_xray_queries_not_in_dashboard.md](feedback_xray_queries_not_in_dashboard.md) - xray_search/xray_search_batch jobs must NOT appear in the dashboard — user explicitly requires this
 
+- [feedback_run_tests_with_timeout_and_monitor.md](feedback_run_tests_with_timeout_and_monitor.md) - NEVER launch tests without --timeout and active monitoring; know expected duration before running; fast-automation ≤10min, server-fast ≤15min, unit files ≤30s
+- [feedback_faithful_db_mocks.md](feedback_faithful_db_mocks.md) - DB mocks must mirror the real driver; psycopg3 executemany is on the cursor NOT the connection; unfaithful FakeConn certified silent-no-op writes — verify storage writes against real PG
+- [feedback_review_local_and_staging_logs_after_testing.md](feedback_review_local_and_staging_logs_after_testing.md) - After testing, ALWAYS audit BOTH local and staging logs; if a pattern points to a bug, file AND fix it (don't just report)
+
 ## Workflow Preferences
+- [feedback_autonomous_overnight_file_fix_iterate.md](feedback_autonomous_overnight_file_fix_iterate.md) - Work autonomously (no triage questions); every defect found = file + fix + iterate until staging logs are clean; clean logs is the bar
 - [feedback_always_checkout_development_before_commit.md](feedback_always_checkout_development_before_commit.md) - ALWAYS switch to development branch before committing — never commit on master/staging
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it
 - [feedback_lint_before_commit.md](feedback_lint_before_commit.md) - Run ruff check/format/mypy BEFORE staging — pre-commit hook is safety net, not primary
 - [feedback_version_bump_must_be_push_tip.md](feedback_version_bump_must_be_push_tip.md) - The __init__.py version-bump commit MUST be the tip of its push or CI skips tag creation (compares HEAD~1..HEAD)
 - [feedback_check_running_jobs_before_restart.md](feedback_check_running_jobs_before_restart.md) - NEVER restart cidx-server without checking for active long-running jobs
+- [feedback_keep_local_server_running.md](feedback_keep_local_server_running.md) - ALWAYS keep the local dev cidx-server (:8000) running — never stop/pkill it; relaunch if down
 - [feedback_ruff_black_version_alignment.md](feedback_ruff_black_version_alignment.md) - Pre-commit ruff version must match system ruff; server-fast-automation uses ruff format
 - [feedback_rest_model_changes_need_fast_automation.md](feedback_rest_model_changes_need_fast_automation.md) - REST/MCP query-model or query-param changes need fast-automation.sh too (param-parity guard is in the CLI suite), not just server-fast
 - [feedback_no_unnecessary_questions.md](feedback_no_unnecessary_questions.md) - Never stop for obvious next steps — only stop if genuinely blocked

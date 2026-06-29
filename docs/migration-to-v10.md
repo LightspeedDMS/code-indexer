@@ -5,7 +5,7 @@ upgrade a CIDX deployment from v9.x to v10.0.0.
 
 ## Breaking Changes
 
-### MCPB Subsystem Removed (Epic #756)
+### MCPB Subsystem Removed
 
 The MCP Bridge subsystem has been fully removed in v10.0.0 with no deprecation
 window. The following are gone:
@@ -50,7 +50,7 @@ built going forward.
 These additions don't break existing operator workflows but add new capabilities
 operators may want to enable.
 
-### Research Assistant Security Hardening (Story #929)
+### Research Assistant Security Hardening
 
 The Research Assistant now uses a wrapper script `scripts/cidx-curl.sh` for HTTP
 fetches instead of raw curl. The wrapper enforces a closed-set whitelist of safe
@@ -64,7 +64,7 @@ operators cannot disable. Restart cidx-server after change.
 **Migration**: No action required. The wrapper architecture is transparent to
 non-RA-using deployments. RA users get tighter exfil containment by default.
 
-### Auto-Trigger Dep-Map Repair (Story #927)
+### Auto-Trigger Dep-Map Repair
 
 Scheduled delta/refinement jobs can now optionally trigger a single repair pass
 when anomalies are detected. Default-off; operator opts in via Web UI:
@@ -76,14 +76,14 @@ auto-repair feature will refuse to fire (loud ERROR) if cluster mode is detected
 without an injected pg_pool - anti-fallback safeguard against per-node solo locks
 firing duplicate jobs across nodes.
 
-### Memory Store + Retrieval Pipeline (Stories #877, #883)
+### Memory Store + Retrieval Pipeline
 
 New MCP tools: `create_memory`, `edit_memory`, `delete_memory`, `search_code` (now
 includes a `relevant_memories` field when search_mode is semantic or hybrid).
 
 **Operator configuration**: `memory_retrieval_enabled` defaults to `false`. Operators must explicitly enable it via the Web UI Config Screen. Kill switch effective immediately (no restart). VoyageAI is required for memory retrieval - Cohere reranker optional.
 
-### TOTP Step-Up Elevation (Epic #922)
+### TOTP Step-Up Elevation
 
 Admin operations require a TOTP elevation window. Rolling 5-min idle, 30-min
 absolute max. Both runtime-configurable via Web UI Config Screen.
@@ -97,7 +97,7 @@ TOTP reset/regenerate/disable.
 compatibility. Operators flip to `true` after all admins have enrolled. Hot-reload
 via 30s reload thread.
 
-### Maintenance Mode Localhost-Only (Story #924)
+### Maintenance Mode Localhost-Only
 
 Maintenance mode write endpoints (`POST /api/admin/maintenance/enter` and `/exit`)
 are now restricted to loopback callers. The MCP `enter_maintenance_mode` and
@@ -107,7 +107,7 @@ are now restricted to loopback callers. The MCP `enter_maintenance_mode` and
 will be rejected (HTTP 403). Use the auto-updater (`--update-cidx-server-systemd`
 flag) or run the curl from the server itself.
 
-### cidx-meta Backup to Remote Git (Story #926)
+### cidx-meta Backup to Remote Git
 
 Operators can now configure a remote git repository as a continuous backup target
 for the cidx-meta directory. Configuration via Web UI; auto-conflict-resolution
@@ -116,7 +116,7 @@ via Claude CLI on push failures.
 **Operator action**: Optional. To enable, set the remote URL via Web UI Config
 Screen -> cidx-meta backup section. Requires SSH key access to the remote.
 
-### Codex CLI Integration (Epic #843)
+### Codex CLI Integration
 
 Codex GPT-5 background agents are now wired into the dep-map analyzer + description
 refresh scheduler with persistent Basic-auth credentials.
@@ -125,7 +125,7 @@ refresh scheduler with persistent Basic-auth credentials.
 cycle (`enable_codex_cli=true` default). Configure auth via Web UI: API key mode
 (set `OPENAI_API_KEY`), subscription mode (OAuth), or none.
 
-### CLI Rerank + Embedder Provider Chain (Epic #689)
+### CLI Rerank + Embedder Provider Chain
 
 CLI now supports configurable rerank with Voyage + Cohere providers, plus an
 embedder provider chain for resilience.
@@ -179,7 +179,7 @@ pipx install --force git+https://github.com/LightspeedDMS/code-indexer.git@v10.0
 sudo systemctl start cidx-server
 
 # 4. Verify
-curl -s http://localhost:8000/docs | head -5
+curl -s http://localhost:8090/docs | head -5
 sqlite3 ~/.cidx-server/logs.db "SELECT timestamp, level, message FROM logs WHERE level IN ('ERROR','WARNING') ORDER BY timestamp DESC LIMIT 20;"
 ```
 
@@ -212,7 +212,7 @@ handles the upgrade idempotently:
 
 ```bash
 # Trigger via REST or via the systemd auto-update timer
-curl -X POST http://localhost:8000/api/admin/auto-update/run -H "Authorization: Bearer $TOKEN"
+curl -X POST http://localhost:8090/api/admin/auto-update/run -H "Authorization: Bearer $TOKEN"
 
 # Auto-updater performs: git pull -> pip install -> DeploymentExecutor.execute() -> systemctl restart
 # All config-step changes are idempotent
@@ -222,8 +222,8 @@ curl -X POST http://localhost:8000/api/admin/auto-update/run -H "Authorization: 
 
 ```bash
 # 1. Server health
-curl -s http://localhost:8000/docs | head -5
-curl -s http://localhost:8000/health
+curl -s http://localhost:8090/docs | head -5
+curl -s http://localhost:8090/health
 
 # 2. No new ERROR/WARNING since deploy
 sqlite3 ~/.cidx-server/logs.db \
@@ -232,8 +232,8 @@ sqlite3 ~/.cidx-server/logs.db \
 # (cluster: same query against postgres_dsn)
 
 # 3. Memory CRUD smoke test (validates Bug #932 fix end-to-end)
-TOKEN=$(curl -s -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"<your-pass>"}' | jq -r '.access_token')
-curl -s -X POST http://localhost:8000/mcp -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+TOKEN=$(curl -s -X POST http://localhost:8090/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"<your-pass>"}' | jq -r '.access_token')
+curl -s -X POST http://localhost:8090/mcp -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_memory","arguments":{"type":"gotcha","scope":"global","summary":"upgrade validation","evidence":[{"file":"none","lines":"1-1"}]}}}'
 # Expect: {"success": true, "id": "<uuid>", "content_hash": "<sha>", ...}
 

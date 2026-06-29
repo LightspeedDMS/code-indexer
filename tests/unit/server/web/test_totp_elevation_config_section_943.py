@@ -399,26 +399,27 @@ class TestTotpElevationAtomicBatch:
         assert block2["elevation_max_age_seconds"] == 2400
 
     def test_save_failure_rolls_back_in_memory_kill_switch(self, tmp_path):
-        """If config file is unwritable, elevation_enforcement_enabled rolls back.
+        """If config save fails, elevation_enforcement_enabled rolls back.
 
-        HIGH 1 regression test. Uses real filesystem permission (chmod 444 on
-        the config file) as the external dependency that causes save to fail.
+        HIGH 1 regression test. Uses real filesystem permission as the external
+        dependency that causes save to fail.
         No patching of the SUT — the failure is injected at the storage layer.
         """
         import os
-        import stat
 
         svc = ConfigService(server_dir_path=str(tmp_path))
         original_enabled = svc.get_config().elevation_enforcement_enabled
 
-        # Force config file into existence, then make it unwritable
+        # Force config file into existence before injecting the failure
         config_file = svc.get_config_file_path()
-        # The config file may not exist yet (lazy write); trigger creation first
         svc.save_config(svc.get_config())
         assert os.path.exists(config_file), "Config file must exist after save_config()"
 
-        # Remove write permission — external storage layer will refuse the write
-        os.chmod(config_file, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        # Under atomic writes (mkstemp + os.replace), making the config FILE
+        # read-only does not prevent the write — POSIX rename only needs directory
+        # write permission.  Inject failure by making the DIRECTORY unwritable so
+        # mkstemp cannot create a temp file there (Bug #1231 atomic-write semantics).
+        os.chmod(tmp_path, 0o555)  # read+execute only; mkstemp will fail
 
         try:
             with pytest.raises(Exception):
@@ -432,8 +433,8 @@ class TestTotpElevationAtomicBatch:
                 "In-memory kill switch was not rolled back after save failure"
             )
         finally:
-            # Restore write permission so tmp_path cleanup can delete the file
-            os.chmod(config_file, stat.S_IRUSR | stat.S_IWUSR)
+            # Restore directory write permission so tmp_path cleanup can delete files
+            os.chmod(tmp_path, 0o755)
 
 
 # ---------------------------------------------------------------------------

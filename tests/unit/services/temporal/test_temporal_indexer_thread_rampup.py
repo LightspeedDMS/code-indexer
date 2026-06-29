@@ -49,6 +49,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = thread_count
+        config.voyage_ai.temporal_parallel_requests = None
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
         config_manager.get_config.return_value = config
@@ -199,6 +200,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = thread_count
+        config.voyage_ai.temporal_parallel_requests = None
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
         config_manager.get_config.return_value = config
@@ -324,6 +326,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = 8
+        config.voyage_ai.temporal_parallel_requests = None
         config.voyage_ai.max_concurrent_batches_per_commit = 10
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
@@ -460,6 +463,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = thread_count
+        config.voyage_ai.temporal_parallel_requests = None
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
         config_manager.get_config.return_value = config
@@ -577,6 +581,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = 4
+        config.voyage_ai.temporal_parallel_requests = None
         config.voyage_ai.max_concurrent_batches_per_commit = 10
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
@@ -777,6 +782,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = 2
+        config.voyage_ai.temporal_parallel_requests = None
         config.voyage_ai.max_concurrent_batches_per_commit = 10
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
@@ -993,6 +999,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = 4
+        config.voyage_ai.temporal_parallel_requests = None
         config.voyage_ai.max_concurrent_batches_per_commit = 10
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
@@ -1138,6 +1145,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = 4
+        config.voyage_ai.temporal_parallel_requests = None
         config.voyage_ai.max_concurrent_batches_per_commit = 10
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
@@ -1368,6 +1376,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = 2
+        config.voyage_ai.temporal_parallel_requests = None
         config.voyage_ai.max_concurrent_batches_per_commit = 10
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
@@ -1592,6 +1601,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         config_manager = Mock()
         config = Mock()
         config.voyage_ai.parallel_requests = thread_count
+        config.voyage_ai.temporal_parallel_requests = None
         config.embedding_provider = "voyage-ai"
         config.voyage_ai.model = "voyage-code-2"
         config_manager.get_config.return_value = config

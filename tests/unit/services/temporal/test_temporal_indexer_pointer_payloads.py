@@ -124,6 +124,11 @@ class TestTemporalIndexerPointerPayloads:
 
         vector_store.upsert_points = capture_upsert  # type: ignore[assignment, method-assign]
 
+        # Story #1171: commits are routed to quarterly shards; end_indexing tries to
+        # build an HNSW index for the shard directory which doesn't exist in this test.
+        # This test is about payload structure, not HNSW building, so stub it out.
+        vector_store.end_indexing = Mock()  # type: ignore[method-assign]
+
         # Create indexer and index the add commit
         indexer = TemporalIndexer(config_manager, vector_store)
 

@@ -25,7 +25,7 @@ The PyPI version of hnswlib (v0.8.0) does not expose the `check_integrity()` met
 
 ```bash
 # 1. Clone code-indexer (if not already cloned)
-git clone https://github.com/LightspeedDMS/code-indexer.git
+git clone https://github.com/YOUR_USERNAME/code-indexer.git
 cd code-indexer
 
 # 2. Initialize hnswlib submodule
@@ -63,7 +63,7 @@ The `dependencies` list in `pyproject.toml` **does not include** `hnswlib>=0.8.0
 ```toml
 dependencies = [
     # ... other dependencies ...
-    # hnswlib is built from third_party/hnswlib submodule (Story #54)
+    # hnswlib is built from third_party/hnswlib submodule
     # DO NOT use PyPI hnswlib - it lacks check_integrity() method
     # Install: git submodule update --init && pip install -e .
 ]
@@ -186,7 +186,7 @@ In CI workflows, ensure submodule initialization:
 
 ```yaml
 - name: Checkout code with submodules
-  uses: actions/checkout@v3
+  uses: actions/checkout@v4
   with:
     submodules: recursive
 
@@ -200,7 +200,7 @@ In Dockerfiles:
 
 ```dockerfile
 # Clone with submodules
-RUN git clone --recurse-submodules https://github.com/LightspeedDMS/code-indexer.git
+RUN git clone --recurse-submodules https://github.com/YOUR_USERNAME/code-indexer.git
 
 # Or initialize after clone
 WORKDIR /app
@@ -237,6 +237,5 @@ If upgrading from a version that used PyPI hnswlib:
 
 ## References
 
-- Story #54: Replace PyPI hnswlib with custom build
 - hnswlib GitHub: https://github.com/nmslib/hnswlib
 - Custom commit: 8972063 (checkIntegrity method)

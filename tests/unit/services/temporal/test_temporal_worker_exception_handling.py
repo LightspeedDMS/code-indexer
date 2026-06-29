@@ -30,6 +30,7 @@ class TestWorkerExceptionHandling:
         self.config_manager = Mock()
         self.config = Mock()
         self.config.voyage_ai.parallel_requests = 2
+        self.config.voyage_ai.temporal_parallel_requests = None
         self.config.voyage_ai.max_concurrent_batches_per_commit = 10
         self.config.embedding_provider = "voyage-ai"
         self.config.voyage_ai.model = "voyage-code-3"

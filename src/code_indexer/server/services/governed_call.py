@@ -23,7 +23,9 @@ collect shadow measurements without altering the live path (shadow-mode).
 import logging
 import random
 import struct
-from typing import Any, Callable, Dict, List, Optional, cast
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 from code_indexer.server.services.coalescer_registry import (
     _digest_for_provider,
@@ -32,6 +34,29 @@ from code_indexer.server.services.coalescer_registry import (
 from code_indexer.server.services.config_service import get_config_service
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Issue #1159: EmbeddingCacheMetadata — cache telemetry returned with vector
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EmbeddingCacheMetadata:
+    """Cache telemetry for one embedding call, returned alongside the vector.
+
+    Fields are all-None when the cache was absent, disabled, or mode=off.
+    When the cache was consulted:
+      key_found: True on HIT, False on MISS or bypass.
+      cache_mode: "on", "shadow", or "off" (from cache.mode_for()).
+      provider_latency_ms: wall-clock ms for the live provider call (MISS only;
+          None on HIT since no provider call was made).
+    """
+
+    key_found: Optional[bool] = None
+    cache_mode: Optional[str] = None
+    provider_latency_ms: Optional[int] = None
+
 
 # Seconds to wait for a governor slot — shared across all 4 embedding sites.
 # 30 s is well within the 60 s caller timeout and absorbs momentary bursts.
@@ -254,10 +279,8 @@ def _compute_live(
     logger.debug(
         "coalesced_query_embedding: coalescing on lane=%s digest=%s", lane, digest[:12]
     )
-    return cast(
-        List[float],
-        coalescer.submit(text, embedding_purpose=embedding_purpose or "query"),
-    )
+    vec, _ = coalescer.submit(text, embedding_purpose=embedding_purpose or "query")
+    return cast(List[float], vec)
 
 
 def _bytes_to_floats(blob: bytes) -> List[float]:
@@ -312,7 +335,7 @@ def _serve_with_cache(
     *,
     metrics: Optional[Any] = None,
     audit_ctx: Optional[Dict[str, Any]] = None,
-) -> List[float]:
+) -> Tuple[List[float], EmbeddingCacheMetadata]:
     """Apply the Story #1105 cache policy for one embedding request.
 
     Called only when the cache is enabled for *provider_name* and mode != "off".
@@ -407,27 +430,35 @@ def _serve_with_cache(
                             "_serve_with_cache: audit_ctx population failed (on-mode): %s",
                             exc,
                         )
-                return decoded_vec
+                return decoded_vec, EmbeddingCacheMetadata(
+                    key_found=True, cache_mode=mode
+                )
 
         # MISS (or corrupt blob treated as MISS)
         logger.debug(
             "coalesced_query_embedding: cache MISS (mode=on, provider=%s)",
             provider_name,
         )
+        _t0 = time.monotonic()
         live_vec: List[float] = live_fn()
+        _latency_ms = int((time.monotonic() - _t0) * 1000)
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
         if metrics is not None:
             metrics.record_miss(mode=mode, provider=provider_name)
-        return live_vec
+        return live_vec, EmbeddingCacheMetadata(
+            key_found=False, cache_mode=mode, provider_latency_ms=_latency_ms
+        )
 
     # shadow (or any unrecognised mode treated as shadow per cache.mode_for default)
     # AC5: wrap live_fn() so provider errors record a miss metric then re-raise.
+    _t0_shadow = time.monotonic()
     try:
         live_vec = live_fn()
     except Exception:
         if metrics is not None:
             metrics.record_miss(mode=mode, provider=provider_name)
         raise
+    _shadow_latency_ms = int((time.monotonic() - _t0_shadow) * 1000)
 
     shadow_blob: Optional[bytes] = cache.lookup(cache_key, qualifier)
     if shadow_blob is not None:
@@ -455,6 +486,9 @@ def _serve_with_cache(
                     "_serve_with_cache: audit_ctx population failed (shadow-mode): %s",
                     exc,
                 )
+        return live_vec, EmbeddingCacheMetadata(
+            key_found=True, cache_mode=mode, provider_latency_ms=_shadow_latency_ms
+        )
     else:
         logger.debug(
             "coalesced_query_embedding: shadow MISS (provider=%s) -> record_miss",
@@ -463,7 +497,9 @@ def _serve_with_cache(
         cache.record_miss_or_shadow(cache_key, qualifier, live_vec)
         if metrics is not None:
             metrics.record_miss(mode=mode, provider=provider_name)
-    return live_vec
+        return live_vec, EmbeddingCacheMetadata(
+            key_found=False, cache_mode=mode, provider_latency_ms=_shadow_latency_ms
+        )
 
 
 def coalesced_query_embedding(
@@ -474,7 +510,7 @@ def coalesced_query_embedding(
     acquire_timeout: float = _GOVERNOR_ACQUIRE_TIMEOUT_SECS,
     no_embedding_cache_shortcut: bool = False,
     audit_ctx: Optional[Dict[str, Any]] = None,
-) -> List[float]:
+) -> Tuple[List[float], EmbeddingCacheMetadata]:
     """Server-gated entry point for a single query embedding (Story #1079 Phase E).
 
     Story #1147 sub-task 3c: this function is now a THIN SHIM.  The cache
@@ -599,21 +635,19 @@ def coalesced_query_embedding(
         # submit() owns the cache check (3b lock-free pre-enqueue),
         # live embedding, and post-dispatch cache write.
         # _serve_with_cache is NOT invoked on this path.
+        # Issue #1159: submit() now returns (vec, EmbeddingCacheMetadata)
+        # so real cache telemetry propagates to callers.
         # ----------------------------------------------------------
         logger.debug(
             "coalesced_query_embedding: delegating to coalescer.submit (Path A)"
         )
-        from typing import cast
-
-        return cast(
-            List[float],
-            coalescer.submit(
-                text,
-                embedding_purpose or "query",
-                no_embedding_cache_shortcut=no_embedding_cache_shortcut,
-                audit_ctx=audit_ctx,
-            ),
+        vec, meta = coalescer.submit(
+            text,
+            embedding_purpose or "query",
+            no_embedding_cache_shortcut=no_embedding_cache_shortcut,
+            audit_ctx=audit_ctx,
         )
+        return cast(List[float], vec), meta
 
     # ----------------------------------------------------------
     # PATH B: no coalescer — direct governed call.
@@ -625,7 +659,7 @@ def coalesced_query_embedding(
         logger.debug(
             "coalesced_query_embedding: no coalescer, no cache -> direct governed call"
         )
-        return _direct_live()
+        return _direct_live(), EmbeddingCacheMetadata()
 
     # Cache active, no coalescer: _serve_with_cache with governed_query_embedding
     # as the live_fn (bypass handled before the _serve_with_cache call).
@@ -636,7 +670,7 @@ def coalesced_query_embedding(
         live_vec: List[float] = _direct_live()
         # cache, cache_key_opt, qualifier are always set here (cache is not None)
         cache.record_miss_or_shadow(cache_key_opt, cache.qualifier(provider), live_vec)  # type: ignore[arg-type]
-        return live_vec
+        return live_vec, EmbeddingCacheMetadata(key_found=False)
 
     logger.debug(
         "coalesced_query_embedding: no coalescer, cache active -> _serve_with_cache (Path B)"

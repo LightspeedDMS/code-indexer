@@ -236,15 +236,6 @@ class MaintenanceState:
         if config.resource_config:
             timeouts.append(config.resource_config.git_refresh_timeout)
 
-        # SCIP config timeouts
-        if config.scip_config:
-            timeouts.extend(
-                [
-                    config.scip_config.indexing_timeout_seconds,
-                    config.scip_config.scip_generation_timeout_seconds,
-                ]
-            )
-
         return max(timeouts) if timeouts else 3600  # Default 1 hour
 
     def get_recommended_drain_timeout(self, config: Any) -> int:

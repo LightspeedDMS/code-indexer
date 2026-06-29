@@ -184,12 +184,43 @@ class _PgBackend:
         now = time.time()
         idle_cutoff = now - self._idle_timeout
         abs_cutoff = now - self._max_age
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    row = cur.execute(
+                        _PG_SELECT_VALID, (session_key, idle_cutoff, abs_cutoff)
+                    ).fetchone()
+            return _row_to_elevated_session(row) if row else None
+        except Exception:
+            logger.warning(
+                "ElevatedSessionManager PG get_status failed; denying (fail-closed)",
+                exc_info=True,
+            )
+            return None
+
+    def prune_expired(self, max_age_seconds: int) -> int:
+        """Delete rows whose absolute elevation window has fully expired.
+
+        A row is prunable when elevated_at < (now - max_age_seconds).
+        Both elevated_at AND last_touched_at are compared against cutoff so
+        any stale row — even one never re-touched — is collected.
+        Returns the number of rows deleted.
+        """
+        if not isinstance(max_age_seconds, int) or max_age_seconds <= 0:
+            raise ValueError(
+                f"max_age_seconds must be a positive integer, got {max_age_seconds!r}"
+            )
+        cutoff = time.time() - max_age_seconds
         with self._pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    _PG_SELECT_VALID, (session_key, idle_cutoff, abs_cutoff)
-                ).fetchone()
-        return _row_to_elevated_session(row) if row else None
+            cursor = conn.execute(
+                "DELETE FROM elevated_sessions "
+                "WHERE elevated_at < %s AND last_touched_at < %s "
+                "RETURNING session_key",
+                (cutoff, cutoff),
+            )
+            conn.commit()
+            rows = cursor.fetchall()
+        return len(rows) if rows else 0
 
 
 class ElevatedSessionManager:
@@ -296,6 +327,26 @@ class ElevatedSessionManager:
         logger.info(
             "ElevatedSessionManager: using PostgreSQL connection pool (cluster mode)"
         )
+
+    def set_sqlite_path(self, db_path: str) -> None:
+        """Redirect SQLite storage to the given shared database path (Bug #1221).
+
+        Mirrors TokenBlacklist.set_sqlite_path() — called by service_init.py
+        to wire the manager to the shared cidx_server.db so all uvicorn workers
+        on the same node share elevation state via the same SQLite file.
+
+        Creates the elevated_sessions schema in the target DB if absent.
+        No-op if a PostgreSQL pool is already wired (PG takes precedence).
+        """
+        if self._pool is not None:
+            # PG cluster mode — SQLite path irrelevant; PG pool already wired.
+            return
+        if not isinstance(db_path, str) or not db_path.strip():
+            raise ValueError("db_path must be a non-empty string")
+        with self._lock:
+            self._db_path = db_path
+        # Ensure schema exists in the target DB (idempotent CREATE IF NOT EXISTS).
+        self._ensure_schema()
 
     # ------------------------------------------------------------------
     # SQLite helpers
@@ -498,7 +549,12 @@ class ElevatedSessionManager:
         logger.debug("All elevation windows revoked for username=%s", username)
 
     def get_status(self, session_key: str) -> Optional[ElevatedSession]:
-        """Return the current elevation window without touching it (read-only)."""
+        """Return the current elevation window without touching it (read-only).
+
+        Fail-closed: any storage error returns None (deny), never raises.
+        This ensures a broken store results in elevation_required (403),
+        not a silent grant or an unhandled 500.
+        """
         if not isinstance(session_key, str) or not session_key.strip():
             raise ValueError("session_key must be a non-empty string")
 
@@ -508,16 +564,64 @@ class ElevatedSessionManager:
         now = time.time()
         idle_cutoff = now - self._idle_timeout
         abs_cutoff = now - self._max_age
-        conn = self._get_conn()
         try:
-            row = conn.execute(
-                "SELECT * FROM elevated_sessions "
-                "WHERE session_key = ? AND last_touched_at > ? AND elevated_at > ?",
-                (session_key, idle_cutoff, abs_cutoff),
-            ).fetchone()
-            return _row_to_elevated_session(row) if row else None
-        finally:
-            conn.close()
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM elevated_sessions "
+                    "WHERE session_key = ? AND last_touched_at > ? AND elevated_at > ?",
+                    (session_key, idle_cutoff, abs_cutoff),
+                ).fetchone()
+                return _row_to_elevated_session(row) if row else None
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning(
+                "ElevatedSessionManager SQLite get_status failed; denying (fail-closed)",
+                exc_info=True,
+            )
+            return None
+
+    def prune_expired(self, max_age_seconds: int) -> int:
+        """Delete elevation rows whose absolute window has fully expired (Bug #1221).
+
+        A row is prunable when elevated_at < (now - max_age_seconds), meaning
+        the absolute max-age clock has run out. Both elevated_at and
+        last_touched_at are checked so untouched stale rows are also removed.
+
+        Mirrors TokenBlacklist.prune_expired() — called by DataRetentionScheduler
+        to prevent unbounded table growth.
+
+        Returns the number of rows deleted.
+        """
+        if not isinstance(max_age_seconds, int) or max_age_seconds <= 0:
+            raise ValueError(
+                f"max_age_seconds must be a positive integer, got {max_age_seconds!r}"
+            )
+
+        if self._pool is not None:
+            return self._pg().prune_expired(max_age_seconds)
+
+        cutoff = time.time() - max_age_seconds
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT session_key FROM elevated_sessions "
+                    "WHERE elevated_at < ? AND last_touched_at < ?",
+                    (cutoff, cutoff),
+                ).fetchall()
+                conn.execute(
+                    "DELETE FROM elevated_sessions "
+                    "WHERE elevated_at < ? AND last_touched_at < ?",
+                    (cutoff, cutoff),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        deleted = len(rows)
+        logger.debug("ElevatedSessionManager: pruned %d expired session(s)", deleted)
+        return deleted
 
 
 # Module-level singleton (Story #923 AC1).

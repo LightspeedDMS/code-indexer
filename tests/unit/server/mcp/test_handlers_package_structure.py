@@ -180,6 +180,8 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "cancel_job",
         # Payload cache retrieval handler (added post-v10)
         "cidx_fetch_cached_payload",
+        # Story 4 (Epic #1213): Memory Governor observability MCP twin
+        "get_memory_governor_stats",
     }
 )
 

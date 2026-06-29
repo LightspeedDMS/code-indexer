@@ -132,9 +132,6 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
 
     dependencies.api_key_manager = _ApiKeyManager(user_manager=user_manager)
 
-    # Seed initial admin user
-    user_manager.seed_initial_admin()
-
     # AC2/AC4: Store ALL closure-captured variables on app.state so extracted
     # router modules can access them via request.app.state.XXX without closures.
     app.state.jwt_manager = jwt_manager

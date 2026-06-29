@@ -308,9 +308,13 @@ class TestPipInstallUsesServerPython:
             executor, "_get_server_python", return_value=server_python
         ) as mock_get_python:
             with patch("subprocess.run") as mock_run:
+                # Bug #1234: pip_install() now probes pip --version before installing.
+                # Call order:
+                #   [0] pip --version probe  (returns pip version to decide flag)
+                #   [1] pip install          (the actual install)
                 mock_run.return_value = Mock(
                     returncode=0,
-                    stdout="Successfully installed code-indexer",
+                    stdout="pip 23.1 from /usr/local/lib/python3/dist-packages/pip (python 3.9)\n",
                     stderr="",
                 )
 
@@ -319,14 +323,15 @@ class TestPipInstallUsesServerPython:
         assert result is True
         mock_get_python.assert_called_once()
 
-        # Verify subprocess.run was called with sudo and server Python
-        # Uses sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+        # Verify subprocess.run was called twice: pip --version probe + pip install
         calls = mock_run.call_args_list
-        assert len(calls) == 1
-        call_args = calls[0][0][0]
-        assert call_args[0] == "sudo"
-        assert call_args[1] == server_python
-        assert call_args[2:] == [
+        assert len(calls) == 2
+
+        # [1] is the actual pip install — verify it uses sudo + server python
+        pip_install_args = calls[1][0][0]
+        assert pip_install_args[0] == "sudo"
+        assert pip_install_args[1] == server_python
+        assert pip_install_args[2:] == [
             "-m",
             "pip",
             "install",
@@ -359,7 +364,7 @@ class TestExecuteCallsEnsureAutoUpdater:
     @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_git_safe_directory", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_workers_config", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_launch_config", return_value=None)
     @patch.object(DeploymentExecutor, "pip_install", return_value=True)
     @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
     @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)
@@ -397,7 +402,7 @@ class TestExecuteCallsEnsureAutoUpdater:
     @patch.object(DeploymentExecutor, "ensure_ripgrep", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_git_safe_directory", return_value=True)
     @patch.object(DeploymentExecutor, "_ensure_cidx_repo_root", return_value=True)
-    @patch.object(DeploymentExecutor, "_ensure_workers_config", return_value=True)
+    @patch.object(DeploymentExecutor, "_ensure_launch_config", return_value=None)
     @patch.object(DeploymentExecutor, "pip_install", return_value=True)
     @patch.object(DeploymentExecutor, "build_custom_hnswlib", return_value=True)
     @patch.object(DeploymentExecutor, "git_submodule_update", return_value=True)

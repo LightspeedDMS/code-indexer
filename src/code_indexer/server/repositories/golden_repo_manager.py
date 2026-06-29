@@ -6,6 +6,7 @@ Golden repositories are stored in ~/.cidx-server/data/golden-repos/ with metadat
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.utils.cow_utils import _safe_makedirs_cow
 
 import errno
 import json
@@ -173,8 +174,9 @@ class GoldenRepoManager:
             resource_config = ServerResourceConfig()
         self.resource_config = resource_config
 
-        # Ensure directory structure exists
-        os.makedirs(self.golden_repos_dir, exist_ok=True)
+        # Ensure directory structure exists (Bug #1229: use safe helper so a
+        # dangling CoW/NFS symlink does not crash the worker with FileExistsError)
+        _safe_makedirs_cow(self.golden_repos_dir)
 
         # Thread safety for concurrent operations (Story #620 Priority 2A)
         self._operation_lock = threading.Lock()
@@ -353,14 +355,40 @@ class GoldenRepoManager:
                     f"Invalid or inaccessible git repository: {repo_url}"
                 )
 
+        def _cleanup_failed_clone(clone_path: Optional[str]) -> None:
+            """Remove a partially-cloned directory so retries don't fail with
+            'destination path already exists' (Bug #1218 orphan-clone cleanup).
+            Silently no-ops if clone_path is None or does not exist.
+            """
+            if not clone_path:
+                return
+            try:
+                if os.path.exists(clone_path):
+                    shutil.rmtree(clone_path)
+                    logging.info(
+                        "Bug #1218: removed orphaned clone '%s' after registration failure",
+                        clone_path,
+                    )
+            except Exception as cleanup_exc:
+                logging.warning(
+                    "Bug #1218: failed to remove orphaned clone '%s': %s",
+                    clone_path,
+                    cleanup_exc,
+                )
+
         # Create wrapper for background execution that accepts progress_callback
         # so BackgroundJobManager can inject it (Story #482 PATH A).
         def background_worker(progress_callback=None) -> Dict[str, Any]:
             """Execute add operation in background thread."""
             nonlocal default_branch
+            # Bug #1218: track clone_path so we can clean it up on failure.
+            # An orphaned clone (clone made but DB record never created) blocks
+            # retries with "destination path already exists".
+            _clone_path_for_cleanup: Optional[str] = None
             try:
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
+                _clone_path_for_cleanup = clone_path
 
                 # Bug #699: When no branch was specified, resolve the actual
                 # checked-out branch so metadata always stores a concrete value
@@ -509,19 +537,23 @@ class GoldenRepoManager:
                 }
 
             except subprocess.CalledProcessError as e:
+                _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise GitOperationError(
                     f"Failed to clone repository: Git process failed with exit code {e.returncode}: {e.stderr}"
                 )
             except subprocess.TimeoutExpired as e:
+                _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise GitOperationError(
                     f"Failed to clone repository: Git operation timed out after {e.timeout} seconds"
                 )
             except (OSError, IOError) as e:
+                _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise GitOperationError(
                     f"Failed to clone repository: File system error: {str(e)}"
                 )
             except GitOperationError:
                 # Re-raise GitOperationError from sub-methods without modification
+                _cleanup_failed_clone(_clone_path_for_cleanup)
                 raise
 
         # Submit to BackgroundJobManager
@@ -1582,31 +1614,12 @@ class GoldenRepoManager:
         _popen_stdout: List[str] = []
         _popen_stderr: List[str] = []
 
-        # Load the registration-path index timeout from ScipConfig.
-        # registration_indexing_timeout_seconds (default 240s) is deliberately set
-        # below the 300s e2e poll deadline so a stuck registration job fails fast
-        # with a clear GitOperationError instead of an opaque 300s poller timeout.
-        # This is distinct from indexing_timeout_seconds (3600s, used by
-        # ActivatedRepoIndexManager for manual re-index operations).
-        _indexing_timeout: float = 240.0
-        try:
-            from ..services.config_service import get_config_service as _get_cfg
-
-            _cfg = _get_cfg().get_config()
-            if _cfg.scip_config is not None:
-                _indexing_timeout = float(
-                    _cfg.scip_config.registration_indexing_timeout_seconds
-                )
-        except Exception as exc:
-            logger.warning(
-                "Failed to read ScipConfig.registration_indexing_timeout_seconds; "
-                "using default %.0fs: %s",
-                _indexing_timeout,
-                exc,
-            )
-
         def _run_popen(command: List[str], phase_name: str, error_label: str) -> None:
-            """Run command with Popen progress, re-raising as GitOperationError on failure."""
+            """Run command with Popen progress, re-raising as GitOperationError on failure.
+
+            No whole-job timeout is applied (Bug #1218): the only legitimate timeout
+            is the per-request outbound embedding-provider HTTP call.
+            """
             _popen_stdout.clear()
             _popen_stderr.clear()
             try:
@@ -1619,7 +1632,6 @@ class GoldenRepoManager:
                     all_stderr=_popen_stderr,
                     cwd=clone_path,
                     error_label=error_label,
-                    timeout=_indexing_timeout,
                 )
             except IndexingSubprocessError as e:
                 # Check for "No files found" — acceptable for golden repo registration
@@ -2091,6 +2103,12 @@ class GoldenRepoManager:
         matching_repos = []
 
         for repo in self.golden_repos.values():
+            # local:// is an internal scheme (cidx-meta, langfuse, etc.) that has
+            # no canonical git URL and can never match a canonical-URL search.
+            # Skip it before normalization to avoid a spurious WARNING (Bug #1188).
+            if repo.repo_url.startswith("local://"):
+                continue
+
             try:
                 # Normalize the repository's URL
                 normalized = normalizer.normalize(repo.repo_url)

@@ -29,6 +29,7 @@ class _FakeConfig:
         background_jobs_retention_hours = 168
 
     data_retention_config = _RetentionConfig()
+    jwt_expiration_minutes = 10  # matches ServerConfig default
 
 
 class _FakeConfigService:

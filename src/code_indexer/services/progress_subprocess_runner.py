@@ -28,6 +28,7 @@ Usage::
         all_stdout=all_stdout,
         all_stderr=all_stderr,
         cwd=repo_path,
+        # No timeout: Bug #1218 — only per-request outbound HTTP timeouts are allowed.
     )
 """
 
@@ -35,7 +36,6 @@ import io
 import logging
 import os
 import select
-import signal
 import subprocess
 import threading
 from pathlib import Path
@@ -161,7 +161,6 @@ def run_with_popen_progress(
     error_label: Optional[str] = None,
     last_reported: Optional[int] = None,
     env: Optional[dict] = None,
-    timeout: Optional[float] = None,
 ) -> int:
     """
     Run a command with Popen, reading JSON progress lines from stdout.
@@ -182,6 +181,10 @@ def run_with_popen_progress(
     when a new phase starts at a lower global percentage than the previous
     phase ended at.
 
+    No whole-job timeout is applied (Bug #1218): the only legitimate timeout is
+    the per-request outbound embedding-provider HTTP call, which is handled
+    inside the embedding providers themselves.
+
     Args:
         command: Command list to execute via subprocess.Popen
         phase_name: Phase name in the allocator (e.g., "semantic", "temporal")
@@ -196,8 +199,6 @@ def run_with_popen_progress(
                        (no suppression). Returns the highest value reported this call.
         env: Optional environment dict passed to subprocess.Popen. If None,
              the subprocess inherits the current process environment.
-        timeout: Optional timeout in seconds. A watchdog thread kills the process
-                 after this many seconds and IndexingSubprocessError is raised.
 
     Returns:
         The highest progress value reported during this call (or last_reported if
@@ -232,6 +233,7 @@ def run_with_popen_progress(
         # new process group / session.  Combined with the poll-aware read loop
         # below, this prevents grandchildren that inherit the stdout PIPE
         # write-end from blocking the parent indefinitely after the child exits.
+        # The shutdown-pipe signal (see below) is what makes termination fast.
         start_new_session=True,
         close_fds=True,
     )
@@ -245,36 +247,6 @@ def run_with_popen_progress(
         raise IndexingSubprocessError(
             f"Failed to {error_label}: subprocess stdout pipe was not created"
         )
-
-    # Watchdog thread enforces timeout independent of stdout line production.
-    # This ensures the process is killed even if it produces no output.
-    # Declared here so both the fallback (no-fd) and real-fd paths can use it.
-    timed_out = threading.Event()
-
-    if timeout is not None:
-
-        def _watchdog() -> None:
-            if not timed_out.wait(timeout=timeout):
-                # Event was not set within timeout — process still running.
-                # Kill the entire process group (child + grandchildren) so any
-                # inherited pipe fds held by grandchildren are also closed.
-                timed_out.set()
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    # Process already exited between the check and the kill.
-                    pass
-                except OSError:
-                    # Fallback: kill just the direct child if getpgid fails.
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-
-        watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
-        watchdog_thread.start()
-    else:
-        watchdog_thread = None
 
     # Detect whether stdout exposes a real OS file descriptor.
     # Real subprocess PIPE streams always do; mocked/StringIO streams do not.
@@ -308,11 +280,6 @@ def run_with_popen_progress(
         all_stderr.append(stderr_output)
 
         process.wait()
-
-        # Signal watchdog that process finished (prevents spurious kill).
-        timed_out.set()
-        if watchdog_thread is not None:
-            watchdog_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
 
         if process.returncode != 0:
             stdout_output = "".join(all_stdout)
@@ -406,9 +373,8 @@ def run_with_popen_progress(
     # both reader threads — without waiting for pipe EOF from a grandchild.
     #
     # start_new_session=True on the Popen places the child + grandchildren in a
-    # new process group so the watchdog can kill them all via os.killpg on
-    # timeout.  It does NOT prevent grandchildren from inheriting pipe fds;
-    # the shutdown-pipe signal is what makes termination fast.
+    # new process group.  It does NOT prevent grandchildren from inheriting pipe
+    # fds; the shutdown-pipe signal is what makes termination fast.
 
     def _stdout_reader() -> None:
         """Read raw bytes from stdout_fd via select; put lines on line_queue.
@@ -534,24 +500,13 @@ def run_with_popen_progress(
                     exc,
                 )
 
-    # Signal watchdog that process finished normally (prevents spurious kill).
-    timed_out.set()
-
     process.wait()
     # Both reader threads exit promptly when shutdown_w is signalled (on child
     # exit) — no need for a short timeout workaround here.
     stderr_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
-    if watchdog_thread is not None:
-        watchdog_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
 
     stderr_output = "".join(stderr_lines)
     all_stderr.append(stderr_output)
-
-    # Check for timeout after process.wait() — the watchdog may have killed it.
-    if timeout is not None and process.returncode == -9:
-        timeout_msg = f"Timed out after {timeout}s"
-        all_stderr.append(timeout_msg)
-        raise IndexingSubprocessError(f"Failed to {error_label}: {timeout_msg}")
 
     if process.returncode != 0:
         stdout_output = "".join(all_stdout)

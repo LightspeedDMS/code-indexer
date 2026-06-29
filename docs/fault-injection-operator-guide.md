@@ -1,7 +1,5 @@
 # Fault Injection Operator Guide
 
-Story #746 -- Fault Injection Harness for External Provider Resilience Testing
-
 ---
 
 ## Overview
@@ -47,7 +45,7 @@ Minimum configuration to enable the harness on a non-production server:
 {
   "server_dir": "~/.cidx-server",
   "host": "127.0.0.1",
-  "port": 8000,
+  "port": 8090,
   "fault_injection_enabled": true,
   "fault_injection_nonprod_ack": true
 }
@@ -56,7 +54,7 @@ Minimum configuration to enable the harness on a non-production server:
 To verify the harness is active after restart:
 
 ```bash
-grep "FAULT INJECTION HARNESS ACTIVE" /tmp/cidx-server.log
+sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE message LIKE '%FAULT INJECTION HARNESS ACTIVE%' ORDER BY id DESC LIMIT 10;"
 ```
 
 ### Bootstrap Keys Reference

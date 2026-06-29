@@ -28,7 +28,7 @@ There are three ways to generate credentials:
 
 ### Option A: Web UI
 
-1. Log in to the CIDX server admin panel (e.g. `https://your-server:8000/admin/`)
+1. Log in to the CIDX server admin panel (e.g. `https://your-server:8090/admin/`)
 2. Navigate to **MCP Credentials** page (`/admin/mcp-credentials`)
 3. Click **Generate New Credential**
 4. Optionally enter a name (e.g. "My Laptop", "CI Pipeline")
@@ -40,12 +40,12 @@ The secret is displayed only once. Save it immediately.
 
 ```bash
 # 1. Authenticate to get a JWT token
-TOKEN=$(curl -s -X POST https://your-server:8000/auth/login \
+TOKEN=$(curl -s -X POST https://your-server:8090/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"YOUR_PASSWORD"}' | jq -r '.access_token')
 
 # 2. Create an MCP credential
-curl -s -X POST https://your-server:8000/api/mcp-credentials \
+curl -s -X POST https://your-server:8090/api/mcp-credentials \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"my-workstation"}' | jq .
@@ -76,7 +76,7 @@ This requires a configured CIDX CLI profile pointing to the server.
 Admins can create credentials on behalf of any user:
 
 ```bash
-curl -s -X POST https://your-server:8000/api/admin/users/USERNAME/mcp-credentials \
+curl -s -X POST https://your-server:8090/api/admin/users/USERNAME/mcp-credentials \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"auto-provisioned"}'
@@ -100,7 +100,7 @@ claude mcp add \
   --header "Authorization: Basic $AUTH_TOKEN" \
   --scope user \
   cidx-local \
-  http://localhost:8000/mcp
+  http://localhost:8090/mcp
 
 # Or register with project scope (only available in a specific project)
 claude mcp add \
@@ -108,7 +108,7 @@ claude mcp add \
   --header "Authorization: Basic $AUTH_TOKEN" \
   --scope project \
   cidx-production \
-  https://your-server:8000/mcp
+  https://your-server:8090/mcp
 ```
 
 #### Scope options
@@ -149,7 +149,7 @@ different nesting levels depending on scope.
   "mcpServers": {
     "cidx-local": {
       "type": "http",
-      "url": "http://localhost:8000/mcp",
+      "url": "http://localhost:8090/mcp",
       "headers": {
         "Authorization": "Basic BASE64_ENCODED_CREDENTIALS"
       }
@@ -167,7 +167,7 @@ different nesting levels depending on scope.
       "mcpServers": {
         "cidx-production": {
           "type": "http",
-          "url": "https://your-server:8000/mcp",
+          "url": "https://your-server:8090/mcp",
           "headers": {
             "Authorization": "Basic BASE64_ENCODED_CREDENTIALS"
           }
@@ -292,7 +292,7 @@ claude mcp get cidx-local
 
 # Test the MCP endpoint directly
 AUTH_TOKEN=$(echo -n "CLIENT_ID:CLIENT_SECRET" | base64)
-curl -s -X POST http://localhost:8000/mcp \
+curl -s -X POST http://localhost:8090/mcp \
   -H "Content-Type: application/json" \
   -H "Authorization: Basic $AUTH_TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq '.result.tools | length'
