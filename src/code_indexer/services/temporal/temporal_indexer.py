@@ -26,6 +26,7 @@ from ...storage.filesystem_vector_store import FilesystemVectorStore
 from .models import CommitInfo
 from .temporal_collection_naming import LEGACY_TEMPORAL_COLLECTION
 from .temporal_diff_scanner import TemporalDiffScanner
+from .temporal_migration_service import _cleanup_monolithic_collection
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,17 @@ class IndexingResult:
     skip_ratio: float
     branches_indexed: List[str]
     commits_per_branch: dict
+
+
+# Story #1158: Default parallelism for git-diff ThreadPoolExecutor sites.
+_DEFAULT_PARALLEL_REQUESTS = 8
+
+# Bug #1206 Fix 2: flush progressive metadata to disk every N commits (amortized).
+# Per-commit flushing re-sorted and rewrote the entire completed list each time
+# (O(N) cost per commit).  With lazy staging + periodic flush, each commit costs
+# O(1) (in-memory set.add) and the disk write happens at most every
+# _FLUSH_INTERVAL commits.  A final flush runs after all workers complete.
+_FLUSH_INTERVAL = 10
 
 
 class TemporalIndexer:
@@ -161,6 +173,13 @@ class TemporalIndexer:
         # Initialize blob registry for tracking indexed content
         # Keyed by collection_name to support dual-provider indexing (Story #631)
         self.indexed_blobs: dict[str, set[str]] = {}
+
+        # Bug #1207 BLOCKER 1: guard cleanup on successful completion only.
+        # Set True at the very end of index_commits() after the shard loop fully
+        # completes without exception.  close() requires this flag AND non-empty
+        # _processed_shards before calling _cleanup_monolithic_collection so that
+        # a crash mid-shard loop does NOT delete the monolith (the only good copy).
+        self._indexing_complete: bool = False
 
         # Initialize progressive metadata tracker for resume capability (primary collection)
         self.progressive_metadata = TemporalProgressiveMetadata(self.temporal_dir)
@@ -313,6 +332,31 @@ class TemporalIndexer:
         # This is conservative and works for batching purposes
         return len(text) // 4
 
+    def _get_temporal_thread_count(self) -> int:
+        """Return the thread count for git-diff ThreadPoolExecutor sites.
+
+        Story #1158: git-diff sites use temporal_parallel_requests when configured,
+        falling back to the provider's parallel_requests. Embedding sites
+        (VectorCalculationManager, lines 408-413) read only parallel_requests
+        and must NOT call this method.
+        """
+        if getattr(self.config, "embedding_provider", None) == "cohere" and hasattr(
+            self.config, "cohere"
+        ):
+            base = self.config.cohere.parallel_requests
+            temporal = getattr(self.config.cohere, "temporal_parallel_requests", None)
+        elif hasattr(self.config, "voyage_ai"):
+            base = getattr(
+                self.config.voyage_ai, "parallel_requests", _DEFAULT_PARALLEL_REQUESTS
+            )
+            temporal = getattr(
+                self.config.voyage_ai, "temporal_parallel_requests", None
+            )
+        else:
+            base = _DEFAULT_PARALLEL_REQUESTS
+            temporal = None
+        return temporal if temporal is not None else base
+
     def index_commits(
         self,
         all_branches: bool = False,
@@ -387,15 +431,12 @@ class TemporalIndexer:
         # (Bug #8, #9 behavior maintained - verified by test_bug8_progressive_resume.py
         # and test_temporal_indexer_list_bounds.py)
 
-        # Initialize incremental HNSW tracking for the temporal collection
-        # This enables change tracking for efficient HNSW index updates
-        self.vector_store.begin_indexing(self.collection_name)
-
         current_branch = self._get_current_branch()
 
         # Step 2: Process commits with parallel workers
         total_blobs_processed = 0
         total_vectors_created = 0
+        commits_processed = 0
 
         # Import embedding provider
         from ...services.embedding_factory import EmbeddingProviderFactory
@@ -415,20 +456,102 @@ class TemporalIndexer:
         # Get config_dir for debug logging
         config_dir = self.config_manager.config_path.parent
 
-        with VectorCalculationManager(
-            embedding_provider, vector_thread_count, config_dir=config_dir
-        ) as vector_manager:
-            # Use parallel processing instead of sequential loop
-            # Returns: (commits_processed_count, total_blobs_processed, total_vectors_created)
-            commits_processed, total_blobs_processed, total_vectors_created = (
-                self._process_commits_parallel(
-                    commits_from_git,
-                    embedding_provider,
-                    vector_manager,
-                    progress_callback,
-                    reconcile,
-                )
+        # Story #1171: Group commits by quarterly shard to bound peak RAM.
+        # Each shard is processed sequentially so only one shard is in RAM at a time.
+        from collections import defaultdict
+        from .temporal_collection_naming import (
+            get_shard_collection_name,
+            get_model_name_for_provider,
+        )
+
+        from datetime import timezone as _tz
+
+        try:
+            _model_name = get_model_name_for_provider(
+                self.config.embedding_provider, self.config
             )
+            shard_commit_map: dict = defaultdict(list)
+            for _commit in commits_from_git:
+                _shard = get_shard_collection_name(
+                    _model_name,
+                    datetime.fromtimestamp(_commit.timestamp, tz=_tz.utc),
+                )
+                shard_commit_map[_shard].append(_commit)
+        except (ValueError, AttributeError) as e:
+            # Unknown or non-standard provider (e.g. MagicMock in tests).
+            # Fall back to treating all commits as a single group under the current collection.
+            logger.warning(
+                "Could not determine shard collection name for provider '%s' (%s); "
+                "falling back to base collection '%s'. Check provider configuration.",
+                getattr(self.config, "embedding_provider", "unknown"),
+                e,
+                self.collection_name,
+            )
+            shard_commit_map = defaultdict(list)
+            shard_commit_map[self.collection_name].extend(commits_from_git)
+
+        sorted_shards = sorted(
+            shard_commit_map.keys()
+        )  # Chronological (lex = chron for YYYYQN)
+
+        # Track shards processed so close() can call end_indexing per shard
+        self._processed_shards: list = []
+
+        # Determine vector size once for shard collection creation (Bug #1171 fix).
+        # Uses same defensive pattern as _ensure_temporal_collection(): default to 1024
+        # when provider info cannot be retrieved (e.g. unknown provider, missing config).
+        from ...services.embedding_factory import EmbeddingProviderFactory as _EPF
+
+        try:
+            _provider_info = _EPF.get_provider_model_info(self.config)
+            _shard_vector_size = _provider_info.get("dimensions", 1024)
+        except Exception as _e:
+            logger.warning(
+                "Could not determine provider dimensions for shard creation (%s); "
+                "defaulting to 1024. Check provider configuration.",
+                _e,
+            )
+            _shard_vector_size = 1024  # Voyage-code-3 / voyage-large-2 default
+
+        _original_collection_name = self.collection_name
+        try:
+            with VectorCalculationManager(
+                embedding_provider, vector_thread_count, config_dir=config_dir
+            ) as vector_manager:
+                for _shard_name in sorted_shards:
+                    self.collection_name = _shard_name
+                    # Bug #1171: Create shard collection before begin_indexing so
+                    # the first upsert_points() does not raise
+                    # ValueError('Collection does not exist').
+                    if not self.vector_store.collection_exists(_shard_name):
+                        logger.info(
+                            "Creating temporal shard collection '%s' with dimension=%d",
+                            _shard_name,
+                            _shard_vector_size,
+                        )
+                        self.vector_store.create_collection(
+                            _shard_name, _shard_vector_size
+                        )
+                    # Initialize incremental HNSW tracking for this shard
+                    self.vector_store.begin_indexing(_shard_name)
+
+                    _shard_commits = shard_commit_map[_shard_name]
+                    _c, _b, _v = self._process_commits_parallel(
+                        _shard_commits,
+                        embedding_provider,
+                        vector_manager,
+                        progress_callback,
+                        reconcile,
+                    )
+                    commits_processed += _c
+                    total_blobs_processed += _b
+                    total_vectors_created += _v
+
+                    # Rebuild HNSW for this shard after processing completes
+                    self.vector_store.end_indexing(collection_name=_shard_name)
+                    self._processed_shards.append(_shard_name)
+        finally:
+            self.collection_name = _original_collection_name
 
         # Early return if no commits were processed (all filtered out)
         if total_blobs_processed == 0 and total_vectors_created == 0:
@@ -463,6 +586,12 @@ class TemporalIndexer:
             max_commits=max_commits,
             since_date=since_date,
         )
+
+        # Bug #1207 BLOCKER 1: mark successful completion so close() knows it is safe
+        # to clean up the monolithic base directory.  This line is only reached when
+        # the entire shard loop completes without raising — any exception propagates
+        # upward before this point, leaving _indexing_complete=False.
+        self._indexing_complete = True
 
         return IndexingResult(
             total_commits=commits_processed,
@@ -611,12 +740,8 @@ class TemporalIndexer:
             f"Loaded {len(existing_ids)} existing temporal points to avoid re-indexing"
         )
 
-        # Get thread count from config
-        thread_count = (
-            getattr(self.config.voyage_ai, "parallel_requests", 8)
-            if hasattr(self.config, "voyage_ai")
-            else 8
-        )
+        # Get thread count — Story #1158: temporal override takes precedence at git-diff sites
+        thread_count = self._get_temporal_thread_count()
 
         # Create slot tracker with max_slots = thread_count (not thread_count + 2)
         commit_slot_tracker = CleanSlotTracker(max_slots=thread_count)
@@ -1123,8 +1248,17 @@ class TemporalIndexer:
                     # TIMEOUT ARCHITECTURE FIX: Only save commit if no errors occurred
                     # Failed/cancelled commits should not be saved to progressive metadata
                     if not commit_had_errors:
-                        # Save completed commit to progressive metadata (Bug #8 fix)
-                        self.progressive_metadata.save_completed(commit.hash)
+                        # Bug #1206 Fix 2: stage the commit in O(1) memory instead of
+                        # triggering a full re-sort + fsync per commit.  flush_pending()
+                        # is called amortized (every _FLUSH_INTERVAL commits) inside the
+                        # progress_lock block below so the counter and the flush are
+                        # always consistent.  The final flush runs after all workers
+                        # complete (see below the ThreadPoolExecutor block).
+                        # DURABILITY ORDER: mark AFTER vectors + metadata are on disk
+                        # (upsert_points already committed the SQLite batch above).
+                        # A crash before flush leaves this commit absent from
+                        # load_completed() — re-indexed on resume via deterministic point_ids.
+                        self.progressive_metadata.mark_commit_indexed(commit.hash)
                     else:
                         logger.warning(
                             f"Commit {commit.hash[:8]}: Not saved to progressive metadata (errors or cancellation)"
@@ -1145,6 +1279,12 @@ class TemporalIndexer:
                     with progress_lock:
                         completed_count[0] += 1
                         current = completed_count[0]
+
+                        # Bug #1206 Fix 2: amortized flush — write progress file every
+                        # _FLUSH_INTERVAL commits, not every commit.  Runs inside
+                        # progress_lock so only one worker flushes at a time.
+                        if current % _FLUSH_INTERVAL == 0:
+                            self.progressive_metadata.flush_pending()
 
                         # Update file counter
                         total_files_processed[0] += files_in_this_commit
@@ -1167,12 +1307,8 @@ class TemporalIndexer:
                         )
                         pct = (100 * current) // total
 
-                        # Get thread count
-                        thread_count = (
-                            getattr(self.config.voyage_ai, "parallel_requests", 8)
-                            if hasattr(self.config, "voyage_ai")
-                            else 8
-                        )
+                        # Get thread count — Story #1158: temporal override at git-diff sites
+                        thread_count = self._get_temporal_thread_count()
 
                         # Use shared state for display (100ms lag acceptable per spec)
                         commit_hash = (
@@ -1223,12 +1359,8 @@ class TemporalIndexer:
 
                 commit_queue.task_done()
 
-        # Get thread count from config (default 8)
-        thread_count = (
-            getattr(self.config.voyage_ai, "parallel_requests", 8)
-            if hasattr(self.config, "voyage_ai")
-            else 8
-        )
+        # Get thread count — Story #1158: temporal override at git-diff sites
+        thread_count = self._get_temporal_thread_count()
 
         # FIX Issue 3: Add proper KeyboardInterrupt handling for graceful shutdown
         # Use ThreadPoolExecutor for parallel processing with multiple workers
@@ -1251,6 +1383,12 @@ class TemporalIndexer:
             # Shutdown executor without waiting for running tasks
             # This prevents atexit handler errors
             raise  # Re-raise to propagate interrupt
+
+        # Bug #1206 Fix 2: flush any staged commits that didn't hit the _FLUSH_INTERVAL
+        # boundary (the "tail" commits).  Runs only on clean exit because KeyboardInterrupt
+        # re-raises above and bypasses this line.  flush_pending() is idempotent when
+        # _pending is already empty.
+        self.progressive_metadata.flush_pending()
 
         # Return actual totals: (commits_processed, files_processed, vectors_created)
         # Use completed_count[0] which tracks commits actually processed (not just passed in)
@@ -1291,7 +1429,9 @@ class TemporalIndexer:
             future = vector_manager.submit_batch_task(
                 chunk_texts, {"commit_hash": commit.hash}
             )
-            result = future.result(timeout=30)
+            # No per-commit timeout (Bug #1218): the only legitimate timeout is
+            # the per-request outbound embedding-provider HTTP call.
+            result = future.result()
 
             if not result.error and result.embeddings:
                 # Convert timestamp to date (YYYY-MM-DD format)
@@ -1365,9 +1505,70 @@ class TemporalIndexer:
             json.dump(metadata, f, indent=2)
 
     def close(self):
-        """Clean up resources and finalize HNSW index."""
-        # Build HNSW index for temporal collection
-        logger.info("Building HNSW index for temporal collection...")
-        self.vector_store.end_indexing(collection_name=self.collection_name)
+        """Clean up resources and finalize HNSW index.
+
+        Story #1171: When sharded indexing was used, end_indexing is already called
+        per-shard inside index_commits(). We skip the base-collection call in that case
+        to avoid a ValueError on a non-existent collection directory.
+
+        Bug #1207 Fix 1 (CLI parity cleanup): After shard-based indexing, write
+        migration_complete.marker and delete the monolithic hnsw_index.bin / id_index.bin
+        from the base collection directory.  This matches what the server-startup
+        migration (Story #1172) does via _cleanup_monolithic_collection(), and prevents
+        get_overlapping_shards() from re-including the base dir as a "legacy monolith"
+        on every subsequent query.  The same shared helper is used here so the two
+        code paths cannot drift apart (anti-duplication).
+
+        Cleanup errors are logged as WARNING but do not abort the process — a partially
+        cleaned directory is still safe because the hardened get_overlapping_shards()
+        predicate requires hnsw_index.bin to be present before including the base dir
+        as a legacy collection.
+        """
+        # Story #1171: Sharded indexing already called end_indexing per shard inside
+        # index_commits(). Only call end_indexing here for the legacy (non-sharded) path.
+        processed_shards = getattr(self, "_processed_shards", [])
+        indexing_complete = getattr(self, "_indexing_complete", False)
+        if processed_shards and indexing_complete:
+            # Bug #1207 Fix 1: clean up the base (monolithic) collection directory so
+            # that get_overlapping_shards() stops enumerating it on future queries.
+            # Gated on BOTH non-empty _processed_shards AND _indexing_complete=True so
+            # that a crash mid-shard loop (close() called from finally) does NOT delete
+            # the monolith — which may be the only good copy of the vectors.
+            # collection_name may have been temporarily changed to a shard name during
+            # index_commits(); _original_collection_name is restored in the finally block
+            # there, so self.collection_name is back to the base name here.
+            logger.info(
+                "Sharded indexing complete — HNSW indexes already built per shard (%d shards).",
+                len(processed_shards),
+            )
+            base_coll_dir = self.vector_store.base_path / self.collection_name
+            if base_coll_dir.is_dir():
+                try:
+                    _cleanup_monolithic_collection(base_coll_dir)
+                    logger.info(
+                        "Bug #1207: wrote migration_complete.marker and removed "
+                        "monolithic binaries from %s",
+                        base_coll_dir,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Bug #1207: cleanup of monolithic base dir %s failed: %s — "
+                        "index is still correct; marker absent but get_overlapping_shards "
+                        "predicate requires hnsw_index.bin to re-include the base dir.",
+                        base_coll_dir,
+                        exc,
+                    )
+        elif processed_shards and not indexing_complete:
+            # Partial failure: some shards were written but index_commits() raised before
+            # completing.  The monolith is intact; do NOT clean it up.
+            logger.info(
+                "Sharded indexing was INCOMPLETE (%d shards written but _indexing_complete "
+                "is False) — skipping monolithic cleanup to preserve the original data.",
+                len(processed_shards),
+            )
+        else:
+            # Legacy non-sharded path or reconcile fast-exit: build HNSW index now.
+            logger.info("Building HNSW index for temporal collection...")
+            self.vector_store.end_indexing(collection_name=self.collection_name)
 
         # Temporal indexing cleanup complete

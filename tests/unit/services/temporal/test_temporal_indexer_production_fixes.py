@@ -9,9 +9,6 @@ import subprocess
 from unittest.mock import MagicMock, patch
 import pytest
 
-from code_indexer.services.temporal.temporal_collection_naming import (
-    LEGACY_TEMPORAL_COLLECTION,
-)
 from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
@@ -148,10 +145,13 @@ class TestBeginIndexingCall:
                 # Run indexing
                 indexer.index_commits()
 
-                # Verify begin_indexing was called BEFORE processing
-                # This will FAIL initially as begin_indexing is not called
-                vector_store.begin_indexing.assert_called_once_with(
-                    LEGACY_TEMPORAL_COLLECTION
+                # Verify begin_indexing was called BEFORE processing.
+                # Story #1171: commits are now routed to quarterly shards, so
+                # begin_indexing is called with the computed shard name, not the
+                # legacy base collection name.  The core Bug #4 invariant — that
+                # begin_indexing IS called at all before any processing — still holds.
+                assert vector_store.begin_indexing.call_count >= 1, (
+                    "begin_indexing() must be called before _process_commits_parallel()"
                 )
 
 

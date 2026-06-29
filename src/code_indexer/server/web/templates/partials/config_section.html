@@ -36,9 +36,22 @@
                         </td>
                     </tr>
                     <tr>
+                        <td class="config-label">Uvicorn Workers</td>
+                        <td class="config-value">{{ config.server.workers }}</td>
+                        <td class="config-note">
+                            {% if 'workers' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Log Level</td>
                         <td class="config-value">{{ config.server.log_level }}</td>
-                        <td class="config-note"></td>
+                        <td class="config-note">
+                            {% if 'log_level' in restart_required_fields %}
+                            <small class="restart-note">Requires server restart</small>
+                            {% endif %}
+                        </td>
                     </tr>
                     <tr>
                         <td class="config-label">JWT Expiration (minutes)</td>
@@ -75,6 +88,11 @@
                     <input type="number" id="server-port" name="port" value="{{ config.server.port }}" min="1" max="65535">
                     <small>1-65535</small>
                 </label>
+                <label for="server-workers">
+                    Uvicorn Workers
+                    <input type="number" id="server-workers" name="workers" value="{{ config.server.workers }}" min="1" max="64">
+                    <small>1-64; requires restart</small>
+                </label>
                 <label for="server-log-level">
                     Log Level
                     <select id="server-log-level" name="log_level">
@@ -96,12 +114,67 @@
                 </label>
             </div>
             <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
+                <button type="button" class="primary" onclick="submitServerConfig()">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('server')">Cancel</button>
             </div>
         </form>
     </article>
 </details>
+
+<!-- Host/Port Change Confirmation Modal (Story #1195 AC2) -->
+<dialog id="host-port-confirm-modal">
+    <article>
+        <header>
+            <button aria-label="Close" rel="prev" onclick="closeHostPortModal()"></button>
+            <h3>Confirm Host/Port Change</h3>
+        </header>
+        <p>
+            <strong>Warning:</strong> Changing the server host or port has infrastructure implications:
+        </p>
+        <ul>
+            <li>HAProxy backend configuration must be updated to match the new host/port.</li>
+            <li>Firewall rules are bound to the existing port — changing it may sever cluster connectivity.</li>
+            <li>A server restart is required for changes to take effect.</li>
+        </ul>
+        <p>Are you sure you want to change the host or port?</p>
+        <footer>
+            <button type="button" class="secondary" onclick="closeHostPortModal()">Cancel</button>
+            <button type="button" class="primary" onclick="confirmHostPortChange()">Confirm Change</button>
+        </footer>
+    </article>
+</dialog>
+
+<script>
+function submitServerConfig() {
+    var form = document.getElementById('edit-form-server');
+    var originalHost = '{{ config.server.host }}';
+    var originalPort = '{{ config.server.port }}';
+    var newHost = document.getElementById('server-host').value;
+    var newPort = document.getElementById('server-port').value;
+    var hostChanged = newHost !== originalHost;
+    var portChanged = newPort !== String(originalPort);
+    if (hostChanged || portChanged) {
+        document.getElementById('host-port-confirm-modal').showModal();
+    } else {
+        form.submit();
+    }
+}
+
+function closeHostPortModal() {
+    document.getElementById('host-port-confirm-modal').close();
+}
+
+function confirmHostPortChange() {
+    var form = document.getElementById('edit-form-server');
+    var confirmInput = document.createElement('input');
+    confirmInput.type = 'hidden';
+    confirmInput.name = 'confirm_host_port_change';
+    confirmInput.value = '1';
+    form.appendChild(confirmInput);
+    closeHostPortModal();
+    form.submit();
+}
+</script>
 
 
 <details class="config-section" id="section-provider-api-keys">
@@ -1410,6 +1483,27 @@ function saveLlmCredsConfig() {
             <table class="config-table">
                 <tbody>
                     <tr>
+                        <td class="config-label">VoyageAI Embedding Parallel Requests</td>
+                        <td class="config-value">{{ config.indexing.voyage_ai_parallel_requests }}</td>
+                        <td class="config-note"><small>Concurrent embedding API calls for VoyageAI (range 1-32, default 8)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cohere Embedding Parallel Requests</td>
+                        <td class="config-value">{{ config.indexing.cohere_parallel_requests }}</td>
+                        <td class="config-note"><small>Concurrent embedding API calls for Cohere (range 1-32, default 8)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Temporal Git-Diff Parallel Requests</td>
+                        <td class="config-value">
+                            {% if config.indexing.temporal_parallel_requests is not none %}
+                                {{ config.indexing.temporal_parallel_requests }}
+                            {% else %}
+                                Inherit from provider
+                            {% endif %}
+                        </td>
+                        <td class="config-note"><small>Thread count for git-diff analysis (1-32, blank = inherit from provider)</small></td>
+                    </tr>
+                    <tr>
                         <td class="config-label">Indexable File Extensions</td>
                         <td class="config-value">
                             <span style="word-break: break-all;">{{ config.indexing.indexable_extensions | join(', ') }}</span>
@@ -1429,6 +1523,23 @@ function saveLlmCredsConfig() {
             <div class="validation-error">{{ validation_errors.indexing }}</div>
             {% endif %}
             <div class="form-grid">
+                <label for="indexing-voyage-parallel">
+                    VoyageAI Embedding Parallel Requests
+                    <input type="number" id="indexing-voyage-parallel" name="voyage_ai_parallel_requests" value="{{ config.indexing.voyage_ai_parallel_requests }}" min="1" max="32">
+                    <small>Range: 1-32 (default 8). Concurrent embedding API calls sent to VoyageAI during indexing.</small>
+                </label>
+                <label for="indexing-cohere-parallel">
+                    Cohere Embedding Parallel Requests
+                    <input type="number" id="indexing-cohere-parallel" name="cohere_parallel_requests" value="{{ config.indexing.cohere_parallel_requests }}" min="1" max="32">
+                    <small>Range: 1-32 (default 8). Concurrent embedding API calls sent to Cohere during indexing.</small>
+                </label>
+                <label for="indexing-temporal-parallel">
+                    Temporal Git-Diff Parallel Requests
+                    <input type="number" id="indexing-temporal-parallel" name="temporal_parallel_requests"
+                           value="{{ config.indexing.temporal_parallel_requests if config.indexing.temporal_parallel_requests is not none else '' }}"
+                           min="1" max="32" placeholder="Leave blank to inherit from provider">
+                    <small>Range: 1-32. Thread count for parallel git-diff analysis. Leave blank to inherit from the active provider setting.</small>
+                </label>
                 <label for="indexing-extensions">
                     Indexable File Extensions
                     <textarea id="indexing-extensions" name="indexable_extensions" rows="4" style="font-family: monospace; font-size: 0.85em;">{{ config.indexing.indexable_extensions | join(', ') }}</textarea>
@@ -1457,16 +1568,6 @@ function saveLlmCredsConfig() {
             <table class="config-table">
                 <tbody>
                     <tr>
-                        <td class="config-label">Indexing Timeout (seconds)</td>
-                        <td class="config-value">{{ config.scip.indexing_timeout_seconds }}</td>
-                        <td class="config-note"><small>Max time for SCIP indexing operations (default: 3600 = 1 hour)</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">SCIP Generation Timeout (seconds)</td>
-                        <td class="config-value">{{ config.scip.scip_generation_timeout_seconds }}</td>
-                        <td class="config-note"><small>Max time for SCIP file generation (default: 600 = 10 min)</small></td>
-                    </tr>
-                    <tr>
                         <td class="config-label">Temporal Stale Threshold (days)</td>
                         <td class="config-value">{{ config.scip.temporal_stale_threshold_days }}</td>
                         <td class="config-note"><small>Days before temporal index considered stale (default: 7)</small></td>
@@ -1484,16 +1585,6 @@ function saveLlmCredsConfig() {
             <div class="validation-error">{{ validation_errors.scip }}</div>
             {% endif %}
             <div class="form-grid">
-                <label for="scip-indexing-timeout">
-                    Indexing Timeout (seconds)
-                    <input type="number" id="scip-indexing-timeout" name="indexing_timeout_seconds" value="{{ config.scip.indexing_timeout_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
-                <label for="scip-generation-timeout">
-                    SCIP Generation Timeout (seconds)
-                    <input type="number" id="scip-generation-timeout" name="scip_generation_timeout_seconds" value="{{ config.scip.scip_generation_timeout_seconds }}" min="60">
-                    <small>Minimum 60 seconds</small>
-                </label>
                 <label for="scip-temporal-stale">
                     Temporal Stale Threshold (days)
                     <input type="number" id="scip-temporal-stale" name="temporal_stale_threshold_days" value="{{ config.scip.temporal_stale_threshold_days }}" min="1">
@@ -1589,6 +1680,51 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.cache.payload_cleanup_interval_seconds }}</td>
                         <td class="config-note"><small>Interval between cache cleanup runs</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.cache.memory_governor_enabled else 'No' }}</td>
+                        <td class="config-note"><small>False reverts to evict-after-use (safe, no retain)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor Yellow Threshold (%)</td>
+                        <td class="config-value">{{ config.cache.memory_governor_yellow_pct }}</td>
+                        <td class="config-note"><small>Used % at which governor enters YELLOW (degraded) band</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor Red Threshold (%)</td>
+                        <td class="config-value">{{ config.cache.memory_governor_red_pct }}</td>
+                        <td class="config-note"><small>Used % at which governor enters RED (evict-after-use) band</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor Hysteresis (%)</td>
+                        <td class="config-value">{{ config.cache.memory_governor_hysteresis_pct }}</td>
+                        <td class="config-note"><small>Gap subtracted from thresholds for band exit (prevents flapping)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor Red Min Dwell (seconds)</td>
+                        <td class="config-value">{{ config.cache.memory_governor_red_min_dwell_seconds }}</td>
+                        <td class="config-note"><small>Minimum seconds in RED before exit is allowed</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor Sample Interval (seconds)</td>
+                        <td class="config-value">{{ config.cache.memory_governor_sample_interval_seconds }}</td>
+                        <td class="config-note"><small>Sampler thread sleep between memory reads</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor Swap Forces Red</td>
+                        <td class="config-value">{{ 'Yes' if config.cache.memory_governor_swap_forces_red else 'No' }}</td>
+                        <td class="config-note"><small>Any swap-in activity forces RED band immediately</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor Swap Pswpin Red Threshold</td>
+                        <td class="config-value">{{ config.cache.memory_governor_swap_pswpin_red_threshold }}</td>
+                        <td class="config-note"><small>Min swap-in pages/interval to force RED (default 100; ignores OS idle noise, catches death-spirals)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Memory Governor RSS Inflation Factor</td>
+                        <td class="config-value">{{ config.cache.memory_governor_rss_inflation_factor }}</td>
+                        <td class="config-note"><small>Multiplier for on-disk shard size when computing LRU eviction budget</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1647,6 +1783,51 @@ function saveLlmCredsConfig() {
                     Payload Cleanup Interval (seconds)
                     <input type="number" id="cache-payload-cleanup" name="payload_cleanup_interval_seconds" value="{{ config.cache.payload_cleanup_interval_seconds }}" min="1">
                     <small>Interval between cache cleanup runs</small>
+                </label>
+                <label for="cache-gov-enabled">
+                    Memory Governor Enabled
+                    <input type="checkbox" id="cache-gov-enabled" name="memory_governor_enabled" value="true" {% if config.cache.memory_governor_enabled %}checked{% endif %}>
+                    <small>Uncheck to revert to evict-after-use (safe)</small>
+                </label>
+                <label for="cache-gov-yellow">
+                    Memory Governor Yellow Threshold (%)
+                    <input type="number" id="cache-gov-yellow" name="memory_governor_yellow_pct" value="{{ config.cache.memory_governor_yellow_pct }}" min="1" max="99" step="0.1">
+                    <small>Used % entry threshold for YELLOW band</small>
+                </label>
+                <label for="cache-gov-red">
+                    Memory Governor Red Threshold (%)
+                    <input type="number" id="cache-gov-red" name="memory_governor_red_pct" value="{{ config.cache.memory_governor_red_pct }}" min="2" max="100" step="0.1">
+                    <small>Used % entry threshold for RED band (must be greater than yellow)</small>
+                </label>
+                <label for="cache-gov-hysteresis">
+                    Memory Governor Hysteresis (%)
+                    <input type="number" id="cache-gov-hysteresis" name="memory_governor_hysteresis_pct" value="{{ config.cache.memory_governor_hysteresis_pct }}" min="0.1" max="50" step="0.1">
+                    <small>Gap subtracted from thresholds for band exit</small>
+                </label>
+                <label for="cache-gov-dwell">
+                    Memory Governor Red Min Dwell (seconds)
+                    <input type="number" id="cache-gov-dwell" name="memory_governor_red_min_dwell_seconds" value="{{ config.cache.memory_governor_red_min_dwell_seconds }}" min="0">
+                    <small>Minimum seconds in RED before exit is allowed</small>
+                </label>
+                <label for="cache-gov-sample">
+                    Memory Governor Sample Interval (seconds)
+                    <input type="number" id="cache-gov-sample" name="memory_governor_sample_interval_seconds" value="{{ config.cache.memory_governor_sample_interval_seconds }}" min="0.1" step="0.1">
+                    <small>Sampler thread sleep between memory reads</small>
+                </label>
+                <label for="cache-gov-swap">
+                    Memory Governor Swap Forces Red
+                    <input type="checkbox" id="cache-gov-swap" name="memory_governor_swap_forces_red" value="true" {% if config.cache.memory_governor_swap_forces_red %}checked{% endif %}>
+                    <small>Any swap-in activity forces RED band immediately</small>
+                </label>
+                <label for="cache-gov-swap-threshold">
+                    Memory Governor Swap Pswpin Red Threshold
+                    <input type="number" id="cache-gov-swap-threshold" name="memory_governor_swap_pswpin_red_threshold" value="{{ config.cache.memory_governor_swap_pswpin_red_threshold }}" min="0">
+                    <small>Min swap-in pages/interval to force RED (default 100; ignores idle noise, catches death-spirals)</small>
+                </label>
+                <label for="cache-gov-rss">
+                    Memory Governor RSS Inflation Factor
+                    <input type="number" id="cache-gov-rss" name="memory_governor_rss_inflation_factor" value="{{ config.cache.memory_governor_rss_inflation_factor }}" min="1.0" step="0.1">
+                    <small>Multiplier for on-disk shard size in LRU eviction budget</small>
                 </label>
             </div>
             <div class="form-actions">
@@ -2364,6 +2545,66 @@ function saveLlmCredsConfig() {
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('pace_maker')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+<!-- Issue #1159: Search event log retention settings -->
+<details class="config-section" id="section-search_event_log">
+    <summary>
+        <h2>Operational Logging</h2>
+    </summary>
+    <p class="section-description">
+        Controls retention of search event logs used for usage analytics and auditing.
+        Events older than the retention window are pruned automatically once per day.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-search_event_log">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Retention Period (days)</td>
+                        <td class="config-value">{{ config.search_event_log.search_event_log_retention_days | default(90) }}</td>
+                        <td class="config-note"><small>1-3650 days. Events older than this are pruned automatically once per day.</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Export File Retention (days)</td>
+                        <td class="config-value">{{ config.search_event_log.export_retention_days | default(30) }}</td>
+                        <td class="config-note"><small>1-3650 days. Export files older than this are deleted automatically.</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('search_event_log')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-search_event_log" method="post" action="/admin/config/search_event_log" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.search_event_log %}
+            <div class="validation-error">{{ validation_errors.search_event_log }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="search-event-log-retention-days">
+                    Retention Period (days)
+                    <input type="number" id="search-event-log-retention-days" name="search_event_log_retention_days"
+                        value="{{ config.search_event_log.search_event_log_retention_days | default(90) }}"
+                        min="1" max="3650">
+                    <small>1-3650 days. Events older than this are pruned automatically once per day.</small>
+                </label>
+                <label for="export-retention-days">
+                    Export File Retention (days)
+                    <input type="number" id="export-retention-days" name="export_retention_days"
+                        value="{{ config.search_event_log.export_retention_days | default(30) }}"
+                        min="1" max="3650">
+                    <small>1-3650 days. Export files older than this are deleted automatically.</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('search_event_log')">Cancel</button>
             </div>
         </form>
     </article>

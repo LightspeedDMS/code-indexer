@@ -102,6 +102,7 @@ def test_worker_exception_is_logged_and_propagated(tmp_path, caplog):
         # CRITICAL FIX: Set max_concurrent_batches_per_commit as an actual integer
         # getattr() on Mock returns Mock, not the default value, so we must set it explicitly
         mock_voyage_ai_config.max_concurrent_batches_per_commit = 10
+        mock_voyage_ai_config.temporal_parallel_requests = None
 
         mock_config_mgr_instance.get_config.return_value = Mock(
             embedding_provider="voyage-ai", voyage_ai=mock_voyage_ai_config
@@ -134,8 +135,8 @@ def test_worker_exception_is_logged_and_propagated(tmp_path, caplog):
         indexer.progressive_metadata.load_completed.return_value = []
         indexer.progressive_metadata.save_completed = Mock()
 
-        # Mock indexed_blobs (blob deduplication)
-        indexer.indexed_blobs = set()
+        # Mock indexed_blobs (blob deduplication) — dict[collection_name, set[blob_hash]]
+        indexer.indexed_blobs = {}
 
         # Mock chunker to return a single chunk
         indexer.chunker = Mock()

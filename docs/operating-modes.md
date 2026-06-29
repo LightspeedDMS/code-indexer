@@ -326,17 +326,17 @@ See [Server Deployment Guide](server-deployment.md) for complete instructions.
 **Quick Overview**:
 ```bash
 # 1. Install on server
-pipx install git+https://github.com/LightspeedDMS/code-indexer.git@v10.34.0
+pipx install git+https://github.com/LightspeedDMS/code-indexer.git@latest
 
 # 2. Configure environment
 export VOYAGE_API_KEY="your-key"
-export CIDX_SERVER_PORT=8000
+export CIDX_SERVER_PORT=8090
 
 # 3. Add golden repositories
 # (done via admin API after server starts)
 
-# 4. Start server
-cidx-server start
+# 4. Start server (via systemd or directly)
+python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8090
 ```
 
 ### Golden Repositories
@@ -386,7 +386,7 @@ export CIDX_INDEX_CACHE_TTL_MINUTES=5  # 5 minutes
 **Monitor Cache Performance**:
 ```bash
 # Query cache statistics
-curl http://localhost:8000/cache/stats
+curl http://localhost:8090/cache/stats
 
 # Response
 {
@@ -417,7 +417,7 @@ Server mode uses **OAuth 2.0** for secure access:
 **REST API**:
 ```bash
 # Query via REST API
-curl -X POST http://localhost:8000/api/v1/query \
+curl -X POST http://localhost:8090/api/query \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query_text": "authentication", "limit": 10}'
@@ -774,7 +774,7 @@ cidx query "test" --limit 10  # Should be ~5ms
 **Check**:
 ```bash
 # Query cache stats
-curl http://localhost:8000/cache/stats
+curl http://localhost:8090/cache/stats
 
 # Check TTL configuration
 echo $CIDX_INDEX_CACHE_TTL_MINUTES

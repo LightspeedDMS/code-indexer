@@ -308,7 +308,11 @@ def _coalesced_burst(
     and dispatches the full batch.
 
     The gate release + holder join run in finally so a failed witness/submit
-    can never leak holder threads.  Collects (vector, exc) per caller.
+    can never leak holder threads.  Collects (embedding_list, exc) per caller.
+
+    Note: EmbeddingCoalescer.submit() returns (List[float], EmbeddingCacheMetadata)
+    per Issue #1159.  _worker unpacks the tuple and stores only the embedding list
+    as the first element of the result tuple so callers can assert vec shape directly.
     """
     n = len(texts)
     holders = gov.current_k[lane]
@@ -321,7 +325,10 @@ def _coalesced_burst(
 
     def _worker(idx: int) -> None:
         try:
-            results[idx] = (coalescer.submit(texts[idx]), None)
+            # submit() returns (List[float], EmbeddingCacheMetadata) per Issue #1159.
+            # Unpack so callers receive the bare embedding list as the first element.
+            embedding_list, _meta = coalescer.submit(texts[idx])
+            results[idx] = (embedding_list, None)
         except BaseException as exc:  # noqa: BLE001
             results[idx] = (None, exc)
 

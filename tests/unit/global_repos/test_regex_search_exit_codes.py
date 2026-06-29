@@ -436,3 +436,101 @@ class TestGrepExitCodeHandling:
                         max_results=100,
                         timeout_seconds=10,
                     )
+
+
+class TestRipgrepDashPatternBug1185:
+    """Regression tests for Bug #1185: dash-prefixed patterns treated as CLI flags.
+
+    Before the fix, `rg --json -1 <path>` caused ripgrep to interpret `-1` as
+    an unknown flag -> exit code 2 -> RipgrepExecutionError. The fix passes the
+    pattern via `-e` and terminates options with `--` before the path.
+
+    These tests use REAL ripgrep invocations (no mocking) against a temp fixture
+    file that contains a matching line, asserting that matches are returned.
+    """
+
+    @pytest.fixture
+    def ripgrep_service_real(self, tmp_path):
+        """Create RegexSearchService backed by a real temp directory with a fixture file."""
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        # File that contains the literal string "-1" (a dash-prefixed token)
+        (repo_path / "sample.py").write_text(
+            "x = func(-1)\ny = func(42)\nreturn_code = -1\n"
+        )
+        return RegexSearchService(repo_path)
+
+    @pytest.mark.asyncio
+    async def test_dash_prefixed_pattern_returns_matches(
+        self, ripgrep_service_real, tmp_path
+    ):
+        """Bug #1185: pattern '-1' must return matches, not raise RipgrepExecutionError.
+
+        Before fix: `rg --json -1 <path>` -> 'unrecognized flag -1', exit 2 -> error.
+        After fix:  `rg --json -e -1 -- <path>` -> matches returned correctly.
+        """
+        repo_path = tmp_path / "repo"
+        matches, total = await ripgrep_service_real._search_ripgrep(
+            pattern="-1",
+            search_path=repo_path,
+            include_patterns=None,
+            exclude_patterns=None,
+            case_sensitive=True,
+            context_lines=0,
+            max_results=100,
+            timeout_seconds=10,
+        )
+
+        assert total >= 2, (
+            f"Expected at least 2 matches for '-1' in fixture file, got {total}. "
+            "Bug #1185: dash-prefixed pattern was parsed as a ripgrep flag."
+        )
+        assert len(matches) >= 2, (
+            f"Expected at least 2 match objects, got {len(matches)}"
+        )
+        assert all("-1" in m.line_content for m in matches), (
+            "Every returned match line must contain the literal '-1'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_double_dash_prefixed_pattern_returns_matches(
+        self, ripgrep_service_real, tmp_path
+    ):
+        """Bug #1185: pattern '--foo' (double-dash) must also work via -e flag."""
+        repo_path = tmp_path / "repo"
+        # Add a file with '--foo' literal
+        (repo_path / "flags.sh").write_text("rg --foo bar\ncmd --foo=baz\n")
+
+        matches, total = await ripgrep_service_real._search_ripgrep(
+            pattern="--foo",
+            search_path=repo_path,
+            include_patterns=None,
+            exclude_patterns=None,
+            case_sensitive=True,
+            context_lines=0,
+            max_results=100,
+            timeout_seconds=10,
+        )
+
+        assert total >= 2, (
+            f"Expected at least 2 matches for '--foo', got {total}. "
+            "Bug #1185: double-dash pattern was parsed as a ripgrep option."
+        )
+
+    @pytest.mark.asyncio
+    async def test_normal_pattern_still_works(self, ripgrep_service_real, tmp_path):
+        """Regression guard: a plain pattern (no leading dash) continues to work."""
+        repo_path = tmp_path / "repo"
+        matches, total = await ripgrep_service_real._search_ripgrep(
+            pattern="func",
+            search_path=repo_path,
+            include_patterns=None,
+            exclude_patterns=None,
+            case_sensitive=True,
+            context_lines=0,
+            max_results=100,
+            timeout_seconds=10,
+        )
+
+        assert total >= 2, f"Expected at least 2 matches for 'func', got {total}"
+        assert all("func" in m.line_content for m in matches)

@@ -23,6 +23,7 @@ EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
         "login_security_config",  # Story #557 - removed in cleanup Story #682
         "mfa_config",  # Story #558 - removed in cleanup Story #682
         "auth_config",  # Story #3 Phase 2 AC36 - removed in cleanup Story #683
+        "launch_restart_generation",  # Story #1195/#1198 - runtime DB key written into config.json by auto-updater; not a bootstrap ServerConfig field
     }
 )
 
@@ -93,6 +94,46 @@ class CacheConfig:
     query_path_cache_enabled: bool = True
     repo_config_cache_ttl_seconds: int = 30
     repo_config_cache_max_entries: int = 2048
+
+    # Memory-Pressure-Aware Index-Cache Governor settings (Story #1213 Story 2).
+    # All 8 fields are runtime CacheConfig knobs — hot-reloaded via the Web UI
+    # Config screen without a server restart.  The governor reads them LIVE on
+    # each band decision (mirrors coalesce_enabled / memory_retrieval_enabled).
+    #
+    # memory_governor_enabled:
+    #   False => kill-switch: should_evict_after_shard() always returns True
+    #   (reverts to Bug #1171 evict-after-use — safe, never retain).
+    # memory_governor_yellow_pct / red_pct:
+    #   Entry thresholds for YELLOW / RED bands.
+    #   Invariant: 0 < yellow < red <= 100.
+    # memory_governor_hysteresis_pct:
+    #   Gap subtracted from entry thresholds for band exit.
+    #   Invariant: hysteresis < min(yellow, 100 - red).
+    # memory_governor_red_min_dwell_seconds:
+    #   Minimum seconds in RED before transition to YELLOW is allowed.
+    # memory_governor_sample_interval_seconds:
+    #   Sampler thread sleep between psutil/cgroup reads.
+    # memory_governor_swap_forces_red:
+    #   True => positive pswpin delta forces RED regardless of used_pct.
+    # memory_governor_rss_inflation_factor:
+    #   Multiplier applied to on-disk shard sizes when computing LRU-cap
+    #   eviction budgets (corrects file-size undercount vs. real RSS).
+    memory_governor_enabled: bool = True
+    memory_governor_yellow_pct: float = 70.0
+    memory_governor_red_pct: float = 85.0
+    memory_governor_hysteresis_pct: float = 10.0
+    memory_governor_red_min_dwell_seconds: int = 30
+    memory_governor_sample_interval_seconds: float = 2.0
+    memory_governor_swap_forces_red: bool = True
+    # memory_governor_swap_pswpin_red_threshold:
+    #   Minimum swap-in rate (pages/interval) required to force RED via the
+    #   swap_forces_red path.  Staging observed idle OS noise of 1-3 pages/interval
+    #   vs. a genuine death-spiral at 3630 pages/interval (Bug #1171).  Default of
+    #   100 is well above idle noise and far below any observed spiral, so trivial
+    #   page-in activity no longer thrashes GREEN<->RED while real memory pressure
+    #   still triggers the guard immediately.
+    memory_governor_swap_pswpin_red_threshold: int = 100
+    memory_governor_rss_inflation_factor: float = 2.0
 
 
 @dataclass
@@ -277,18 +318,14 @@ class ScipConfig:
     """
     SCIP indexing configuration (Story #3 - Phase 2, AC9-AC11, AC31-AC34).
 
-    Controls SCIP indexing timeouts, temporal staleness thresholds, and query limits.
+    Controls SCIP indexing staleness thresholds and query limits.
     Migrated from hardcoded constants in activated_repo_index_manager.py and scip_query_engine.py.
+
+    Note (Bug #1218): whole-job and per-subprocess indexing timeouts have been removed.
+    The only legitimate timeout on the indexing path is the per-request outbound
+    embedding-provider HTTP call, which is handled inside the embedding providers.
     """
 
-    # AC9: Indexing timeout in seconds (default 3600s/1 hour, minimum 300s/5 min)
-    indexing_timeout_seconds: int = 3600
-    # Registration-path index timeout (default 240s — deliberately below the 300s e2e
-    # poll deadline so a stuck registration job fails fast with a clear error instead of
-    # an opaque 300s timeout in the poller).  Must stay < e2e poll timeout (300s).
-    registration_indexing_timeout_seconds: int = 240
-    # AC10: SCIP generation timeout in seconds (default 600s/10 min, minimum 60s/1 min)
-    scip_generation_timeout_seconds: int = 600
     # AC11: Temporal staleness threshold in days (default 7 days, minimum 1 day)
     temporal_stale_threshold_days: int = 7
     # AC31: SCIP reference limit (default 100, range 10-10000)
@@ -418,6 +455,12 @@ class IndexingConfig:
     removed (duplicates of ScipConfig fields). Loader guards strip them from
     old config files at load time.
     """
+
+    # Story #1158 - AC1: Configurable embedding API parallelism via Web UI.
+    voyage_ai_parallel_requests: int = 8
+    cohere_parallel_requests: int = 8
+    # Story #1158 - AC2: Configurable temporal git-diff parallelism (None = inherit from provider).
+    temporal_parallel_requests: Optional[int] = None
 
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
@@ -1356,6 +1399,16 @@ class ServerConfig:
     # Web-UI tunable. 0 (or negative) disables the sweep entirely.
     research_session_retention_days: int = 7
 
+    # Issue #1159 — Search event log retention (days). SearchEventLogWriter
+    # prunes rows older than this many days once per day. Runtime / Web-UI
+    # tunable. Must be >= 1; values < 1 are treated as the default (90).
+    search_event_log_retention_days: int = 90
+
+    # Issue #1160 — Export file retention (days). QueryAnalyticsExportService
+    # removes export files older than this many days. Runtime / Web-UI tunable.
+    # Must be in [1, 3650]; defaults to 30 days.
+    export_retention_days: int = 30
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:
@@ -1496,31 +1549,72 @@ class ServerConfigManager:
         """
         return ServerConfig(server_dir=str(self.server_dir))
 
+    def _atomic_write_json(
+        self, config_dict: dict, trailing_newline: bool = False
+    ) -> None:
+        """Write config_dict as JSON to config.json atomically.
+
+        Bug #1231: write to a temp file in the SAME directory as config.json,
+        flush+fsync for durability, then os.replace() for an atomic rename.
+        On any exception (including a failed os.replace) the temp file is
+        unlinked before re-raising so no corrupt partial file is ever left behind.
+
+        Args:
+            config_dict: dict to serialise as JSON with indent=2.
+            trailing_newline: if True append a bare '\\n' after the JSON
+                (save_config_dict byte-identical contract).
+        """
+        import tempfile
+
+        self.server_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.config_file_path.parent, prefix=".cfg_tmp_"
+        )
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(config_dict, fh, indent=2)
+                if trailing_newline:
+                    fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            # Preserve existing file mode so the auto-updater (which may run as
+            # a different OS user — see Bug #879) can still read config.json.
+            # mkstemp always creates files at 0600; we must correct that before
+            # the atomic rename.
+            if self.config_file_path.exists():
+                target_mode = os.stat(self.config_file_path).st_mode & 0o777
+            else:
+                target_mode = 0o644  # faithful to the prior umask-default behaviour
+            os.chmod(tmp_path, target_mode)
+            os.replace(tmp_path, self.config_file_path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
     def save_config(self, config: ServerConfig) -> None:
         """
         Save configuration to file.
 
+        Atomic write via _atomic_write_json (Bug #1231): original config.json
+        is never truncated before the new content is durable.
+
         Args:
             config: ServerConfig object to save
         """
-        # Ensure server directory exists
-        self.server_dir.mkdir(parents=True, exist_ok=True)
-
-        # Convert config to dictionary and save as JSON
-        config_dict = asdict(config)
-
-        with open(self.config_file_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
+        self._atomic_write_json(asdict(config), trailing_newline=False)
 
     def save_config_dict(self, config_dict: dict) -> None:
         """Save a dict (not full ServerConfig) to config.json.
 
+        Atomic write via _atomic_write_json (Bug #1231).  Appends a trailing
+        '\\n' to preserve byte-identical output with the pre-fix implementation.
+
         Used by Story #578 to write bootstrap-only keys in cluster mode.
         """
-        self.server_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.config_file_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
-            f.write("\n")
+        self._atomic_write_json(config_dict, trailing_newline=True)
 
     def load_config(self) -> Optional[ServerConfig]:
         """
@@ -1715,7 +1809,16 @@ class ServerConfigManager:
         if "scip_config" in config_dict and isinstance(
             config_dict["scip_config"], dict
         ):
-            config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+            # Bug #1218: strip overarching job-timeout fields removed from ScipConfig
+            # so existing config.json / DB rows load cleanly without TypeError.
+            scip_dict = config_dict["scip_config"].copy()
+            for _removed in (
+                "indexing_timeout_seconds",
+                "scip_generation_timeout_seconds",
+                "registration_indexing_timeout_seconds",
+            ):
+                scip_dict.pop(_removed, None)
+            config_dict["scip_config"] = ScipConfig(**scip_dict)
 
         # Story #3 - Phase 2: Convert P2 config dicts (AC12-AC26)
         # Convert nested git_timeouts_config dict to GitTimeoutsConfig
@@ -1770,6 +1873,17 @@ class ServerConfigManager:
             idx_dict = config_dict["indexing_config"]
             idx_dict.pop("indexing_timeout_seconds", None)
             idx_dict.pop("temporal_stale_threshold_days", None)
+            # Rolling-upgrade safety: strip unknown keys so an old node loading a
+            # new blob (with Story #1158 fields) doesn't crash with TypeError.
+            from dataclasses import fields as dc_fields
+
+            known_idx_fields = {f.name for f in dc_fields(IndexingConfig)}
+            for unknown_key in [k for k in list(idx_dict) if k not in known_idx_fields]:
+                idx_dict.pop(unknown_key)
+                logger.warning(
+                    "Stripped unknown indexing_config key '%s' (not in IndexingConfig)",
+                    unknown_key,
+                )
             config_dict["indexing_config"] = IndexingConfig(**idx_dict)
 
         # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config
@@ -1791,7 +1905,15 @@ class ServerConfigManager:
         if "scip_config" in config_dict and isinstance(
             config_dict["scip_config"], dict
         ):
-            config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+            # Bug #1218: strip removed overarching timeout fields here too
+            scip_dict_ac2 = config_dict["scip_config"].copy()
+            for _removed in (
+                "indexing_timeout_seconds",
+                "scip_generation_timeout_seconds",
+                "registration_indexing_timeout_seconds",
+            ):
+                scip_dict_ac2.pop(_removed, None)
+            config_dict["scip_config"] = ScipConfig(**scip_dict_ac2)
 
         # Story #15 AC3 Migration: Move Claude CLI settings to claude_integration_config
         claude_settings_keys = [

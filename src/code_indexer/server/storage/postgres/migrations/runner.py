@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 
 _SQL_DIR = Path(__file__).parent / "sql"
 
+# Advisory lock key for pg_advisory_lock / pg_advisory_unlock.
+# Derived from sha256(b"cidx_migrations")[:8] interpreted as a big-endian signed
+# 64-bit integer so the value is stable and identical on every cluster node.
+# All workers contend on this single SESSION-level lock, which serialises the
+# migration-apply critical section without being released by COMMIT/ROLLBACK
+# (unlike pg_advisory_xact_lock).  The lock is released explicitly in the
+# finally block of run(), or automatically when the connection closes — so a
+# crashed worker cannot permanently block the others.
+_MIGRATION_ADVISORY_LOCK_KEY: int = int.from_bytes(
+    hashlib.sha256(b"cidx_migrations").digest()[:8], "big", signed=True
+)
+
 _CREATE_SCHEMA_MIGRATIONS = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     id SERIAL PRIMARY KEY,
@@ -181,28 +193,45 @@ class MigrationRunner:
         """
         Execute all pending migrations in numeric order.
 
-        Calls ensure_migrations_table(), discovers all SQL files, compares
-        against already-applied migrations, and applies each pending one.
+        Acquires a PostgreSQL SESSION advisory lock before any work so that
+        concurrent worker processes (e.g. uvicorn --workers N) serialise here.
+        While one worker applies pending migrations and records them in
+        schema_migrations, all others block on the lock; when they acquire it
+        the pending set is already empty and they apply nothing — eliminating
+        the schema_migrations UNIQUE-constraint race.
+
+        The lock is SESSION-level (pg_advisory_lock, not pg_advisory_xact_lock)
+        so it survives the per-migration COMMIT/ROLLBACK inside apply_migration.
+        It is released explicitly in the finally block, or automatically when
+        the connection closes (so a crashed worker cannot block others forever).
 
         Returns:
             Count of migrations applied in this run.
         """
-        self.ensure_migrations_table()
-        applied = set(self.get_applied_migrations())
-        all_migrations = self.discover_migrations()
-        pending = [m for m in all_migrations if m.name not in applied]
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_ADVISORY_LOCK_KEY,))
+        try:
+            self.ensure_migrations_table()
+            applied = set(self.get_applied_migrations())
+            all_migrations = self.discover_migrations()
+            pending = [m for m in all_migrations if m.name not in applied]
 
-        for migration_path in pending:
-            logger.info("Applying pending migration: %s", migration_path.name)
-            self.apply_migration(migration_path)
+            for migration_path in pending:
+                logger.info("Applying pending migration: %s", migration_path.name)
+                self.apply_migration(migration_path)
 
-        count = len(pending)
-        logger.info(
-            "Migration run complete: %d applied, %d already up-to-date",
-            count,
-            len(applied),
-        )
-        return count
+            count = len(pending)
+            logger.info(
+                "Migration run complete: %d applied, %d already up-to-date",
+                count,
+                len(applied),
+            )
+            return count
+        finally:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_unlock(%s)", (_MIGRATION_ADVISORY_LOCK_KEY,)
+                )
 
     def get_status(self) -> Dict[str, object]:
         """

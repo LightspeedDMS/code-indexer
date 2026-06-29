@@ -53,14 +53,21 @@ class TestStateManagerThreadSafety:
         mgr = StateManager()
         assert mgr.update_state_data("nonexistent", {}) is False
 
-    def test_validate_expired_returns_none(self):
+    def test_validate_expired_returns_none(self, tmp_path):
         """Expired tokens return None from validate_state."""
+        import sqlite3 as _sqlite3
+
+        db_path = str(tmp_path / "oidc_expire_test.db")
         mgr = StateManager()
+        mgr.set_sqlite_path(db_path)
         token = mgr.create_state({"x": 1})
-        # Force expiration
-        mgr._states[token]["expires_at"] = datetime.now(timezone.utc) - timedelta(
-            seconds=1
-        )
+        # Force expiration by backdating expires_at directly in the DB
+        past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        with _sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE oidc_state_tokens SET expires_at = ? WHERE state_token = ?",
+                (past, token),
+            )
         assert mgr.validate_state(token) is None
 
     def test_set_connection_pool(self):

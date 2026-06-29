@@ -362,8 +362,16 @@ class TestTemporalLegMultiPatternExclusion:
             f"Single pattern should pass ['**/tests/**'], got {captured[0]!r}"
         )
 
-    def test_multi_provider_passes_split_list_not_raw_string(self, monkeypatch):
-        """_query_multi_provider_fusion: comma-separated exclude_path yields split list."""
+    def test_multi_provider_passes_split_list_not_raw_string(
+        self, monkeypatch, tmp_path
+    ):
+        """execute_temporal_query_with_fusion: comma-separated exclude_path yields split list.
+
+        Migrated from _query_multi_provider_fusion (deleted, Story #1171 C3).
+        Uses the single-provider path (one provider group) of
+        execute_temporal_query_with_fusion to verify that exclude_path is split
+        before reaching query_temporal.
+        """
         from unittest.mock import MagicMock, patch
         from code_indexer.services.temporal import temporal_fusion_dispatch as tfd
         from code_indexer.services.temporal.temporal_search_service import (
@@ -388,8 +396,9 @@ class TestTemporalLegMultiPatternExclusion:
         mock_svc = MagicMock()
         mock_svc.query_temporal.side_effect = fake_query_temporal
 
-        # TemporalSearchService is imported locally inside query_provider closure;
-        # patch at its source module.
+        # One provider group to keep the single-provider path (simpler to reason about)
+        one_provider = [("temporal_voyage_code_3", ["temporal_voyage_code_3"])]
+
         with (
             patch.object(
                 tfd,
@@ -397,20 +406,33 @@ class TestTemporalLegMultiPatternExclusion:
                 return_value=MagicMock(),
             ),
             patch.object(tfd, "_make_config_manager", return_value=MagicMock()),
+            patch.object(
+                tfd,
+                "_discover_provider_shards_with_pruning",
+                return_value=one_provider,
+            ),
+            patch.object(
+                tfd,
+                "filter_healthy_temporal_providers",
+                side_effect=lambda cols: (cols, []),
+            ),
+            patch(
+                "code_indexer.services.temporal.temporal_migration"
+                ".migrate_legacy_temporal_collection",
+            ),
             patch(
                 "code_indexer.services.temporal.temporal_search_service"
                 ".TemporalSearchService",
                 return_value=mock_svc,
             ),
         ):
-            tfd._query_multi_provider_fusion(
+            tfd.execute_temporal_query_with_fusion(
                 config=fake_config,
+                index_path=tmp_path,
                 vector_store=fake_vs,
-                collections=[("temporal_voyage_code_3", "/fake/path")],
                 query_text="auth logic",
                 limit=10,
                 time_range=("2024-01-01", "2024-12-31"),
-                file_path_filter=None,
                 exclude_path="dirA/**,dirB/**",
             )
 

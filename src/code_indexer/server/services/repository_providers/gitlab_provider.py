@@ -6,8 +6,9 @@ and self-hosted GitLab instances.
 """
 
 import logging
+import math
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional, Set, Tuple, TypedDict
+from typing import TYPE_CHECKING, Callable, List, Optional, Set, Tuple, TypedDict
 from typing_extensions import NotRequired
 
 import httpx
@@ -488,9 +489,16 @@ class GitLabProvider(RepositoryProviderBase):
         parsed = [self._parse_project(p) for p in projects]
         return parsed, next_source, has_more, source_total
 
-    def _fetch_all_pages_rest(self) -> Tuple[List[DiscoveredRepository], int]:
+    def _fetch_all_pages_rest(
+        self,
+        progress_callback: Optional[Callable] = None,
+    ) -> Tuple[List[DiscoveredRepository], int]:
         """
         Exhaust all GitLab REST pages and return (repos, source_total).
+
+        Args:
+            progress_callback: Optional callable(progress, phase=, detail=) for progress
+                reporting. Called after each page with percentage capped at 90.
 
         Raises:
             GitLabProviderError: On HTTP failure or if page cap exceeded.
@@ -512,6 +520,14 @@ class GitLabProvider(RepositoryProviderBase):
             if batch_total is not None:
                 source_total = batch_total
             all_repos.extend(batch)
+            if progress_callback is not None and source_total > 0:
+                total_pages = math.ceil(source_total / _DISCOVERY_REST_PAGE_SIZE)
+                pct = min(90, int(page / total_pages * 90))
+                progress_callback(
+                    pct,
+                    phase="fetching",
+                    detail=f"Fetched {len(all_repos)}/{source_total} repos",
+                )
             if not has_more:
                 return all_repos, source_total
         raise GitLabProviderError(
@@ -559,9 +575,16 @@ class GitLabProvider(RepositoryProviderBase):
         self,
         indexed_urls: Set[str],
         hidden_identifiers: Set[str],
+        progress_callback: Optional[Callable] = None,
     ) -> dict:
         """
         Exhaustively fetch all unregistered GitLab repositories in a single pass.
+
+        Args:
+            indexed_urls: Canonical URLs of already-indexed repositories to exclude.
+            hidden_identifiers: Set of 'platform:url' identifiers for hidden repos.
+            progress_callback: Optional callable(progress, phase=, detail=) for progress
+                reporting. Threaded through to _fetch_all_pages_rest.
 
         Raises:
             ValueError: If indexed_urls or hidden_identifiers is None.
@@ -576,7 +599,9 @@ class GitLabProvider(RepositoryProviderBase):
                 "GitLab token not configured. "
                 "Please configure a GitLab token in the CI Tokens settings."
             )
-        all_repos, source_total = self._fetch_all_pages_rest()
+        all_repos, source_total = self._fetch_all_pages_rest(
+            progress_callback=progress_callback
+        )
         out = self._map_repos_to_dicts(all_repos, indexed_urls, hidden_identifiers)
         total_unregistered = sum(1 for r in out if not r["is_hidden"])
         return {

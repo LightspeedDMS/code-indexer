@@ -26,6 +26,7 @@ def executor(tmp_path):
         branch="master",
         service_name="cidx-server",
         server_url="http://localhost:8000",
+        drain_poll_interval=0,
     )
 
 
@@ -463,12 +464,26 @@ class TestExecuteWiring:
         Create an executor where ALL _ensure_* methods and git/pip operations
         are mocked to succeed, so we can test the wiring of steps 9 and 10.
         """
-        return DeploymentExecutor(
+        executor = DeploymentExecutor(
             repo_path=tmp_path,
             branch="master",
             service_name="cidx-server",
             server_url="http://localhost:8000",
+            drain_poll_interval=0,
         )
+        # Pre-stub all non-essential steps that make real subprocess/network/file
+        # calls (npm, git-clone, installer scripts, systemd, NFS symlinks, etc.).
+        # Steps 6.5-15 in execute() — not under test here.
+        executor._ensure_data_dir_env_var = lambda: True
+        executor._ensure_malloc_arena_max = lambda: True
+        executor._ensure_codex_cli_installed = lambda: True
+        executor._ensure_claude_cli_updated = lambda: True
+        executor._ensure_pace_maker_installed = lambda: True
+        executor._ensure_claude_cli_installed = lambda: True
+        executor._ensure_nfs_research_symlinks = lambda: True
+        executor._ensure_activated_repos_symlink_for_cow_daemon = lambda: True
+        executor._ensure_systemd_claude_path = lambda: True
+        return executor
 
     def test_execute_calls_memory_overcommit_after_sudoers(self, tmp_path):
         """
@@ -497,7 +512,7 @@ class TestExecuteWiring:
             patch.object(executor, "git_submodule_update", return_value=True),
             patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
             patch.object(executor, "pip_install", return_value=True),
-            patch.object(executor, "_ensure_workers_config", return_value=True),
+            patch.object(executor, "_ensure_launch_config", return_value=None),
             patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
             patch.object(executor, "_ensure_git_safe_directory", return_value=True),
             patch.object(
@@ -512,6 +527,7 @@ class TestExecuteWiring:
                 side_effect=mock_memory_overcommit,
             ),
             patch.object(executor, "_ensure_swap_file", side_effect=mock_swap_file),
+            patch.object(executor, "_wait_for_drain", return_value=True),
         ):
             result = executor.execute()
 
@@ -547,7 +563,7 @@ class TestExecuteWiring:
             patch.object(executor, "git_submodule_update", return_value=True),
             patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
             patch.object(executor, "pip_install", return_value=True),
-            patch.object(executor, "_ensure_workers_config", return_value=True),
+            patch.object(executor, "_ensure_launch_config", return_value=None),
             patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
             patch.object(executor, "_ensure_git_safe_directory", return_value=True),
             patch.object(
@@ -562,6 +578,7 @@ class TestExecuteWiring:
                 side_effect=mock_memory_overcommit,
             ),
             patch.object(executor, "_ensure_swap_file", side_effect=mock_swap_file),
+            patch.object(executor, "_wait_for_drain", return_value=True),
         ):
             result = executor.execute()
 
@@ -600,7 +617,7 @@ class TestExecuteWiring:
             patch.object(executor, "git_submodule_update", return_value=True),
             patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
             patch.object(executor, "pip_install", return_value=True),
-            patch.object(executor, "_ensure_workers_config", return_value=True),
+            patch.object(executor, "_ensure_launch_config", return_value=None),
             patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
             patch.object(executor, "_ensure_git_safe_directory", return_value=True),
             patch.object(
@@ -611,6 +628,7 @@ class TestExecuteWiring:
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             patch.object(executor, "_ensure_memory_overcommit", return_value=False),
             patch.object(executor, "_ensure_swap_file", side_effect=mock_swap_file),
+            patch.object(executor, "_wait_for_drain", return_value=True),
         ):
             with caplog.at_level(logging.WARNING):
                 result = executor.execute()
@@ -640,7 +658,7 @@ class TestExecuteWiring:
             patch.object(executor, "git_submodule_update", return_value=True),
             patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
             patch.object(executor, "pip_install", return_value=True),
-            patch.object(executor, "_ensure_workers_config", return_value=True),
+            patch.object(executor, "_ensure_launch_config", return_value=None),
             patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
             patch.object(executor, "_ensure_git_safe_directory", return_value=True),
             patch.object(
@@ -651,6 +669,7 @@ class TestExecuteWiring:
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             patch.object(executor, "_ensure_memory_overcommit", return_value=True),
             patch.object(executor, "_ensure_swap_file", return_value=False),
+            patch.object(executor, "_wait_for_drain", return_value=True),
         ):
             with caplog.at_level(logging.WARNING):
                 result = executor.execute()

@@ -1,4 +1,4 @@
-# Query-Embedding Cache (Epic #1103)
+# Query-Embedding Cache
 
 Server-side cache of query embeddings on the CIDX query path, for both providers
 (VoyageAI voyage-code-3, 1024 dims; Cohere embed-v4.0, 1536 dims). The cache
@@ -174,7 +174,7 @@ string resolves to `shadow`.
 ### 2.2 The anchor dial trade-off
 
 `build_key(text, anchor_tokens, *, config_digest)` normalizes the query and
-returns a config-namespaced readable key (Story #1149):
+returns a config-namespaced readable key:
 
 1. Tokenize with `text.split()` (any whitespace run; empty tokens dropped;
    punctuation NOT stripped, it stays attached to its token).
@@ -334,7 +334,7 @@ These are non-negotiable. They are enforced in code and verified against it.
 - The table stores ONLY query-purpose embeddings, NEVER document-purpose
   embeddings. The two have different Cohere `input_type` semantics
   (`search_query` vs `search_document`) and are not interchangeable.
-- Key format (Story #1149): `s:<config-digest>:<normalized-query>`. The `s:`
+- Key format: `s:<config-digest>:<normalized-query>`. The `s:`
   prefix is provably disjoint from legacy 64-hex SHA-256 keys so both keyspaces
   coexist and legacy rows age out via passive LRU (prune_to_max). `config_digest`
   is the coalescer-registry digest (provider + endpoint + model). `build_key()`
@@ -353,7 +353,7 @@ These are non-negotiable. They are enforced in code and verified against it.
 
 ---
 
-## 4. The S0 Cohere embedding_purpose bug (Bug #1104)
+## 4. The S0 Cohere embedding_purpose bug
 
 S0 is a prerequisite for the cache and was committed in isolation. It is the fix
 for a latent correctness bug, independent of caching.
@@ -375,7 +375,7 @@ thread the purpose through the coalescer (`embedding_coalescer.py` `submit()` ->
 `do_call()` -> `get_embeddings_batch(..., embedding_purpose=...)`) so the purpose
 survives coalescing. The invariant: NEVER pass `embedding_purpose=None` or omit
 the argument at a query-embed call site. See the CLAUDE.md
-"Query embedding_purpose invariant (Bug #1104)" section. Because the cache stores
+"Query embedding_purpose invariant" section. Because the cache stores
 the live vector, this fix is a prerequisite for the cache storing CORRECT Cohere
 vectors.
 

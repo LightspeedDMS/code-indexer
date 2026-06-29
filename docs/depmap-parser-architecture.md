@@ -1,4 +1,4 @@
-# Depmap Parser Module Split and Anomaly Channels (Story #887, Epic #886)
+# Depmap Parser Module Split and Anomaly Channels
 
 This document captures the depmap parser architecture invariants extracted from the project CLAUDE.md to keep that file focused on rules and rituals.
 
@@ -9,7 +9,7 @@ The depmap parser was split from a single 1042-line `dep_map_mcp_parser.py` into
 | `dep_map_mcp_parser.py` | Orchestration + public API (2-tuple legacy + 4-tuple with-channels) | ~440 |
 | `dep_map_parser_tables.py` | Markdown table extraction | ~354 |
 | `dep_map_parser_hygiene.py` | Identifier normalization, `AnomalyEntry`/`AnomalyAggregate`/`AnomalyType` dataclasses, dedup + aggregation helpers | ~279 |
-| `dep_map_parser_graph.py` | Graph edge aggregation, filter hooks (reserved for Story #889), channel split | ~445 |
+| `dep_map_parser_graph.py` | Graph edge aggregation, filter hooks (reserved for future use), channel split | ~445 |
 
 **Public API dual-surface** (both are stable contracts):
 - `get_cross_domain_graph(output_dir) -> Tuple[List[Dict], List[Dict[str, str]]]` — legacy 2-tuple, anomalies as `{file, error}` dicts (backward-compat).
@@ -18,11 +18,11 @@ The depmap parser was split from a single 1042-line `dep_map_mcp_parser.py` into
 **Anomaly channel structure** (response envelope for all 5 `depmap_*` tools):
 - `parser_anomalies[]` — structural file defects: malformed YAML, truncated table, unreadable bytes, path-traversal rejected, missing required frontmatter keys, section-present-but-empty.
 - `data_anomalies[]` — source-graph drift: bidirectional mismatch, dual-source inconsistency (JSON↔markdown), garbage-domain rejected, self-loop, edge with no derivable types, case normalization applied.
-- `anomalies[]` — legacy concatenation of both, preserved for ONE release after Epic #886 completes (to be dropped in vN+1 per epic BREAKING CHANGES).
+- `anomalies[]` — legacy concatenation of both, preserved for ONE release after the parser module split (to be dropped in vN+1 per the BREAKING CHANGES plan).
 
 **AnomalyType self-classifying enum**: each variant carries a bound `channel: Literal["parser", "data"]` attribute. Routing is `AnomalyType.channel` lookup — no manual classification logic. Aggregates route identically (the aggregate's `.type.channel` determines the channel).
 
-**Frozenset-keyed bidirectional dedup**: `_check_bidirectional_consistency` aggregates by `frozenset({normalize(source), normalize(target)})` so one anomaly emits per unordered edge pair. Prevents the pre-Story-#887 pattern of ~170 anomalies for ~150 edges. Both sides of the frozenset are normalized (strip_backticks + lowercase) to prevent case/backtick drift from producing false mismatches.
+**Frozenset-keyed bidirectional dedup**: `_check_bidirectional_consistency` aggregates by `frozenset({normalize(source), normalize(target)})` so one anomaly emits per unordered edge pair. Prevents the pre-split pattern of ~170 anomalies for ~150 edges. Both sides of the frozenset are normalized (strip_backticks + lowercase) to prevent case/backtick drift from producing false mismatches.
 
 **Invariants (MESSI rule 15, stripped under `python -O`)**:
 - `strip_backticks()` postcondition: `assert not s.startswith("\`") and not s.endswith("\`")` — all wrapper backticks stripped via `while` loops (not just one pair).

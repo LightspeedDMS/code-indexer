@@ -585,3 +585,172 @@ class TestFieldPreservation:
             assert field in data["status"], (
                 f"Field '{field}' must be preserved in 'status'"
             )
+
+
+# ---------------------------------------------------------------------------
+# Bug #1204: repository_status omits next_refresh + enable_scip for global repos
+# ---------------------------------------------------------------------------
+
+
+def _make_global_status_with_all_fields():
+    """Sample GlobalRepoOperations.get_status() return dict WITH the two new fields."""
+    return {
+        "alias": "backend-global",
+        "repo_name": "backend",
+        "url": "https://github.com/example/backend.git",
+        "last_refresh": "2024-01-01T12:00:00Z",
+        "enable_temporal": True,
+        "next_refresh": "1735736400.5",
+        "enable_scip": True,
+    }
+
+
+class TestGlobalStatusFieldsBug1204:
+    """Bug #1204: next_refresh and enable_scip must appear in global repository_status.
+
+    RED: these tests fail before the fix (fields absent from get_status() output).
+    GREEN: pass after get_status() copies the two fields from the already-loaded record.
+    """
+
+    def test_get_status_returns_next_refresh(self, tmp_path):
+        """GlobalRepoOperations.get_status() must include 'next_refresh' from the record."""
+        from code_indexer.global_repos.shared_operations import GlobalRepoOperations
+
+        raw_record = {
+            "alias_name": "backend-global",
+            "repo_name": "backend",
+            "repo_url": "https://github.com/example/backend.git",
+            "last_refresh": "2024-01-01T12:00:00Z",
+            "enable_temporal": True,
+            "next_refresh": "1735736400.5",
+            "enable_scip": True,
+        }
+        mock_registry = MagicMock()
+        mock_registry.get_global_repo.return_value = raw_record
+
+        ops = GlobalRepoOperations(str(tmp_path / "golden-repos"))
+        ops._registry = mock_registry  # inject directly to bypass lazy resolution
+
+        status = ops.get_status("backend-global")
+
+        assert "next_refresh" in status, (
+            "get_status() must return 'next_refresh' — field is in the loaded record "
+            "but was not being copied (Bug #1204)"
+        )
+        assert status["next_refresh"] == "1735736400.5"
+
+    def test_get_status_returns_enable_scip(self, tmp_path):
+        """GlobalRepoOperations.get_status() must include 'enable_scip' from the record."""
+        from code_indexer.global_repos.shared_operations import GlobalRepoOperations
+
+        raw_record = {
+            "alias_name": "backend-global",
+            "repo_name": "backend",
+            "repo_url": "https://github.com/example/backend.git",
+            "last_refresh": "2024-01-01T12:00:00Z",
+            "enable_temporal": False,
+            "next_refresh": None,
+            "enable_scip": True,
+        }
+        mock_registry = MagicMock()
+        mock_registry.get_global_repo.return_value = raw_record
+
+        ops = GlobalRepoOperations(str(tmp_path / "golden-repos"))
+        ops._registry = mock_registry
+
+        status = ops.get_status("backend-global")
+
+        assert "enable_scip" in status, (
+            "get_status() must return 'enable_scip' — field is in the loaded record "
+            "but was not being copied (Bug #1204)"
+        )
+        assert status["enable_scip"] is True
+
+    def test_get_status_next_refresh_none_when_not_scheduled(self, tmp_path):
+        """get_status() must return next_refresh=None when record has None."""
+        from code_indexer.global_repos.shared_operations import GlobalRepoOperations
+
+        raw_record = {
+            "alias_name": "backend-global",
+            "repo_name": "backend",
+            "repo_url": "https://github.com/example/backend.git",
+            "last_refresh": "2024-01-01T12:00:00Z",
+            "enable_temporal": False,
+            "next_refresh": None,
+            "enable_scip": False,
+        }
+        mock_registry = MagicMock()
+        mock_registry.get_global_repo.return_value = raw_record
+
+        ops = GlobalRepoOperations(str(tmp_path / "golden-repos"))
+        ops._registry = mock_registry
+
+        status = ops.get_status("backend-global")
+
+        assert "next_refresh" in status
+        assert status["next_refresh"] is None
+
+    def test_repository_status_handler_returns_next_refresh_and_enable_scip(
+        self, normal_user
+    ):
+        """handler repository_status() response must include next_refresh + enable_scip
+        for a global alias — sourced from the already-loaded record (no extra DB query).
+        """
+        from code_indexer.server.mcp.handlers.repos import handle_repository_status
+
+        full_status = _make_global_status_with_all_fields()
+        mock_ops = MagicMock()
+        mock_ops.get_status.return_value = full_status
+
+        with (
+            patch(_GLOBAL_OPS_PATH, return_value=mock_ops),
+            patch(
+                "code_indexer.server.mcp.handlers.repos._get_golden_repos_dir",
+                return_value="/fake/golden-repos",
+            ),
+        ):
+            result = handle_repository_status(
+                {"alias": "backend-global", "detail": "basic"}, normal_user
+            )
+
+        data = _parse(result)
+
+        assert data["success"] is True
+        assert data["kind"] == "global"
+        assert "next_refresh" in data["status"], (
+            "'next_refresh' must appear in status for global repos (Bug #1204)"
+        )
+        assert "enable_scip" in data["status"], (
+            "'enable_scip' must appear in status for global repos (Bug #1204)"
+        )
+        assert data["status"]["next_refresh"] == "1735736400.5"
+        assert data["status"]["enable_scip"] is True
+
+    def test_activated_repo_status_unchanged_no_new_fields(self, normal_user):
+        """Activated repo status must NOT gain next_refresh or enable_scip fields
+        from the global branch — regression guard for the activated path.
+        """
+        from code_indexer.server.mcp.handlers.repos import handle_repository_status
+
+        activated_status = _make_activated_status()
+        mock_listing_mgr = MagicMock()
+        mock_listing_mgr.get_repository_details.return_value = activated_status
+
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
+            mock_app.repository_listing_manager = mock_listing_mgr
+            result = handle_repository_status(
+                {"alias": "my-repo", "detail": "basic"}, normal_user
+            )
+
+        data = _parse(result)
+
+        assert data["success"] is True
+        assert data["kind"] == "activated"
+        # The activated status dict as returned by listing manager must be passed
+        # through unchanged — listing manager does not include next_refresh/enable_scip
+        assert "next_refresh" not in data["status"], (
+            "Activated repo status must NOT include next_refresh (global-only field)"
+        )
+        assert "enable_scip" not in data["status"], (
+            "Activated repo status must NOT include enable_scip (global-only field)"
+        )

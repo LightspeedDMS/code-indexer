@@ -50,8 +50,11 @@ Both approaches enable **semantic code search directly in AI conversations**.
 | Platform | Instruction File | Location |
 |----------|-----------------|----------|
 | **Claude Code** | CLAUDE.md | Project or ~/.claude/ |
-| **Gemini** | GEMINI.md | Project-specific |
+| **Gemini** | .gemini/styleguide.md | Project-specific |
 | **Codex** | CODEX.md | Project-specific |
+| **OpenCode** | AGENTS.md | Project or ~/.config/opencode/ |
+| **Amazon Q** | .amazonq/rules/cidx.md | Project or ~/.aws/amazonq/ |
+| **Junie** | .junie/guidelines.md | Project-specific |
 
 ### Setup (Claude Code)
 
@@ -82,7 +85,7 @@ cidx teach-ai --claude --global
 # Project-level
 cidx teach-ai --gemini --project
 
-# Creates: ./GEMINI.md
+# Creates: ./.gemini/styleguide.md
 ```
 
 ### Setup (Codex)
@@ -92,6 +95,38 @@ cidx teach-ai --gemini --project
 cidx teach-ai --codex --project
 
 # Creates: ./CODEX.md
+```
+
+### Setup (OpenCode)
+
+```bash
+# Project-level
+cidx teach-ai --opencode --project
+
+# Creates: ./AGENTS.md
+
+# Global
+cidx teach-ai --opencode --global
+
+# Creates: ~/.config/opencode/AGENTS.md
+```
+
+### Setup (Amazon Q)
+
+```bash
+# Project-level
+cidx teach-ai --q --project
+
+# Creates: ./.amazonq/rules/cidx.md
+```
+
+### Setup (Junie)
+
+```bash
+# Project-level
+cidx teach-ai --junie --project
+
+# Creates: ./.junie/guidelines.md
 ```
 
 ### What Gets Created
@@ -175,7 +210,7 @@ AI Assistant → MCP Protocol → CIDX Server → Golden Repositories
 
 ### Features
 
-- **Standard Protocol** - MCP Protocol 2024-11-05
+- **Standard Protocol** - MCP Protocol 2025-06-18
 - **OAuth 2.1 Authentication** - Secure AI assistant auth via browser
 - **Remote Code Search** - Query centralized indexed codebases
 - **Permission Controls** - Role-based access (admin, power_user, normal_user)
@@ -224,7 +259,7 @@ See [CIDX MCP Bridge](../README.md#cidx-mcp-bridge-for-claude-desktop) for compl
 
 See: [Delegation Functions Guide](delegation-functions.md) for complete documentation.
 
-Total: **148 MCP tools** available
+**150+ MCP tools** available (exact count grows with new releases)
 
 ### Permissions
 
@@ -238,7 +273,7 @@ Total: **148 MCP tools** available
 
 ### Claude Code (CLI Integration)
 
-**Status**: ✅ Fully supported
+**Status**: Fully supported
 
 **Setup**:
 ```bash
@@ -251,7 +286,7 @@ cidx teach-ai --claude --project
 
 ### Claude Desktop (MCP Server)
 
-**Status**: ✅ Fully supported via MCP Bridge
+**Status**: Fully supported via MCP Bridge
 
 **Setup**: See [MCP Bridge Guide](../README.md#cidx-mcp-bridge-for-claude-desktop)
 
@@ -262,7 +297,7 @@ cidx teach-ai --claude --project
 
 ### Gemini (CLI Integration)
 
-**Status**: ✅ Supported
+**Status**: Supported
 
 **Setup**:
 ```bash
@@ -273,7 +308,7 @@ cidx teach-ai --gemini --project
 
 ### Codex (CLI Integration)
 
-**Status**: ✅ Supported
+**Status**: Supported
 
 **Setup**:
 ```bash
@@ -281,6 +316,39 @@ cidx teach-ai --codex --project
 ```
 
 **Note**: Instruction file format may need platform-specific adjustments.
+
+### OpenCode (CLI Integration)
+
+**Status**: Supported
+
+**Setup**:
+```bash
+cidx teach-ai --opencode --project
+```
+
+Creates `AGENTS.md` (project) or `~/.config/opencode/AGENTS.md` (global).
+
+### Amazon Q (CLI Integration)
+
+**Status**: Supported
+
+**Setup**:
+```bash
+cidx teach-ai --q --project
+```
+
+Creates `.amazonq/rules/cidx.md` (project) or `~/.aws/amazonq/Q.md` (global).
+
+### Junie (CLI Integration)
+
+**Status**: Supported
+
+**Setup**:
+```bash
+cidx teach-ai --junie --project
+```
+
+Creates `.junie/guidelines.md` in project root.
 
 ### Other Platforms
 
@@ -413,7 +481,8 @@ pipx upgrade code-indexer
 
 1. **Server is running**:
    ```bash
-   curl https://your-server.com:8383/health
+   curl https://your-server.com:8090/health \
+     -H "Authorization: Bearer YOUR_TOKEN"
    ```
 
 2. **Authentication valid**:

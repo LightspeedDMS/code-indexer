@@ -313,11 +313,11 @@ class TestAccessorAtSubmit:
             config_digest=_TEST_DIGEST,
         )
 
-        result = coalescer.submit("hello world")
+        vec, _ = coalescer.submit("hello world")
         # Provider was called (live path)
         assert provider.call_count == 1
         # Result is the live vector
-        assert isinstance(result, list) and len(result) > 0
+        assert isinstance(vec, list) and len(vec) > 0
 
     def test_accessor_called_at_submit_time_not_construction(self, monkeypatch):
         """Cache accessor is called at submit time, NOT at construction time.
@@ -407,7 +407,7 @@ class TestLockFreeCacheCheck:
             # Submit text that is a cache HIT — must return immediately
             # even though all governor slots are held
             t_start = time.monotonic()
-            result = coalescer.submit(text)
+            vec, _ = coalescer.submit(text)
             elapsed = time.monotonic() - t_start
 
             # Must return within 0.5s (fast, no slot wait)
@@ -416,8 +416,8 @@ class TestLockFreeCacheCheck:
                 f"(it should return immediately from cache, no slot needed)"
             )
             # Must return cached vector, not live
-            assert result == pytest.approx(CACHED_VEC, abs=1e-4), (
-                f"on-mode HIT must return CACHED_VEC {CACHED_VEC}, got {result}"
+            assert vec == pytest.approx(CACHED_VEC, abs=1e-4), (
+                f"on-mode HIT must return CACHED_VEC {CACHED_VEC}, got {vec}"
             )
             # Provider NOT called
             assert provider.call_count == 0, (
@@ -446,9 +446,9 @@ class TestLockFreeCacheCheck:
             config_digest=_TEST_DIGEST,
         )
 
-        result = coalescer.submit(text)
+        vec, _ = coalescer.submit(text)
         assert provider.call_count == 0
-        assert result == pytest.approx(CACHED_VEC, abs=1e-4)
+        assert vec == pytest.approx(CACHED_VEC, abs=1e-4)
 
     def test_on_mode_miss_calls_enqueue_provider_embeds(self, monkeypatch):
         """on-mode MISS: _enqueue IS called, provider embedding happens."""
@@ -467,9 +467,9 @@ class TestLockFreeCacheCheck:
             config_digest=_TEST_DIGEST,
         )
 
-        result = coalescer.submit("unique query for miss test")
+        vec, _ = coalescer.submit("unique query for miss test")
         assert provider.call_count == 1, "MISS must call provider exactly once"
-        assert isinstance(result, list)
+        assert isinstance(vec, list)
 
     def test_on_mode_miss_then_hit_counter_behavior(self, monkeypatch):
         """on-mode: MISS calls provider; second identical call is HIT (no provider call)."""
@@ -491,16 +491,16 @@ class TestLockFreeCacheCheck:
         text = "repeated query text"
 
         # First: MISS -> provider called
-        result1 = coalescer.submit(text)
+        vec1, _ = coalescer.submit(text)
         assert provider.call_count == 1
 
         # Second: HIT -> provider NOT called again
-        result2 = coalescer.submit(text)
+        vec2, _ = coalescer.submit(text)
         assert provider.call_count == 1, (
             "Second submit for same text must be a cache HIT (no additional provider call)"
         )
         # Both results should be equivalent (first was live, second is cached)
-        assert len(result1) == len(result2) == DIM
+        assert len(vec1) == len(vec2) == DIM
 
     def test_shadow_mode_always_embeds_live(self, monkeypatch):
         """shadow-mode: ALWAYS calls provider even on key HIT."""
@@ -520,14 +520,14 @@ class TestLockFreeCacheCheck:
             config_digest=_TEST_DIGEST,
         )
 
-        result = coalescer.submit(text)
+        vec, _ = coalescer.submit(text)
         # Shadow mode: always live, even on HIT
         assert provider.call_count == 1, (
             "shadow-mode must ALWAYS call provider (even on key HIT)"
         )
         # Returns LIVE vector, not cached
         expected_live = [float(len(text) % 999), 0.0, 0.0]
-        assert result == pytest.approx(expected_live, abs=1e-4)
+        assert vec == pytest.approx(expected_live, abs=1e-4)
 
     def test_shadow_mode_records_hit_once_per_key(self, monkeypatch):
         """shadow-mode HIT: record_hit (touch_last_used) called once per key-resolution."""
@@ -807,7 +807,7 @@ class TestThinShimCQE:
         set_coalescer_registry(reg)
 
         try:
-            result = governed_call.coalesced_query_embedding(
+            result, _meta = governed_call.coalesced_query_embedding(
                 provider, "thin shim test query"
             )
             # Provider was called (MISS -> live embed)
@@ -859,7 +859,7 @@ class TestThinShimCQE:
         set_coalescer_registry(reg)
 
         try:
-            result = governed_call.coalesced_query_embedding(provider, text)
+            result, _meta = governed_call.coalesced_query_embedding(provider, text)
             # Cache HIT: zero provider calls
             assert provider.call_count == 0, (
                 f"on-mode HIT via CQE must skip provider, got call_count={provider.call_count}"
@@ -978,7 +978,7 @@ class TestThinShimCQE:
 
         clear_coalescer_registry()
 
-        result = governed_call.coalesced_query_embedding(_Provider(), text)
+        result, _meta = governed_call.coalesced_query_embedding(_Provider(), text)
         # HIT: governed_query_embedding must NOT be called
         assert governed_calls[0] == 0, (
             "Direct fallback on-mode HIT must skip governed_query_embedding"
@@ -1129,13 +1129,13 @@ class TestBypassBehavior:
         )
 
         # Bypass=True: must not serve from cache, must go live
-        result = coalescer.submit(text, no_embedding_cache_shortcut=True)
+        vec, _ = coalescer.submit(text, no_embedding_cache_shortcut=True)
 
         # Provider was called (bypass went live)
         assert provider.call_count == 1
         # Result is the live vector, not the cached one
         expected_live = [float(len(text) % 999), 0.0, 0.0]
-        assert result == pytest.approx(expected_live, abs=1e-4), (
+        assert vec == pytest.approx(expected_live, abs=1e-4), (
             f"bypass=True must return live vector, not cached {CACHED_VEC}"
         )
 
@@ -1238,10 +1238,10 @@ class TestPathAAuditCtxPopulation:
         monkeypatch.setattr(governed_call, "_audit_sample_rate_for", lambda pname: 1.0)
 
         audit_ctx: Dict[str, Any] = {}
-        result = coalescer.submit(text, audit_ctx=audit_ctx)
+        vec, _ = coalescer.submit(text, audit_ctx=audit_ctx)
 
         assert provider.call_count == 0, "on-mode HIT must not call provider"
-        assert result == pytest.approx(CACHED_VEC, abs=1e-4)
+        assert vec == pytest.approx(CACHED_VEC, abs=1e-4)
         assert audit_ctx.get("sampled") is True
         assert audit_ctx.get("mode") == "on"
         assert audit_ctx.get("provider") == PROVIDER_NAME
@@ -1351,8 +1351,8 @@ class TestPathAAuditCtxPopulation:
         )
         monkeypatch.setattr(governed_call, "_audit_sample_rate_for", lambda pname: 1.0)
 
-        result = coalescer.submit(text)  # audit_ctx=None default
-        assert result == pytest.approx(CACHED_VEC, abs=1e-4)
+        vec, _ = coalescer.submit(text)  # audit_ctx=None default
+        assert vec == pytest.approx(CACHED_VEC, abs=1e-4)
         assert provider.call_count == 0
 
 
@@ -1496,8 +1496,8 @@ class TestPathAMetrics:
             config_digest=_TEST_DIGEST,
         )
 
-        result = coalescer.submit(text)
-        assert result == pytest.approx(CACHED_VEC, abs=1e-4)
+        vec, _ = coalescer.submit(text)
+        assert vec == pytest.approx(CACHED_VEC, abs=1e-4)
 
 
 # ===========================================================================
@@ -1610,3 +1610,252 @@ class TestKConcurrentSameKeyCardinality:
             "corrupt" in msg.lower() or "struct" in msg.lower() or "miss" in msg.lower()
             for msg in log_records
         ), f"Corrupt blob must log a WARNING, got: {log_records}"
+
+
+# ===========================================================================
+# Bug #1230: shadow-mode dispatch Future metadata key_found fix
+# ===========================================================================
+
+
+class TestShadowHitMetadata1230:
+    """Bug #1230: _dispatch() sets miss-meta unconditionally for all callers,
+    so shadow HITs are never recorded as key_found=True on the Future metadata
+    that becomes SearchEventRecord.voyage_cache_hit.
+
+    Full matrix tested at the Future-metadata level:
+      on-mode   hit  -> key_found=True,  cache_mode="on"     (pre-existing behaviour, explicit)
+      on-mode   miss -> key_found=False, cache_mode="on"     (regression guard)
+      shadow    hit  -> key_found=True,  cache_mode="shadow" (BUG #1230 fix)
+      shadow    miss -> key_found=False, cache_mode="shadow" (unchanged, regression guard)
+
+    On-mode HITs short-circuit before _dispatch via _make_hit_meta (~line 659/676).
+    Shadow HITs flow through _dispatch where _shadow_blobs holds the pre-write blob.
+
+    Tests that verify ONLY shadow behavior (and will FAIL before the fix):
+      test_shadow_repeat_query_second_call_metadata_key_found_true  <- core regression
+      test_shadow_first_query_metadata_key_found_false             <- miss unchanged
+      test_shadow_preexisting_hit_key_found_not_false_positive     <- pre-write guard
+    """
+
+    # ------------------------------------------------------------------
+    # Shadow-mode: core regression (MUST FAIL before fix, PASS after)
+    # ------------------------------------------------------------------
+
+    def test_shadow_repeat_query_second_call_metadata_key_found_true(self, monkeypatch):
+        """CORE REGRESSION (Bug #1230): shadow-mode, repeated identical query.
+
+        First call: no pre-existing key -> key_found=False (miss).
+        Second call: key now exists in cache (written by first call) -> key_found=True (HIT).
+
+        Before the fix: second call returns key_found=False (miss-meta unconditional).
+        After the fix:  second call returns key_found=True  (hit-meta from _shadow_blobs).
+        """
+        from code_indexer.server.services import governed_call
+
+        text = "shadow repeat query bug 1230"
+        cache, _ = _make_real_cache(mode="shadow")
+        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+
+        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
+        provider = _FakeVoyageProvider()
+        coalescer = EmbeddingCoalescer(
+            LANE,
+            provider,
+            governor=gov,
+            acquire_timeout=5.0,
+            config_digest=_TEST_DIGEST,
+        )
+
+        # First call: cold miss — key does not exist yet.
+        _vec1, meta1 = coalescer.submit(text)
+        assert meta1.key_found is False, (
+            f"First shadow call must be a MISS (key_found=False), got key_found={meta1.key_found}"
+        )
+        assert meta1.cache_mode == "shadow"
+
+        # Second call: the first call wrote the key to cache.
+        # _shadow_blobs is built BEFORE the cache write for this dispatch,
+        # so it reflects the key written by call #1 — a genuine pre-existing hit.
+        _vec2, meta2 = coalescer.submit(text)
+
+        assert meta2.key_found is True, (
+            f"Second shadow call (repeat query) must be a HIT (key_found=True). "
+            f"Got key_found={meta2.key_found}, cache_mode={meta2.cache_mode}. "
+            f"This is Bug #1230: _dispatch sets miss-meta unconditionally."
+        )
+        assert meta2.cache_mode == "shadow", (
+            f"cache_mode must be 'shadow', got '{meta2.cache_mode}'"
+        )
+        # Shadow always embeds live — provider called twice (once per submit).
+        assert provider.call_count == 2, (
+            f"Shadow mode always embeds live; expected 2 provider calls, got {provider.call_count}"
+        )
+
+    def test_shadow_first_query_metadata_key_found_false(self, monkeypatch):
+        """Shadow-mode, first/unique query (no prior key): key_found=False (miss unchanged).
+
+        This must pass both before and after the fix — the miss path is untouched.
+        """
+        from code_indexer.server.services import governed_call
+
+        cache, _ = _make_real_cache(mode="shadow")
+        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+
+        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
+        provider = _FakeVoyageProvider()
+        coalescer = EmbeddingCoalescer(
+            LANE,
+            provider,
+            governor=gov,
+            acquire_timeout=5.0,
+            config_digest=_TEST_DIGEST,
+        )
+
+        _vec, meta = coalescer.submit("unique shadow query no prior seed 1230")
+        assert meta.key_found is False, (
+            f"First shadow call with no pre-existing key must be MISS (key_found=False), "
+            f"got key_found={meta.key_found}"
+        )
+        assert meta.cache_mode == "shadow"
+
+    def test_shadow_preexisting_hit_reports_key_found_true_not_false_positive(
+        self, monkeypatch
+    ):
+        """Guard: pre-seeded key is a genuine pre-existing HIT, not a false positive.
+
+        Seeds the cache BEFORE any coalescer call. The very first submit must
+        report key_found=True because _shadow_blobs reflects pre-write state
+        (the seeded blob was there before this dispatch).
+
+        Proves _shadow_blobs is populated from lookups BEFORE the cache writes
+        for this dispatch. If _shadow_blobs were populated AFTER the write, a
+        cold-miss would also report key_found=True — that would be a false positive.
+        """
+        from code_indexer.server.services import governed_call
+
+        text = "preseeded shadow hit 1230"
+        # Pre-seed: key exists BEFORE any coalescer call.
+        cache, _ = _make_real_cache(mode="shadow", pre_seed_text=text)
+        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+
+        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
+        provider = _FakeVoyageProvider()
+        coalescer = EmbeddingCoalescer(
+            LANE,
+            provider,
+            governor=gov,
+            acquire_timeout=5.0,
+            config_digest=_TEST_DIGEST,
+        )
+
+        _vec, meta = coalescer.submit(text)
+        # The key existed before this dispatch -> genuine shadow HIT.
+        assert meta.key_found is True, (
+            f"Pre-seeded key must be a shadow HIT (key_found=True), got {meta.key_found}. "
+            f"Bug #1230 fix: _shadow_blobs must be consulted for hit/miss selection."
+        )
+        assert meta.cache_mode == "shadow"
+        # Shadow always goes live.
+        assert provider.call_count == 1, "Shadow mode always embeds live even on HIT"
+
+    def test_shadow_unique_query_not_false_positive_key_found_false(self, monkeypatch):
+        """False-positive guard: a shadow query whose key was NOT pre-existing must NOT
+        report key_found=True.
+
+        If _shadow_blobs were populated AFTER the cache write, every dispatch would
+        find its own just-written entry and falsely report a HIT. This test proves
+        that a genuinely cold query reports key_found=False.
+        """
+        from code_indexer.server.services import governed_call
+
+        cache, _ = _make_real_cache(mode="shadow")  # empty — no pre-seed
+        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+
+        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
+        provider = _FakeVoyageProvider()
+        coalescer = EmbeddingCoalescer(
+            LANE,
+            provider,
+            governor=gov,
+            acquire_timeout=5.0,
+            config_digest=_TEST_DIGEST,
+        )
+
+        _vec, meta = coalescer.submit("cold unique shadow query guard 1230")
+        assert meta.key_found is False, (
+            f"Cold shadow query (no pre-existing key) must NOT report key_found=True "
+            f"(false positive from post-write _shadow_blobs). Got key_found={meta.key_found}."
+        )
+
+    # ------------------------------------------------------------------
+    # On-mode: explicit first-class test (not just regression footnote)
+    # ------------------------------------------------------------------
+
+    def test_on_mode_repeat_records_hit_true(self, monkeypatch):
+        """ON-mode, repeated identical query: 2nd call metadata has key_found=True.
+
+        On-mode HITs short-circuit before _dispatch via _make_hit_meta (~line 659/676),
+        so this tests the existing correct path explicitly as a first-class assertion.
+
+        First call:  key_found=False, cache_mode="on"  (miss -> provider called, cached)
+        Second call: key_found=True,  cache_mode="on"  (hit  -> provider NOT called)
+        """
+        from code_indexer.server.services import governed_call
+
+        text = "on mode repeat hit test 1230"
+        cache, _ = _make_real_cache(mode="on")  # empty initially
+        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+
+        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
+        provider = _FakeVoyageProvider()
+        coalescer = EmbeddingCoalescer(
+            LANE,
+            provider,
+            governor=gov,
+            acquire_timeout=5.0,
+            config_digest=_TEST_DIGEST,
+        )
+
+        # First call: cold miss.
+        _vec1, meta1 = coalescer.submit(text)
+        assert meta1.key_found is False, (
+            f"First on-mode call must be MISS (key_found=False), got {meta1.key_found}"
+        )
+        assert meta1.cache_mode == "on"
+        assert provider.call_count == 1
+
+        # Second call: should be an on-mode HIT (short-circuits before dispatch).
+        _vec2, meta2 = coalescer.submit(text)
+        assert meta2.key_found is True, (
+            f"Second on-mode call (repeat) must be HIT (key_found=True), got {meta2.key_found}"
+        )
+        assert meta2.cache_mode == "on", (
+            f"cache_mode must be 'on', got '{meta2.cache_mode}'"
+        )
+        # On-mode HIT: provider NOT called again.
+        assert provider.call_count == 1, (
+            f"On-mode HIT must not call provider again; call_count={provider.call_count}"
+        )
+
+    def test_on_mode_miss_metadata_key_found_false(self, monkeypatch):
+        """ON-mode, first/unique query: key_found=False (miss). Regression guard."""
+        from code_indexer.server.services import governed_call
+
+        cache, _ = _make_real_cache(mode="on")
+        monkeypatch.setattr(governed_call, "get_query_embedding_cache", lambda: cache)
+
+        gov = ProviderConcurrencyGovernor(max_concurrency=GOV_K)
+        provider = _FakeVoyageProvider()
+        coalescer = EmbeddingCoalescer(
+            LANE,
+            provider,
+            governor=gov,
+            acquire_timeout=5.0,
+            config_digest=_TEST_DIGEST,
+        )
+
+        _vec, meta = coalescer.submit("on mode miss unique 1230")
+        assert meta.key_found is False, (
+            f"On-mode MISS must have key_found=False, got {meta.key_found}"
+        )
+        assert meta.cache_mode == "on"

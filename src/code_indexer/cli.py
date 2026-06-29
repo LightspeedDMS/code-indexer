@@ -3499,6 +3499,7 @@ def index(
                     )
                     _orig_provider = config.embedding_provider
                     _extra_temporal_indexer = None
+                    _extra_indexing_result = None
                     try:
                         # Health check before indexing (audit fix A1)
                         _extra_embedding = _EPF.create(
@@ -3519,27 +3520,36 @@ def index(
                             vector_store,
                             collection_name=_extra_coll_name,
                         )
+                        # Bug #1205: start a fresh display for this provider so
+                        # progress renders during index_commits (Option B fix).
+                        rich_live_manager.start_bottom_display()
                         _extra_indexing_result = _extra_temporal_indexer.index_commits(
                             all_branches=all_branches,
                             max_commits=max_commits,
                             since_date=since_date,
                             progress_callback=_make_offset_callback(
                                 progress_callback,
-                                _extra_idx + 1,
-                                _num_temporal_providers,
+                                0,
+                                1,
                             ),
                             reconcile=reconcile,
                         )
-                        console.print(
-                            f"✅ {_extra_provider}: "
-                            f"{_extra_indexing_result.total_commits} commits",
-                            style="green",
-                        )
                     finally:
+                        # Bug #1205: stop the display before printing the completion
+                        # line so a bare console.print does not interleave with an
+                        # active Rich Live display.  Placed in finally so the display
+                        # is always torn down even if index_commits raises.
+                        rich_live_manager.stop_display()
                         if _extra_temporal_indexer is not None:
                             _extra_temporal_indexer.close()
                         config.embedding_provider = _orig_provider  # type: ignore[assignment]
                         config_manager._config = config
+                        if _extra_indexing_result is not None:
+                            console.print(
+                                f"✅ {_extra_provider}: "
+                                f"{_extra_indexing_result.total_commits} commits",
+                                style="green",
+                            )
 
                 sys.exit(0)
 
@@ -4140,6 +4150,12 @@ def index(
 
         if stats.failed_files > 0:
             console.print(f"⚠️  Failed files: {stats.failed_files}", style="yellow")
+            if stats.files_processed == 0 and stats.failed_files > 0:
+                console.print(
+                    "❌ All files failed to index — index is empty.",
+                    style="red",
+                )
+                sys.exit(1)
 
         # Show final indexing status
         final_status = smart_indexer.get_indexing_status()
@@ -5445,8 +5461,10 @@ def query(
                 # Story 2: All temporal results are changes now
                 console.print("   Showing changed chunks only (diff-based indexing)")
 
-            # file_path_filter: use first path_filter entry when only one provided
-            _path_filter_str = list(path_filter)[0] if len(path_filter) == 1 else None
+            # file_path_filter: join all path_filter entries with comma so
+            # _query_single_provider can split them (Bug #1210 — was only
+            # forwarding the first filter and silently dropping the rest).
+            _path_filter_str = ",".join(path_filter) if path_filter else None
 
             temporal_results = _execute_temporal_fusion(
                 config=config_manager.get_config(),
@@ -5456,6 +5474,7 @@ def query(
                 limit=limit,
                 time_range=(start_date, end_date),
                 file_path_filter=_path_filter_str,
+                exclude_path=",".join(exclude_paths) if exclude_paths else None,
                 diff_types=list(diff_types) if diff_types else None,
                 author=author,
                 chunk_type=chunk_type,

@@ -24,11 +24,21 @@ from ..models.api_models import QueryResultItem
 from ..query.semantic_query_manager import SemanticQueryError
 from ..auth import dependencies
 from ..logging_utils import format_error_log
-from ..middleware.correlation import get_correlation_id
+from code_indexer.server.telemetry.correlation_bridge import (
+    get_current_correlation_id as get_correlation_id,
+)
 from ..app_helpers import (
     _apply_rest_semantic_truncation,
     _apply_rest_fts_truncation,
 )
+from code_indexer.server.mcp.reranking import (
+    _apply_reranking_sync as _rest_apply_reranking_sync,
+    calculate_overfetch_limit as _rest_calculate_overfetch_limit,
+    extract_rerank_document as _rest_extract_rerank_document,
+)
+
+# Bug #1209: default overfetch multiplier when rerank config is unavailable.
+_REST_DEFAULT_OVERFETCH_MULTIPLIER = 5
 
 # Module-level logger
 logger = logging.getLogger(__name__)
@@ -72,10 +82,31 @@ def register_query_routes(
         Raises:
             HTTPException: If query fails, index missing, or invalid parameters
         """
+        import socket
         import time
         from pathlib import Path as PathLib
+        from code_indexer.server.services.search_event_context import (
+            SearchEventContext,
+            _search_event_ctx,
+        )
+        from code_indexer.server.services.search_event_log_writer import (
+            SearchEventRecord,
+        )
+        from code_indexer.server.services.config_service import get_config_service
 
         start_time = time.time()
+
+        # Issue #1159: install per-request search event context.
+        _search_type = request.search_mode or "semantic"
+        _event_ctx = SearchEventContext(
+            username=current_user.username,
+            repo_alias=request.repository_alias,
+            search_type=_search_type,
+            query_text=(request.query_text or "")[:500],
+        )
+        _ctx_token = _search_event_ctx.set(_event_ctx)
+        _result_count = 0
+        _search_succeeded = False
 
         try:
             # Handle background job submission (semantic mode only)
@@ -96,6 +127,7 @@ def register_query_routes(
                 )
                 from fastapi.responses import JSONResponse
 
+                _search_succeeded = True
                 return JSONResponse(
                     status_code=status.HTTP_202_ACCEPTED,
                     content={
@@ -240,7 +272,7 @@ def register_query_routes(
                         tantivy_manager = TantivyIndexManager(
                             repo_path / ".code-indexer" / "tantivy_index"
                         )
-                        tantivy_manager.initialize_index(create_new=False)
+                        tantivy_manager.open_for_search()
 
                         # Handle fuzzy flag
                         edit_dist = request.edit_distance
@@ -390,6 +422,8 @@ def register_query_routes(
                 # Return as JSONResponse to support truncated fields
                 from fastapi.responses import JSONResponse
 
+                _result_count = len(truncated_fts) + len(truncated_semantic)
+                _search_succeeded = True
                 return JSONResponse(
                     content={
                         "search_mode": search_mode_actual,
@@ -409,11 +443,27 @@ def register_query_routes(
                 )
 
             # Default semantic mode (backward compatibility)
+            # Bug #1209: when reranking is requested, overfetch so the reranker
+            # receives a larger candidate pool before trimming to requested_limit.
+            _requested_limit = request.limit
+            _fetch_limit = _requested_limit
+            if request.rerank_query:
+                _cfg_svc = get_config_service()
+                _rc = _cfg_svc.get_config().rerank_config
+                _overfetch_mul = (
+                    _rc.overfetch_multiplier
+                    if _rc
+                    else _REST_DEFAULT_OVERFETCH_MULTIPLIER
+                )
+                _fetch_limit = _rest_calculate_overfetch_limit(
+                    _requested_limit, _overfetch_mul
+                )
+
             results = semantic_query_manager.query_user_repositories(
                 username=current_user.username,
                 query_text=request.query_text,
                 repository_alias=request.repository_alias,
-                limit=request.limit,
+                limit=_fetch_limit,
                 min_score=request.min_score,
                 file_extensions=request.file_extensions,
                 # Phase 1 parameters (Story #503)
@@ -447,6 +497,21 @@ def register_query_routes(
                 )
                 results["total_results"] = len(results["results"])
 
+            # Bug #1209: apply reranking AFTER fusion and BEFORE truncation,
+            # mirroring the MCP _apply_rerank_and_filter pipeline order exactly.
+            # The reranker receives the full fused candidate set; it trims to
+            # _requested_limit internally.
+            if request.rerank_query:
+                results["results"], _rerank_meta = _rest_apply_reranking_sync(
+                    results=results["results"],
+                    rerank_query=request.rerank_query,
+                    rerank_instruction=request.rerank_instruction,
+                    content_extractor=_rest_extract_rerank_document,
+                    requested_limit=_requested_limit,
+                    config_service=get_config_service(),
+                )
+                results["total_results"] = len(results["results"])
+
             # Apply payload truncation for consistency with MCP handlers
             truncated_results = _apply_rest_semantic_truncation(
                 results["results"],
@@ -456,6 +521,8 @@ def register_query_routes(
             # Return as JSONResponse to support truncated fields
             from fastapi.responses import JSONResponse
 
+            _result_count = len(truncated_results)
+            _search_succeeded = True
             return JSONResponse(
                 content={
                     "results": truncated_results,
@@ -514,3 +581,49 @@ def register_query_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal search error: {str(e)}",
             )
+        finally:
+            # Issue #1159: reset ctx and enqueue search event record.
+            # Bug #1173: only enqueue on success (H11 — failed searches must NOT log).
+            _search_event_ctx.reset(_ctx_token)
+            _writer = getattr(
+                getattr(app, "state", None), "search_event_log_writer", None
+            )
+            if _writer is not None and _search_succeeded:
+                try:
+                    _total_ms = int((time.time() - start_time) * 1000)
+                    _cfg_svc = get_config_service()
+                    _cfg_get = getattr(_cfg_svc, "get_config", None)
+                    _cfg_obj = _cfg_get() if callable(_cfg_get) else None
+                    _node_id = str(getattr(_cfg_obj, "node_id", "") or "")
+                    if not _node_id:
+                        try:
+                            _node_id = socket.gethostname()
+                        except OSError as _hn_exc:
+                            logger.debug(
+                                "inline_query: socket.gethostname() failed, using 'unknown': %s",
+                                _hn_exc,
+                            )
+                            _node_id = "unknown"
+                    _record = SearchEventRecord(
+                        timestamp=time.time(),
+                        username=current_user.username,
+                        repo_alias=_event_ctx.repo_alias,
+                        search_type=_event_ctx.search_type,
+                        query_text=_event_ctx.query_text,
+                        voyage_cache_hit=_event_ctx.voyage_cache_hit,
+                        voyage_cache_mode=_event_ctx.voyage_cache_mode,
+                        voyage_latency_ms=_event_ctx.voyage_latency_ms,
+                        cohere_cache_hit=_event_ctx.cohere_cache_hit,
+                        cohere_cache_mode=_event_ctx.cohere_cache_mode,
+                        cohere_latency_ms=_event_ctx.cohere_latency_ms,
+                        total_latency_ms=_total_ms,
+                        result_count=_result_count,
+                        node_id=_node_id,
+                        correlation_id=get_correlation_id(),
+                    )
+                    _writer.enqueue(_record)
+                except Exception as _enq_exc:  # noqa: BLE001
+                    logger.debug(
+                        "inline_query: failed to enqueue search event record: %s",
+                        _enq_exc,
+                    )

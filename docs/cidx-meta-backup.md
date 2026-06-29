@@ -1,6 +1,6 @@
-# cidx-meta backup contract (Story #926)
+# cidx-meta backup contract
 
-This document captures the cidx-meta backup contract invariants extracted from the project CLAUDE.md to keep that file focused on rules and rituals.
+This document describes the cidx-meta backup contract invariants for the continuous git backup feature.
 
 The server can maintain a continuous git backup of the cidx-meta directory to a remote repository. Key invariants:
 
@@ -14,7 +14,7 @@ The server can maintain a continuous git backup of the cidx-meta directory to a 
 
 **Externalized conflict-resolution prompt**: `src/code_indexer/server/mcp/prompts/cidx_meta_conflict_resolution.md` — editable by operators. Must contain `{conflict_files}`, `{branch}`, and `{repo_path}` format placeholders.
 
-**Claude CLI routing**: Conflict resolution invokes Claude via `invoke_claude_cli()` in `src/code_indexer/global_repos/repo_analyzer.py` (Story #885 A10 boundary). On 600 s timeout, SIGTERM is sent first; SIGKILL follows after `_CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS` (30 s).
+**Claude CLI routing**: Conflict resolution invokes Claude via `invoke_claude_cli()` in `src/code_indexer/global_repos/repo_analyzer.py`. On 600 s timeout, SIGTERM is sent first; SIGKILL follows after `_CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS` (30 s).
 
 **Branch detection**: `detect_default_branch(master_path)` from `src/code_indexer/server/services/cidx_meta_backup/branch_detect.py` is called at the start of each backup sync to support remotes with `main` as default. Falls back to `"master"` when detection fails.
 

@@ -563,3 +563,39 @@ def test_detect_from_collection_meta_corrupt_json(
     assert result == MigrationResult.COMPLETED
     target = index_path / "code-indexer-temporal-voyage_code_3"
     assert target.exists()
+
+
+# ---------------------------------------------------------------------------
+# test_migration_skips_metadata_tracker_dir (Bug #1176)
+# ---------------------------------------------------------------------------
+
+
+def test_migration_skips_metadata_tracker_dir(index_path, voyage_config, caplog):
+    """Bug #1176: code-indexer-temporal/ that is a metadata tracker (only temporal_metadata.db)
+    must return SKIPPED without emitting any WARNING.
+
+    The directory is NOT a genuine HNSW collection — it has no hnsw_index.bin
+    and no collection_meta.json. The migration must bail out early before
+    calling _detect_provider_from_disk() to avoid the spurious
+    'Temporal migration: no metadata found' WARNING.
+    """
+    # Create the metadata-tracker layout: directory exists but has only the DB file
+    metadata_tracker = index_path / "code-indexer-temporal"
+    metadata_tracker.mkdir()
+    (metadata_tracker / "temporal_metadata.db").write_bytes(b"SQLite format 3\x00")
+
+    with caplog.at_level(logging.WARNING):
+        result = migrate_legacy_temporal_collection(index_path, voyage_config)
+
+    assert result == MigrationResult.SKIPPED, (
+        "A metadata-tracker directory (no hnsw_index.bin, no collection_meta.json) "
+        "should be SKIPPED, not migrated"
+    )
+    assert metadata_tracker.exists(), (
+        "Metadata tracker directory must be left untouched"
+    )
+    warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not warning_records, (
+        f"No WARNING should be emitted for a metadata-tracker dir, "
+        f"but got: {[r.message for r in warning_records]}"
+    )

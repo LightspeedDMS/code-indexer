@@ -331,23 +331,6 @@ This allows existing CIDX users to seamlessly transition to SSO authentication w
 
 When an SSO identity is linked, CIDX stores:
 
-**In `~/.cidx-server/users.json`:**
-```json
-{
-  "john": {
-    "role": "normal_user",
-    "password_hash": "bcrypt_hash",
-    "email": "john@example.com",
-    "oidc_identity": {
-      "subject": "oidc-user-id-12345",
-      "email": "john@example.com",
-      "linked_at": "2025-01-15T10:30:00Z",
-      "last_login": "2025-01-20T14:22:00Z"
-    }
-  }
-}
-```
-
 **In `~/.cidx-server/oauth.db`:**
 ```sql
 -- Fast lookup table for SSO subject → username mapping
@@ -556,7 +539,7 @@ After SSO authentication:
    - Ensure exact match (including https vs http, trailing slash)
 
 2. **Localhost vs production URL:**
-   - Development: Register `http://localhost:8000/auth/sso/callback`
+   - Development: Register `http://localhost:8090/auth/sso/callback`
    - Production: Register `https://your-domain.com/auth/sso/callback`
    - Many providers require separate clients for dev/prod
 
@@ -655,7 +638,7 @@ After SSO authentication:
   "log_level": "DEBUG"
 }
 # Restart server and check logs
-tail -f ~/.cidx-server/logs/server.log | grep -i oidc
+sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs WHERE message LIKE '%oidc%' ORDER BY id DESC LIMIT 50;"
 ```
 
 **Test Provider Metadata Discovery:**
@@ -684,5 +667,5 @@ sqlite3 ~/.cidx-server/oauth.db "SELECT * FROM oidc_identity_links;"
 - **PKCE Specification:** https://tools.ietf.org/html/rfc7636
 
 For CIDX-specific issues:
-- Check server logs in `~/.cidx-server/logs/`
+- Query server logs: `sqlite3 ~/.cidx-server/logs.db "SELECT * FROM logs ORDER BY id DESC LIMIT 100;"`
 - Report issues on the project repository issue tracker

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
+from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -138,13 +139,22 @@ class DataRetentionScheduler:
         job_id = f"data-retention-{uuid.uuid4().hex[:8]}"
 
         if self._job_tracker is not None:
-            self._job_tracker.register_job(
-                job_id,
-                "data_retention_cleanup",
-                username="system",
-                repo_alias="server",
-            )
-            self._job_tracker.update_status(job_id, status="running")
+            try:
+                self._job_tracker.register_job_if_no_conflict(
+                    job_id,
+                    "data_retention_cleanup",
+                    username="system",
+                    repo_alias="server",
+                )
+                self._job_tracker.update_status(job_id, status="running")
+            except DuplicateJobError:
+                # Another worker already claimed this cleanup cycle — skip silently.
+                # This is expected and benign under multi-worker deployments (Bug #1184).
+                logger.debug(
+                    "DataRetentionScheduler: data_retention_cleanup already claimed "
+                    "by another worker; skipping"
+                )
+                return
 
         try:
             if self._storage_mode == "postgres" and self._backend_registry is not None:
@@ -221,18 +231,38 @@ class DataRetentionScheduler:
             failed_tables=failed_tables,
         )
 
+        cfg_root = self._config_service.get_config()
+        token_blacklist_deleted = self._safe_prune_token_blacklist(
+            jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
+            failed_tables=failed_tables,
+        )
+
+        elevated_sessions_deleted = self._safe_prune_elevated_sessions(
+            failed_tables=failed_tables,
+        )
+
+        oidc_state_deleted = self._safe_prune_oidc_state_tokens(
+            failed_tables=failed_tables,
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
             "sync_jobs_deleted": sync_jobs_deleted,
             "dep_map_history_deleted": dep_map_history_deleted,
             "background_jobs_deleted": background_jobs_deleted,
+            "token_blacklist_deleted": token_blacklist_deleted,
+            "elevated_sessions_deleted": elevated_sessions_deleted,
+            "oidc_state_deleted": oidc_state_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
                 + sync_jobs_deleted
                 + dep_map_history_deleted
                 + background_jobs_deleted
+                + token_blacklist_deleted
+                + elevated_sessions_deleted
+                + oidc_state_deleted
             ),
             "failed_tables": failed_tables,
         }
@@ -302,18 +332,38 @@ class DataRetentionScheduler:
             failed_tables=failed_tables,
         )
 
+        cfg_root = self._config_service.get_config()
+        token_blacklist_deleted = self._safe_prune_token_blacklist(
+            jwt_expiration_minutes=getattr(cfg_root, "jwt_expiration_minutes", 10),
+            failed_tables=failed_tables,
+        )
+
+        elevated_sessions_deleted = self._safe_prune_elevated_sessions(
+            failed_tables=failed_tables,
+        )
+
+        oidc_state_deleted = self._safe_prune_oidc_state_tokens(
+            failed_tables=failed_tables,
+        )
+
         return {
             "logs_deleted": logs_deleted,
             "audit_logs_deleted": audit_logs_deleted,
             "sync_jobs_deleted": sync_jobs_deleted,
             "dep_map_history_deleted": dep_map_history_deleted,
             "background_jobs_deleted": background_jobs_deleted,
+            "token_blacklist_deleted": token_blacklist_deleted,
+            "elevated_sessions_deleted": elevated_sessions_deleted,
+            "oidc_state_deleted": oidc_state_deleted,
             "total_deleted": (
                 logs_deleted
                 + audit_logs_deleted
                 + sync_jobs_deleted
                 + dep_map_history_deleted
                 + background_jobs_deleted
+                + token_blacklist_deleted
+                + elevated_sessions_deleted
+                + oidc_state_deleted
             ),
             "failed_tables": failed_tables,
         }
@@ -416,6 +466,101 @@ class DataRetentionScheduler:
             )
             if failed_tables is not None:
                 failed_tables.append(table_name)
+            return 0
+
+    def _safe_prune_token_blacklist(
+        self,
+        jwt_expiration_minutes: int,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from token_blacklist (Story #1163 AC2).
+
+        TTL is derived from jwt_expiration_minutes (the token lifetime) so
+        rows cannot be pruned before the JWT they represent could still be
+        considered valid.
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'token_blacklist' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.app import get_token_blacklist
+
+            ttl_seconds = jwt_expiration_minutes * 60
+            return int(get_token_blacklist().prune_expired(ttl_seconds=ttl_seconds))
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'token_blacklist' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("token_blacklist")
+            return 0
+
+    def _safe_prune_elevated_sessions(
+        self,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from elevated_sessions (Bug #1221).
+
+        TTL is the manager's configured max_age_seconds so rows cannot be
+        pruned before the elevation window they represent has fully expired.
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'elevated_sessions' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.auth.elevated_session_manager import (
+                elevated_session_manager,
+            )
+
+            max_age_seconds = elevated_session_manager._max_age
+            return int(elevated_session_manager.prune_expired(max_age_seconds))
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'elevated_sessions' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("elevated_sessions")
+            return 0
+
+    def _safe_prune_oidc_state_tokens(
+        self,
+        failed_tables: Optional[List[str]] = None,
+    ) -> int:
+        """Prune expired rows from oidc_state_tokens (Bug #1224).
+
+        TTL is already encoded in each row's expires_at column, so deletion
+        predicate is simply expires_at <= NOW().
+
+        Uses oidc_routes.state_manager (the instance wired with the PG pool
+        in cluster mode, or the shared-SQLite instance in solo mode) so the
+        correct backend is pruned.  Returns 0 when SSO is not configured
+        (state_manager is None).
+
+        Mirrors the Bug #1068 safe-wrapper pattern: catches and logs any
+        exception, appends 'oidc_state_tokens' to failed_tables on error, and
+        returns 0 so the rest of the cleanup cycle is never aborted.
+        """
+        try:
+            from code_indexer.server.auth.oidc import routes as oidc_routes
+
+            mgr = oidc_routes.state_manager
+            if mgr is None:
+                return 0
+            return int(mgr.prune_expired())
+        except Exception as exc:
+            logger.error(
+                "DataRetentionScheduler: pruning of 'oidc_state_tokens' failed: %s",
+                exc,
+                exc_info=True,
+            )
+            if failed_tables is not None:
+                failed_tables.append("oidc_state_tokens")
             return 0
 
     # ------------------------------------------------------------------

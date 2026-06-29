@@ -2,9 +2,8 @@
 
 Covers:
 - execute_temporal_query_with_fusion() with no collections, single, and multi-provider
-- _discover_queryable_collections() collection discovery and provider_filter
 - _query_single_provider() attribution fields populated
-- _query_multi_provider_fusion() fuse_rrf_multi wired correctly
+- fuse_rrf_multi wired correctly for multi-provider path
 - TEMPORAL_QUERY_TIMEOUT_SECONDS constant value
 - _make_config_manager() shim wraps config correctly
 """
@@ -14,7 +13,6 @@ from unittest.mock import MagicMock, patch
 
 from code_indexer.services.temporal.temporal_fusion_dispatch import (
     TEMPORAL_QUERY_TIMEOUT_SECONDS,
-    _discover_queryable_collections,
     _make_config_manager,
     execute_temporal_query_with_fusion,
 )
@@ -85,71 +83,6 @@ def test_make_config_manager_shim():
 
 
 # ---------------------------------------------------------------------------
-# test_discover_queryable_collections_finds_provider_dirs
-# ---------------------------------------------------------------------------
-
-
-def test_discover_queryable_collections_finds_provider_dirs(tmp_path):
-    """Temporal collection dirs on disk are discovered and returned."""
-    coll_dir = tmp_path / "code-indexer-temporal-voyage_code_3"
-    coll_dir.mkdir()
-
-    config = _make_mock_config()
-    collections = _discover_queryable_collections(config, tmp_path)
-
-    assert len(collections) == 1
-    coll_name, _ = collections[0]
-    assert coll_name == "code-indexer-temporal-voyage_code_3"
-
-
-def test_discover_queryable_collections_finds_legacy_collection(tmp_path):
-    """Legacy 'code-indexer-temporal' dir is also discovered."""
-    legacy_dir = tmp_path / "code-indexer-temporal"
-    legacy_dir.mkdir()
-
-    config = _make_mock_config()
-    collections = _discover_queryable_collections(config, tmp_path)
-
-    assert len(collections) == 1
-    coll_name, _ = collections[0]
-    assert coll_name == "code-indexer-temporal"
-
-
-def test_discover_queryable_collections_finds_multiple_collections(tmp_path):
-    """Multiple temporal collection dirs are all discovered."""
-    (tmp_path / "code-indexer-temporal-voyage_code_3").mkdir()
-    (tmp_path / "code-indexer-temporal-embed_v4_0").mkdir()
-
-    config = _make_mock_config()
-    collections = _discover_queryable_collections(config, tmp_path)
-
-    assert len(collections) == 2
-    names = {c[0] for c in collections}
-    assert "code-indexer-temporal-voyage_code_3" in names
-    assert "code-indexer-temporal-embed_v4_0" in names
-
-
-# ---------------------------------------------------------------------------
-# test_discover_queryable_collections_applies_provider_filter
-# ---------------------------------------------------------------------------
-
-
-def test_discover_queryable_collections_applies_provider_filter(tmp_path):
-    """provider_filter narrows results to matching collection names only."""
-    (tmp_path / "code-indexer-temporal-voyage_code_3").mkdir()
-    (tmp_path / "code-indexer-temporal-embed_v4_0").mkdir()
-
-    config = _make_mock_config()
-    collections = _discover_queryable_collections(
-        config, tmp_path, provider_filter="voyage"
-    )
-
-    assert len(collections) == 1
-    coll_name, _ = collections[0]
-    assert "voyage" in coll_name
-
-
-# ---------------------------------------------------------------------------
 # test_execute_returns_empty_when_no_collections
 # ---------------------------------------------------------------------------
 
@@ -205,16 +138,32 @@ def test_zero_providers_returns_warning(tmp_path):
 
 
 def test_single_provider_no_fusion_overhead(tmp_path):
-    """One collection → direct query via TemporalSearchService (no fusion math)."""
-    (tmp_path / "code-indexer-temporal-voyage_code_3").mkdir()
-
+    """One provider group → TemporalSearchService queried once for the shard."""
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
 
     expected_result = _make_result("auth.py")
     expected_results = _make_results_with([expected_result])
 
+    one_provider = [
+        (
+            "code-indexer-temporal-voyage_code_3",
+            ["code-indexer-temporal-voyage_code_3"],
+        )
+    ]
+
     with (
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=one_provider,
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
         patch(
             "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
         ) as MockService,
@@ -235,7 +184,9 @@ def test_single_provider_no_fusion_overhead(tmp_path):
             limit=5,
         )
 
-    assert result is expected_results
+    # Single provider: results must contain the expected file
+    assert len(result.results) >= 1
+    assert any(r.file_path == "auth.py" for r in result.results)
     mock_service_instance.query_temporal.assert_called_once()
 
 
@@ -246,15 +197,31 @@ def test_single_provider_no_fusion_overhead(tmp_path):
 
 def test_single_provider_attribution_populated(tmp_path):
     """Single provider query must set source_provider, contributing_providers, fusion_score."""
-    (tmp_path / "code-indexer-temporal-voyage_code_3").mkdir()
-
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
 
     result_item = _make_result("service.py", score=0.85)
     service_results = _make_results_with([result_item])
 
+    one_provider = [
+        (
+            "code-indexer-temporal-voyage_code_3",
+            ["code-indexer-temporal-voyage_code_3"],
+        )
+    ]
+
     with (
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=one_provider,
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
         patch(
             "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
         ) as MockService,
@@ -275,6 +242,7 @@ def test_single_provider_attribution_populated(tmp_path):
             limit=5,
         )
 
+    assert len(result.results) >= 1
     r = result.results[0]
     assert r.source_provider is not None
     assert r.contributing_providers is not None
@@ -288,10 +256,7 @@ def test_single_provider_attribution_populated(tmp_path):
 
 
 def test_multi_provider_dispatches_to_all(tmp_path):
-    """Two collections → both are queried (TemporalSearchService called twice)."""
-    (tmp_path / "code-indexer-temporal-voyage_code_3").mkdir()
-    (tmp_path / "code-indexer-temporal-embed_v4_0").mkdir()
-
+    """Two provider groups → both are queried (TemporalSearchService called twice)."""
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
 
@@ -299,6 +264,17 @@ def test_multi_provider_dispatches_to_all(tmp_path):
     result_b = _make_result("b.py", score=0.8)
 
     call_count = []  # type: ignore[var-annotated]
+
+    two_providers = [
+        (
+            "code-indexer-temporal-voyage_code_3",
+            ["code-indexer-temporal-voyage_code_3"],
+        ),
+        (
+            "code-indexer-temporal-embed_v4_0",
+            ["code-indexer-temporal-embed_v4_0"],
+        ),
+    ]
 
     def make_service(*args, **kwargs):
         instance = MagicMock()
@@ -310,6 +286,17 @@ def test_multi_provider_dispatches_to_all(tmp_path):
         return instance
 
     with (
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=two_providers,
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
         patch(
             "code_indexer.services.temporal.temporal_search_service.TemporalSearchService",
             side_effect=make_service,
@@ -338,14 +325,22 @@ def test_multi_provider_dispatches_to_all(tmp_path):
 
 def test_multi_provider_fusion_applied(tmp_path):
     """Two providers → fuse_rrf_multi called and results are fused."""
-    (tmp_path / "code-indexer-temporal-voyage_code_3").mkdir()
-    (tmp_path / "code-indexer-temporal-embed_v4_0").mkdir()
-
     config = _make_mock_config()
     vector_store = _make_mock_vector_store(tmp_path)
 
     result_a = _make_result("a.py", score=0.9)
     result_b = _make_result("b.py", score=0.8)
+
+    two_providers = [
+        (
+            "code-indexer-temporal-voyage_code_3",
+            ["code-indexer-temporal-voyage_code_3"],
+        ),
+        (
+            "code-indexer-temporal-embed_v4_0",
+            ["code-indexer-temporal-embed_v4_0"],
+        ),
+    ]
 
     def make_service(*args, **kwargs):
         instance = MagicMock()
@@ -353,6 +348,17 @@ def test_multi_provider_fusion_applied(tmp_path):
         return instance
 
     with (
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch._discover_provider_shards_with_pruning",
+            return_value=two_providers,
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_fusion_dispatch.filter_healthy_temporal_providers",
+            side_effect=lambda cols: (cols, []),
+        ),
+        patch(
+            "code_indexer.services.temporal.temporal_migration.migrate_legacy_temporal_collection",
+        ),
         patch(
             "code_indexer.services.temporal.temporal_search_service.TemporalSearchService",
             side_effect=make_service,
@@ -376,3 +382,98 @@ def test_multi_provider_fusion_applied(tmp_path):
         )
 
     mock_fuse.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Bug #1210 — _query_single_provider must split comma-joined file_path_filter
+# ---------------------------------------------------------------------------
+
+# Shared patch list for _query_single_provider split tests.
+# We call _query_single_provider directly and capture the kwargs that reach
+# service.query_temporal so we can assert the split contract.
+
+_SHARD = "code-indexer-temporal-voyage_code_3"
+
+
+def _invoke_query_single_provider(
+    tmp_path,
+    file_path_filter,
+):
+    """Call _query_single_provider with given file_path_filter; return the
+    kwargs dict that was passed to the mocked query_temporal."""
+    from code_indexer.services.temporal.temporal_fusion_dispatch import (
+        _query_single_provider,
+    )
+
+    config = _make_mock_config()
+    vector_store = _make_mock_vector_store(tmp_path)
+
+    captured: dict = {}
+
+    def _capture_query_temporal(**kwargs):
+        captured.update(kwargs)
+        return _make_results_with([])
+
+    with (
+        patch(
+            "code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+        ) as MockService,
+        patch(
+            "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+        ) as MockFactory,
+    ):
+        mock_svc = MagicMock()
+        mock_svc.query_temporal.side_effect = _capture_query_temporal
+        MockService.return_value = mock_svc
+        MockFactory.create.return_value = MagicMock()
+
+        _query_single_provider(
+            config=config,
+            vector_store=vector_store,
+            coll_name=_SHARD,
+            query_text="test",
+            limit=5,
+            time_range=None,
+            file_path_filter=file_path_filter,
+        )
+
+    return captured
+
+
+def test_file_path_filter_comma_split_reaches_query_temporal(tmp_path):
+    """Bug #1210 dispatch split: 'a/**,b/**' must reach query_temporal as ['a/**', 'b/**']."""
+    captured = _invoke_query_single_provider(tmp_path, "a/**,b/**")
+    path_filter = captured.get("path_filter")
+    assert path_filter is not None, (
+        "path_filter must not be None for a comma-joined file_path_filter"
+    )
+    assert isinstance(path_filter, list), (
+        f"path_filter must be a list, got {type(path_filter)}"
+    )
+    assert len(path_filter) == 2, (
+        f"Expected 2 patterns from 'a/**,b/**', got {path_filter!r}"
+    )
+    assert "a/**" in path_filter, f"'a/**' missing from {path_filter!r}"
+    assert "b/**" in path_filter, f"'b/**' missing from {path_filter!r}"
+
+
+def test_file_path_filter_single_pattern_is_one_element_list(tmp_path):
+    """Bug #1210 dispatch split: single pattern '*/src/*' must reach query_temporal as ['*/src/*']."""
+    captured = _invoke_query_single_provider(tmp_path, "*/src/*")
+    path_filter = captured.get("path_filter")
+    assert path_filter is not None, (
+        "path_filter must not be None for a single file_path_filter"
+    )
+    assert isinstance(path_filter, list), (
+        f"path_filter must be a list, got {type(path_filter)}"
+    )
+    assert path_filter == ["*/src/*"], f"Expected ['*/src/*'], got {path_filter!r}"
+
+
+def test_file_path_filter_none_passes_none_to_query_temporal(tmp_path):
+    """Bug #1210 dispatch split: None file_path_filter must reach query_temporal as None."""
+    captured = _invoke_query_single_provider(tmp_path, None)
+    path_filter = captured.get("path_filter")
+    assert path_filter is None, (
+        f"path_filter must be None when file_path_filter is None, got {path_filter!r}"
+    )

@@ -11,9 +11,11 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, cast
+from typing import Any, Dict, Optional, Set, Tuple, cast
 
 from code_indexer.server.logging_utils import format_error_log
 from .token_encryption import (
@@ -25,6 +27,20 @@ from .token_encryption import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# De-spam memo for APP-GENERAL-061 (Bug #1222)
+#
+# CITokenManager is constructed fresh at every call site (NOT a singleton).
+# Without a module-level memo, the same undecryptable ciphertext floods
+# WARNING logs on every check-credentials request.
+#
+# Key: (platform, sha256_hexdigest(encrypted_token)) — NEVER the raw value.
+# Thread-safe under FastAPI workers via _DECRYPT_WARN_SEEN_LOCK.
+# ---------------------------------------------------------------------------
+_DECRYPT_WARN_SEEN: Set[Tuple[str, str]] = set()
+_DECRYPT_WARN_SEEN_LOCK: threading.Lock = threading.Lock()
+
 
 # Token validation patterns
 GITHUB_TOKEN_PATTERN = re.compile(
@@ -284,15 +300,31 @@ class CITokenManager:
                     token_row["encrypted_token"]
                 )
             except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "APP-GENERAL-061",
-                        f"Failed to decrypt {platform} token, treating as unconfigured "
-                        f"(token preserved in DB for recovery): {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
+                # De-spam memo (Bug #1222): log WARNING once per distinct
+                # (platform, ciphertext-hash) pair; downgrade to DEBUG on repeat.
+                _enc = token_row["encrypted_token"]
+                _key = (platform, sha256(_enc.encode()).hexdigest())
+                with _DECRYPT_WARN_SEEN_LOCK:
+                    _is_new = _key not in _DECRYPT_WARN_SEEN
+                    if _is_new:
+                        _DECRYPT_WARN_SEEN.add(_key)
+                _msg = format_error_log(
+                    "APP-GENERAL-061",
+                    f"Failed to decrypt {platform} token, treating as unconfigured "
+                    f"(token preserved in DB for recovery): {e}",
+                    extra={"correlation_id": get_correlation_id()},
                 )
+                if _is_new:
+                    logger.warning(_msg)
+                else:
+                    logger.debug(_msg)
                 return None
+            # Clear any memo entry for this platform on successful decrypt so that
+            # a genuinely new bad ciphertext (e.g. after token rotation) warns once again.
+            _enc_success = token_row["encrypted_token"]
+            _key_success = (platform, sha256(_enc_success.encode()).hexdigest())
+            with _DECRYPT_WARN_SEEN_LOCK:
+                _DECRYPT_WARN_SEEN.discard(_key_success)
             if used_fallback:
                 new_enc = self._encrypt_token(decrypted_token)
                 self._sqlite_backend.update_encrypted_token(platform, new_enc)

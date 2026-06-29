@@ -57,6 +57,32 @@ RESTART_SIGNAL_PATH = _cidx_data_dir / "restart.signal"
 # and deleted without triggering a restart. Set to 2x the typical poll interval.
 RESTART_SIGNAL_STALENESS_THRESHOLD = 120
 
+# Story #1198 MAJOR-M2: launch.json written by ConfigService.materialize_launch_config()
+# to capture the TARGET launch parameters (workers, log_level, host, port,
+# target_restart_generation).  The auto-updater reads this file before restarting
+# uvicorn so that the restarted process picks up any pending config changes.
+LAUNCH_CONFIG_PATH = _cidx_data_dir / "launch.json"
+# applied_launch.json written by the auto-updater AFTER it has applied a launch
+# config (started uvicorn with the values from launch.json).  Consumers such as
+# applied_worker_count.py read this to determine the APPLIED (running) count.
+APPLIED_LAUNCH_CONFIG_PATH = _cidx_data_dir / "applied_launch.json"
+
+
+# Canonical server defaults mirroring ServerConfig field declarations (config_manager.py).
+# Used by _resolve_launch_values so defaults stay centralized; never hardcode these inline.
+def _get_server_config_defaults() -> tuple:
+    """Return (host, port, workers) defaults from ServerConfig field declarations."""
+    from code_indexer.server.utils.config_manager import ServerConfig as _SC
+    import dataclasses as _dc
+
+    _fields = {f.name: f.default for f in _dc.fields(_SC)}
+    return _fields["host"], _fields["port"], _fields["workers"]
+
+
+_LAUNCH_DEFAULT_HOST, _LAUNCH_DEFAULT_PORT, _LAUNCH_DEFAULT_WORKERS = (
+    _get_server_config_defaults()
+)
+
 # Hnswlib fallback constants (Bug #160)
 # Note: Using /var/tmp/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 HNSWLIB_FALLBACK_PATH = Path("/var/tmp/cidx-hnswlib")
@@ -933,6 +959,74 @@ class DeploymentExecutor:
             )
             return False
 
+    def _pip_supports_break_system_packages(
+        self, python_path: str, use_sudo: bool = False
+    ) -> bool:
+        """Return True if the pip that will run the install supports --break-system-packages.
+
+        The flag was introduced in pip 23.0.1.  On stock Rocky 9 the system pip
+        is 21.3.1, which rejects the flag with "no such option", causing the
+        hnswlib build step to fail (Bug #1234).
+
+        IMPORTANT (live-VM fix): the probe MUST use the same privilege context as
+        the install.  Both build_custom_hnswlib and pip_install run their installs
+        via ``sudo python3 -m pip install ...``.  On Rocky 9 the non-sudo user pip
+        may be 26.x (probe would return True) while the sudo/system pip is 21.3.1
+        (should return False).  Pass ``use_sudo=True`` when the corresponding
+        install command starts with ``sudo``.
+
+        Args:
+            python_path: Path to the Python interpreter whose pip to probe.
+            use_sudo: When True, prefix the pip --version probe with ``sudo`` so
+                      the probe resolves the same pip binary the install will use.
+
+        Returns:
+            True if pip version >= 23.0.1, False otherwise or on any error.
+            Conservatively returns False on any parse/subprocess failure so that
+            the flag is silently omitted rather than breaking the install.
+        """
+        try:
+            cmd = (["sudo"] if use_sudo else []) + [
+                python_path,
+                "-m",
+                "pip",
+                "--version",
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return False
+
+            # Output format: "pip X.Y.Z from /path (python N.M)"
+            parts = result.stdout.strip().split()
+            if len(parts) < 2 or parts[0] != "pip":
+                return False
+
+            raw_version = parts[1]
+            # Parse major.minor.patch (or major.minor) — ignore pre/post suffixes
+            version_parts = raw_version.split(".")
+            major = int(version_parts[0])
+            minor = int(version_parts[1]) if len(version_parts) > 1 else 0
+            patch = int(version_parts[2]) if len(version_parts) > 2 else 0
+
+            # Minimum version that supports --break-system-packages: 23.0.1
+            if major > 23:
+                return True
+            if major == 23:
+                if minor > 0:
+                    return True
+                if minor == 0 and patch >= 1:
+                    return True
+            return False
+
+        except Exception:
+            # Swallow all errors — conservatively omit the flag
+            return False
+
     def _ensure_build_dependencies(self) -> bool:
         """Ensure C++ build dependencies are installed for compiling hnswlib.
 
@@ -1042,23 +1136,44 @@ class DeploymentExecutor:
 
         try:
             python_path = self._get_server_python()
+            # Probe with use_sudo=True: both installs below run via sudo, so we must
+            # check the SAME pip binary (system pip) that sudo will resolve.
+            # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
+            # True) while the actual sudo install used the system pip (21.3.1, False).
+            break_sys_pkg = self._pip_supports_break_system_packages(
+                python_path, use_sudo=True
+            )
 
             # Install pybind11 first - required because setup.py imports it at module level
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+            pybind11_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            if break_sys_pkg:
+                pybind11_cmd.append("--break-system-packages")
+            pybind11_cmd.append("pybind11")
             pybind_result = subprocess.run(
-                [
-                    "sudo",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--break-system-packages",
-                    "pybind11",
-                ],
+                pybind11_cmd,
                 capture_output=True,
                 text=True,
                 timeout=120,
             )
+
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                pybind_result.returncode != 0
+                and "--break-system-packages" in pybind11_cmd
+                and "no such option" in pybind_result.stderr
+            ):
+                logger.warning(
+                    "pybind11 install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in pybind11_cmd if c != "--break-system-packages"]
+                pybind_result = subprocess.run(
+                    retry_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
 
             if pybind_result.returncode != 0:
                 logger.error(
@@ -1075,23 +1190,36 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+            hnswlib_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            if break_sys_pkg:
+                hnswlib_cmd.append("--break-system-packages")
+            hnswlib_cmd.extend(["--force-reinstall", "--no-deps", "."])
             result = subprocess.run(
-                [
-                    "sudo",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--break-system-packages",
-                    "--force-reinstall",
-                    "--no-deps",
-                    ".",
-                ],
+                hnswlib_cmd,
                 cwd=hnswlib_path,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout for compilation
             )
+
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                result.returncode != 0
+                and "--break-system-packages" in hnswlib_cmd
+                and "no such option" in result.stderr
+            ):
+                logger.warning(
+                    "hnswlib install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in hnswlib_cmd if c != "--break-system-packages"]
+                result = subprocess.run(
+                    retry_cmd,
+                    cwd=hnswlib_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
 
             if result.returncode != 0:
                 logger.error(
@@ -1668,22 +1796,39 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
+            # Probe with use_sudo=True: the install runs via sudo, so the probe must
+            # check the same pip binary (system pip) that sudo will resolve.
+            # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
+            # True) while the actual sudo install used the system pip (21.3.1, False).
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
+            pip_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            if self._pip_supports_break_system_packages(python_path, use_sudo=True):
+                pip_cmd.append("--break-system-packages")
+            pip_cmd.extend(["-e", "."])
             result = subprocess.run(
-                [
-                    "sudo",
-                    python_path,
-                    "-m",
-                    "pip",
-                    "install",
-                    "--break-system-packages",
-                    "-e",
-                    ".",
-                ],
+                pip_cmd,
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
             )
+
+            # Belt-and-suspenders: if pip still rejects the flag, retry without it.
+            if (
+                result.returncode != 0
+                and "--break-system-packages" in pip_cmd
+                and "no such option" in result.stderr
+            ):
+                logger.warning(
+                    "pip install rejected --break-system-packages; retrying without flag",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                retry_cmd = [c for c in pip_cmd if c != "--break-system-packages"]
+                result = subprocess.run(
+                    retry_cmd,
+                    cwd=self.repo_path,
+                    capture_output=True,
+                    text=True,
+                )
 
             if result.returncode != 0:
                 logger.error(
@@ -1797,94 +1942,291 @@ class DeploymentExecutor:
             )
             return False
 
-    def _ensure_workers_config(self) -> bool:
-        """Ensure systemd service has --workers 1 configured.
+    def _read_launch_source(self, mode: str) -> Optional[dict]:
+        """Read launch config JSON for the given mode.
 
-        Single worker maintains in-memory cache coherency (HNSW, FTS, OmniCache).
-        Multiple workers duplicate caches and break cursor-based pagination.
-
-        Returns:
-            True if config is correct or was updated, False on error
+        APPLY:  reads LAUNCH_CONFIG_PATH; missing/corrupt → returns {} (fall through
+                to config.json → defaults; APPLY's job is to apply the TARGET).
+        DEPLOY: reads APPLIED_LAUNCH_CONFIG_PATH. Both the MISSING and CORRUPT cases
+            return None so the caller PRESERVES the live ExecStart unchanged — a routine
+            code deploy must never rewrite the live unit from a stale config. The live
+            ExecStart is the confirmed running state (e.g. --host 0.0.0.0 bound so HAProxy
+            on another host can reach this node); falling through to config.json /
+            ServerConfig defaults would risk rewriting --host 0.0.0.0 → 127.0.0.1 (the
+            ServerConfig default), dropping the node off the load balancer (a confirmed
+            production-outage path). A present+valid applied_launch.json is used normally.
         """
-        service_path = Path(f"/etc/systemd/system/{self.service_name}.service")
-
-        try:
-            if not service_path.exists():
-                logger.warning(
-                    format_error_log(
-                        "DEPLOY-GENERAL-017",
-                        f"Service file not found: {service_path}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-                return True  # Not an error if service doesn't exist yet
-
-            content = service_path.read_text()
-
-            # Check if --workers is already configured
-            if "--workers" in content:
+        source_path = (
+            LAUNCH_CONFIG_PATH if mode == "APPLY" else APPLIED_LAUNCH_CONFIG_PATH
+        )
+        if not source_path.exists():
+            if mode == "DEPLOY":
+                # DEPLOY + missing applied_launch.json: preserve the live ExecStart.
+                # The live unit IS the confirmed running state (e.g. --host 0.0.0.0 bound
+                # so HAProxy on another host can reach this node). Falling through to
+                # config.json / ServerConfig defaults risks rewriting --host 0.0.0.0
+                # to 127.0.0.1 (the ServerConfig default), dropping the node off the
+                # load balancer (production outage).
+                # Treat identically to the CORRUPT case: return None so the caller
+                # preserves the live unit unchanged.
                 logger.debug(
-                    "Workers config already present in service file",
+                    "DEPLOY: applied_launch.json missing — preserving live ExecStart "
+                    "(same as corrupt path; live unit is the confirmed running state)",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                return True
-
-            # Add --workers 1 to ExecStart line
-            if "ExecStart=" in content and "uvicorn" in content:
-                # Find ExecStart line and add --workers 1
-                lines = content.split("\n")
-                updated_lines = []
-                modified = False
-
-                for line in lines:
-                    if line.startswith("ExecStart=") and "uvicorn" in line:
-                        # Add --workers 1 before any newline
-                        line = line.rstrip() + " --workers 1"
-                        modified = True
-                    updated_lines.append(line)
-
-                if modified:
-                    new_content = "\n".join(updated_lines)
-                    # Write via sudo
-                    result = subprocess.run(
-                        ["sudo", "tee", str(service_path)],
-                        input=new_content,
-                        capture_output=True,
-                        text=True,
-                    )
-
-                    if result.returncode != 0:
-                        logger.error(
-                            format_error_log(
-                                "DEPLOY-GENERAL-018",
-                                f"Failed to update service file: {result.stderr}",
-                                extra={"correlation_id": get_correlation_id()},
-                            )
-                        )
-                        return False
-
-                    # Reload systemd
-                    subprocess.run(
-                        ["sudo", "systemctl", "daemon-reload"],
-                        capture_output=True,
-                    )
-
-                    logger.info(
-                        "Added --workers 1 to service file",
+                return None
+            return {}
+        try:
+            return dict(json.loads(source_path.read_text()))
+        except (json.JSONDecodeError, OSError) as exc:
+            if mode == "DEPLOY":
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-199",
+                        f"DEPLOY: applied_launch.json corrupt — preserving live ExecStart: {exc}",
                         extra={"correlation_id": get_correlation_id()},
                     )
+                )
+                return None
+            logger.debug(
+                f"APPLY: launch.json unreadable ({exc}); falling through to config.json",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return {}
 
-            return True
+    def _fill_from_config_json(
+        self, host: Optional[str], port: Optional[int], workers: Optional[int]
+    ) -> tuple:
+        """Fill any still-None values from config.json; return (host, port, workers)."""
+        if all(v is not None for v in (host, port, workers)):
+            return host, port, workers
+        config_path = _cidx_data_dir / "config.json"
+        if config_path.exists():
+            try:
+                cfg = json.loads(config_path.read_text())
+                if host is None:
+                    host = cfg.get("host")
+                if port is None:
+                    port = cfg.get("port")
+                if workers is None:
+                    workers = cfg.get("workers")
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug(
+                    f"config.json unreadable ({exc}); using ServerConfig defaults",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        return host, port, workers
 
-        except Exception as e:
+    def _resolve_launch_values(self, mode: str) -> Optional[dict]:
+        """Return resolved {host, port, workers} or None (DEPLOY: missing/corrupt source).
+
+        For APPLY mode, also includes applied_restart_generation sourced from
+        launch.json's target_restart_generation (defaults to 0 when absent).
+        DEPLOY mode is unaffected: it reads applied_launch.json which has no generation
+        field, and the ExecStart rewrite must not receive that field.
+        """
+        raw = self._read_launch_source(mode)
+        if raw is None:
+            return (
+                None  # DEPLOY: corrupt/missing applied_launch.json — preserve ExecStart
+            )
+
+        host, port, workers = raw.get("host"), raw.get("port"), raw.get("workers")
+        host, port, workers = self._fill_from_config_json(host, port, workers)
+        result: dict = {
+            "host": host if host is not None else _LAUNCH_DEFAULT_HOST,
+            "port": int(port) if port is not None else _LAUNCH_DEFAULT_PORT,
+            "workers": max(
+                1, int(workers) if workers is not None else _LAUNCH_DEFAULT_WORKERS
+            ),
+        }
+        if mode == "APPLY":
+            # APPLY reads launch.json; target_restart_generation is written by Story #1198.
+            # Story #1200 reads applied_restart_generation to detect pending restart loops.
+            # Default 0 matches COALESCE(applied, 0) semantics in #1200 AC1/AC5.
+            result["applied_restart_generation"] = int(
+                raw.get("target_restart_generation") or 0
+            )
+        return result
+
+    @staticmethod
+    def _is_cidx_execstart(line: str) -> bool:
+        """Detection predicate covering both ExecStart shapes (CRITICAL-D).
+
+        The old uvicorn-only gate silently skipped installer-shape units that use
+        'code_indexer.server.main' instead of 'uvicorn'. This predicate covers both.
+        """
+        return line.startswith("ExecStart=") and (
+            "code_indexer.server.main" in line or "uvicorn" in line
+        )
+
+    @staticmethod
+    def _read_flag(line: str, flag: str) -> "Optional[str]":
+        """Extract the value of a flag from an ExecStart line (Bug #1232).
+
+        Uses the same bounded-token regex as _rewrite_flag so '--workers 1'
+        is never confused with '--workers 10'.
+
+        Returns the string value following flag, or None if flag is absent.
+        """
+        import re as _re
+
+        bounded = _re.compile(r"(?<!\S)" + _re.escape(flag) + r"\s+(\S+)")
+        m = bounded.search(line)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _rewrite_flag(line: str, flag: str, value: str) -> tuple:
+        """Token-bounded in-place flag rewrite (Bug #1183 idiom).
+
+        Returns (new_line, was_modified). Exact match → no-op.
+        Differing value → bounded replace. Absent flag → append.
+        Never confuses '--workers 1' with '--workers 10'.
+        """
+        import re as _re
+
+        exact = _re.compile(
+            r"(?<!\S)" + _re.escape(flag) + r"\s+" + _re.escape(value) + r"(?!\S)"
+        )
+        if exact.search(line):
+            return line, False
+
+        bounded = _re.compile(r"(?<!\S)" + _re.escape(flag) + r"\s+\S+")
+        if bounded.search(line):
+            return bounded.sub(f"{flag} {value}", line), True
+
+        return line.rstrip() + f" {flag} {value}", True
+
+    def _read_cidx_service_lines(self, service_path: "Path") -> Optional[list]:
+        """Read service file lines; return them only if a cidx ExecStart is present.
+
+        Returns None when the file is missing or contains no cidx ExecStart line.
+        """
+        if not service_path.exists():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-017",
+                    f"Service file not found: {service_path}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
+        lines = service_path.read_text().split("\n")
+        if not any(self._is_cidx_execstart(ln) for ln in lines):
+            logger.debug(
+                "No cidx ExecStart found; skipping launch config rewrite",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+        return lines
+
+    def _rewrite_execstart_lines(
+        self, lines: list, host: str, port: int, workers: int
+    ) -> tuple:
+        """Rewrite --host/--port/--workers on cidx ExecStart lines only.
+
+        Returns (updated_lines, was_modified). Never writes --log-level (CRITICAL-A).
+        """
+        updated, modified = [], False
+        for line in lines:
+            if self._is_cidx_execstart(line):
+                line, c1 = self._rewrite_flag(line, "--host", str(host))
+                line, c2 = self._rewrite_flag(line, "--port", str(port))
+                line, c3 = self._rewrite_flag(line, "--workers", str(workers))
+                modified = modified or c1 or c2 or c3
+            updated.append(line)
+        return updated, modified
+
+    def _write_and_reload_service(self, service_path: "Path", lines: list) -> bool:
+        """Write lines to service_path via sudo tee, then daemon-reload.
+
+        Returns True on tee success; daemon-reload failure is logged but non-fatal.
+        """
+        tee = subprocess.run(
+            ["sudo", "tee", str(service_path)],
+            input="\n".join(lines),
+            capture_output=True,
+            text=True,
+        )
+        if tee.returncode != 0:
             logger.error(
                 format_error_log(
-                    "DEPLOY-GENERAL-019",
-                    f"Error checking workers config: {e}",
+                    "DEPLOY-GENERAL-018",
+                    f"sudo tee failed updating service file: {tee.stderr}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
             return False
+        reload = subprocess.run(
+            ["sudo", "systemctl", "daemon-reload"],
+            capture_output=True,
+            text=True,
+        )
+        if reload.returncode != 0:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-173",
+                    f"daemon-reload failed after launch config update: {reload.stderr}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+        return True
+
+    def _ensure_launch_config(self, mode: str) -> Optional[dict]:
+        """Rewrite --host/--port/--workers in the live systemd ExecStart.
+
+        APPLY:  returns snapshot {host, port, workers} on success; None on failure.
+        DEPLOY: rewrites ExecStart then always returns None (MAJOR-M5).
+        """
+        if mode not in {"APPLY", "DEPLOY"}:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-200",
+                    f"_ensure_launch_config: invalid mode={mode!r}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
+        try:
+            values = self._resolve_launch_values(mode)
+            if values is None:
+                return None
+            host, port, workers = values["host"], values["port"], values["workers"]
+            service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+            lines = self._read_cidx_service_lines(service_path)
+            if lines is None:
+                return None
+            updated, modified = self._rewrite_execstart_lines(
+                lines, host, port, workers
+            )
+            snapshot: dict = {"host": host, "port": port, "workers": workers}
+            if "applied_restart_generation" in values:
+                snapshot["applied_restart_generation"] = values[
+                    "applied_restart_generation"
+                ]
+            if not modified:
+                logger.debug(
+                    f"ExecStart already matches ({host}:{port} workers={workers}); no-op",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return snapshot if mode == "APPLY" else None
+            if not self._write_and_reload_service(service_path, updated):
+                return None
+            logger.info(
+                f"Rewrote ExecStart: --host {host} --port {port} --workers {workers} "
+                f"(mode={mode})",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return snapshot if mode == "APPLY" else None
+        except Exception as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-019",
+                    f"Error in _ensure_launch_config(mode={mode}): {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return None
 
     def _extract_service_user(self, content: str) -> Optional[str]:
         """Extract User= value from service file content.
@@ -2849,8 +3191,13 @@ class DeploymentExecutor:
             )
             return False
 
-        # Step 3: Story #30 AC4 - Ensure workers config
-        self._ensure_workers_config()
+        # Step 3: Story #1199 - Ensure launch config (host/port/workers) from applied_launch.json.
+        # DEPLOY mode reads applied_launch.json → config.json → ServerConfig defaults (NEVER launch.json)
+        # so a routine code deploy preserves the last operator-applied launch config without
+        # auto-applying a saved-but-unconfirmed TARGET change (decision #3).
+        # Uses the broadened ExecStart predicate (CRITICAL-D) that covers both installer-shape
+        # (code_indexer.server.main) and uvicorn-shape units.
+        self._ensure_launch_config("DEPLOY")
 
         # Step 4: Bug #87 - Ensure CIDX_REPO_ROOT environment variable
         self._ensure_cidx_repo_root()
@@ -4224,3 +4571,50 @@ class DeploymentExecutor:
             return False
 
         return self._build_xray_cli(rust_dir, env)
+
+
+def read_execstart_flags(service_name: str = "cidx-server") -> dict:
+    """Read host/port/workers from the live systemd ExecStart line (Bug #1232).
+
+    Reuses DeploymentExecutor._is_cidx_execstart (detection) and
+    DeploymentExecutor._read_flag (bounded-token extraction) so there is
+    exactly ONE ExecStart parser in the codebase.
+
+    Returns a dict containing any subset of 'host' (str), 'port' (int),
+    'workers' (int) that were found.  Returns an empty dict when:
+      - the service file does not exist,
+      - it cannot be read (OSError),
+      - it contains no cidx ExecStart line.
+
+    Values for 'port' and 'workers' are coerced to int; entries with
+    non-integer values are omitted rather than raising.
+    """
+    service_path = SYSTEMD_UNIT_DIR / f"{service_name}.service"
+    if not service_path.exists():
+        return {}
+    try:
+        lines = service_path.read_text().split("\n")
+    except OSError:
+        return {}
+
+    result: dict = {}
+    for line in lines:
+        if not DeploymentExecutor._is_cidx_execstart(line):
+            continue
+        host = DeploymentExecutor._read_flag(line, "--host")
+        if host is not None:
+            result["host"] = host
+        port_str = DeploymentExecutor._read_flag(line, "--port")
+        if port_str is not None:
+            try:
+                result["port"] = int(port_str)
+            except ValueError:
+                pass
+        workers_str = DeploymentExecutor._read_flag(line, "--workers")
+        if workers_str is not None:
+            try:
+                result["workers"] = int(workers_str)
+            except ValueError:
+                pass
+        break  # only the first cidx ExecStart line matters
+    return result

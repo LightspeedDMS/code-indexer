@@ -1,21 +1,54 @@
 # Dependency Management
 
-This project supports both modern and traditional Python dependency management approaches:
+All dependencies are defined in `pyproject.toml`, which is the single source of truth for this project.
 
 ## For Users
 
-- **Modern Approach**: Use `pip install git+https://github.com/LightspeedDMS/code-indexer.git` (dependencies automatically resolved from `pyproject.toml`)
-- **Traditional Approach**: Use `pip install -r requirements.txt` for production dependencies only
+Install the package and its core dependencies:
+
+```bash
+pip install git+https://github.com/LightspeedDMS/code-indexer.git
+```
+
+### Optional extras
+
+The following optional extras are available:
+
+```bash
+# Cohere embedding provider support (alternative to VoyageAI)
+pip install "git+https://github.com/LightspeedDMS/code-indexer.git[cohere]"
+
+# PostgreSQL cluster mode (required for multi-node deployments)
+pip install "git+https://github.com/LightspeedDMS/code-indexer.git[cluster]"
+
+# Both optional providers
+pip install "git+https://github.com/LightspeedDMS/code-indexer.git[cohere,cluster]"
+```
 
 ## For Developers
 
-- **Modern Approach (Recommended)**: `pip install -e ".[dev]"` (includes dev dependencies from `pyproject.toml`)
-- **Traditional Approach**: `pip install -r requirements-dev.txt && pip install -e .`
+```bash
+# Clone and install with all development dependencies
+git clone https://github.com/LightspeedDMS/code-indexer.git
+cd code-indexer
+pip install -e ".[dev]"
+
+# Full development setup including all optional extras
+pip install -e ".[dev,cohere,cluster]"
+```
 
 ## Files
 
-- `pyproject.toml` - Modern Python project configuration (primary source of truth)
-- `requirements.txt` - Production dependencies (generated from pyproject.toml)
-- `requirements-dev.txt` - Development dependencies (includes requirements.txt + dev tools)
+- `pyproject.toml` - Project configuration and all dependency definitions (primary source of truth)
 
-Both approaches install the same dependencies. Use whichever fits your workflow better.
+Note: `requirements.txt` and `requirements-dev.txt` are not used by this project. All
+dependencies are declared in `pyproject.toml` under `[project.dependencies]` and
+`[project.optional-dependencies]`.
+
+## Notable dependencies
+
+- `hnswlib` is installed from a custom fork that exposes the `check_integrity()` method absent
+  from the PyPI version. This requires `gcc`/`g++` at install time. See
+  `docs/hnswlib-custom-build.md` for details.
+- `tree-sitter>=0.21,<0.22` and `tree-sitter-languages==1.10.2` are pinned core dependencies
+  required for X-Ray AST-aware code search (included since v10.2.1).

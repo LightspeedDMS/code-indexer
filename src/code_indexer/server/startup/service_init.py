@@ -106,13 +106,67 @@ def initialize_services() -> Dict[str, Any]:
     from code_indexer.server.routers.repo_categories import set_category_service
 
     # Story #526: Initialize server-side HNSW cache at bootstrap for 1800x performance
-    from code_indexer.server.cache import get_global_cache, get_global_fts_cache
+    from code_indexer.server.cache import (
+        get_global_cache,
+        get_global_fts_cache,
+        initialize_caches,
+    )
+
+    # Story #1166 Fix 1: Divide HNSW/FTS caps by worker count BEFORE the eager
+    # getters build the singletons.  initialize_caches is idempotent so if a
+    # lazy getter somehow fired first (degraded path) it skips re-construction.
+    #
+    # Story #1197 AC5 (CRITICAL-C2): Use the applied-worker-count resolver
+    # (applied_launch.json → config.json → 1) instead of get_config().workers.
+    # This ensures the cache cap is divided by the APPLIED count (the count the
+    # running process was actually launched with), not a saved-but-unapplied
+    # TARGET that an admin saved via the Web UI without triggering a restart.
+    _cache_worker_count = 1
+    try:
+        from code_indexer.server.services.applied_worker_count import (
+            get_applied_worker_count as _get_applied_workers,
+        )
+
+        _cache_worker_count = _get_applied_workers()
+    except Exception as _wc_exc:
+        logger.debug(
+            "Story #1166/#1197: could not read applied worker count (%s); "
+            "using worker_count=1 (no per-worker cap division)",
+            _wc_exc,
+        )
+    initialize_caches(worker_count=_cache_worker_count)
+    logger.info(
+        "Story #1166: HNSW/FTS cache caps initialized with per-worker budget "
+        "(workers=%d)",
+        _cache_worker_count,
+        extra={"correlation_id": get_correlation_id()},
+    )
+
+    # Story #1213 Story 1/2: build and install the node-level MemoryGovernor.
+    # Story 2: pass get_config_service() so watermarks are read LIVE from the
+    # Web UI config on each tick (hot-reload, no server restart required).
+    from code_indexer.server.services.config_service import get_config_service
+    from code_indexer.server.services.memory_governor import (
+        build_memory_governor,
+        set_memory_governor,
+    )
+
+    _memory_governor = build_memory_governor(config_service=get_config_service())
+    set_memory_governor(_memory_governor)
+    _memory_governor.start()
+    logger.info(
+        "Story #1213: MemoryGovernor built, installed, and sampler started "
+        "(band=RED until first sample; live config_service wired for hot-reload)",
+        extra={"correlation_id": get_correlation_id()},
+    )
 
     _server_hnsw_cache = get_global_cache()
     logger.info(
         f"HNSW index cache initialized (TTL: {_server_hnsw_cache.config.ttl_minutes}min)",
         extra={"correlation_id": get_correlation_id()},
     )
+    # Story 4: wire HNSW cache into governor for YELLOW proactive LRU eviction.
+    _memory_governor.attach_cache(_server_hnsw_cache)
 
     # Initialize server-side FTS cache for FTS query performance
     _server_fts_cache = get_global_fts_cache()
@@ -178,6 +232,24 @@ def initialize_services() -> Dict[str, Any]:
 
     get_token_blacklist().set_sqlite_path(str(db_path))
 
+    # Bug #1221: Wire ElevatedSessionManager with shared SQLite path so all
+    # workers on the same node read/write the same elevated_sessions table.
+    from code_indexer.server.auth.elevated_session_manager import (
+        elevated_session_manager,
+    )
+
+    elevated_session_manager.set_sqlite_path(str(db_path))
+
+    # Bug #1224: Configure OIDC StateManager default SQLite path so all
+    # StateManager() instances subsequently constructed in lifespan.py
+    # (and late-init cluster paths) automatically use the shared cidx_server.db
+    # instead of a per-instance default, giving cross-worker state sharing.
+    from code_indexer.server.auth.oidc.state_manager import (
+        configure_sqlite_path as _cfg_oidc_sqlite,
+    )
+
+    _cfg_oidc_sqlite(str(db_path))
+
     # Bug #577: Wire DelegationJobTracker with SQLite path for standalone mode
     from code_indexer.server.services.delegation_job_tracker import (
         DelegationJobTracker,
@@ -188,6 +260,9 @@ def initialize_services() -> Dict[str, Any]:
     # Story #578: Initialize SQLite-backed runtime config (unified model).
     # Must happen after schema init (server_config table) and before PG pool.
     config_service.initialize_runtime_db(str(db_path))
+    # Story #1198 AC4: materialize launch.json once at startup (solo and cluster).
+    # Fail-soft — materialize_launch_config() never raises.
+    config_service.materialize_launch_config()
 
     # Epic #408: Cluster mode — determine storage backend
     _storage_mode = "sqlite"
@@ -437,42 +512,67 @@ def initialize_services() -> Dict[str, Any]:
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
 
-    # Migration and bootstrap using the main golden_repo_manager instance
-    try:
-        migrate_legacy_cidx_meta(
-            golden_repo_manager, golden_repo_manager.golden_repos_dir
-        )
-        bootstrap_cidx_meta(golden_repo_manager, golden_repo_manager.golden_repos_dir)
-        register_langfuse_golden_repos(
-            golden_repo_manager, golden_repo_manager.golden_repos_dir
-        )
-        logger.info(
-            "cidx-meta migration and bootstrap completed",
-            extra={"correlation_id": get_correlation_id()},
-        )
+    # Bug #1178: Outer bootstrap lock.  Serializes the entire first-boot SQLite
+    # critical section — seed_initial_admin + cidx-meta migration/bootstrap —
+    # across all concurrent uvicorn worker processes.  Only the first worker
+    # does real work; the others block then find everything already done.
+    # is_singleton=True makes the lock reentrant within the same process so the
+    # inner FileLock inside initialize_database() (same path) nests cleanly.
+    # SQLite mode only — PG first-boot is covered by the Story #1164
+    # pg_advisory_lock in MigrationRunner.run().
+    import filelock as _filelock
 
-        # Register cidx-meta-global as write exception (Story #197 AC1/AC4)
-        from code_indexer.server.services.file_crud_service import file_crud_service
+    _BOOTSTRAP_LOCK_TIMEOUT = 120  # seconds; matches inner lock in database_manager
+    _bootstrap_lock_path = str(db_path) + ".bootstrap.lock"
+    with _filelock.FileLock(
+        _bootstrap_lock_path, timeout=_BOOTSTRAP_LOCK_TIMEOUT, is_singleton=True
+    ):
+        # Seed initial admin user inside the lock so concurrent workers cannot
+        # race on the users.username UNIQUE constraint.  seed_initial_admin()
+        # pre-checks get_user("admin") before calling create_user(), so the
+        # second worker skips the INSERT entirely — backends stay strict (fail-loud).
+        user_manager.seed_initial_admin()
 
-        cidx_meta_path = Path(golden_repo_manager.golden_repos_dir) / "cidx-meta"
-        file_crud_service.register_write_exception("cidx-meta-global", cidx_meta_path)
-        # Inject golden_repos_dir for write-mode marker lookup (Story #231)
-        file_crud_service.set_golden_repos_dir(
-            Path(golden_repo_manager.golden_repos_dir)
-        )
-        logger.info(
-            "Registered cidx-meta-global as write exception for direct editing",
-            extra={"correlation_id": get_correlation_id()},
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "APP-GENERAL-011",
-                f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
-                exc_info=True,
+        # Migration and bootstrap using the main golden_repo_manager instance
+        try:
+            migrate_legacy_cidx_meta(
+                golden_repo_manager, golden_repo_manager.golden_repos_dir
+            )
+            bootstrap_cidx_meta(
+                golden_repo_manager, golden_repo_manager.golden_repos_dir
+            )
+            register_langfuse_golden_repos(
+                golden_repo_manager, golden_repo_manager.golden_repos_dir
+            )
+            logger.info(
+                "cidx-meta migration and bootstrap completed",
                 extra={"correlation_id": get_correlation_id()},
             )
-        )
+
+            # Register cidx-meta-global as write exception (Story #197 AC1/AC4)
+            from code_indexer.server.services.file_crud_service import file_crud_service
+
+            cidx_meta_path = Path(golden_repo_manager.golden_repos_dir) / "cidx-meta"
+            file_crud_service.register_write_exception(
+                "cidx-meta-global", cidx_meta_path
+            )
+            # Inject golden_repos_dir for write-mode marker lookup (Story #231)
+            file_crud_service.set_golden_repos_dir(
+                Path(golden_repo_manager.golden_repos_dir)
+            )
+            logger.info(
+                "Registered cidx-meta-global as write exception for direct editing",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "APP-GENERAL-011",
+                    f"Failed to migrate/bootstrap cidx-meta on startup: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
     activated_repo_manager = ActivatedRepoManager(
         data_dir=data_dir,
@@ -561,4 +661,5 @@ def initialize_services() -> Dict[str, Any]:
         "_server_fts_cache": _server_fts_cache,
         "scip_audit_repository": scip_audit_repository,
         "latency_tracker": latency_tracker,
+        "memory_governor": _memory_governor,
     }

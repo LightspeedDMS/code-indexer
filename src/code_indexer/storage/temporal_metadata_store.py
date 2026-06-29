@@ -214,6 +214,68 @@ class TemporalMetadataStore:
             f"save_metadata failed after {max_retries} attempts for {point_id}: {last_error}"
         )
 
+    def save_metadata_batch(self, rows: list) -> list:
+        """Save metadata for multiple points in ONE transaction.
+
+        Bug #1206 Fix 1: replaces N individual connect/commit/close cycles with a
+        single connection opened once, all rows inserted via executemany, one
+        commit, one close.  This eliminates the per-vector fsync bottleneck that
+        serialised all 8 embed threads on the same SQLite WAL.
+
+        Args:
+            rows: List of (point_id, payload) tuples.
+
+        Returns:
+            List of 16-char hash prefixes in the same order as input rows.
+        """
+        if not rows:
+            return []
+
+        created_at = datetime.now().isoformat()
+        params = []
+        hash_prefixes = []
+        for point_id, payload in rows:
+            hash_prefix = self.generate_hash_prefix(point_id)
+            hash_prefixes.append(hash_prefix)
+            commit_hash = payload.get("commit_hash", "")
+            file_path = payload.get("path", "")
+            chunk_index = payload.get("chunk_index", 0)
+            params.append(
+                (hash_prefix, point_id, commit_hash, file_path, chunk_index, created_at)
+            )
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO temporal_metadata
+                (hash_prefix, point_id, commit_hash, file_path, chunk_index, created_at, format_version)
+                VALUES (?, ?, ?, ?, ?, ?, 2)
+                """,
+                params,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return hash_prefixes
+
+    def checkpoint_wal(self) -> None:
+        """Run a PASSIVE WAL checkpoint to bound WAL file growth.
+
+        Bug #1206 Fix 1: call periodically (e.g. every commit batch) to prevent
+        the WAL from growing unbounded (a 93 MB WAL was observed on a 36 MB DB).
+        PASSIVE mode: checkpoints as many frames as possible without blocking
+        readers or writers.
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        finally:
+            conn.close()
+
     def get_point_id(self, hash_prefix: str) -> Optional[str]:
         """Retrieve point_id from hash prefix.
 

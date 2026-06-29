@@ -63,10 +63,26 @@ ADMIN_USER = _make_user(UserRole.ADMIN)
 
 @pytest.fixture
 def app():
-    """Create test FastAPI app."""
-    from code_indexer.server.app import create_app
+    """Create minimal test FastAPI app with only xray routes (no heavy service init).
 
-    return create_app()
+    Sets a default get_current_user override that raises 401 so no-auth tests work
+    without needing jwt_manager/user_manager to be initialized. Tests that need an
+    authenticated user replace this override via app.dependency_overrides[get_current_user].
+    """
+    from fastapi import FastAPI, HTTPException, status
+    from code_indexer.server.routes.xray_routes import router as xray_router
+
+    test_app = FastAPI()
+    test_app.include_router(xray_router)
+
+    def _unauthenticated():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication credentials",
+        )
+
+    test_app.dependency_overrides[get_current_user] = _unauthenticated
+    return test_app
 
 
 @pytest.fixture

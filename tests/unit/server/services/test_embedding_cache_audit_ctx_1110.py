@@ -320,7 +320,7 @@ def test_audit_ctx_none_no_crash_on_mode_hit():
     from code_indexer.server.services.governed_call import _serve_with_cache
 
     cache, qualifier, key = _make_cache(mode="on", pre_seed=True)
-    result = _serve_with_cache(
+    result, _meta = _serve_with_cache(
         cache, PROVIDER_VOYAGE, key, qualifier, lambda: LIVE_VEC, audit_ctx=None
     )
     # Should return cached vec (decoded from CACHED_VEC bytes)
@@ -332,7 +332,7 @@ def test_audit_ctx_none_no_crash_shadow_hit():
     from code_indexer.server.services.governed_call import _serve_with_cache
 
     cache, qualifier, key = _make_cache(mode="shadow", pre_seed=True)
-    result = _serve_with_cache(
+    result, _meta = _serve_with_cache(
         cache, PROVIDER_VOYAGE, key, qualifier, lambda: LIVE_VEC, audit_ctx=None
     )
     assert result == LIVE_VEC
@@ -343,7 +343,7 @@ def test_audit_ctx_none_no_crash_on_mode_miss():
     from code_indexer.server.services.governed_call import _serve_with_cache
 
     cache, qualifier, key = _make_cache(mode="on", pre_seed=False)
-    result = _serve_with_cache(
+    result, _meta = _serve_with_cache(
         cache, PROVIDER_VOYAGE, key, qualifier, lambda: LIVE_VEC, audit_ctx=None
     )
     assert result == LIVE_VEC
@@ -373,11 +373,11 @@ def test_coalesced_query_embedding_accepts_audit_ctx_kwarg():
 
     with patch.object(governed_call, "governed_query_embedding", return_value=LIVE_VEC):
         # Default: audit_ctx not passed
-        result = governed_call.coalesced_query_embedding(fake_provider, TEXT)
+        result, _meta = governed_call.coalesced_query_embedding(fake_provider, TEXT)
         assert result == LIVE_VEC
 
         # Explicit audit_ctx=None
-        result2 = governed_call.coalesced_query_embedding(
+        result2, _meta2 = governed_call.coalesced_query_embedding(
             fake_provider, TEXT, audit_ctx=None
         )
         assert result2 == LIVE_VEC
@@ -602,7 +602,7 @@ def test_serve_with_cache_on_mode_hit_still_returns_cached_vec():
         patch("code_indexer.server.services.governed_call.random") as mock_random,
     ):
         mock_random.random.return_value = 0.0
-        result = governed_call._serve_with_cache(
+        result, _meta = governed_call._serve_with_cache(
             cache,
             PROVIDER_VOYAGE,
             key,
@@ -632,7 +632,7 @@ def test_serve_with_cache_shadow_hit_still_returns_live_vec():
         patch("code_indexer.server.services.governed_call.random") as mock_random,
     ):
         mock_random.random.return_value = 0.0
-        result = governed_call._serve_with_cache(
+        result, _meta = governed_call._serve_with_cache(
             cache,
             PROVIDER_VOYAGE,
             key,
@@ -684,7 +684,7 @@ def test_corrupt_blob_not_multiple_of_4_fails_open_no_exception():
         live_called.append(True)
         return LIVE_VEC
 
-    result = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
+    result, _meta = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
     assert result == LIVE_VEC, f"Expected live vec on corrupt blob, got {result}"
     assert live_called, "live_fn must be called on corrupt blob (treated as MISS)"
 
@@ -703,7 +703,7 @@ def test_wrong_dimension_blob_fails_open_no_exception():
         live_called.append(True)
         return LIVE_VEC
 
-    result = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
+    result, _meta = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
     assert result == LIVE_VEC, f"Expected live vec on wrong-dim blob, got {result}"
     assert live_called, "live_fn must be called on wrong-dim blob (treated as MISS)"
 
@@ -742,7 +742,7 @@ def test_valid_blob_correct_dimension_still_returns_cached_vec():
         live_called.append(True)
         return LIVE_VEC
 
-    result = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
+    result, _meta = _serve_with_cache(cache, PROVIDER_VOYAGE, key, qualifier, live_fn)
     assert result == list(CACHED_VEC), f"Expected cached vec {CACHED_VEC}, got {result}"
     assert not live_called, "live_fn must NOT be called on a valid HIT"
 

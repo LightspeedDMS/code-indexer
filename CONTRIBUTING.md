@@ -6,9 +6,10 @@ Thank you for considering contributing to CIDX! This guide will help you set up 
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- Python 3.9 to 3.12 (Python 3.13 is not yet supported)
 - Git
-- VoyageAI API key (for testing semantic search features)
+- VoyageAI API key (`VOYAGE_API_KEY`) for testing semantic search features, OR
+- Cohere API key (`CO_API_KEY`) as an alternative embedding provider (supported since v9.8)
 
 ### Initial Setup
 
@@ -130,11 +131,11 @@ CIDX v8.0+ uses a container-free, filesystem-based architecture:
 2. **Daemon Mode** (Local, Cached)
    - Local RPyC-based background service for faster queries
    - In-memory HNSW/FTS index caching
-   - Unix socket communication (`.code-indexer/daemon.sock`)
+   - Unix socket communication at `/tmp/cidx/{repo_hash}.sock` (path uses a SHA-256 hash of the repo path to stay within the 108-character Unix socket limit)
 
 ### Key Components
 
-- **VoyageAI** - Only supported embedding provider (voyage-3, voyage-3-large, voyage-code-3)
+- **VoyageAI / Cohere** - Supported embedding providers (VoyageAI: voyage-code-3 default 1024 dims, voyage-large-2 1536 dims; Cohere: embed-v4.0, supported since v9.8)
 - **FilesystemVectorStore** - Container-free vector storage
 - **HNSW** - Graph-based approximate nearest neighbor search
 - **Tantivy** - Full-text search (FTS) with regex support
@@ -188,7 +189,13 @@ Follow this workflow during development:
 2. Manual testing (verify feature works)
    |
    v
-3. fast-automation.sh (FINAL GATE - must pass before done)
+3. fast-automation.sh (CLI/core gate - must pass before commit)
+   |
+   v
+4. server-fast-automation.sh (server gate - required when touching src/code_indexer/server/)
+   |
+   v
+5. e2e-automation.sh (FINAL REGRESSION GATE - required before merge)
 ```
 
 **NEVER run fast-automation.sh after every small change.** That wastes time.
@@ -233,9 +240,15 @@ Run **only after ALL changes are complete**:
 | Suite | Tests | Time | When to Use |
 |-------|-------|------|-------------|
 | Targeted pytest | varies | seconds | During development |
-| fast-automation.sh | 865+ | ~6-7 min | Final validation before commit |
-| server-fast-automation.sh | varies | varies | Server-specific changes |
-| full-automation.sh | all | 10+ min | Complete validation (ask user to run) |
+| fast-automation.sh | 865+ | ~6-7 min | Final validation before commit (CLI and core logic) |
+| server-fast-automation.sh | varies | ~10-15 min | Required when touching `src/code_indexer/server/` |
+| e2e-automation.sh | 5-phase E2E | 45-90 min | **Final regression gate before merge** (non-negotiable) |
+| full-automation.sh | all | 10+ min | Complete validation (legacy suite) |
+
+The `e2e-automation.sh` suite runs 5 phases: CLI standalone, CLI daemon, server in-process,
+CLI remote (live uvicorn), and fault-injection resiliency. It requires `E2E_ADMIN_USER`,
+`E2E_ADMIN_PASS`, and `E2E_VOYAGE_API_KEY` environment variables. Run a specific phase with
+`./e2e-automation.sh --phase N`.
 
 ### Writing Tests
 
@@ -381,8 +394,10 @@ code-indexer/
 │   └── hnswlib/                # HNSW library
 ├── test-fixtures/              # Test fixture submodules
 │   └── multimodal-mock-repo/   # Multimodal E2E test fixtures
-├── fast-automation.sh          # Fast test suite
-├── full-automation.sh          # Complete test suite
+├── fast-automation.sh          # Fast test suite (CLI and core logic)
+├── server-fast-automation.sh   # Server-specific test suite
+├── e2e-automation.sh           # Final 5-phase E2E regression gate (45-90 min)
+├── full-automation.sh          # Legacy complete test suite
 ├── lint.sh                     # Linting script
 └── CLAUDE.md                   # Development guidelines
 ```

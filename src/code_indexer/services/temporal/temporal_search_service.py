@@ -229,14 +229,25 @@ class TemporalSearchService:
             return ""
 
         # Execute git show
-        result_proc = subprocess.run(
-            cmd,
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            check=False,
-        )
+        # Story #1170: add timeout=30 to prevent hung git processes from blocking
+        # the server thread indefinitely.
+        try:
+            result_proc = subprocess.run(
+                cmd,
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "git reconstruction timed out after 30s for path=%s diff_type=%s",
+                metadata.get("path") or metadata.get("file_path", "unknown"),
+                metadata.get("diff_type", "unknown"),
+            )
+            return "[Content unavailable - git reconstruction timed out]"
 
         if result_proc.returncode == 0:
             return result_proc.stdout
@@ -436,12 +447,39 @@ class TemporalSearchService:
                 coalesced_query_embedding,
             )
 
-            query_embedding = coalesced_query_embedding(
+            query_embedding, _embed_meta = coalesced_query_embedding(
                 self.embedding_provider,
                 query,
                 embedding_purpose="query",
                 no_embedding_cache_shortcut=no_embedding_cache_shortcut,
             )
+            # Story #1159: write embedding-cache metadata to the active
+            # SearchEventContext so cache fields are recorded for temporal queries.
+            try:
+                from code_indexer.server.services.search_event_context import (
+                    _search_event_ctx,
+                )
+
+                _temporal_event_ctx = _search_event_ctx.get(None)
+                if _temporal_event_ctx is not None:
+                    _pname = self.embedding_provider.get_provider_name().lower()
+                    if "cohere" in _pname:
+                        _temporal_event_ctx.cohere_cache_hit = _embed_meta.key_found
+                        _temporal_event_ctx.cohere_cache_mode = _embed_meta.cache_mode
+                        _temporal_event_ctx.cohere_latency_ms = (
+                            _embed_meta.provider_latency_ms
+                        )
+                    else:
+                        _temporal_event_ctx.voyage_cache_hit = _embed_meta.key_found
+                        _temporal_event_ctx.voyage_cache_mode = _embed_meta.cache_mode
+                        _temporal_event_ctx.voyage_latency_ms = (
+                            _embed_meta.provider_latency_ms
+                        )
+            except Exception as _tsc_exc:  # noqa: BLE001
+                logger.warning(
+                    "search_event_log: temporal path failed to write embed_meta to ctx: %s",
+                    _tsc_exc,
+                )
             raw_results = self.vector_store_client.search(
                 query_vector=query_embedding,
                 filter_conditions=filter_conditions,  # Apply user-specified filters (language, path, etc.)

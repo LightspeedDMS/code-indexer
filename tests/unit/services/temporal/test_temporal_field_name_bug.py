@@ -58,6 +58,7 @@ class TestTemporalFieldNameBug:
         config = MagicMock()
         config.codebase_dir = temp_repo
         config.voyage_ai.parallel_requests = 1
+        config.voyage_ai.temporal_parallel_requests = None
         config.voyage_ai.max_concurrent_batches_per_commit = 10
         config_manager.get_config.return_value = config
         config_manager.load.return_value = config

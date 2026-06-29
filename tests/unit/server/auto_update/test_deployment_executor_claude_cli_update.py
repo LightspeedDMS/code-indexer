@@ -153,7 +153,7 @@ class TestEnsureClaudeCliUpdated:
             patch.object(executor, "_build_hnswlib_with_fallback", return_value=True),
             patch.object(executor, "pip_install", return_value=True),
             patch.object(
-                executor, "_ensure_workers_config", side_effect=record("workers_config")
+                executor, "_ensure_launch_config", side_effect=record("launch_config")
             ),
             patch.object(
                 executor, "_ensure_cidx_repo_root", side_effect=record("cidx_repo_root")
@@ -190,5 +190,5 @@ class TestEnsureClaudeCliUpdated:
 
         assert "claude_cli_updated" in call_order
         idx_claude = call_order.index("claude_cli_updated")
-        assert idx_claude > call_order.index("workers_config")
+        assert idx_claude > call_order.index("launch_config")
         assert idx_claude > call_order.index("cidx_repo_root")

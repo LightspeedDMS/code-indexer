@@ -13,11 +13,13 @@ if TYPE_CHECKING:
     from .deployment_lock import DeploymentLock
     from .deployment_executor import DeploymentExecutor
 from code_indexer.server.auto_update.deployment_executor import (
+    APPLIED_LAUNCH_CONFIG_PATH,
     LEGACY_REDEPLOY_MARKER,
     PENDING_REDEPLOY_MARKER,
     RESTART_SIGNAL_PATH,
     RESTART_SIGNAL_STALENESS_THRESHOLD,
 )
+from code_indexer.server.auto_update.deployment_lock import get_default_lock_path
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -46,11 +48,11 @@ class AutoUpdateService:
         Args:
             repo_path: Path to git repository
             check_interval: Polling interval in seconds
-            lock_file: Path to lock file (default: /tmp/cidx-auto-update.lock)
+            lock_file: Path to lock file (default: {CIDX_DATA_DIR}/cidx-auto-update.lock)
         """
         self.repo_path = repo_path
         self.check_interval = check_interval
-        self.lock_file = lock_file or Path("/tmp/cidx-auto-update.lock")
+        self.lock_file = lock_file or get_default_lock_path()
         self.current_state = ServiceState.IDLE
         self.last_deployment: Optional[datetime] = None
         self.last_error: Optional[Exception] = None
@@ -129,6 +131,23 @@ class AutoUpdateService:
                 "Restart signal detected, file deleted, executing restart",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Re-apply launch config (host/port/workers) before restart so an
+            # admin-requested restart picks up any pending config changes.
+            # _ensure_launch_config is idempotent and value-aware (Bug #1183).
+            # MAJOR-M5: check return value — skip restart if ensure fails.
+            # APPLY mode reads launch.json (TARGET) and returns a snapshot on success.
+            # DEPLOY always returns None (by design), which would unconditionally
+            # trigger the 'if not launch_snapshot' guard and skip restart_server().
+            launch_snapshot = self.deployment_executor._ensure_launch_config("APPLY")
+            if not launch_snapshot:
+                logger.warning(
+                    format_error_log(
+                        "AUTO-UPDATE-014",
+                        "Failed to apply launch config before restart; skipping restart",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return
             restart_ok = self.deployment_executor.restart_server()
             if not restart_ok:
                 logger.error(
@@ -136,6 +155,19 @@ class AutoUpdateService:
                         "AUTO-UPDATE-013",
                         "Restart signal handler: server restart FAILED "
                         "(signal already deleted, no retry)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return
+            # Write applied_launch.json only after ensure+restart both succeed (MAJOR-M5).
+            # Single-writer invariant: only this code path writes applied_launch.json.
+            try:
+                APPLIED_LAUNCH_CONFIG_PATH.write_text(json.dumps(launch_snapshot))
+            except OSError as e:
+                logger.warning(
+                    format_error_log(
+                        "AUTO-UPDATE-015",
+                        f"Failed to write applied_launch.json: {e}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )

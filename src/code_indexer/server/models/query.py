@@ -152,6 +152,26 @@ class SemanticQueryRequest(BaseModel):
         ),
     )
 
+    # Bug #1209: REST reranking parity with MCP/CLI.
+    # When rerank_query is provided (non-empty), the result set is reranked using
+    # the configured reranker (Voyage or Cohere) before truncation and response.
+    # Matches MCP search_code rerank_query / rerank_instruction semantics exactly.
+    rerank_query: Optional[str] = Field(
+        default=None,
+        description=(
+            "When provided, rerank results against this query using the configured "
+            "reranker (Voyage or Cohere) before returning. Absent or None means no "
+            "reranking (byte-identical to pre-fix behavior)."
+        ),
+    )
+    rerank_instruction: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional instruction forwarded to the reranker alongside rerank_query. "
+            "Has no effect when rerank_query is absent."
+        ),
+    )
+
     @field_validator("query_text")
     @classmethod
     def validate_query_text(cls, v: str) -> str:

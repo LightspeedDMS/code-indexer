@@ -190,7 +190,8 @@ def _run_saturated_submits(
     def _submit(i: int):
         start.wait()
         try:
-            outcome.results[i] = coalescer.submit(f"text-{i}")
+            vec, _ = coalescer.submit(f"text-{i}")
+            outcome.results[i] = vec
         except BaseException as ex:  # noqa: BLE001
             outcome.errors[i] = ex
 
@@ -299,7 +300,8 @@ class TestSingleSubmit:
     def test_single_submit_returns_vector(self):
         prov = FakeVoyageProvider()
         c = EmbeddingCoalescer(LANE, prov, governor=ProviderConcurrencyGovernor(GOV_K))
-        assert c.submit("text-5") == [5.0, 0.0]
+        vec, _ = c.submit("text-5")
+        assert vec == [5.0, 0.0]
         assert prov.call_count == 1
         assert prov.batch_sizes == [1]
 
@@ -550,7 +552,7 @@ class TestBackoffReleasesSlot:
 
         sampler = threading.Thread(target=_sampler, daemon=True)
         sampler.start()
-        vec = c.submit("text-9")
+        vec, _ = c.submit("text-9")
         stop.set()
         sampler.join(timeout=5)
 
@@ -619,12 +621,12 @@ class TestDispatchCounters:
         assert c.batches_dispatched == 0
         assert c.texts_coalesced == 0
 
-        vec = c.submit("text-3")
+        vec, _ = c.submit("text-3")
         assert vec == [3.0, 0.0]
         assert c.batches_dispatched == 1
         assert c.texts_coalesced == 1
 
-        c.submit("text-4")
+        c.submit("text-4")  # noqa: discard result; only counter assertions follow
         assert c.batches_dispatched == 2
         assert c.texts_coalesced == 2
 

@@ -8,6 +8,28 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
+# Bug #879 / Bug #1175: Honor CIDX_DATA_DIR so both cidx-server and cidx-auto-update
+# (which may run as different OS users) resolve the lock path identically.
+# NEVER put the lock under /tmp — systemd PrivateTmp=yes isolates /tmp per-service,
+# causing PermissionError (EACCES) when the auto-updater tries to access cidx-server's
+# private /tmp.
+_cidx_data_dir = Path(
+    os.environ.get("CIDX_DATA_DIR", str(Path.home() / ".cidx-server"))
+)
+
+
+def get_default_lock_path() -> Path:
+    """Return the default lock file path anchored to CIDX_DATA_DIR.
+
+    The lock file is placed in the data directory (not /tmp) so it is
+    accessible to both the cidx-server and cidx-auto-update systemd units
+    even when PrivateTmp=yes isolates each service's /tmp namespace.
+
+    Returns:
+        Path to the default lock file location.
+    """
+    return _cidx_data_dir / "cidx-auto-update.lock"
+
 
 class DeploymentLock:
     """Manages deployment lock using PID-based lock file mechanism."""
@@ -20,6 +42,12 @@ class DeploymentLock:
         """
         self.lock_file = lock_file
 
+    def _lock_file_exists(self) -> bool:
+        try:
+            return self.lock_file.exists()
+        except OSError:
+            return False
+
     def acquire(self) -> bool:
         """Attempt to acquire deployment lock.
 
@@ -30,7 +58,7 @@ class DeploymentLock:
             IOError: If lock file operations fail
         """
         # Check if lock file exists
-        if self.lock_file.exists():
+        if self._lock_file_exists():
             # Read PID from lock file
             try:
                 with open(self.lock_file, "r+") as f:
@@ -86,22 +114,27 @@ class DeploymentLock:
                 extra={"correlation_id": get_correlation_id()},
             )
             return True
-        except IOError as e:
-            logger.error(
+        except OSError as e:
+            # Fail-soft: under systemd PrivateTmp=yes the lock file path may be
+            # unwritable (EACCES/PermissionError).  Losing best-effort mutual
+            # exclusion is strictly better than a permanently un-updatable node —
+            # the worst case is two overlapping deploys on the same node, which
+            # systemctl restart handles safely.  NEVER re-raise here.
+            logger.warning(
                 format_error_log(
                     "GIT-GENERAL-003",
-                    f"Error creating lock file: {e}",
+                    f"Cannot create lock file (proceeding without lock): {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
-            raise
+            return True
 
     def release(self) -> None:
         """Release deployment lock by removing lock file.
 
         Does not raise exceptions if lock file doesn't exist or can't be deleted.
         """
-        if not self.lock_file.exists():
+        if not self._lock_file_exists():
             logger.debug(
                 "Lock file doesn't exist, nothing to release",
                 extra={"correlation_id": get_correlation_id()},
@@ -126,7 +159,7 @@ class DeploymentLock:
         Returns:
             True if lock is stale, False if lock is active or doesn't exist
         """
-        if not self.lock_file.exists():
+        if not self._lock_file_exists():
             return False
 
         try:

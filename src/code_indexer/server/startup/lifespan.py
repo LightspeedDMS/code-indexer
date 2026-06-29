@@ -1,6 +1,7 @@
 """Lifespan context manager for CIDX server startup and shutdown."""
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -9,7 +10,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
@@ -154,6 +155,19 @@ def make_lifespan(
         )
         startup_config = None  # Story #746: ensure always defined before try block
         try:
+            # Story #1198 AC5: try launch.json first for log_level (written by
+            # ConfigService.materialize_launch_config); fall back to config.json.
+            from code_indexer.server.auto_update.deployment_executor import (
+                LAUNCH_CONFIG_PATH,
+            )
+
+            _launch_log_level: Optional[str] = None
+            try:
+                _launch_data = json.loads(LAUNCH_CONFIG_PATH.read_text())
+                _launch_log_level = _launch_data.get("log_level")
+            except Exception:
+                pass  # launch.json absent or unreadable — proceed to load_config()
+
             # Load config to get configured log level (Story #38: respect log_level setting)
             from code_indexer.server.utils.config_manager import ServerConfigManager
 
@@ -168,8 +182,14 @@ def make_lifespan(
                 "ERROR": logging.ERROR,
                 "CRITICAL": logging.CRITICAL,
             }
+            # Story #1198 AC5: prefer log_level from launch.json if available
+            _effective_log_level = (
+                _launch_log_level
+                if _launch_log_level is not None
+                else startup_config.log_level
+            )
             configured_level = log_level_map.get(
-                startup_config.log_level.upper(), logging.INFO
+                _effective_log_level.upper(), logging.INFO
             )
 
             log_db_path = Path(server_data_dir) / "logs.db"
@@ -499,6 +519,72 @@ def make_lifespan(
                 )
             )
 
+        # Issue #1159: Initialize SearchEventLogWriter (per-query operational stats).
+        # Mirrors ApiMetricsService pattern: background drain thread, non-fatal on failure.
+        try:
+            from code_indexer.server.services.search_event_log_writer import (
+                SearchEventLogSqliteBackend,
+                SearchEventLogWriter,
+            )
+
+            if backend_registry is not None and hasattr(
+                backend_registry, "search_event_log"
+            ):
+                _sel_backend = backend_registry.search_event_log
+            else:
+                sel_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _sel_backend = SearchEventLogSqliteBackend(str(sel_db_path))
+
+            app.state.search_event_log_writer = SearchEventLogWriter(_sel_backend)
+            app.state.search_event_log_writer.start()
+
+            logger.info(
+                "SearchEventLogWriter started",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _sel_exc:
+            logger.error(
+                "Failed to initialize SearchEventLogWriter: %s",
+                _sel_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.search_event_log_writer = None
+
+        # Issue #1160: Initialize QueryAnalyticsExportService (export to Excel).
+        # Mirrors SearchEventLogWriter pattern: select backend from registry or fall back
+        # to SQLite. Service is stateless (no threads to start/stop).
+        try:
+            from code_indexer.server.services.query_analytics_export_service import (
+                QueryAnalyticsExportService,
+                QueryAnalyticsExportSqliteBackend,
+            )
+
+            if backend_registry is not None:
+                _qae_backend = backend_registry.query_analytics_exports
+            else:
+                qae_db_path = Path(server_data_dir) / "data" / "cidx_server.db"
+                _qae_backend = QueryAnalyticsExportSqliteBackend(str(qae_db_path))
+
+            app.state.query_analytics_export_service = QueryAnalyticsExportService(
+                backend=_qae_backend,
+                golden_repos_dir=str(golden_repos_dir),
+            )
+            logger.info(
+                "QueryAnalyticsExportService initialized (Issue #1160)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        except Exception as _qae_exc:
+            logger.error(
+                "Failed to initialize QueryAnalyticsExportService: %s",
+                _qae_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            app.state.query_analytics_export_service = None
+
         # Startup: cidx-meta migration and bootstrap moved to after main GoldenRepoManager initialization
         # (See lines after GoldenRepoManager creation below)
 
@@ -772,6 +858,19 @@ def make_lifespan(
                     arm = getattr(golden_repo_manager, "activated_repo_manager", None)
                     if arm is not None:
                         arm._clone_backend = snapshot_manager._clone_backend
+                        # Bug #1203: wire ActivatedRepoIndexManager into ARM so
+                        # _run_branch_delta_index is not a no-op in production.
+                        # Pass activated_repo_manager=arm explicitly to avoid the
+                        # circular-construction hazard where the default constructor
+                        # creates a second ActivatedRepoManager.
+                        from code_indexer.server.services.activated_repo_index_manager import (
+                            ActivatedRepoIndexManager,
+                        )
+
+                        arm._index_manager = ActivatedRepoIndexManager(
+                            activated_repo_manager=arm,
+                            background_job_manager=background_job_manager,
+                        )
                 # Direct wire into refresh_scheduler (belt-and-suspenders)
                 global_lifecycle_manager.refresh_scheduler._snapshot_manager = (
                     snapshot_manager
@@ -1675,6 +1774,22 @@ def make_lifespan(
             except Exception as _oe:
                 logger.warning("Startup: orphaned job cleanup failed: %s", _oe)
 
+            # Bug #1228: reconcile orphaned query-analytics exports.
+            # Server restart kills export worker threads but leaves rows in
+            # pending/running forever.  Mirror the fail_orphaned_jobs pattern:
+            # fail-soft, log the count, never block startup.
+            _qae_svc = getattr(app.state, "query_analytics_export_service", None)
+            if _qae_svc is not None:
+                try:
+                    _export_orphan_count = _qae_svc.reconcile_orphaned_exports()
+                    if _export_orphan_count:
+                        logger.info(
+                            "Startup: failed %d orphaned pending/running export(s)",
+                            _export_orphan_count,
+                        )
+                except Exception as _eoe:
+                    logger.warning("Startup: orphaned export cleanup failed: %s", _eoe)
+
             def _dep_map_health_check_fn():
                 from code_indexer.server.services.dep_map_health_detector import (
                     DepMapHealthDetector,
@@ -2555,6 +2670,11 @@ def make_lifespan(
 
                     _config_svc = get_config_service()
                     _config_svc.set_connection_pool(_cluster_pool)
+                    # Story #1198 AC2/FIX-3: register materialize_launch_config as cb1
+                    # before the reload poller starts, so config changes trigger a re-write.
+                    _config_svc.register_on_change_callback(
+                        lambda _cfg: _config_svc.materialize_launch_config()
+                    )  # noqa: E501
                     _config_svc.start_config_reload(interval_seconds=30)
 
                     # Bug #998: Late-initialize OIDC on cluster secondary nodes.
@@ -3118,9 +3238,13 @@ def make_lifespan(
                     backend=_qec_backend,
                 )
                 set_query_embedding_cache(_query_embedding_cache)
+                # Bug #1181 Perf Fix #2: start the async touch-flush background thread
+                # so cache hits buffer last_used touches instead of doing synchronous
+                # DB writes on the hot query path.
+                _query_embedding_cache.start()
                 logger.info(
-                    "Query embedding cache built (Story #1105, "
-                    "live config reads via QueryEmbeddingCacheConfig)",
+                    "Query embedding cache built and async touch flusher started "
+                    "(Story #1105, Bug #1181 Perf Fix #2)",
                     extra={"correlation_id": get_correlation_id()},
                 )
             else:
@@ -3192,6 +3316,40 @@ def make_lifespan(
                 )
             )
 
+        # Story #1172: Background startup migration — monolithic temporal indexes to quarterly shards.
+        # Scan all golden repos for unsharded temporal HNSW collections and submit BGM jobs.
+        # Non-fatal: log WARNING on any failure, never block startup.
+        try:
+            from code_indexer.services.temporal.temporal_migration_service import (
+                submit_temporal_migration_jobs as _submit_temporal_migrations,
+            )
+
+            _temporal_repos = (
+                golden_repo_manager.list_golden_repos()
+                if golden_repo_manager is not None
+                else []
+            )
+            _submit_temporal_migrations(background_job_manager, _temporal_repos)
+            logger.info(
+                "Story #1172: temporal index migration scan complete (%d repos checked)",
+                len(_temporal_repos),
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as _tmig_exc:
+            logger.warning(
+                "Story #1172: temporal index migration scan failed (non-fatal): %s",
+                _tmig_exc,
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Story #1166: HNSW/FTS cache caps are divided by worker count in
+        # initialize_services() (service_init.py) BEFORE the eager
+        # get_global_cache()/get_global_fts_cache() calls build the singletons.
+        # No initialize_caches call here — service_init.py is the single source
+        # of truth so that the division is in place when the singletons are first
+        # constructed, not after.
+
         yield  # Server is now running
 
         # Story #1083: close the pooled production httpx client owned by the
@@ -3227,6 +3385,17 @@ def make_lifespan(
             logger.warning(
                 "Story #1083: failed to drain api-metrics writer during shutdown: %s",
                 _metrics_stop_exc,
+            )
+
+        # Issue #1159: drain the search-event-log writer on shutdown.
+        try:
+            _sel_writer = getattr(app.state, "search_event_log_writer", None)
+            if _sel_writer is not None:
+                _sel_writer.stop()
+        except Exception as _sel_stop_exc:
+            logger.warning(
+                "Issue #1159: failed to drain search-event-log writer during shutdown: %s",
+                _sel_stop_exc,
             )
 
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging
@@ -3292,6 +3461,39 @@ def make_lifespan(
         except Exception:
             logger.debug(
                 "Coalescer registry clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Story #1213 Story 1: stop the sampler thread then clear the singleton.
+        # stop() must come before clear_memory_governor() so the thread is joined
+        # before the reference is dropped (mirrors other lifecycle service stops).
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            from code_indexer.server.services.memory_governor import (
+                clear_memory_governor,
+                get_memory_governor,
+            )
+
+            _gov_for_shutdown = get_memory_governor()
+            if _gov_for_shutdown is not None:
+                _gov_for_shutdown.stop(timeout=5.0)
+            clear_memory_governor()
+        except Exception:
+            logger.debug(
+                "MemoryGovernor stop/clear failed (expected during shutdown)",
+                exc_info=True,
+            )
+
+        # Bug #1181 Perf Fix #2: stop the async touch-flush background thread so
+        # it performs a final drain of buffered last_used touches before the cache
+        # is cleared.  Must run BEFORE clear_query_embedding_cache() below.
+        # Non-fatal — never abort the remaining shutdown chain.
+        try:
+            if "_query_embedding_cache" in dir():
+                _query_embedding_cache.stop()
+        except Exception:
+            logger.debug(
+                "Query embedding cache async touch flusher stop failed (expected during shutdown)",
                 exc_info=True,
             )
 

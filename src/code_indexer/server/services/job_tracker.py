@@ -53,9 +53,18 @@ class TrackedJob:
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    actor_username: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
+# Sentinel job_id used by _atomic_insert_or_raise when a unique-violation fires
+# but the blocking row has already completed (fell outside the partial-index
+# predicate) by the time the follow-up SELECT runs.  Callers (e.g.
+# DataRetentionScheduler) see a DuplicateJobError — not a RuntimeError — so they
+# skip silently, which is correct: the concurrent worker already ran the job.
+CONCURRENT_COMPLETED_SENTINEL = "(concurrent-completed)"
+
+
 # DuplicateJobError exception
 # ---------------------------------------------------------------------------
 
@@ -176,6 +185,7 @@ def _row_to_tracked_job(row) -> TrackedJob:
         repo_alias,
         progress_info,
         metadata_json,
+        actor_username,
     ) = row
     return TrackedJob(
         job_id=job_id,
@@ -191,6 +201,7 @@ def _row_to_tracked_job(row) -> TrackedJob:
         completed_at=_iso_to_dt(completed_at_str),
         error=error,
         result=json.loads(result_json) if result_json else None,
+        actor_username=actor_username,
     )
 
 
@@ -210,6 +221,7 @@ def _tracked_job_to_dict(job: TrackedJob) -> Dict[str, Any]:
         "completed_at": _dt_to_iso(job.completed_at),
         "error": job.error,
         "result": job.result,
+        "actor_username": job.actor_username,
     }
 
 
@@ -242,7 +254,8 @@ def _status_priority_sort_key(job_dict: Dict[str, Any]):
 # Columns fetched by all SELECT queries — keeps column index mapping single-source.
 _SELECT_COLUMNS = (
     "job_id, operation_type, status, created_at, started_at, completed_at, "
-    "result, error, progress, username, repo_alias, progress_info, metadata"
+    "result, error, progress, username, repo_alias, progress_info, metadata, "
+    "actor_username"
 )
 
 # Upper bound for backend list_jobs when enumerating candidates for bulk deletion.
@@ -1072,10 +1085,24 @@ class JobTracker:
             job.operation_type, job.repo_alias
         )
         if existing_id is None:
-            raise RuntimeError(
-                f"atomic insert raised IntegrityError for "
-                f"({job.operation_type}, {job.repo_alias}) but no active row "
-                f"was found in the lookup; database state is inconsistent"
+            # Bug #1235: The blocking row completed between our INSERT and our
+            # SELECT — a benign race under PG multi-worker.  The concurrent
+            # worker already ran the operation; treat it as a duplicate so the
+            # caller (e.g. DataRetentionScheduler) skips silently rather than
+            # crashing with RuntimeError.  We use a sentinel job_id because the
+            # actual job_id is no longer visible (it fell outside the partial
+            # index predicate when it completed).
+            logger.debug(
+                "atomic insert raised unique-violation for (%s, %s) but no "
+                "active row is visible — concurrent worker completed the job "
+                "between INSERT and SELECT; treating as benign duplicate",
+                job.operation_type,
+                job.repo_alias,
+            )
+            raise DuplicateJobError(
+                operation_type=job.operation_type,
+                repo_alias=job.repo_alias,
+                existing_job_id=CONCURRENT_COMPLETED_SENTINEL,
             )
         raise DuplicateJobError(
             operation_type=job.operation_type,
@@ -1179,19 +1206,17 @@ class JobTracker:
         lookup) and raises RuntimeError rather than substituting a fallback.
         """
         if self._backend is not None:
-            for status in ("running", "pending"):
-                rows = self._backend.list_jobs(
-                    status=status, operation_type=operation_type
-                )
-                for row in rows:
-                    if row.get("repo_alias") == repo_alias:
-                        # Explicit type narrowing: list_jobs returns
-                        # List[Dict[str, Any]], so row.get("job_id") is Any.
-                        # A well-formed row has a string job_id; guard
-                        # defensively rather than suppress mypy.
-                        candidate = row.get("job_id")
-                        return candidate if isinstance(candidate, str) else None
-            return None
+            # Bug #1220: use the direct backend lookup instead of the paginated
+            # list_jobs + Python repo_alias filter approach.  The paginated path
+            # can miss the blocking row when it falls outside the top-N results,
+            # causing _atomic_insert_or_raise to raise RuntimeError instead of
+            # DuplicateJobError.  find_active_job_by_type_and_alias queries by
+            # (operation_type, repo_alias, status IN pending/running) directly,
+            # with no pagination and no Python-side filtering.
+            result: Optional[str] = self._backend.find_active_job_by_type_and_alias(
+                operation_type, repo_alias
+            )
+            return result
 
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
