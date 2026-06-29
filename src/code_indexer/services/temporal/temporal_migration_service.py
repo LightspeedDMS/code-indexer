@@ -390,7 +390,7 @@ def _build_quarter_buckets(
     for label, point_id in label_to_point_id.items():
         rel_path = point_id_to_rel_path.get(point_id)
         if rel_path is None:
-            logger.warning(
+            logger.debug(
                 "Migration: point_id %s has no id_index entry in %s — skipping",
                 point_id,
                 collection_path.name,
@@ -400,7 +400,7 @@ def _build_quarter_buckets(
 
         src_json = collection_path / rel_path
         if not src_json.exists():
-            logger.warning(
+            logger.debug(
                 "Migration: JSON payload %s not found — skipping point %s",
                 src_json,
                 point_id,
@@ -424,7 +424,7 @@ def _build_quarter_buckets(
                 if commit_ts is None:
                     commit_ts = payload_data.get("commit_timestamp")
                 if commit_ts is None:
-                    logger.warning(
+                    logger.debug(
                         "Migration: no commit_timestamp in %s and no git timestamp "
                         "for point %s — skipping",
                         src_json,
@@ -436,7 +436,7 @@ def _build_quarter_buckets(
 
             q = quarter_suffix(dt)
         except Exception as exc:
-            logger.warning(
+            logger.debug(
                 "Migration: error processing %s: %s — skipping", src_json, exc
             )
             drop_counts["timestamp_unresolved"] += 1
