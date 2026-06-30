@@ -3361,6 +3361,34 @@ class DeploymentExecutor:
             extra={"correlation_id": get_correlation_id()},
         )
 
+        # Bug #1251: Set TMPDIR for the entire deploy process BEFORE any
+        # subprocess is spawned. Bug #1243 set TMPDIR only on the explicit
+        # `sudo env TMPDIR=...` prefix used by the SUDO pip path; Bug #1245's
+        # writability fix routes editable-home installs (no /.local/ segment,
+        # writable directory -- the staging cluster layout) through the
+        # NO-SUDO command, which carried no TMPDIR at all. Under systemd
+        # PrivateTmp=yes + Python 3.12, the auto-updater's private /tmp is
+        # isolated and unusable, so pip's tempfile.gettempdir() raises
+        # FileNotFoundError at the pybind11/hnswlib build step, dead-looping
+        # the auto-updater (same self-perpetuating class as #1182/#1243/#1245).
+        #
+        # Mutating os.environ here -- rather than threading an explicit env=
+        # kwarg through every no-sudo call site -- is sufficient and
+        # exhaustive: every subprocess.run() invocation in this module either
+        # omits env= entirely (inherits the live process environment, which
+        # now carries TMPDIR) or explicitly builds its env from
+        # os.environ.copy() / dict(os.environ) (build_non_interactive_git_env()
+        # for git operations, the self-restart smoke test, the pace-maker
+        # no-sudo install, the Rust toolchain install + cargo build). So this
+        # single early mutation propagates TMPDIR to every no-sudo child
+        # process without requiring any per-call-site change.
+        #
+        # The SUDO path is unchanged: sudo's env_reset strips inherited
+        # environment variables, so it still requires (and keeps) the
+        # explicit ["sudo", "env", f"TMPDIR={tmpdir}", ...] prefix from
+        # Bug #1243.
+        os.environ["TMPDIR"] = self._deploy_tmpdir()
+
         # Step 0: Calculate hash of auto_update code BEFORE git pull
         hash_before = self._calculate_auto_update_hash()
 
