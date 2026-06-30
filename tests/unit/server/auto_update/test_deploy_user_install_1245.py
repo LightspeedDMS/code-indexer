@@ -5,9 +5,18 @@ Root cause: build_custom_hnswlib() and pip_install() unconditionally run pip via
 targeting /root/.local on a user-install layout (code-indexer in ~/.local/...).
 On an immutable host /root/.local is read-only -> OSError -> deploy dead-loops.
 
+Re-fix (v11.11.0): the original v11.10.0 fix below (item 1) classified a user install
+ONLY via the "/.local/" substring. Staging proved this misses an EDITABLE install at a
+jsbattig-owned path with NO /.local/ segment (e.g. /home/jsbattig/code-indexer/src/
+code_indexer/__init__.py) -> probe returned False -> use_sudo=True -> sudo's root pip hit
+read-only /root/.local + /root/.cache/pip/wheels -> fatal pip install failure -> dead loop.
+_is_user_install now keys on WRITABILITY (os.access(install_dir, os.W_OK)) in addition to
+the /.local/ substring, so editable-home installs are also correctly classified.
+
 Fix:
 1. _is_user_install(python_path): probe code_indexer.__file__; returns True if path
-   contains /.local/. Conservative: False on any failure.
+   contains /.local/ OR its containing directory is writable by the current process
+   user (os.access W_OK). Conservative: False on any failure, DEBUG-logged.
 2. _hnswlib_importable(python_path): probe `import hnswlib`; returns True if rc==0.
 3. _get_hnswlib_submodule_commit(): git ls-files -s third_party/hnswlib; parses second token.
 4. _get_last_built_hnswlib_commit(): reads _cidx_data_dir/hnswlib-last-built-commit.
@@ -28,6 +37,8 @@ Invariants verified:
 - MUST NOT modify any existing test files.
 """
 
+import logging
+import os
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -161,6 +172,134 @@ class TestIsUserInstall:
         with patch("subprocess.run", side_effect=OSError("permission denied")):
             result = executor._is_user_install("/usr/bin/python3")  # type: ignore[attr-defined]
         assert result is False
+
+    def test_user_install_detected_for_writable_editable_home_install(
+        self, executor: DeploymentExecutor, tmp_path: Path
+    ) -> None:
+        """Bug #1245 re-fix regression (staging-proven).
+
+        An editable-home install (e.g. /home/jsbattig/code-indexer/src/
+        code_indexer/__init__.py) has NO "/.local/" segment at all, but its
+        containing directory IS writable by the current (auto-updater)
+        process user. The v11.10.0 /.local/-substring-only probe returned
+        False for this exact layout -> use_sudo=True -> sudo's root pip
+        targeted read-only /root/.local and /root/.cache/pip/wheels on the
+        immutable staging host -> fatal pip install failure -> dead loop.
+
+        Constructed with a REAL writable tmp_path directory (not a mock of
+        os.access) so this test exercises genuine filesystem writability.
+
+        MUST FAIL against the pre-fix /.local/-only implementation (which
+        returns False here) and PASS after the writability-based fix.
+        """
+        fake_pkg_dir = tmp_path / "code-indexer" / "src" / "code_indexer"
+        fake_pkg_dir.mkdir(parents=True)
+        fake_init = fake_pkg_dir / "__init__.py"
+        fake_init.write_text("# fake editable install\n")
+        assert os.access(fake_pkg_dir, os.W_OK), (
+            "test precondition: fake install dir must be writable"
+        )
+        assert "/.local/" not in str(fake_init), (
+            "test precondition: fake path must NOT contain /.local/ "
+            "(this is the regression the v11.10.0 fix missed)"
+        )
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(
+                returncode=0,
+                stdout=f"{fake_init}\n",
+                stderr="",
+            )
+            result = executor._is_user_install("/usr/bin/python3")  # type: ignore[attr-defined]
+
+        assert result is True, (
+            "Editable-home install with a writable directory must be "
+            "classified as a user install (no sudo) even without a "
+            "/.local/ segment in the path"
+        )
+
+    def test_system_install_detected_for_non_writable_dir_via_os_access(
+        self, executor: DeploymentExecutor
+    ) -> None:
+        """Path with NO /.local/ segment + os.access(W_OK) explicitly False ->
+        system install -> False (use sudo).
+
+        Mocks os.access directly (rather than relying on a path that merely
+        happens not to exist) so the writability-check CODE PATH itself is
+        proven, not just an incidental ENOENT outcome.
+        """
+        with (
+            patch("subprocess.run") as mock_run,
+            patch.object(_de_mod.os, "access", return_value=False) as mock_access,
+        ):
+            mock_run.return_value = Mock(
+                returncode=0,
+                stdout="/usr/local/lib/python3.9/site-packages/code_indexer/__init__.py\n",
+                stderr="",
+            )
+            result = executor._is_user_install("/usr/bin/python3")  # type: ignore[attr-defined]
+
+        assert result is False, (
+            "Non-writable install dir without /.local/ must be a system "
+            "install (use sudo)"
+        )
+        mock_access.assert_called_once()
+
+    def test_user_install_probe_rc_nonzero_logs_debug(
+        self, executor: DeploymentExecutor, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Probe rc!=0 -> conservative False AND a DEBUG record is emitted
+        (operator visibility into why sudo was chosen)."""
+        caplog.set_level(
+            logging.DEBUG, logger="code_indexer.server.auto_update.deployment_executor"
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=1, stdout="", stderr="boom")
+            result = executor._is_user_install("/usr/bin/python3")  # type: ignore[attr-defined]
+
+        assert result is False
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert debug_records, "Expected a DEBUG log record on probe rc!=0"
+
+    def test_user_install_probe_exception_logs_debug(
+        self, executor: DeploymentExecutor, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """subprocess.run exception -> conservative False AND a DEBUG record
+        is emitted."""
+        caplog.set_level(
+            logging.DEBUG, logger="code_indexer.server.auto_update.deployment_executor"
+        )
+        with patch("subprocess.run", side_effect=OSError("permission denied")):
+            result = executor._is_user_install("/usr/bin/python3")  # type: ignore[attr-defined]
+
+        assert result is False
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert debug_records, "Expected a DEBUG log record on probe exception"
+
+    def test_user_install_writability_check_exception_logs_debug(
+        self, executor: DeploymentExecutor, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """os.access raising during the writability check -> conservative
+        False AND a DEBUG record is emitted (not a crash)."""
+        caplog.set_level(
+            logging.DEBUG, logger="code_indexer.server.auto_update.deployment_executor"
+        )
+        with (
+            patch("subprocess.run") as mock_run,
+            patch.object(_de_mod.os, "access", side_effect=OSError("stat failed")),
+        ):
+            mock_run.return_value = Mock(
+                returncode=0,
+                stdout="/usr/local/lib/python3.9/site-packages/code_indexer/__init__.py\n",
+                stderr="",
+            )
+            result = executor._is_user_install("/usr/bin/python3")  # type: ignore[attr-defined]
+
+        assert result is False
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert debug_records, (
+            "Expected a DEBUG log record on writability-check exception"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -820,3 +959,120 @@ class TestPipInstallCommandShape:
             f"System install + pip>=23: --break-system-packages must be in cmd; "
             f"got: {install_calls[0]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestEditableHomeInstallEndToEnd
+#
+# Bug #1245 re-fix: end-to-end proof that the REAL _is_user_install() logic
+# (not a patch.object mock of the method itself) drives the no-sudo command
+# shape for the exact staging-proven editable-home layout. Only the
+# subprocess-level code_indexer.__file__ probe and the pip --version probe
+# are dispatched; _is_user_install runs its genuine writability check
+# against a real, writable tmp_path directory.
+# ---------------------------------------------------------------------------
+
+
+def _make_editable_home_dispatch(
+    calls: list, fake_init: Path, pip_version: str = "23.1"
+):
+    """subprocess.run side_effect that answers the code_indexer.__file__ probe
+    with a fake editable-home path (no /.local/ segment), answers the pip
+    --version probe, and captures every call for shape assertions."""
+
+    def dispatch(cmd: list, **kw: object) -> Mock:
+        calls.append(list(cmd))
+        if "-c" in cmd and any("code_indexer.__file__" in str(a) for a in cmd):
+            return Mock(returncode=0, stdout=f"{fake_init}\n", stderr="")
+        if "-m" in cmd and "pip" in cmd and "--version" in cmd:
+            return Mock(
+                returncode=0,
+                stdout=f"pip {pip_version} from /path (python 3.9)\n",
+                stderr="",
+            )
+        return Mock(returncode=0, stdout="", stderr="")
+
+    return dispatch
+
+
+class TestEditableHomeInstallEndToEnd:
+    """End-to-end: editable-home install (no /.local/, writable dir) must
+    produce a no-sudo pip command in BOTH build_custom_hnswlib() and
+    pip_install(), with _is_user_install's real logic exercised (not mocked).
+    """
+
+    def test_build_custom_hnswlib_no_sudo_for_writable_editable_home_install(
+        self, executor: DeploymentExecutor, tmp_path: Path, patched_data_dir: Path
+    ) -> None:
+        """Real _is_user_install() on an editable-home writable path ->
+        build_custom_hnswlib's pybind11 AND hnswlib install commands must
+        both have NO sudo."""
+        hnswlib_path = _make_hnswlib_path(tmp_path)
+        fake_pkg_dir = tmp_path / "code-indexer" / "src" / "code_indexer"
+        fake_pkg_dir.mkdir(parents=True)
+        fake_init = fake_pkg_dir / "__init__.py"
+        fake_init.write_text("# fake editable install\n")
+        calls: list = []
+
+        with (
+            patch.object(
+                executor, "_get_server_python", return_value="/usr/bin/python3"
+            ),
+            patch.object(executor, "_ensure_build_dependencies", return_value=True),
+            patch.object(executor, "_hnswlib_importable", return_value=False),
+            patch.object(executor, "_get_hnswlib_submodule_commit", return_value=None),
+            patch.object(executor, "_get_last_built_hnswlib_commit", return_value=None),
+            # _is_user_install is INTENTIONALLY NOT mocked here: its genuine
+            # subprocess-probe + os.access(W_OK) logic must run.
+            patch(
+                "subprocess.run",
+                side_effect=_make_editable_home_dispatch(calls, fake_init),
+            ),
+        ):
+            result = executor.build_custom_hnswlib(hnswlib_path=hnswlib_path)
+
+        assert result is True
+        pybind11_calls = [c for c in calls if "pybind11" in c]
+        hnswlib_calls = [c for c in calls if "--force-reinstall" in c]
+        assert pybind11_calls, f"Expected pybind11 install call; all calls: {calls}"
+        assert hnswlib_calls, f"Expected hnswlib install call; all calls: {calls}"
+        assert pybind11_calls[0][0] != "sudo", (
+            f"Editable-home install: pybind11 cmd must NOT start with "
+            f"'sudo'; got: {pybind11_calls[0]}"
+        )
+        assert hnswlib_calls[0][0] != "sudo", (
+            f"Editable-home install: hnswlib cmd must NOT start with "
+            f"'sudo'; got: {hnswlib_calls[0]}"
+        )
+
+    def test_pip_install_no_sudo_for_writable_editable_home_install(
+        self, executor: DeploymentExecutor, tmp_path: Path, patched_data_dir: Path
+    ) -> None:
+        """Real _is_user_install() on an editable-home writable path ->
+        pip_install's command must start with the python binary, NOT sudo."""
+        fake_pkg_dir = tmp_path / "code-indexer" / "src" / "code_indexer"
+        fake_pkg_dir.mkdir(parents=True)
+        fake_init = fake_pkg_dir / "__init__.py"
+        fake_init.write_text("# fake editable install\n")
+        calls: list = []
+
+        with (
+            patch.object(
+                executor, "_get_server_python", return_value="/usr/bin/python3"
+            ),
+            # _is_user_install is INTENTIONALLY NOT mocked here.
+            patch(
+                "subprocess.run",
+                side_effect=_make_editable_home_dispatch(calls, fake_init),
+            ),
+        ):
+            result = executor.pip_install()
+
+        assert result is True
+        install_calls = [c for c in calls if "-e" in c]
+        assert install_calls, f"Expected pip install -e . call; all calls: {calls}"
+        assert install_calls[0][0] == "/usr/bin/python3", (
+            f"Editable-home install: pip_install command must start with "
+            f"the python binary, NOT sudo; got: {install_calls[0]}"
+        )
+        assert install_calls[0][0] != "sudo"

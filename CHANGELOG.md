@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.11.0] - 2026-06-30
+
+### Fixed
+- **#1245 (re-fix of v11.10.0, P1): auto-updater STILL dead-looped on editable-home installs.** v11.10.0's `_is_user_install` classified a host as user-install ONLY via the `/.local/` substring; the staging cluster runs an editable install at `/home/<user>/code-indexer/src` (no `/.local/` segment), so the probe returned False -> sudo'd pip -> root's read-only `/root/.local` + `/root/.cache/pip/wheels` -> `[DEPLOY-GENERAL-021]` -> the dead-loop persisted even after the v11.10.0 source was pulled. Fix: `_is_user_install` now ALSO returns True when `os.access(install_dir, os.W_OK)` (the running import location is writable by the auto-updater's user) -- editable-home, `~/.local`, and genuine root-owned system installs are all classified correctly (conservative False -> sudo on probe failure, DEBUG-logged). System-install command shape (sudo + `env TMPDIR=` #1243, break-system-packages probe/retry #1234) is byte-identical. Caught ONLY by deploying+testing on the real staging cluster (unit tests had asserted `/.local/` paths).
+- **#1248 (P1): reindex endpoint 500'd -- `TriggerReindexResponse(**result)` but `trigger_reindex` returns a job_id str, not a mapping.** The router built the response via `**result` while the service returns a bare job_id string (and the response model needs `success`/`job_id`/`status`/`index_types`/`started_at`), so every successful reindex submission 500'd. The failure was masked on cow-daemon by the #1246 400 and never covered by a router-level test. Fix: construct `TriggerReindexResponse` explicitly (`status=JobStatus.PENDING.value` from the BGM's source-of-truth enum, `started_at=now UTC ISO`); `trigger_reindex` keeps its `-> str` contract; the endpoint stays HTTP 202 (async job-trigger semantics). Adds the missing router-level (TestClient) coverage. Found during live staging testing immediately after #1246 unblocked the reindex path.
+
 ## [11.10.0] - 2026-06-30
 
 ### Fixed
