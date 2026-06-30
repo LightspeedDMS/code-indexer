@@ -33,6 +33,7 @@ from code_indexer.server.services.cidx_meta_backup import (
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
@@ -221,6 +222,13 @@ class RefreshScheduler:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()  # Event-based signaling for efficient stop
+
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback on every
+        # per-repo _submit_refresh_job() failure during a PG outage. This is
+        # SEPARATE from the Bug #735 outer circuit breaker (whole-iteration
+        # failures) below — that one is untouched.
+        self._db_throttle = DbOutageThrottle(service_name="RefreshScheduler")
 
         # Per-repo locking for concurrent refresh serialization
         self._repo_locks: dict[str, threading.Lock] = {}
@@ -1089,6 +1097,7 @@ class RefreshScheduler:
                     _submit_failed = False
                     try:
                         self._submit_refresh_job(alias_name)
+                        self._db_throttle.on_db_success(logger)
                     except DuplicateJobError:
                         # Job already running for this repo — expected when prior refresh
                         # is still in flight (possibly extended by a verification pass).
@@ -1102,10 +1111,15 @@ class RefreshScheduler:
                         # Transient failure — do NOT advance next_refresh.
                         # The repo remains overdue and will be retried on the next poll.
                         _submit_failed = True
-                        logger.error(
-                            f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
-                            exc_info=True,
-                        )
+                        # Bug #1249: a connectivity error (e.g. PoolTimeout from
+                        # job_tracker._atomic_insert_or_raise during a PG outage)
+                        # is throttled (single ERROR transition, DEBUG
+                        # follow-ups); anything else still logs normally.
+                        if not self._db_throttle.on_db_error(e, logger):
+                            logger.error(
+                                f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
+                                exc_info=True,
+                            )
 
                     # Story #284 AC1: back-propagate next_refresh with jitter.
                     # Bug #1066: skip advancement when submit raised a generic exception.
@@ -1142,8 +1156,12 @@ class RefreshScheduler:
                     return
                 continue
 
-            # Short poll interval instead of full refresh_interval wait
-            poll_interval = self._calculate_poll_interval(refresh_interval)
+            # Short poll interval instead of full refresh_interval wait.
+            # Bug #1249: during a per-repo DB outage, back off the overall
+            # poll cadence too (capped) instead of hammering every tick.
+            poll_interval = self._db_throttle.next_wait_seconds(
+                self._calculate_poll_interval(refresh_interval)
+            )
             self._stop_event.wait(timeout=poll_interval)
 
         logger.debug("Refresh scheduler loop exited")

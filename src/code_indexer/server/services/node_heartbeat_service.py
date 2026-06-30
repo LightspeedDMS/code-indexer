@@ -33,6 +33,8 @@ from typing import Any, List, Optional
 
 from psycopg.rows import tuple_row
 
+from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
+
 logger = logging.getLogger(__name__)
 
 # Extra seconds added to heartbeat_interval when joining the thread on stop().
@@ -85,6 +87,11 @@ class NodeHeartbeatService:
         self._active_threshold_seconds = active_threshold_seconds
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback every tick.
+        self._db_throttle = DbOutageThrottle(
+            service_name=f"NodeHeartbeatService[{node_id}]"
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -229,12 +236,18 @@ class NodeHeartbeatService:
         while not self._stop_event.is_set():
             try:
                 self.update_heartbeat()
+                self._db_throttle.on_db_success(logger)
                 logger.debug(
                     "NodeHeartbeatService [%s]: heartbeat updated", self._node_id
                 )
-            except Exception:
-                logger.exception(
-                    "NodeHeartbeatService [%s]: error updating heartbeat",
-                    self._node_id,
-                )
-            self._stop_event.wait(self._heartbeat_interval)
+            except Exception as exc:
+                # Bug #1249: a connectivity error is throttled (single ERROR
+                # transition, DEBUG follow-ups); anything else still logs
+                # normally every time.
+                if not self._db_throttle.on_db_error(exc, logger):
+                    logger.exception(
+                        "NodeHeartbeatService [%s]: error updating heartbeat",
+                        self._node_id,
+                    )
+            wait_seconds = self._db_throttle.next_wait_seconds(self._heartbeat_interval)
+            self._stop_event.wait(wait_seconds)
