@@ -308,10 +308,12 @@ class TestPipInstallUsesServerPython:
             executor, "_get_server_python", return_value=server_python
         ) as mock_get_python:
             with patch("subprocess.run") as mock_run:
-                # Bug #1234: pip_install() now probes pip --version before installing.
+                # Bug #1234: pip_install() probes pip --version before installing.
+                # Bug #1245: pip_install() now also probes _is_user_install first.
                 # Call order:
-                #   [0] pip --version probe  (returns pip version to decide flag)
-                #   [1] pip install          (the actual install)
+                #   [0] _is_user_install probe  (import code_indexer; print(__file__))
+                #   [1] pip --version probe  (returns pip version to decide flag)
+                #   [2] pip install          (the actual install)
                 mock_run.return_value = Mock(
                     returncode=0,
                     stdout="pip 23.1 from /usr/local/lib/python3/dist-packages/pip (python 3.9)\n",
@@ -323,13 +325,14 @@ class TestPipInstallUsesServerPython:
         assert result is True
         mock_get_python.assert_called_once()
 
-        # Verify subprocess.run was called twice: pip --version probe + pip install
+        # Verify subprocess.run was called three times:
+        # _is_user_install probe + pip --version probe + pip install
         calls = mock_run.call_args_list
-        assert len(calls) == 2
+        assert len(calls) == 3
 
-        # [1] is the actual pip install — verify it uses sudo + env TMPDIR + server python
+        # [2] is the actual pip install — verify it uses sudo + env TMPDIR + server python
         # Bug #1243: command is now ["sudo", "env", "TMPDIR=<dir>", python, "-m", "pip", ...]
-        pip_install_args = calls[1][0][0]
+        pip_install_args = calls[2][0][0]
         assert pip_install_args[0] == "sudo"
         assert pip_install_args[1] == "env", (
             "Bug #1243: 'env' must appear at position 1 to pass TMPDIR through sudo"
