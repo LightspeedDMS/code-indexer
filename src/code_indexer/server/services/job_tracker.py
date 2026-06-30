@@ -64,6 +64,13 @@ class TrackedJob:
 # skip silently, which is correct: the concurrent worker already ran the job.
 CONCURRENT_COMPLETED_SENTINEL = "(concurrent-completed)"
 
+# Bug #1252: bounded retry count for _atomic_insert_or_raise when a
+# unique-violation fires but the conflicting row has already vanished
+# (completed) by lookup time. 1 initial attempt + up to 2 retries — enough
+# for the transient race to clear without risking an unbounded loop
+# (Messi Rule #14).
+_MAX_ATOMIC_INSERT_ATTEMPTS = 3
+
 
 # DuplicateJobError exception
 # ---------------------------------------------------------------------------
@@ -1062,9 +1069,20 @@ class JobTracker:
         Backend path catches the narrow _BackendUniqueViolation marker that
         _atomic_insert_impl raises in place of psycopg's IntegrityError.
 
-        If the lookup for the blocking row returns None, raises RuntimeError
-        — treating an inconsistent database state as a hard error rather
-        than substituting a fallback value (Messi Rule #2 anti-fallback).
+        Bug #1252: if the violation fires but the follow-up lookup finds no
+        active blocking row, the conflicting job completed between our INSERT
+        and our SELECT — a benign TOCTOU race. The partial index no longer
+        has any conflicting active row, so the slot is genuinely free and the
+        INSERT should now succeed: retry (bounded by
+        _MAX_ATOMIC_INSERT_ATTEMPTS) instead of immediately treating a freed
+        slot as a duplicate. A real duplicate (blocking row found) raises
+        DuplicateJobError immediately, without retrying. If the
+        no-active-row state persists across every bounded attempt (Messi
+        Rule #14 — no unbounded loop), falls back to the Bug #1235 behavior
+        of DuplicateJobError with CONCURRENT_COMPLETED_SENTINEL rather than
+        ever raising a fatal RuntimeError (Messi Rule #2 anti-fallback still
+        honored: this is a deliberate, logged, bounded degradation — never a
+        silently substituted success).
 
         Args:
             is_admin: Persisted to the DB row on INSERT (AC12 audit trail).
@@ -1073,41 +1091,56 @@ class JobTracker:
         assert job.repo_alias is not None, (
             "atomic insert requires non-null repo_alias — partial index excludes NULL"
         )
-        try:
-            self._atomic_insert_impl(
-                job, is_admin=is_admin, actor_username=actor_username
-            )
-            return
-        except (sqlite3.IntegrityError, _BackendUniqueViolation):
-            pass
+        for attempt in range(1, _MAX_ATOMIC_INSERT_ATTEMPTS + 1):
+            try:
+                self._atomic_insert_impl(
+                    job, is_admin=is_admin, actor_username=actor_username
+                )
+                return
+            except (sqlite3.IntegrityError, _BackendUniqueViolation):
+                pass
 
-        existing_id = self._find_blocking_active_job_id(
-            job.operation_type, job.repo_alias
+            existing_id = self._find_blocking_active_job_id(
+                job.operation_type, job.repo_alias
+            )
+            if existing_id is not None:
+                # A real active row is blocking us — genuine duplicate.
+                raise DuplicateJobError(
+                    operation_type=job.operation_type,
+                    repo_alias=job.repo_alias,
+                    existing_job_id=existing_id,
+                )
+
+            if attempt < _MAX_ATOMIC_INSERT_ATTEMPTS:
+                logger.debug(
+                    "atomic insert raised unique-violation for (%s, %s) on "
+                    "attempt %d/%d but no active row is visible — retrying; "
+                    "concurrent worker likely completed the job between "
+                    "INSERT and SELECT",
+                    job.operation_type,
+                    job.repo_alias,
+                    attempt,
+                    _MAX_ATOMIC_INSERT_ATTEMPTS,
+                )
+
+        # Bug #1235: bounded retries exhausted and the no-active-row state
+        # persisted on every attempt. Treat as a benign duplicate so the
+        # caller (e.g. DataRetentionScheduler, refresh schedulers) skips
+        # silently rather than crashing with RuntimeError. We use a sentinel
+        # job_id because the actual job_id is no longer visible (it fell
+        # outside the partial index predicate when it completed).
+        logger.debug(
+            "atomic insert raised unique-violation for (%s, %s) repeatedly "
+            "with no active row visible after %d attempt(s) — treating as "
+            "benign duplicate (concurrent worker completed the job)",
+            job.operation_type,
+            job.repo_alias,
+            _MAX_ATOMIC_INSERT_ATTEMPTS,
         )
-        if existing_id is None:
-            # Bug #1235: The blocking row completed between our INSERT and our
-            # SELECT — a benign race under PG multi-worker.  The concurrent
-            # worker already ran the operation; treat it as a duplicate so the
-            # caller (e.g. DataRetentionScheduler) skips silently rather than
-            # crashing with RuntimeError.  We use a sentinel job_id because the
-            # actual job_id is no longer visible (it fell outside the partial
-            # index predicate when it completed).
-            logger.debug(
-                "atomic insert raised unique-violation for (%s, %s) but no "
-                "active row is visible — concurrent worker completed the job "
-                "between INSERT and SELECT; treating as benign duplicate",
-                job.operation_type,
-                job.repo_alias,
-            )
-            raise DuplicateJobError(
-                operation_type=job.operation_type,
-                repo_alias=job.repo_alias,
-                existing_job_id=CONCURRENT_COMPLETED_SENTINEL,
-            )
         raise DuplicateJobError(
             operation_type=job.operation_type,
             repo_alias=job.repo_alias,
-            existing_job_id=existing_id,
+            existing_job_id=CONCURRENT_COMPLETED_SENTINEL,
         )
 
     def _atomic_insert_impl(
@@ -1201,9 +1234,10 @@ class JobTracker:
         idx_active_job_per_repo, so the caller can populate
         DuplicateJobError.existing_job_id.
 
-        Returns None if no blocking row is visible — the caller treats that
-        as an inconsistent database state (row vanished between INSERT and
-        lookup) and raises RuntimeError rather than substituting a fallback.
+        Returns None if no blocking row is visible — the row vanished
+        (completed) between the INSERT and this lookup. The caller
+        (_atomic_insert_or_raise, Bug #1252) retries the insert (bounded)
+        rather than immediately treating the now-free slot as a duplicate.
         """
         if self._backend is not None:
             # Bug #1220: use the direct backend lookup instead of the paginated
