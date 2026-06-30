@@ -245,7 +245,7 @@ class TestPybind11InstallCarriesTmpdir:
 
         def dispatch(cmd: list, **kw: object) -> Mock:
             calls.append(list(cmd))
-            return base(cmd, **kw)
+            return base(cmd, **kw)  # type: ignore[no-any-return]
 
         with patch("subprocess.run", side_effect=dispatch):
             executor.build_custom_hnswlib(hnswlib_path=hnswlib_path)
@@ -337,7 +337,7 @@ class TestHnswlibInstallCarriesTmpdir:
 
         def dispatch(cmd: list, **kw: object) -> Mock:
             calls.append(list(cmd))
-            return base(cmd, **kw)
+            return base(cmd, **kw)  # type: ignore[no-any-return]
 
         with patch("subprocess.run", side_effect=dispatch):
             executor.build_custom_hnswlib(hnswlib_path=hnswlib_path)
@@ -427,7 +427,7 @@ class TestPipInstallCarriesTmpdir:
 
         def dispatch(cmd: list, **kw: object) -> Mock:
             calls.append(list(cmd))
-            return base(cmd, **kw)
+            return base(cmd, **kw)  # type: ignore[no-any-return]
 
         with patch("subprocess.run", side_effect=dispatch):
             executor.pip_install()
@@ -503,7 +503,7 @@ class TestBreakSystemPackagesPreservedWithTmpdir:
 
         def dispatch(cmd: list, **kw: object) -> Mock:
             calls.append(list(cmd))
-            return base(cmd, **kw)
+            return base(cmd, **kw)  # type: ignore[no-any-return]
 
         with patch("subprocess.run", side_effect=dispatch):
             result = executor.pip_install()
@@ -529,7 +529,7 @@ class TestBreakSystemPackagesPreservedWithTmpdir:
 
         def dispatch(cmd: list, **kw: object) -> Mock:
             calls.append(list(cmd))
-            return base(cmd, **kw)
+            return base(cmd, **kw)  # type: ignore[no-any-return]
 
         with patch("subprocess.run", side_effect=dispatch):
             result = executor.pip_install()
@@ -559,7 +559,7 @@ class TestBreakSystemPackagesPreservedWithTmpdir:
 
         def dispatch(cmd: list, **kw: object) -> Mock:
             calls.append(list(cmd))
-            return base(cmd, **kw)
+            return base(cmd, **kw)  # type: ignore[no-any-return]
 
         with patch("subprocess.run", side_effect=dispatch):
             result = executor.build_custom_hnswlib(hnswlib_path=hnswlib_path)
@@ -595,7 +595,7 @@ class TestBreakSystemPackagesPreservedWithTmpdir:
 
         def dispatch(cmd: list, **kw: object) -> Mock:
             calls.append(list(cmd))
-            return base(cmd, **kw)
+            return base(cmd, **kw)  # type: ignore[no-any-return]
 
         with patch("subprocess.run", side_effect=dispatch):
             result = executor.build_custom_hnswlib(hnswlib_path=hnswlib_path)

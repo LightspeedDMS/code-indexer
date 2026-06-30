@@ -1120,6 +1120,131 @@ class DeploymentExecutor:
         deploy_tmp.mkdir(parents=True, exist_ok=True)
         return str(deploy_tmp)
 
+    def _is_user_install(self, python_path: str) -> bool:
+        """Return True if code-indexer is installed under the service user's ~/.local/ (user install).
+
+        Bug #1245: On a user-install layout, pip installs MUST NOT use sudo.
+        sudo's root pip targets /root/.local (wrong, often read-only on immutable hosts).
+        Running pip as the service user directly targets the correct ~/.local/lib/.../site-packages.
+
+        Conservative: returns False (use sudo) on any subprocess failure or empty output.
+
+        Args:
+            python_path: Path to the Python interpreter to probe.
+
+        Returns:
+            True if code_indexer.__file__ is under ~/.local/ (user install, no sudo).
+            False if under /usr/, /opt/, or on any probe failure (system install, use sudo).
+        """
+        try:
+            result = subprocess.run(
+                [
+                    python_path,
+                    "-c",
+                    "import code_indexer; print(code_indexer.__file__)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            install_path = result.stdout.strip()
+            return "/.local/" in install_path
+        except Exception:
+            return False
+
+    def _hnswlib_importable(self, python_path: str) -> bool:
+        """Return True if hnswlib can be imported by the server python.
+
+        Bug #1245: Used to (a) skip an unnecessary rebuild and (b) demote a
+        failed rebuild to WARNING when the existing module still works.
+
+        Args:
+            python_path: Path to the Python interpreter to probe.
+
+        Returns:
+            True if `import hnswlib` succeeds (rc=0), False otherwise.
+        """
+        try:
+            result = subprocess.run(
+                [python_path, "-c", "import hnswlib"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _get_hnswlib_submodule_commit(self) -> Optional[str]:
+        """Return the current hnswlib submodule commit hash from git, or None if unavailable.
+
+        Bug #1245: Used to detect whether the submodule has changed since the last
+        successful build, so an up-to-date importable hnswlib can skip the rebuild.
+
+        Returns:
+            The commit hash string, or None on any failure.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "-s", "third_party/hnswlib"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+            # Output format: "<mode> <hash> <stage>\t<path>"
+            parts = result.stdout.strip().split()
+            if len(parts) < 2:
+                return None
+            return parts[1]
+        except Exception:
+            return None
+
+    def _get_last_built_hnswlib_commit(self) -> Optional[str]:
+        """Return the commit hash recorded from the last successful hnswlib build.
+
+        Bug #1245: Persisted to _cidx_data_dir/hnswlib-last-built-commit so that
+        the rebuild-skip check survives process restarts.
+
+        Returns:
+            The stored commit hash string, or None if absent/unreadable.
+        """
+        try:
+            path = _cidx_data_dir / "hnswlib-last-built-commit"
+            if not path.exists():
+                return None
+            value = path.read_text().strip()
+            return value if value else None
+        except Exception:
+            return None
+
+    def _save_last_built_hnswlib_commit(self, commit: str) -> None:
+        """Persist the commit hash of a successful hnswlib build for future skip checks.
+
+        Bug #1245: Written atomically after build_custom_hnswlib() succeeds so the
+        next deploy can compare against it to skip an unchanged rebuild.
+
+        Args:
+            commit: The hnswlib submodule commit hash to record.
+        """
+        try:
+            path = _cidx_data_dir / "hnswlib-last-built-commit"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(commit)
+            logger.debug(
+                f"Saved hnswlib last-built commit: {commit[:8]}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not save hnswlib built-commit marker: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
     def build_custom_hnswlib(self, hnswlib_path: Optional[Path] = None) -> bool:
         """Build and install custom hnswlib from specified path or default submodule.
 
@@ -1158,31 +1283,50 @@ class DeploymentExecutor:
 
         try:
             python_path = self._get_server_python()
+            # Bug #1245: Skip rebuild when hnswlib is already importable and the
+            # submodule commit is unchanged since the last successful build.
+            current_commit = self._get_hnswlib_submodule_commit()
+            last_built_commit = self._get_last_built_hnswlib_commit()
+            if self._hnswlib_importable(python_path):
+                if current_commit is not None and current_commit == last_built_commit:
+                    logger.info(
+                        f"hnswlib already importable and submodule commit unchanged "
+                        f"({current_commit[:8]}); skipping rebuild",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+
             # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
             # a writable temp dir under systemd PrivateTmp=yes.  sudo's env_reset strips
             # inherited env vars but does NOT strip vars set by a child `env` command, so
             # `sudo env TMPDIR=<dir> python3 -m pip install ...` receives a usable TMPDIR.
             tmpdir = self._deploy_tmpdir()
-            # Probe with use_sudo=True: both installs below run via sudo, so we must
-            # check the SAME pip binary (system pip) that sudo will resolve.
-            # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
-            # True) while the actual sudo install used the system pip (21.3.1, False).
+            # Bug #1245: Use sudo only for system installs. For a user-install layout
+            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
+            # site-packages and read-only on immutable hosts.
+            use_sudo = not self._is_user_install(python_path)
+            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
+            # pip binary (system pip for sudo installs, user pip for user installs).
             break_sys_pkg = self._pip_supports_break_system_packages(
-                python_path, use_sudo=True
+                python_path, use_sudo=use_sudo
             )
 
-            # Install pybind11 first - required because setup.py imports it at module level
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            # Bug #1243: env TMPDIR= passes the temp dir through sudo's env_reset.
-            pybind11_cmd = [
-                "sudo",
-                "env",
-                f"TMPDIR={tmpdir}",
-                python_path,
-                "-m",
-                "pip",
-                "install",
-            ]
+            # Install pybind11 first - required because setup.py imports it at module level.
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            pybind11_cmd = (
+                [
+                    "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
+                    python_path,
+                    "-m",
+                    "pip",
+                    "install",
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
             if break_sys_pkg:
                 pybind11_cmd.append("--break-system-packages")
             pybind11_cmd.append("pybind11")
@@ -1225,17 +1369,21 @@ class DeploymentExecutor:
                 "pybind11 installed successfully",
                 extra={"correlation_id": get_correlation_id()},
             )
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            # Bug #1243: env TMPDIR= passes the temp dir through sudo's env_reset.
-            hnswlib_cmd = [
-                "sudo",
-                "env",
-                f"TMPDIR={tmpdir}",
-                python_path,
-                "-m",
-                "pip",
-                "install",
-            ]
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            hnswlib_cmd = (
+                [
+                    "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
+                    python_path,
+                    "-m",
+                    "pip",
+                    "install",
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
             if break_sys_pkg:
                 hnswlib_cmd.append("--break-system-packages")
             hnswlib_cmd.extend(["--force-reinstall", "--no-deps", "."])
@@ -1267,6 +1415,19 @@ class DeploymentExecutor:
                 )
 
             if result.returncode != 0:
+                # Bug #1245: Non-fatal when hnswlib is still importable (existing module works).
+                # Only hard-fail when hnswlib genuinely cannot be imported.
+                if self._hnswlib_importable(python_path):
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-042",
+                            f"Custom hnswlib build failed but hnswlib is still importable; "
+                            f"continuing deploy: "
+                            f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return True
                 logger.error(
                     format_error_log(
                         "DEPLOY-GENERAL-042",
@@ -1280,6 +1441,9 @@ class DeploymentExecutor:
                 "Custom hnswlib build and install successful",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Bug #1245: Record successful build commit for future skip checks.
+            if current_commit:
+                self._save_last_built_hnswlib_commit(current_commit)
             return True
 
         except subprocess.TimeoutExpired:
@@ -1844,22 +2008,28 @@ class DeploymentExecutor:
             # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
             # a writable temp dir under systemd PrivateTmp=yes.
             tmpdir = self._deploy_tmpdir()
-            # Probe with use_sudo=True: the install runs via sudo, so the probe must
-            # check the same pip binary (system pip) that sudo will resolve.
-            # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
-            # True) while the actual sudo install used the system pip (21.3.1, False).
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            # Bug #1243: env TMPDIR= passes the temp dir through sudo's env_reset.
-            pip_cmd = [
-                "sudo",
-                "env",
-                f"TMPDIR={tmpdir}",
-                python_path,
-                "-m",
-                "pip",
-                "install",
-            ]
-            if self._pip_supports_break_system_packages(python_path, use_sudo=True):
+            # Bug #1245: Use sudo only for system installs. For a user-install layout
+            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
+            # site-packages and read-only on immutable hosts.
+            use_sudo = not self._is_user_install(python_path)
+            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
+            # pip binary (system pip for sudo installs, user pip for user installs).
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            pip_cmd = (
+                [
+                    "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
+                    python_path,
+                    "-m",
+                    "pip",
+                    "install",
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
+            if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
                 pip_cmd.append("--break-system-packages")
             pip_cmd.extend(["-e", "."])
             result = subprocess.run(
