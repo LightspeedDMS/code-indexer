@@ -1121,20 +1121,49 @@ class DeploymentExecutor:
         return str(deploy_tmp)
 
     def _is_user_install(self, python_path: str) -> bool:
-        """Return True if code-indexer is installed under the service user's ~/.local/ (user install).
+        """Return True if pip can install code-indexer WITHOUT sudo (user install).
 
-        Bug #1245: On a user-install layout, pip installs MUST NOT use sudo.
-        sudo's root pip targets /root/.local (wrong, often read-only on immutable hosts).
-        Running pip as the service user directly targets the correct ~/.local/lib/.../site-packages.
+        Bug #1245 (v11.10.0 fix was INCOMPLETE -- proven on the live staging
+        cluster): the original probe recognized a user install ONLY when
+        code_indexer.__file__ contained the substring "/.local/". Staging
+        nodes run an EDITABLE install at a jsbattig-owned path such as
+        /home/jsbattig/code-indexer/src/code_indexer/__init__.py -- which
+        has NO "/.local/" segment at all. The substring-only probe returned
+        False there -> use_sudo=True -> sudo's root pip targeted
+        /root/.local and /root/.cache/pip/wheels, both READ-ONLY on the
+        immutable host -> fatal "Pip install failed" -> the auto-updater
+        dead-looped forever, even though the auto-updater's OWN process user
+        (jsbattig, non-root) already owns and can write the install dir.
 
-        Conservative: returns False (use sudo) on any subprocess failure or empty output.
+        Re-fix: key on WRITABILITY instead of the "/.local/" substring. pip
+        (editable `-e .` plus dependency wheel builds such as hnswlib)
+        writes the install directory itself, the user pip cache, and the
+        user site-packages. If the CURRENT process user can already write
+        the install directory, sudo is not merely unnecessary -- it is
+        actively WRONG: it escalates to root and points pip at root's
+        separate (often read-only) cache/site-packages instead.
+        os.access(W_OK) correctly classifies every layout that matters: an
+        editable-home install (writable -> no sudo), a ~/.local install
+        (writable -> no sudo; the "/.local/" substring is also kept as a
+        fast-path signal so a probe that can list the file but not stat its
+        parent still classifies correctly), a genuine root-owned system
+        install (not writable as the service user -> sudo), and the
+        auto-updater running as root itself (writable -> sudo not needed,
+        already root).
+
+        Conservative: returns False (use sudo) on any subprocess failure,
+        empty probe output, or writability-check error. Each conservative
+        branch is DEBUG-logged for operator visibility into why sudo was
+        chosen.
 
         Args:
             python_path: Path to the Python interpreter to probe.
 
         Returns:
-            True if code_indexer.__file__ is under ~/.local/ (user install, no sudo).
-            False if under /usr/, /opt/, or on any probe failure (system install, use sudo).
+            True if code_indexer.__file__ is under ~/.local/ OR its
+            containing directory is writable by the current process user
+            (user install, no sudo). False otherwise, or on any probe/check
+            failure (system install, use sudo).
         """
         try:
             result = subprocess.run(
@@ -1148,10 +1177,38 @@ class DeploymentExecutor:
                 timeout=10,
             )
             if result.returncode != 0:
+                logger.debug(
+                    f"_is_user_install probe failed (rc={result.returncode}): "
+                    f"{result.stderr.strip()}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
                 return False
             install_path = result.stdout.strip()
-            return "/.local/" in install_path
-        except Exception:
+            if not install_path:
+                logger.debug(
+                    "_is_user_install probe returned empty output; "
+                    "conservatively treating as system install",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+        except Exception as e:
+            logger.debug(
+                f"_is_user_install probe raised an exception: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if "/.local/" in install_path:
+            return True
+
+        try:
+            install_dir = Path(install_path).resolve().parent
+            return os.access(install_dir, os.W_OK)
+        except Exception as e:
+            logger.debug(
+                f"_is_user_install writability check failed for {install_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
             return False
 
     def _hnswlib_importable(self, python_path: str) -> bool:
