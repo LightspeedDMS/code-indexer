@@ -637,6 +637,11 @@ class TestEnsureRustToolchainMkdirUsesSudo:
             patch(f"{_MODULE}.__file__", fake_file, create=True),
             patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
             patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+            # Bug #1255: force the "already usable" probe to report False
+            # so provisioning (mkdir/chown) is actually attempted here.
+            patch.object(
+                DeploymentExecutor, "_is_rust_toolchain_usable", return_value=False
+            ),
             patch("subprocess.run", side_effect=recording_run),
         ):
             executor._ensure_rust_toolchain()
@@ -673,6 +678,11 @@ class TestEnsureRustToolchainMkdirUsesSudo:
             patch(f"{_MODULE}.__file__", fake_file, create=True),
             patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
             patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+            # Bug #1255: force the "already usable" probe to report False
+            # so provisioning (mkdir/chown) is actually attempted here.
+            patch.object(
+                DeploymentExecutor, "_is_rust_toolchain_usable", return_value=False
+            ),
             patch("subprocess.run", side_effect=recording_run),
         ):
             executor._ensure_rust_toolchain()
@@ -713,8 +723,12 @@ class TestEnsureRustToolchainMkdirUsesSudo:
         mock_mkdir.assert_not_called()
 
     def test_returns_false_when_sudo_mkdir_fails(self, tmp_path: Path) -> None:
-        """If 'sudo mkdir -p /opt/rust' returns non-zero, _ensure_rust_toolchain
-        must return False (FATAL — same as other subprocess failures)."""
+        """If 'sudo mkdir -p /opt/rust' fails AND the toolchain is genuinely
+        NOT usable (Bug #1255 regression pin: forced via the usability
+        probe patch below), _ensure_rust_toolchain must return False
+        (FATAL — the host truly lacks a working toolchain and cannot get
+        one). When the toolchain IS usable despite the mkdir/chown failure,
+        see test_deploy_rust_toolchain_immutable_1255.py instead."""
         executor = _make_executor()
         fake_file = str(
             tmp_path
@@ -744,6 +758,12 @@ class TestEnsureRustToolchainMkdirUsesSudo:
             patch(f"{_MODULE}.__file__", fake_file, create=True),
             patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
             patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+            # Bug #1255: force "not usable" on both the upfront probe and
+            # the post-mkdir-failure recheck, so the mkdir failure stays
+            # FATAL (genuinely missing toolchain case).
+            patch.object(
+                DeploymentExecutor, "_is_rust_toolchain_usable", return_value=False
+            ),
             patch("subprocess.run", side_effect=failing_mkdir),
         ):
             result = executor._ensure_rust_toolchain()
