@@ -4774,18 +4774,27 @@ class DeploymentExecutor:
     def _verify_c_compiler(self) -> bool:
         """Return True if gcc, cc, or clang is available (needed by tree-sitter crate).
 
-        Bug #1255: logged at WARNING, not ERROR -- the xray-cli native
-        backend this gates is an optional accelerator (Python xray engine
-        is the always-available fallback), so a missing C compiler must not
-        read as a deployment-blocking condition in logs/alerting.
+        Bug #1255/#1296: the deploy itself stays non-fatal on a missing C
+        compiler (xray is a non-core/optional feature and pip install +
+        restart must still complete), but this is logged at ERROR, not
+        WARNING: there is NO Python evaluation fallback for xray query-time
+        execution. xray_search/xray_explore call the native xray-cli binary
+        unconditionally; without it they return BinaryNotFound for every
+        file. A missing C compiler blocks the xray-cli build, so this is a
+        real capability loss that must stay loudly visible to operators.
         """
         for cc in ["gcc", "cc", "clang"]:
             if shutil.which(cc) is not None:
                 return True
-        logger.warning(
+        logger.error(
             format_error_log(
                 "DEPLOY-GENERAL-172",
-                "No C compiler found (gcc/cc/clang) — tree-sitter build will fail",
+                "xray native search UNAVAILABLE: no C compiler found "
+                "(gcc/cc/clang) -- xray-cli native binary cannot be built; "
+                "xray_search/xray_explore will return BinaryNotFound until "
+                "a C compiler is installed and the binary is built. "
+                "(Evaluator pre-flight validation still works; query-time "
+                "evaluation does not.)",
             ),
             extra={"correlation_id": get_correlation_id()},
         )
@@ -4796,10 +4805,14 @@ class DeploymentExecutor:
 
         Returns True on success, False on nonzero exit or timeout.
 
-        Bug #1255: failures here are logged at WARNING, not ERROR -- the
-        caller (_ensure_rust_toolchain) treats a False return as a
-        non-fatal degrade of the optional xray native backend, not a
-        deployment-blocking condition.
+        Bug #1255/#1296: the caller (_ensure_rust_toolchain) still treats a
+        False return as non-fatal to the overall deploy (pip install +
+        restart must still complete), but the failure is logged at ERROR,
+        not WARNING: there is NO Python evaluation fallback for xray
+        query-time execution. xray_search/xray_explore call the native
+        xray-cli binary unconditionally; without it they return
+        BinaryNotFound for every file, so a failed build is a real
+        capability loss that must stay loudly visible to operators.
         """
         try:
             build_result = subprocess.run(
@@ -4811,20 +4824,31 @@ class DeploymentExecutor:
                 env=env,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-            logger.warning(
+            logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"cargo build xray-cli failed: {exc}",
+                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"failed to build (cargo build error: {exc}); "
+                    f"xray_search/xray_explore will return BinaryNotFound "
+                    f"until the binary is built. (Evaluator pre-flight "
+                    f"validation still works; query-time evaluation does "
+                    f"not.)",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
             return False
         if build_result.returncode != 0:
-            logger.warning(
+            logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"cargo build xray-cli failed: "
-                    f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"failed to build (cargo build exited "
+                    f"{build_result.returncode}: "
+                    f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}); "
+                    f"xray_search/xray_explore will return BinaryNotFound "
+                    f"until the binary is built. (Evaluator pre-flight "
+                    f"validation still works; query-time evaluation does "
+                    f"not.)",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -4908,8 +4932,16 @@ class DeploymentExecutor:
 
         Idempotent: skips install when rustc is already on PATH.
         Returns True on success, when rust/ dir is absent (non-fatal skip),
-        or when the OPTIONAL xray-cli build/C-compiler step fails (the
-        native backend degrades gracefully -- Python xray is the fallback).
+        or when the xray-cli build/C-compiler step fails. That failure is
+        non-fatal to the OVERALL deploy (pip install + restart must still
+        complete -- xray is a non-core/optional feature), but it is NOT a
+        graceful degrade to an alternate execution path: there is no Python
+        evaluation fallback for xray query-time execution, so
+        xray_search/xray_explore become genuinely unavailable
+        (BinaryNotFound) until the binary builds successfully. That
+        capability loss is logged at ERROR (see _verify_c_compiler /
+        _build_xray_cli) precisely because it is real, even though it does
+        not block the deploy.
         Returns False ONLY when the toolchain is genuinely missing and
         cannot be installed (FATAL) -- the host truly lacks Rust.
         """
@@ -5008,11 +5040,17 @@ class DeploymentExecutor:
             return True  # Non-fatal: older code versions may not have rust/
 
         if not self._verify_c_compiler():
-            return True  # Bug #1255: optional feature, degrade not block
+            # Bug #1255/#1296: non-fatal to the overall deploy, but NOT a
+            # graceful degrade -- there is no Python fallback, so xray
+            # native search is genuinely unavailable (logged at ERROR above).
+            return True
 
         build_env = self._resolve_rust_build_env(env)
         if not self._build_xray_cli(rust_dir, build_env):
-            return True  # Bug #1255: optional feature, degrade not block
+            # Bug #1255/#1296: non-fatal to the overall deploy, but NOT a
+            # graceful degrade -- there is no Python fallback, so xray
+            # native search is genuinely unavailable (logged at ERROR above).
+            return True
         return True
 
 

@@ -16,10 +16,13 @@ Fix:
 3. The xray-cli `cargo build` step redirects CARGO_HOME to a writable
    fallback (~/.cargo) when RUST_SYSTEM_DIR exists but is not writable, so
    the build doesn't need write access under a read-only /opt/rust.  A
-   residual cargo-build failure (or missing C compiler) is now WARNING +
-   non-fatal -- xray's native backend is an optional accelerator with a
-   Python fallback, so deployment (pip install + restart) must still
-   complete.
+   residual cargo-build failure (or missing C compiler) is non-fatal to the
+   overall deploy (pip install + restart still completes), but is logged at
+   ERROR -- there is NO Python evaluation fallback for xray query-time
+   execution (PythonEvaluatorSandbox is never invoked for it); when the
+   native binary is missing or fails to build, xray_search/xray_explore are
+   genuinely unavailable (BinaryNotFound) until the binary builds
+   successfully, so this must stay loudly visible to operators.
 4. Genuinely-missing-and-uninstallable toolchain remains FATAL (regression
    pin) -- this bug is about hosts where the toolchain IS present and
    usable, not about hosts that truly lack Rust.
@@ -292,6 +295,12 @@ class TestCargoHomeRedirectedWhenReadOnly:
             f"when RUST_SYSTEM_DIR is read-only, got: "
             f"{build_envs[0].get('CARGO_HOME')!r}"
         )
+        assert build_envs[0].get("RUSTUP_HOME") == str(fake_rust_system_dir), (
+            "RUSTUP_HOME must stay pointed at RUST_SYSTEM_DIR even when "
+            "CARGO_HOME is redirected to a writable fallback -- rustup's "
+            f"proxy binaries must keep resolving the installed toolchain, "
+            f"got: {build_envs[0].get('RUSTUP_HOME')!r}"
+        )
 
     def test_cargo_build_env_keeps_rust_system_dir_when_writable(
         self, tmp_path: Path
@@ -335,12 +344,19 @@ class TestCargoHomeRedirectedWhenReadOnly:
 
 
 class TestXrayCliBuildFailureIsNonFatal:
-    """A cargo build failure (or missing C compiler) for the OPTIONAL
-    xray-cli native backend must no longer abort _ensure_rust_toolchain --
-    the core deploy (pip install + restart) must still complete. The Python
-    xray engine remains the working fallback."""
+    """A cargo build failure (or missing C compiler) for the xray-cli native
+    backend must no longer abort _ensure_rust_toolchain -- the core deploy
+    (pip install + restart) must still complete. But there is NO Python
+    evaluation fallback for xray query-time execution: xray_search/
+    xray_explore become genuinely unavailable (BinaryNotFound) until the
+    binary builds successfully, so the failure must still be logged at
+    ERROR (not WARNING) to stay visible to operators."""
 
-    def test_returns_true_when_cargo_build_fails(self, tmp_path: Path) -> None:
+    def test_returns_true_and_logs_error_when_cargo_build_fails(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
         executor = _make_executor()
         rust_dir = tmp_path / "rust"
         rust_dir.mkdir()
@@ -351,19 +367,35 @@ class TestXrayCliBuildFailureIsNonFatal:
                 return _proc(1, stderr="error[E0001]: compile error")
             return _proc(0, stdout="rustc 1.78.0")
 
-        with (
-            patch(f"{_MODULE}.__file__", fake_file, create=True),
-            patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
-            patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
-            patch("subprocess.run", side_effect=recording_run),
-        ):
-            result = executor._ensure_rust_toolchain()
+        with caplog.at_level(logging.WARNING):
+            with (
+                patch(f"{_MODULE}.__file__", fake_file, create=True),
+                patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
+                patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"),
+                patch("subprocess.run", side_effect=recording_run),
+            ):
+                result = executor._ensure_rust_toolchain()
 
         assert result is True, (
-            "cargo build failure for the optional xray native backend must be non-fatal"
+            "cargo build failure must remain non-fatal to the overall deploy"
+        )
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert error_records, (
+            f"Expected an ERROR log for the cargo build failure, got: "
+            f"{[(r.levelname, r.message) for r in caplog.records]}"
+        )
+        combined = " ".join(r.message for r in error_records).lower()
+        assert "unavailable" in combined
+        assert "binarynotfound" in combined
+        assert "fallback" not in combined, (
+            "Must not claim a Python fallback exists -- there is none"
         )
 
-    def test_returns_true_when_no_c_compiler(self, tmp_path: Path) -> None:
+    def test_returns_true_and_logs_error_when_no_c_compiler(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        import logging
+
         executor = _make_executor()
         rust_dir = tmp_path / "rust"
         rust_dir.mkdir()
@@ -372,14 +404,26 @@ class TestXrayCliBuildFailureIsNonFatal:
         def recording_run(args, **kwargs):  # type: ignore[no-untyped-def]
             return _proc(0, stdout="rustc 1.78.0")
 
-        with (
-            patch(f"{_MODULE}.__file__", fake_file, create=True),
-            patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
-            patch(f"{_MODULE}.shutil.which", return_value=None),
-            patch("subprocess.run", side_effect=recording_run),
-        ):
-            result = executor._ensure_rust_toolchain()
+        with caplog.at_level(logging.WARNING):
+            with (
+                patch(f"{_MODULE}.__file__", fake_file, create=True),
+                patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
+                patch(f"{_MODULE}.shutil.which", return_value=None),
+                patch("subprocess.run", side_effect=recording_run),
+            ):
+                result = executor._ensure_rust_toolchain()
 
         assert result is True, (
-            "missing C compiler for the optional xray native backend must be non-fatal"
+            "missing C compiler failure must remain non-fatal to the overall deploy"
+        )
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert error_records, (
+            f"Expected an ERROR log for the missing C compiler, got: "
+            f"{[(r.levelname, r.message) for r in caplog.records]}"
+        )
+        combined = " ".join(r.message for r in error_records).lower()
+        assert "unavailable" in combined
+        assert "binarynotfound" in combined
+        assert "fallback" not in combined, (
+            "Must not claim a Python fallback exists -- there is none"
         )
