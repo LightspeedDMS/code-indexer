@@ -1098,6 +1098,28 @@ class DeploymentExecutor:
         )
         return False
 
+    def _deploy_tmpdir(self) -> str:
+        """Return a writable temp directory for deploy pip installs under sudo + PrivateTmp.
+
+        Bug #1243: Under systemd PrivateTmp=yes, pip's tempfile.gettempdir() finds no
+        usable temp dir (private /tmp isolated from sudo context, /var/tmp also isolated,
+        CWD / not writable, no TMPDIR env var set by the service unit).  This causes
+        FileNotFoundError: No usable temporary directory found in ['/tmp', '/var/tmp',
+        '/usr/tmp', '/'] on every pip build attempt, dead-looping the auto-updater.
+
+        Solution: use a path under _cidx_data_dir (.deploy-tmp) which is NOT under /tmp
+        and therefore unaffected by PrivateTmp isolation.  Pass it to pip via sudo `env`
+        (the POSIX env utility): sudo's env_reset strips inherited env vars but does NOT
+        strip env vars injected by a child `env` command, so `sudo env TMPDIR=<path> pip`
+        receives a writable TMPDIR regardless of the PrivateTmp setting.
+
+        Returns:
+            Absolute path string to the deploy temp directory (created if absent).
+        """
+        deploy_tmp = _cidx_data_dir / ".deploy-tmp"
+        deploy_tmp.mkdir(parents=True, exist_ok=True)
+        return str(deploy_tmp)
+
     def build_custom_hnswlib(self, hnswlib_path: Optional[Path] = None) -> bool:
         """Build and install custom hnswlib from specified path or default submodule.
 
@@ -1136,6 +1158,11 @@ class DeploymentExecutor:
 
         try:
             python_path = self._get_server_python()
+            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
+            # a writable temp dir under systemd PrivateTmp=yes.  sudo's env_reset strips
+            # inherited env vars but does NOT strip vars set by a child `env` command, so
+            # `sudo env TMPDIR=<dir> python3 -m pip install ...` receives a usable TMPDIR.
+            tmpdir = self._deploy_tmpdir()
             # Probe with use_sudo=True: both installs below run via sudo, so we must
             # check the SAME pip binary (system pip) that sudo will resolve.
             # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
@@ -1146,7 +1173,16 @@ class DeploymentExecutor:
 
             # Install pybind11 first - required because setup.py imports it at module level
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            pybind11_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            # Bug #1243: env TMPDIR= passes the temp dir through sudo's env_reset.
+            pybind11_cmd = [
+                "sudo",
+                "env",
+                f"TMPDIR={tmpdir}",
+                python_path,
+                "-m",
+                "pip",
+                "install",
+            ]
             if break_sys_pkg:
                 pybind11_cmd.append("--break-system-packages")
             pybind11_cmd.append("pybind11")
@@ -1190,7 +1226,16 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            hnswlib_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            # Bug #1243: env TMPDIR= passes the temp dir through sudo's env_reset.
+            hnswlib_cmd = [
+                "sudo",
+                "env",
+                f"TMPDIR={tmpdir}",
+                python_path,
+                "-m",
+                "pip",
+                "install",
+            ]
             if break_sys_pkg:
                 hnswlib_cmd.append("--break-system-packages")
             hnswlib_cmd.extend(["--force-reinstall", "--no-deps", "."])
@@ -1796,12 +1841,24 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
+            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
+            # a writable temp dir under systemd PrivateTmp=yes.
+            tmpdir = self._deploy_tmpdir()
             # Probe with use_sudo=True: the install runs via sudo, so the probe must
             # check the same pip binary (system pip) that sudo will resolve.
             # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
             # True) while the actual sudo install used the system pip (21.3.1, False).
             # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            pip_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            # Bug #1243: env TMPDIR= passes the temp dir through sudo's env_reset.
+            pip_cmd = [
+                "sudo",
+                "env",
+                f"TMPDIR={tmpdir}",
+                python_path,
+                "-m",
+                "pip",
+                "install",
+            ]
             if self._pip_supports_break_system_packages(python_path, use_sudo=True):
                 pip_cmd.append("--break-system-packages")
             pip_cmd.extend(["-e", "."])

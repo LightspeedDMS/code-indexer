@@ -327,11 +327,20 @@ class TestPipInstallUsesServerPython:
         calls = mock_run.call_args_list
         assert len(calls) == 2
 
-        # [1] is the actual pip install — verify it uses sudo + server python
+        # [1] is the actual pip install — verify it uses sudo + env TMPDIR + server python
+        # Bug #1243: command is now ["sudo", "env", "TMPDIR=<dir>", python, "-m", "pip", ...]
         pip_install_args = calls[1][0][0]
         assert pip_install_args[0] == "sudo"
-        assert pip_install_args[1] == server_python
-        assert pip_install_args[2:] == [
+        assert pip_install_args[1] == "env", (
+            "Bug #1243: 'env' must appear at position 1 to pass TMPDIR through sudo"
+        )
+        assert pip_install_args[2].startswith("TMPDIR="), (
+            "Bug #1243: TMPDIR=<path> must appear at position 2"
+        )
+        assert pip_install_args[3] == server_python, (
+            "Server python must appear at position 3 (after sudo env TMPDIR=)"
+        )
+        assert pip_install_args[4:] == [
             "-m",
             "pip",
             "install",

@@ -163,16 +163,23 @@ class LogsPostgresBackend:
             return
         try:
             with self._pool.connection() as conn:
-                conn.execute("SET LOCAL synchronous_commit = off")
-                conn.executemany(
-                    """
-                    INSERT INTO logs
-                        (timestamp, level, source, message, correlation_id,
-                         user_id, request_path, extra_data, node_id, alias)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    items,
-                )
+                # psycopg v3: executemany lives on the CURSOR, NOT the connection.
+                # Calling conn.executemany() raises AttributeError on real psycopg3
+                # (swallowed by the fail-open handler -> silently drops all rows).
+                # Mirror the pattern used by PayloadCachePostgresBackend and
+                # QueryEmbeddingCachePostgresBackend (payload_cache_backend.py:133,
+                # query_embedding_cache_backend.py:192).
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL synchronous_commit = off")
+                    cur.executemany(
+                        """
+                        INSERT INTO logs
+                            (timestamp, level, source, message, correlation_id,
+                             user_id, request_path, extra_data, node_id, alias)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        items,
+                    )
                 conn.commit()
         except Exception as exc:
             logger.warning("LogsPostgresBackend: insert_log_batch failed: %s", exc)

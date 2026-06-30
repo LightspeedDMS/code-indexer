@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.9.0] - 2026-06-30
+
+### Fixed
+- **#1243 (P1): auto-updater dead-looped on Python 3.12 + systemd `PrivateTmp` ("No usable temporary directory") -> NO staging deploy could complete.** Under `PrivateTmp=yes`, the auto-update service has an isolated `/tmp`; the sudo'd `pip install` (pybind11 + hnswlib build, and `pip install -e .`) found no usable temp dir (private /tmp/var-tmp, CWD `/` not writable, and `sudo env_reset` strips inherited `TMPDIR`), crashing every retry. Same self-perpetuating-deadlock class as #1182 (the broken auto-updater cannot deploy the fix), and `/etc` is read-only on the hosts so a unit drop-in is impossible. Fix: `DeploymentExecutor` now passes a writable `TMPDIR` THROUGH sudo at every pip site via the POSIX `env` utility -- `["sudo","env",f"TMPDIR={tmpdir}",python,"-m","pip","install",...]` -- where `tmpdir = {CIDX_DATA_DIR}/.deploy-tmp` (created on demand, never under `/tmp`). The `--break-system-packages` handling (#1234) and retry-strip variants are preserved. Validated live (`sudo env TMPDIR=... pip install` -> rc=0).
+- **#1241 follow-up (P1, regression caught live on the staging PostgreSQL cluster): `LogsPostgresBackend.insert_log_batch` called `conn.executemany`, but psycopg3 `executemany` is a CURSOR method, not a Connection method.** Every batched log insert raised AttributeError, swallowed by the fail-open WARNING -> ALL batched operational logs silently dropped on the cluster. The #1241 server-fast tests passed because the fake backend was unfaithful (had a connection-level `executemany`). Fix: `with conn.cursor() as cur: cur.executemany(...)` (with `SET LOCAL synchronous_commit = off` on the cursor first). New `test_logs_pg_batch_cursor_1241.py` uses a faithful fake Connection with NO `executemany` attribute (mirrors psycopg3) so the regression is guarded. A cross-backend audit confirmed no sibling `conn.executemany`-on-a-psycopg3-Connection bug elsewhere.
+
 ## [11.8.0] - 2026-06-29
 
 ### Fixed
