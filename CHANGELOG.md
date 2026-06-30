@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.12.0] - 2026-06-30
+
+### Fixed
+- **#1251 (P1): auto-updater dead-looped on "No usable temporary directory" -- the no-sudo pip path had no `TMPDIR`.** #1243 set the deploy `TMPDIR` ONLY on the `sudo env TMPDIR=...` prefix. v11.11.0's #1245 writability fix correctly routes editable-home installs (the staging cluster layout) through the NO-SUDO command, which carried no `TMPDIR` -- so under systemd `PrivateTmp=yes` + Python 3.12 the auto-updater's isolated `/tmp` was unusable and pip's `tempfile.gettempdir()` raised `FileNotFoundError: No usable temporary directory found in ['/tmp','/var/tmp','/usr/tmp','/']` at the pybind11/hnswlib build step, dead-looping the auto-updater (same self-perpetuating class as #1182/#1243/#1245). Fix: `os.environ["TMPDIR"] = self._deploy_tmpdir()` at the TOP of `DeploymentExecutor.execute()`, before any subprocess is spawned. This is exhaustive by construction -- every `subprocess.run()` in the module either omits `env=` (inherits `os.environ`, now carrying `TMPDIR`) or builds its env from `os.environ.copy()`/`dict(os.environ)` (git env, self-restart smoke test, pace-maker install, Rust toolchain/cargo) -- so the single early mutation reaches every no-sudo child without per-call-site changes. The SUDO path's explicit `["sudo","env",f"TMPDIR={tmpdir}",...]` prefix (#1243) is byte-identical. Found by deploying v11.11.0 to the real staging cluster.
+
 ## [11.11.0] - 2026-06-30
 
 ### Fixed
