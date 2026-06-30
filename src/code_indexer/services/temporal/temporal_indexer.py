@@ -24,9 +24,15 @@ from ...services.file_identifier import FileIdentifier
 from ...storage.filesystem_vector_store import FilesystemVectorStore
 
 from .models import CommitInfo
-from .temporal_collection_naming import LEGACY_TEMPORAL_COLLECTION
+from .temporal_collection_naming import (
+    LEGACY_TEMPORAL_COLLECTION,
+    base_collection_name,
+)
 from .temporal_diff_scanner import TemporalDiffScanner
-from .temporal_migration_service import _cleanup_monolithic_collection
+from .temporal_migration_service import (
+    _cleanup_monolithic_collection,
+    _ensure_shard_has_projection_matrix,
+)
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
 
 logger = logging.getLogger(__name__)
@@ -532,6 +538,40 @@ class TemporalIndexer:
                         self.vector_store.create_collection(
                             _shard_name, _shard_vector_size
                         )
+                    else:
+                        # Bug #1242: Collection exists but may be missing
+                        # projection_matrix.npy (deployed broken shards from pre-fix
+                        # migration).  Self-heal by copying from the base (monolith)
+                        # collection or regenerating so the first upsert_points()
+                        # does not raise FileNotFoundError.
+                        _shard_path = self.vector_store._get_collection_path(
+                            _shard_name
+                        )
+                        # Guard: _get_collection_path must return a real Path.
+                        # In some unit tests the entire vector_store is mocked,
+                        # which returns a Mock object — skip the self-heal in that case.
+                        if (
+                            isinstance(_shard_path, Path)
+                            and not (_shard_path / "projection_matrix.npy").exists()
+                        ):
+                            _base_name = base_collection_name(_shard_name)
+                            _base_path = self.vector_store._get_collection_path(
+                                _base_name
+                            )
+                            logger.info(
+                                "Bug #1242: self-healing missing projection_matrix.npy"
+                                " for shard '%s'",
+                                _shard_name,
+                            )
+                            _ensure_shard_has_projection_matrix(
+                                _shard_path,
+                                _base_path
+                                if (
+                                    isinstance(_base_path, Path) and _base_path.exists()
+                                )
+                                else None,
+                                _shard_vector_size,
+                            )
                     # Initialize incremental HNSW tracking for this shard
                     self.vector_store.begin_indexing(_shard_name)
 

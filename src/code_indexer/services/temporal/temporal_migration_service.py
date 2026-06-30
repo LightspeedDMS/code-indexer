@@ -15,6 +15,7 @@ Key constraints:
 import gc
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -286,11 +287,12 @@ def _write_collection_meta(
     vector_dim: int,
     space: str,
     id_mapping: Dict[int, str],
+    quantization_range: Optional[Dict[str, float]] = None,
 ) -> None:
     """Write collection_meta.json for a shard directory. Atomic via temp+rename."""
     hnsw_file = shard_dir / "hnsw_index.bin"
     file_size = hnsw_file.stat().st_size if hnsw_file.exists() else 0
-    meta = {
+    meta: Dict[str, Any] = {
         "name": shard_name,
         "vector_size": vector_dim,
         "created_at": datetime.utcnow().isoformat(),
@@ -308,6 +310,8 @@ def _write_collection_meta(
             "last_marked_stale": None,
         },
     }
+    if quantization_range is not None:
+        meta["quantization_range"] = quantization_range
     meta_path = shard_dir / "collection_meta.json"
     tmp = meta_path.with_suffix(".json.tmp")
     with open(tmp, "w") as f:
@@ -436,15 +440,147 @@ def _build_quarter_buckets(
 
             q = quarter_suffix(dt)
         except Exception as exc:
-            logger.debug(
-                "Migration: error processing %s: %s — skipping", src_json, exc
-            )
+            logger.debug("Migration: error processing %s: %s — skipping", src_json, exc)
             drop_counts["timestamp_unresolved"] += 1
             continue
 
         buckets.setdefault(q, []).append((label, point_id, src_json))
 
     return buckets, drop_counts
+
+
+def _read_monolith_quantization_range(
+    collection_path: Path, vector_dim: int
+) -> Dict[str, float]:
+    """Read quantization_range from monolith collection_meta.json.
+
+    Falls back to the create_collection formula (±3·sqrt(64/input_dim)) when the
+    monolith meta is absent, corrupt, or missing the key.
+
+    Args:
+        collection_path: Monolith (or base) collection directory.
+        vector_dim: Full-dimension vector size (used for formula fallback).
+
+    Returns:
+        Dict with "min" and "max" float keys.
+    """
+    try:
+        meta_path = collection_path / "collection_meta.json"
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+            qr = meta.get("quantization_range")
+            if qr and "min" in qr and "max" in qr:
+                return {"min": float(qr["min"]), "max": float(qr["max"])}
+    except Exception:
+        pass
+    # Formula from FilesystemVectorStore.create_collection: ±3·sqrt(output_dim/input_dim)
+    output_dim = 64
+    std = math.sqrt(output_dim / vector_dim)
+    return {"min": float(-3 * std), "max": float(3 * std)}
+
+
+def _backfill_quantization_range_if_missing(
+    shard_path: Path,
+    source_collection_path: Optional[Path],
+    vector_dim: int,
+) -> None:
+    """Write quantization_range into shard meta if not already present. Atomic.
+
+    Args:
+        shard_path: Shard directory whose collection_meta.json may need updating.
+        source_collection_path: Base collection to try reading quantization_range from.
+            Falls back to formula if None or if source meta lacks the key.
+        vector_dim: Full input dimension (for formula fallback).
+    """
+    meta_path = shard_path / "collection_meta.json"
+    if not meta_path.exists():
+        return
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except Exception as exc:
+        logger.warning(
+            "Bug #1242: could not read shard meta at %s: %s", shard_path, exc
+        )
+        return
+
+    if "quantization_range" in meta:
+        return  # Already present — nothing to do
+
+    src = source_collection_path if source_collection_path is not None else shard_path
+    qr = _read_monolith_quantization_range(src, vector_dim)
+    meta["quantization_range"] = qr
+    tmp = meta_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(meta, f, indent=2)
+        os.replace(tmp, meta_path)
+        logger.debug("Bug #1242: backfilled quantization_range in %s", shard_path.name)
+    except Exception as exc:
+        logger.warning(
+            "Bug #1242: failed to backfill quantization_range in %s: %s",
+            shard_path.name,
+            exc,
+        )
+
+
+def _ensure_shard_has_projection_matrix(
+    shard_path: Path,
+    source_collection_path: Optional[Path],
+    vector_dim: int,
+) -> None:
+    """Ensure shard_path has projection_matrix.npy (copy from source or regenerate).
+
+    Idempotent — returns immediately when the matrix file is already present.
+
+    Preferred: copies from source_collection_path (monolith or base collection) so
+    the write-path bucket layout (vector @ matrix -> hex dir) is consistent with
+    any vectors previously written by the monolith.  Falls back to regenerating a
+    fresh matrix when the source is None or lacks the file.
+
+    Also backfills quantization_range in the shard's collection_meta.json when the
+    key is missing (both copy and regenerate paths).
+
+    Args:
+        shard_path: Shard (or in-progress migrating) directory.
+        source_collection_path: Monolith / base collection to copy from, or None.
+        vector_dim: Full input dimension (e.g. 1024) for regeneration + formula.
+    """
+    from code_indexer.storage.projection_matrix_manager import ProjectionMatrixManager
+
+    matrix_file = shard_path / "projection_matrix.npy"
+    if matrix_file.exists():
+        return  # Already present — idempotent
+
+    copied = False
+    if source_collection_path is not None:
+        src_matrix = source_collection_path / "projection_matrix.npy"
+        if src_matrix.exists():
+            shutil.copy2(src_matrix, matrix_file)
+            logger.info(
+                "Bug #1242: copied projection_matrix.npy from %s into %s",
+                source_collection_path.name,
+                shard_path.name,
+            )
+            copied = True
+
+    if not copied:
+        output_dim = 64
+        manager = ProjectionMatrixManager()
+        matrix = manager.create_projection_matrix(
+            input_dim=vector_dim, output_dim=output_dim
+        )
+        manager.save_matrix(matrix, shard_path)
+        logger.info(
+            "Bug #1242: regenerated projection_matrix.npy for %s (source absent)",
+            shard_path.name,
+        )
+
+    # Backfill quantization_range in meta if absent (no-op when already written)
+    _backfill_quantization_range_if_missing(
+        shard_path, source_collection_path, vector_dim
+    )
 
 
 def _build_one_shard(
@@ -522,13 +658,22 @@ def _build_one_shard(
     shard_index.save_index(str(migrating_dir / "hnsw_index.bin"))
 
     new_id_mapping = {i: shard_point_ids[i] for i in range(n)}
+
+    # Bug #1242: read quantization_range from the monolith to include in shard meta.
+    _quant_range = _read_monolith_quantization_range(collection_path, vector_dim)
+
     _write_collection_meta(
         shard_dir=migrating_dir,
         shard_name=shard_name,
         vector_dim=vector_dim,
         space=space,
         id_mapping=new_id_mapping,
+        quantization_range=_quant_range,
     )
+
+    # Bug #1242: copy projection_matrix.npy from monolith (or regenerate as fallback)
+    # before the atomic rename so the shard is immediately usable by upsert_points.
+    _ensure_shard_has_projection_matrix(migrating_dir, collection_path, vector_dim)
 
     # Atomic rename to final shard dir.
     os.replace(migrating_dir, final_shard_dir)

@@ -3664,6 +3664,32 @@ class LogsSqliteBackend:
 
         self._conn_manager.execute_atomic(operation)
 
+    def insert_log_batch(self, items: List[Any]) -> None:
+        """Insert a batch of log records in ONE transaction via executemany.
+
+        Issue #1241 P1.1: batched writer to eliminate per-record commit churn.
+
+        Args:
+            items: List of 10-tuples in column order:
+                (timestamp, level, source, message, correlation_id,
+                 user_id, request_path, extra_data, node_id, alias)
+        """
+        if not items:
+            return
+
+        def operation(conn: Any) -> None:
+            conn.executemany(
+                """
+                INSERT INTO logs
+                    (timestamp, level, source, message, correlation_id,
+                     user_id, request_path, extra_data, node_id, alias)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                items,
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
     def _build_query_conditions(
         self,
         level: Optional[str],

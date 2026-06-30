@@ -49,6 +49,11 @@ _HIGH_SEVERITY_QUEUE_TIMEOUT_S = 2.0
 # Minimum seconds between throttled stderr drop-warnings (anti-spam).
 _STDERR_THROTTLE_S = 10.0
 
+# Maximum number of log records to coalesce into ONE transaction per drain
+# cycle (Issue #1241 P1.1).  Under a burst this reduces 34k individual
+# commits to ceil(34k/512) = 67 commits — WAL churn drops proportionally.
+MAX_DRAIN_BATCH = 512
+
 # Type alias for the items we put on the queue.
 _LogItem = Tuple[
     str,  # timestamp
@@ -208,6 +213,20 @@ class SQLiteLogHandler(logging.Handler):
         """Create database file, logs table, and indexes if they don't exist."""
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Issue #1241 P1.2: WAL must be set OUTSIDE any transaction.
+        # SQLite silently ignores PRAGMA journal_mode = WAL if issued inside
+        # BEGIN ... COMMIT (execute_atomic does BEGIN EXCLUSIVE).
+        # Use a short-lived raw connection for this once-per-file pragma.
+        # Note: busy_timeout is PER-CONNECTION and is set to 30000 ms by
+        # DatabaseConnectionManager.get_connection() on every connection it
+        # opens, so we do NOT set it here on this throwaway bootstrap connection.
+        _bootstrap_conn = sqlite3.connect(str(self.db_path))
+        try:
+            _bootstrap_conn.execute("PRAGMA journal_mode = WAL")
+            _bootstrap_conn.commit()
+        finally:
+            _bootstrap_conn.close()
 
         def _do_init(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
@@ -391,12 +410,17 @@ class SQLiteLogHandler(logging.Handler):
             self._emit_guard.active = False
 
     def _writer_loop(self) -> None:
-        """Background daemon thread: drain queue and perform actual DB writes.
+        """Background daemon thread: drain queue and perform batched DB writes.
+
+        Issue #1241 P1.1: drain up to MAX_DRAIN_BATCH items per cycle and
+        coalesce them into ONE transaction (insert_log_batch / executemany).
+        Under a burst of 34k records this reduces commits from 34k to ~67,
+        eliminating the WAL churn that caused "database is locked" contention.
 
         Runs until the stop event is set AND the queue is empty.  Uses a
         bounded poll timeout so the thread exits cleanly on shutdown.
 
-        Writer-thread re-entry guard: while this thread is inside insert_log()
+        Writer-thread re-entry guard: while this thread is inside insert_log_batch()
         or execute_atomic(), any logging it triggers must not re-enqueue.
         We set _emit_guard.active = True on this thread before each DB write
         so that recursive calls to emit() from within the DB layer are dropped
@@ -404,73 +428,72 @@ class SQLiteLogHandler(logging.Handler):
         clean drop — Bug #731 / Bug #1078).
         """
         while True:
+            # Block waiting for the first item in the batch.
             try:
-                item = self._queue.get(timeout=_QUEUE_POLL_TIMEOUT_S)
+                first_item = self._queue.get(timeout=_QUEUE_POLL_TIMEOUT_S)
             except queue.Empty:
                 if self._stop_event.is_set():
                     break
                 continue
 
-            (
-                timestamp,
-                level,
-                source,
-                message,
-                correlation_id,
-                user_id,
-                request_path,
-                extra_data_json,
-                alias,
-            ) = item
+            # Drain up to MAX_DRAIN_BATCH - 1 additional items non-blocking.
+            batch = [first_item]
+            additional = min(self._queue.qsize(), MAX_DRAIN_BATCH - 1)
+            for _ in range(additional):
+                try:
+                    batch.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
 
             # Set the re-entry guard for THIS thread while we do DB I/O.
             # Any logging triggered by the DB layer will be dropped cleanly.
             self._emit_guard.active = True
             try:
                 if self._logs_backend is not None:
-                    # Delegated path (Story #500 AC4): route through injected
-                    # LogsBackend.  Supports both SQLite and PostgreSQL backends
-                    # transparently.  node_id is injected by set_node_id() in
-                    # cluster mode (Story #501 AC3).  alias carries the repo tag
-                    # for lifecycle-runner rows (Story #876 Phase C).
-                    self._logs_backend.insert_log(
-                        timestamp=timestamp,
-                        level=level,
-                        source=source,
-                        message=message,
-                        correlation_id=correlation_id,
-                        user_id=user_id,
-                        request_path=request_path,
-                        extra_data=extra_data_json,
-                        node_id=self._node_id,
-                        alias=alias,
-                    )
+                    # Delegated path: build expanded tuples with node_id and
+                    # call insert_log_batch() — ONE call per drain cycle.
+                    # node_id is injected by set_node_id() in cluster mode
+                    # (Story #501 AC3).  alias carries the repo tag for
+                    # lifecycle-runner rows (Story #876 Phase C).
+                    expanded = [
+                        (
+                            ts,
+                            lvl,
+                            src,
+                            msg,
+                            cid,
+                            uid,
+                            rpath,
+                            extra,
+                            self._node_id,
+                            alias,
+                        )
+                        for (ts, lvl, src, msg, cid, uid, rpath, extra, alias) in batch
+                    ]
+                    self._logs_backend.insert_log_batch(expanded)
                 else:
-                    # Direct-SQLite path (backwards compatible, no backend
-                    # injected).  alias is persisted to its own column to stay
-                    # consistent with the delegated path (Story #876 Phase C).
-                    def _do_insert(conn: sqlite3.Connection) -> None:
-                        conn.execute(
+                    # Direct-SQLite path: executemany in ONE transaction.
+                    # alias is persisted to its own column (Story #876 Phase C).
+                    batch_params = [
+                        (ts, lvl, src, msg, cid, uid, rpath, extra, alias)
+                        for (ts, lvl, src, msg, cid, uid, rpath, extra, alias) in batch
+                    ]
+
+                    def _do_batch(conn: sqlite3.Connection) -> None:
+                        conn.executemany(
                             """
-                        INSERT INTO logs (timestamp, level, source, message, correlation_id, user_id, request_path, extra_data, alias)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                            (
-                                timestamp,
-                                level,
-                                source,
-                                message,
-                                correlation_id,
-                                user_id,
-                                request_path,
-                                extra_data_json,
-                                alias,
-                            ),
+                            INSERT INTO logs
+                                (timestamp, level, source, message,
+                                 correlation_id, user_id, request_path,
+                                 extra_data, alias)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            batch_params,
                         )
 
                     DatabaseConnectionManager.get_instance(
                         str(self.db_path)
-                    ).execute_atomic(_do_insert)
+                    ).execute_atomic(_do_batch)
             except Exception:
                 # DB write failures must not crash the writer thread.
                 # We can't log here (would recurse), so swallow silently.
@@ -478,7 +501,9 @@ class SQLiteLogHandler(logging.Handler):
             finally:
                 self._emit_guard.active = False
 
-            self._queue.task_done()
+            # Mark every drained item as done so queue.join() (flush) works.
+            for _ in batch:
+                self._queue.task_done()
 
     def flush(self) -> None:
         """Synchronously drain the writer queue without stopping the handler.

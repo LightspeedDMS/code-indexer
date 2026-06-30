@@ -36,22 +36,21 @@ class TestChunkTextOptimization:
         content_in_payload = False
 
         for i, line in enumerate(lines):
-            # Look for point = { structure (around line 1187 after Bug #1206 edits)
-            if "point = {" in line and i > 1050 and i < 1210:
+            # Look for any point = { structure (no line-number coupling — future
+            # edits that add lines above this block must not re-break this test).
+            if "point = {" in line:
                 point_creation_found = True
-                # Check next 10 lines for structure
+                # Check next 15 lines for root-level chunk_text
                 point_block = "\n".join(lines[i : i + 15])
 
                 # Optimized: chunk_text should be at root level
                 if '"chunk_text":' in point_block or "'chunk_text':" in point_block:
                     chunk_text_at_root = True
 
-                # Wasteful pattern: content should NOT be in payload creation (around line 1046)
-                payload_block = "\n".join(lines[i - 30 : i])
+                # Wasteful pattern: content should NOT be in payload creation
+                payload_block = "\n".join(lines[max(0, i - 30) : i])
                 if '"content":' in payload_block and "chunk.get" in payload_block:
                     content_in_payload = True
-
-                break
 
         # Assertions
         assert point_creation_found, (

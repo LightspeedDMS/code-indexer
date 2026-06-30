@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +174,9 @@ def _setup_monolith_with_missing_json_orphan(
     all_payloads = sorted(
         f for f in coll_dir.rglob("*.json") if f.name != "collection_meta.json"
     )
-    assert len(all_payloads) == 3, f"Setup: expected 3 payloads, got {len(all_payloads)}"
+    assert len(all_payloads) == 3, (
+        f"Setup: expected 3 payloads, got {len(all_payloads)}"
+    )
     all_payloads[0].unlink()
     return repo_path, index_path, coll_dir
 
@@ -235,9 +236,7 @@ class TestBug1240PerPointLogLevel:
 
         # Bug #1240: per-point message must NOT appear at WARNING level
         warning_msgs = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno >= logging.WARNING
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
         assert not any("id_index entry" in m for m in warning_msgs), (
             f"Bug #1240: 'has no id_index entry' is logged at WARNING (log-storm risk). "
@@ -246,9 +245,7 @@ class TestBug1240PerPointLogLevel:
 
         # Must appear at DEBUG level (message still emitted, just quieter)
         debug_msgs = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno == logging.DEBUG
+            r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
         ]
         assert any("id_index entry" in m for m in debug_msgs), (
             "Per-point 'has no id_index entry' message must still be emitted at DEBUG level"
@@ -295,9 +292,7 @@ class TestBug1240PerPointLogLevel:
         assert len(buckets) >= 1, "Valid point must still be bucketed"
 
         warning_msgs = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno >= logging.WARNING
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
         assert not any("skipping point" in m for m in warning_msgs), (
             f"Bug #1240: per-point 'skipping point' is at WARNING (log-storm risk). "
@@ -305,9 +300,7 @@ class TestBug1240PerPointLogLevel:
         )
 
         debug_msgs = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno == logging.DEBUG
+            r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
         ]
         assert any("not found" in m for m in debug_msgs), (
             "Per-point JSON-not-found message must still be emitted at DEBUG level"
@@ -359,9 +352,7 @@ class TestBug1240PerPointLogLevel:
         assert len(buckets) >= 1, "Valid point must still be bucketed"
 
         warning_msgs = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno >= logging.WARNING
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
         assert not any("no commit_timestamp" in m for m in warning_msgs), (
             f"Bug #1240: per-point 'no commit_timestamp' is at WARNING (log-storm risk). "
@@ -369,9 +360,7 @@ class TestBug1240PerPointLogLevel:
         )
 
         debug_msgs = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno == logging.DEBUG
+            r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
         ]
         assert any("commit_timestamp" in m for m in debug_msgs), (
             "Per-point 'no commit_timestamp' message must still be emitted at DEBUG level"
@@ -403,9 +392,7 @@ class TestBug1240PerPointLogLevel:
             )
 
         warning_msgs = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno >= logging.WARNING
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
 
         # Aggregate summary WARNING must still be present after the fix
