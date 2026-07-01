@@ -987,7 +987,46 @@ class FilesystemVectorStore:
             raise ValueError(f"Collection '{collection_name}' does not exist")
 
         # Load projection matrix (singleton-cached in ProjectionMatrixManager)
-        projection_matrix = self.matrix_manager.load_matrix(collection_path)
+        try:
+            projection_matrix = self.matrix_manager.load_matrix(collection_path)
+        except FileNotFoundError:
+            # Bug #1264: the shard-prep self-heal in temporal_indexer.py (Bug
+            # #1242) only covers shards it enumerates ahead of the write, in a
+            # different module from this call. Any other path that reaches
+            # upsert_points() for a collection whose projection_matrix.npy is
+            # missing on disk still hard-crashed here. Self-heal AT the write
+            # chokepoint itself instead: reuse the exact copy/regenerate logic
+            # from Bug #1242 (no duplicated matrix-creation logic), then retry
+            # the load once. A genuine failure to heal still propagates loudly.
+            vector_size = self._get_vector_size(collection_name)
+            source_collection_path: Optional[Path] = None
+            if TemporalMetadataStore.is_temporal_collection(collection_name):
+                from code_indexer.services.temporal.temporal_collection_naming import (
+                    base_collection_name,
+                )
+
+                base_name = base_collection_name(collection_name)
+                if base_name != collection_name:
+                    base_path = self._get_collection_path(base_name, subdirectory)
+                    if base_path.exists():
+                        source_collection_path = base_path
+
+            self.logger.warning(
+                "Bug #1264: projection_matrix.npy missing for collection '%s' "
+                "at write time -- self-healing (source=%s)",
+                collection_name,
+                source_collection_path,
+            )
+
+            from code_indexer.services.temporal.temporal_migration_service import (
+                _ensure_shard_has_projection_matrix,
+            )
+
+            _ensure_shard_has_projection_matrix(
+                collection_path, source_collection_path, vector_size
+            )
+            self.matrix_manager._matrix_cache.pop(str(collection_path.absolute()), None)
+            projection_matrix = self.matrix_manager.load_matrix(collection_path)
 
         # Get expected vector dimensions from projection matrix
         expected_dims = projection_matrix.shape[0]

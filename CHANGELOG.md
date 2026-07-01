@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.16.0] - 2026-07-01
+
+### Fixed
+- **#1264 (P1): Temporal projection-matrix self-heal is now applied at the `upsert_points` write chokepoint, closing the gap left by #1242.** The #1242 self-heal (v11.8.0) only repaired shards enumerated by the `index_commits` prep loop, but the actual crash lives in a separate module: `FilesystemVectorStore.upsert_points()` routes each point to its per-quarter shard by commit date and calls `ProjectionMatrixManager.load_matrix()`, which raised a bare `FileNotFoundError` when a shard's `projection_matrix.npy` was missing. Any shard the prep loop did not revisit (old-history quarters, lazily-touched shards) still hard-crashed every golden-repo refresh -- observed in production for `evolution-global` (2009Q4), `genai-talk2db-global` (2025Q4), and `mobile-global` (2026Q2). The fix wraps the `load_matrix` call: on a missing matrix it reuses the existing `_ensure_shard_has_projection_matrix()` helper (copy-from-base or deterministic regenerate -- no duplicated logic), evicts the stale matrix-cache entry, and retries the load once; a genuinely nonexistent collection still raises loudly (anti-silent-failure). Validated by real-path reproduction against the exact production stack trace: crash at the pre-fix commit, clean self-heal at HEAD, index remains queryable.
+- **#1264 (hardening): The shared `_ensure_shard_has_projection_matrix()` helper now writes the projection matrix atomically (temp file in the same directory + `os.replace`) for both the copy-from-base and regenerate branches.** Because #1264 makes the helper reachable from the temporal parallel-worker write path, two workers first-writing the same missing-matrix shard concurrently could otherwise hit a torn-read window; the atomic rename closes it. Both the #1242 prep-loop path and the #1264 chokepoint path benefit from the single shared change.
+
 ## [11.15.0] - 2026-07-01
 
 ### Fixed

@@ -598,7 +598,18 @@ class TestEndToEndNoCrashAfterHealing:
         assert matrix.shape == (_DIM, 64)
 
     def test_upsert_points_succeeds_into_healed_shard(self, tmp_path):
-        """upsert_points does not raise FileNotFoundError after projection matrix is healed."""
+        """upsert_points does not raise FileNotFoundError after projection matrix is healed.
+
+        Bug #1264 note: upsert_points() now self-heals a missing matrix
+        automatically at the write chokepoint (see
+        test_temporal_write_chokepoint_self_heal_1264.py), so the pre-#1264
+        "upsert_points crashes without the matrix" assertion that used to
+        live here is no longer true and has been removed. This test now
+        focuses on what it always meant to prove: the manual
+        _ensure_shard_has_projection_matrix heal (used by the
+        temporal_indexer.py shard-prep loop) is idempotent and upsert_points
+        succeeds against a shard it healed.
+        """
         from code_indexer.services.temporal.temporal_migration_service import (
             _ensure_shard_has_projection_matrix,
         )
@@ -621,20 +632,16 @@ class TestEndToEndNoCrashAfterHealing:
         # Clear cache so load_matrix re-reads disk
         ProjectionMatrixManager._matrix_cache.clear()
 
-        # Confirm the bug reproduces: upsert_points crashes without the matrix
+        # Heal via the shard-prep-loop helper (Bug #1242) before any write.
+        _ensure_shard_has_projection_matrix(coll_path, None, _DIM)
+        ProjectionMatrixManager._matrix_cache.clear()
+
+        # upsert_points succeeds against the pre-healed shard.
         test_point = {
             "id": "test:commit:" + "a" * 40 + ":0",
             "vector": np.random.rand(_DIM).astype(np.float32).tolist(),
             "payload": {"commit_timestamp": _Q1_2024},
         }
-        with pytest.raises(FileNotFoundError):
-            vector_store.upsert_points(collection_name, [test_point], watch_mode=True)
-
-        # Heal: restore the matrix
-        _ensure_shard_has_projection_matrix(coll_path, None, _DIM)
-        ProjectionMatrixManager._matrix_cache.clear()
-
-        # After heal: upsert_points succeeds without exception
         result = vector_store.upsert_points(
             collection_name, [test_point], watch_mode=True
         )
