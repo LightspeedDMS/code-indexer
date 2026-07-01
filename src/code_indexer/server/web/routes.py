@@ -6260,9 +6260,9 @@ def _get_current_config() -> dict:
             "dependency_map_enabled": False,
             "dependency_map_interval_hours": 168,
             "dependency_map_pass_timeout_seconds": 600,
-            "dependency_map_pass1_max_turns": 50,
-            "dependency_map_pass2_max_turns": 60,
-            "dependency_map_delta_max_turns": 30,
+            "dependency_map_pass1_max_turns": 0,
+            "dependency_map_pass2_max_turns": 0,
+            "dependency_map_delta_max_turns": 0,
             # Story #724: post-generation verification pass
             "dep_map_fact_check_enabled": False,
             "fact_check_timeout_seconds": 600,
@@ -6292,13 +6292,13 @@ def _get_current_config() -> dict:
                 "dependency_map_pass_timeout_seconds", 600
             ),
             "dependency_map_pass1_max_turns": claude_cli_raw.get(
-                "dependency_map_pass1_max_turns", 50
+                "dependency_map_pass1_max_turns", 0
             ),
             "dependency_map_pass2_max_turns": claude_cli_raw.get(
-                "dependency_map_pass2_max_turns", 60
+                "dependency_map_pass2_max_turns", 0
             ),
             "dependency_map_delta_max_turns": claude_cli_raw.get(
-                "dependency_map_delta_max_turns", 30
+                "dependency_map_delta_max_turns", 0
             ),
             # Story #724: post-generation verification pass
             "dep_map_fact_check_enabled": claude_cli_raw.get(

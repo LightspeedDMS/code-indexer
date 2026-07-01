@@ -1406,9 +1406,9 @@ class ConfigService:
         elif key == "dependency_map_pass1_max_turns":
             claude_config.dependency_map_pass1_max_turns = max(0, int(value))
         elif key == "dependency_map_pass2_max_turns":
-            claude_config.dependency_map_pass2_max_turns = max(5, int(value))
+            claude_config.dependency_map_pass2_max_turns = max(0, int(value))
         elif key == "dependency_map_delta_max_turns":
-            claude_config.dependency_map_delta_max_turns = max(5, int(value))
+            claude_config.dependency_map_delta_max_turns = max(0, int(value))
         elif key == "refinement_enabled":
             claude_config.refinement_enabled = value in ["true", True, "True"]
         elif key == "refinement_interval_hours":

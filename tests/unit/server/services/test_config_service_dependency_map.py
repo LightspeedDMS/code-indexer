@@ -94,13 +94,15 @@ def test_dependency_map_pass1_max_turns_accepts_large_value(tmp_path):
 
 
 def test_dependency_map_pass2_max_turns_clamped_to_min(tmp_path):
-    """Test that dependency_map_pass2_max_turns is clamped to minimum value of 5."""
+    """Bug #1261: dependency_map_pass2_max_turns is clamped to minimum value of 0
+    (unlimited), not 5 -- a floor of 5 would make the unlimited default
+    unreachable via the Web UI."""
     service = ConfigService(server_dir_path=str(tmp_path))
 
-    service.update_setting("claude_cli", "dependency_map_pass2_max_turns", 2)
+    service.update_setting("claude_cli", "dependency_map_pass2_max_turns", -1)
     claude_config = service.get_claude_integration_config()
 
-    assert claude_config.dependency_map_pass2_max_turns == 5
+    assert claude_config.dependency_map_pass2_max_turns == 0
 
 
 def test_dependency_map_pass2_max_turns_accepts_large_value(tmp_path):
@@ -115,13 +117,15 @@ def test_dependency_map_pass2_max_turns_accepts_large_value(tmp_path):
 
 
 def test_dependency_map_delta_max_turns_clamped_to_min(tmp_path):
-    """Test that dependency_map_delta_max_turns is clamped to minimum value of 5."""
+    """Bug #1261: dependency_map_delta_max_turns is clamped to minimum value of 0
+    (unlimited), not 5 -- a floor of 5 would make the unlimited default
+    unreachable via the Web UI."""
     service = ConfigService(server_dir_path=str(tmp_path))
 
-    service.update_setting("claude_cli", "dependency_map_delta_max_turns", 0)
+    service.update_setting("claude_cli", "dependency_map_delta_max_turns", -1)
     claude_config = service.get_claude_integration_config()
 
-    assert claude_config.dependency_map_delta_max_turns == 5
+    assert claude_config.dependency_map_delta_max_turns == 0
 
 
 def test_dependency_map_delta_max_turns_accepts_large_value(tmp_path):
