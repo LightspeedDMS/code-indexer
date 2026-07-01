@@ -574,10 +574,12 @@ class ClaudeIntegrationConfig:
     fact_check_timeout_seconds: int = 600
     # Pass 1 (synthesis) max turns (default: 0 = single-shot mode, no tool use)
     dependency_map_pass1_max_turns: int = 0
-    # Pass 2 (per-domain) max turns (default: 50 = agentic mode with search_code tool)
-    dependency_map_pass2_max_turns: int = 50  # Fix 6: Reduced from 60
-    # Delta analysis max turns (default: 30, for future incremental updates)
-    dependency_map_delta_max_turns: int = 30
+    # Pass 2 (per-domain) max turns (default: 0 = unlimited agentic mode; Bug #1261:
+    # a hard turn cap can truncate a legitimately long per-domain analysis mid-flight,
+    # the same anti-pattern removed from the indexing path in Bug #1218)
+    dependency_map_pass2_max_turns: int = 0
+    # Delta analysis max turns (default: 0 = unlimited, matching pass1/pass2; Bug #1261)
+    dependency_map_delta_max_turns: int = 0
     # Story #359: Refinement job configuration
     # Enable/disable continuous dependency document refinement
     refinement_enabled: bool = False

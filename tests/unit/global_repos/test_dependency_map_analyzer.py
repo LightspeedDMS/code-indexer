@@ -2529,7 +2529,7 @@ class TestIteration13LargeDomainDetection:
     """Test large domain detection and output-first prompt selection (Iteration 13)."""
 
     def test_large_domain_uses_output_first_prompt(self, tmp_path):
-        """With 4+ repos, verify prompt starts with WRITE YOUR ANALYSIS FIRST."""
+        """With 4+ repos, verify prompt uses the output-first ANALYSIS GROUNDING section."""
         from code_indexer.server.services.intelligence_cli_invoker import (
             InvocationResult,
         )
@@ -2572,12 +2572,14 @@ class TestIteration13LargeDomainDetection:
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Verify output-first prompt characteristics
-        assert "WRITE YOUR ANALYSIS FIRST" in prompt
+        assert "ANALYSIS GROUNDING" in prompt
         assert "Source Code Exploration Mandate" not in prompt
         assert "Required Searches" not in prompt
         assert "run at least one search" not in prompt.lower()
-        assert "AT MOST 5" in prompt  # Limited searches
-        assert "OPTIONAL" in prompt  # Searches are optional
+        # Bug #1261: no artificial search-call ceiling -- search is mandatory/unbounded
+        assert "AT MOST 5" not in prompt
+        assert "OPTIONAL" not in prompt
+        assert "MANDATORY" in prompt
 
     def test_small_domain_uses_standard_prompt(self, tmp_path):
         """With 3 or fewer repos, verify prompt references the analysis guidelines file."""
@@ -2811,8 +2813,8 @@ class TestIteration13OutputFirstPrompt:
         assert "## Intra-Domain Dependencies" in prompt
         assert "## Cross-Domain Connections" in prompt
 
-    def test_output_first_prompt_limits_search_calls(self, tmp_path):
-        """Verify prompt contains 'AT MOST 5' and 'OPTIONAL'."""
+    def test_output_first_prompt_does_not_limit_search_calls(self, tmp_path):
+        """Bug #1261: verify prompt does NOT contain 'AT MOST 5' or 'OPTIONAL' search caps."""
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
             cidx_meta_path=tmp_path / "cidx-meta",
@@ -2827,8 +2829,9 @@ class TestIteration13OutputFirstPrompt:
 
         prompt = analyzer._build_output_first_prompt(domain, [domain], [], None)
 
-        assert "AT MOST 5" in prompt
-        assert "OPTIONAL" in prompt
+        assert "AT MOST 5" not in prompt
+        assert "OPTIONAL" not in prompt
+        assert "MANDATORY" in prompt
 
     def test_output_first_prompt_includes_pass1_evidence(self, tmp_path):
         """Verify prompt includes evidence from domain dict."""
@@ -3324,8 +3327,8 @@ class TestIteration15InsideOutAndConciseness:
         assert "## Intra-Domain Dependencies" in prompt
         assert "## Cross-Domain Connections" in prompt
 
-    def test_standard_prompt_has_output_budget(self, tmp_path):
-        """Test that standard prompt includes Output Budget section with 3,000-10,000 character limit."""
+    def test_standard_prompt_has_no_hard_output_budget(self, tmp_path):
+        """Bug #1261: standard prompt must NOT hardcode a 3,000-10,000 character range."""
         analyzer, staging_dir, mock_dispatcher = self._make_pass2_context(tmp_path)
 
         domain = {
@@ -3341,9 +3344,12 @@ class TestIteration15InsideOutAndConciseness:
         mock_dispatcher.dispatch.assert_called_once()
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
-        assert "Output Budget" in prompt
-        assert "3,000" in prompt or "3000" in prompt
-        assert "10,000" in prompt or "10000" in prompt
+        assert "3,000" not in prompt
+        assert "10,000" not in prompt
+        assert "3000" not in prompt
+        assert "10000" not in prompt
+        # Qualitative conciseness guidance must still be present
+        assert "CONCISE" in prompt
 
     def test_prohibited_content_includes_search_audit(self, tmp_path):
         """Test that PROHIBITED Content section explicitly forbids 'MCP Searches Performed' sections."""

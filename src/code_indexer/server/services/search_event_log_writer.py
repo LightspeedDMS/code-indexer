@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from queue import Empty, Full, Queue
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from code_indexer.server.services.config_service import (
     get_config_service as get_config_service_for_eviction,
@@ -305,6 +305,51 @@ class SearchEventLogSqliteBackend:
             )
             return []
 
+    def get_hit_rate_counts(self, mode: str) -> Dict[str, int]:
+        """Request-denominated hit/request counts for a cache mode (Issue #1257).
+
+        Returns aggregated counts over the ENTIRE table (no time filtering):
+            {"hits": int, "requests": int}
+
+        A row counts toward "requests" when EITHER provider recorded this mode
+        for that request (voyage_cache_mode == mode OR cohere_cache_mode ==
+        mode). A row counts toward "hits" when a provider recorded BOTH this
+        mode AND a hit for that SAME provider on that SAME request. This is
+        REQUEST-denominated (one row = one user request), matching the
+        cache_hit_filter="hits_only" OR-combination semantics already used by
+        query_for_export -- unlike the in-process QueryEmbeddingCacheMetrics
+        tallies, which increment once per cache OPERATION and can therefore
+        count a single request twice when it performs two on-mode embedding
+        operations (e.g. voyage + cohere, or a shared-vector re-embed).
+
+        Fail-open: returns {"hits": 0, "requests": 0} on any error.
+        """
+        try:
+            conn = sqlite3.connect(self._db_path, timeout=30)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN voyage_cache_mode = ? OR cohere_cache_mode = ?
+                            THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN (voyage_cache_mode = ? AND voyage_cache_hit = 1)
+                                 OR (cohere_cache_mode = ? AND cohere_cache_hit = 1)
+                            THEN 1 ELSE 0 END)
+                    FROM search_event_log
+                    """,
+                    (mode, mode, mode, mode),
+                ).fetchone()
+                requests_count = row[0] or 0
+                hits_count = row[1] or 0
+                return {"hits": int(hits_count), "requests": int(requests_count)}
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(
+                "SearchEventLogSqliteBackend: get_hit_rate_counts failed: %s", exc
+            )
+            return {"hits": 0, "requests": 0}
+
 
 # ---------------------------------------------------------------------------
 # PostgreSQL backend
@@ -564,6 +609,39 @@ class SearchEventLogPostgresBackend:
                 "SearchEventLogPostgresBackend: query_for_export failed: %s", exc
             )
             return []
+
+    def get_hit_rate_counts(self, mode: str) -> Dict[str, int]:
+        """Request-denominated hit/request counts for a cache mode (Issue #1257).
+
+        See SearchEventLogSqliteBackend.get_hit_rate_counts for full rationale.
+        Cluster mode: this table is shared PostgreSQL, so the returned counts
+        are automatically aggregated across every node -- no per-node merge
+        is needed by the caller.
+
+        Fail-open: returns {"hits": 0, "requests": 0} on any error.
+        """
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN voyage_cache_mode = %s OR cohere_cache_mode = %s
+                            THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN (voyage_cache_mode = %s AND voyage_cache_hit = TRUE)
+                                 OR (cohere_cache_mode = %s AND cohere_cache_hit = TRUE)
+                            THEN 1 ELSE 0 END)
+                    FROM search_event_log
+                    """,
+                    (mode, mode, mode, mode),
+                ).fetchone()
+                requests_count = row[0] or 0
+                hits_count = row[1] or 0
+                return {"hits": int(hits_count), "requests": int(requests_count)}
+        except Exception as exc:
+            logger.warning(
+                "SearchEventLogPostgresBackend: get_hit_rate_counts failed: %s", exc
+            )
+            return {"hits": 0, "requests": 0}
 
 
 # ---------------------------------------------------------------------------

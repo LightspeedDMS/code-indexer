@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.15.0] - 2026-07-01
+
+### Fixed
+- **#1261: Removed artificial work-budgets (search-call ceiling / agent-turn caps / output-length caps) on dep-map analysis jobs.** These caps were throttling legitimate long-running dependency-map analysis, causing large repos to hit budget limits before completing a full pass.
+- **#1259: `frontmatter_json_mismatch` anomalies now route to the free Phase 3.5 sync instead of Phase-1 Claude re-analysis.** Splits the overloaded `REPAIRABLE_ANOMALY_TYPES` set so frontmatter/JSON drift -- a deterministic sync fix -- no longer burns a Claude re-analysis pass that Phase 3.5 can resolve for free.
+- **#1260: Stopped deleting the domain `.md` before Phase-1 repair analysis, restoring the previous `previous_domain_dir` extend/improve reuse.** The prior delete-then-regenerate path discarded reusable domain context that Phase-1 repair analysis depends on to extend/improve rather than start from scratch.
+- **#1257: Dashboard On-Mode Hit Rate is now request-denominated (from `search_event_log`) instead of operation-denominated.** The previous operation-denominated calculation misrepresented actual query-embedding cache effectiveness; the metric now reflects the true per-request hit rate.
+- **#1262: `LifecycleBatchRunner.run()` now surfaces per-alias failure so a failed single-alias description refresh is marked failed and increments the circuit-breaker.** Previously a failed alias inside a batch was masked by the batch-level success reporting, silently burning Claude spend on repos that were quietly failing every cycle without ever tripping the #1096 quarantine circuit-breaker.
+- **#1258: `JobTracker.complete_job`/`fail_job` persisted-row fallback closes the double-completion "not in memory" warning flood and the pop-before-persist zombie edge.** A completion racing an in-memory pop could log a flood of "not in memory" warnings and leave a zombie job row; the fallback now reads the persisted row when the in-memory entry is already gone.
+
+### Testing
+- **test(auto-update): aligned the 5 swap-failure tests with the Bug #1254 non-fatal contract.** These tests had gone stale after #1254 changed `_ensure_swap_file` to best-effort (WARNING + return True on failure); updated assertions to match the current non-fatal behavior.
+
 ## [11.14.0] - 2026-07-01
 
 ### Fixed

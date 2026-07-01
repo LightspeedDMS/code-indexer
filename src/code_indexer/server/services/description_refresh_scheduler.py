@@ -1474,7 +1474,9 @@ class DescriptionRefreshScheduler:
             claude_cli_invoker=self._lifecycle_invoker,
             concurrency=self._get_lifecycle_concurrency(),
         )
-        runner.run([alias], parent_job_id=job_id)
+        failed = runner.run([alias], parent_job_id=job_id)
+        if alias in failed:
+            raise RuntimeError(failed[alias])
 
     def _get_interval_hours(self) -> int:
         """Get refresh interval from config."""

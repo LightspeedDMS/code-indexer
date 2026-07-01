@@ -39,9 +39,9 @@ class TestDependencyMapConfigDefaults:
             claude_config.dependency_map_pass1_max_turns == 0
         )  # Single-shot mode (no tool use)
         assert (
-            claude_config.dependency_map_pass2_max_turns == 50
-        )  # Agentic mode with search_code tool
-        assert claude_config.dependency_map_delta_max_turns == 30
+            claude_config.dependency_map_pass2_max_turns == 0
+        )  # Bug #1261: unlimited agentic mode (no artificial turn cap)
+        assert claude_config.dependency_map_delta_max_turns == 0  # Bug #1261: unlimited
 
 
 class TestDependencyMapConfigPersistence:
@@ -108,8 +108,8 @@ class TestDependencyMapConfigPersistence:
         assert (
             claude_config.dependency_map_pass1_max_turns == 0
         )  # Single-shot mode (no tool use)
-        assert claude_config.dependency_map_pass2_max_turns == 50  # Fix 6
-        assert claude_config.dependency_map_delta_max_turns == 30
+        assert claude_config.dependency_map_pass2_max_turns == 0  # Bug #1261
+        assert claude_config.dependency_map_delta_max_turns == 0  # Bug #1261
 
 
 class TestClaudeIntegrationConfigDataclass:

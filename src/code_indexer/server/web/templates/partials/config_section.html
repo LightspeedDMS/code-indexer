@@ -2687,12 +2687,12 @@ function saveLlmCredsConfig() {
                     <tr>
                         <td class="config-label">Pass 2 Max Turns (Per-Domain)</td>
                         <td class="config-value">{{ config.claude_cli.dependency_map_pass2_max_turns }}</td>
-                        <td class="config-note"><small>Max turns for per-domain source analysis (default: 50 = agentic)</small></td>
+                        <td class="config-note"><small>Max turns for per-domain source analysis (default: 0 = unlimited)</small></td>
                     </tr>
                     <tr>
                         <td class="config-label">Delta Max Turns</td>
                         <td class="config-value">{{ config.claude_cli.dependency_map_delta_max_turns }}</td>
-                        <td class="config-note"><small>Max turns for incremental delta analysis (default: 30)</small></td>
+                        <td class="config-note"><small>Max turns for incremental delta analysis (default: 0 = unlimited)</small></td>
                     </tr>
                     <!-- Refinement Settings (Story #359) -->
                     <tr><td colspan="3" style="padding-top: 1em;"><strong>Document Refinement</strong></td></tr>
@@ -2792,13 +2792,13 @@ function saveLlmCredsConfig() {
                 </label>
                 <label for="depmap-pass2-turns">
                     Pass 2 Max Turns (Per-Domain)
-                    <input type="number" id="depmap-pass2-turns" name="dependency_map_pass2_max_turns" value="{{ config.claude_cli.dependency_map_pass2_max_turns }}" min="5">
-                    <small>Max turns for per-domain source analysis (min: 5, default: 50)</small>
+                    <input type="number" id="depmap-pass2-turns" name="dependency_map_pass2_max_turns" value="{{ config.claude_cli.dependency_map_pass2_max_turns }}" min="0">
+                    <small>0=unlimited (no tool-use cap), &gt;0=bounded agentic mode (min: 0, default: 0)</small>
                 </label>
                 <label for="depmap-delta-turns">
                     Delta Max Turns
-                    <input type="number" id="depmap-delta-turns" name="dependency_map_delta_max_turns" value="{{ config.claude_cli.dependency_map_delta_max_turns }}" min="5">
-                    <small>Max turns for incremental delta analysis (min: 5, default: 30)</small>
+                    <input type="number" id="depmap-delta-turns" name="dependency_map_delta_max_turns" value="{{ config.claude_cli.dependency_map_delta_max_turns }}" min="0">
+                    <small>0=unlimited (no tool-use cap), &gt;0=bounded agentic mode (min: 0, default: 0)</small>
                 </label>
                 <!-- Refinement Settings (Story #359) -->
                 <label for="refinement-enabled">
