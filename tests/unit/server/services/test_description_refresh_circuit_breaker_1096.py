@@ -111,6 +111,9 @@ class _StubDebouncer:
 
 
 class _StubJobTracker:
+    def register_job_if_no_conflict(self, *a: Any, **k: Any) -> None:
+        pass
+
     def register_job(self, *a: Any, **k: Any) -> None:
         pass
 
@@ -240,6 +243,44 @@ def _build_scheduler(
     sched.calculate_next_run = lambda a: "2099-01-01T00:00:00+00:00"  # type: ignore[method-assign]
 
     # Stub get_stale_repos; tests override this via _set_stale(sched, ...)
+    sched.get_stale_repos = lambda: []  # type: ignore[method-assign]
+
+    return sched
+
+
+def _build_scheduler_with_real_batch_runner(
+    tmp_path: Path,
+) -> DescriptionRefreshScheduler:
+    """
+    Build a real scheduler whose _run_lifecycle_via_batch_runner method is not
+    stubbed, so it constructs and runs a real LifecycleBatchRunner.
+    """
+    db_path = tmp_path / "tracking-real-batch.db"
+    DatabaseSchema(str(db_path)).initialize_database()
+
+    sched = object.__new__(DescriptionRefreshScheduler)
+    tracking = DescriptionRefreshTrackingBackend(str(db_path))
+
+    def _failing_invoker(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("simulated UnifiedResponseParseError")
+
+    sched._tracking_backend = tracking
+    sched._golden_backend = MagicMock()
+    sched._golden_repos_dir = tmp_path
+    sched._meta_dir = tmp_path / "cidx-meta"
+    sched._lifecycle_backfill_running = threading.Event()
+    sched._description_backfill_running = threading.Event()
+    sched._shutdown_event = threading.Event()
+    sched._prompt_failure_counts = defaultdict(int)
+    sched._executor = _SyncExecutor()
+    sched._claude_cli_manager = object()
+    sched._failure_commit = {}  # type: ignore[attr-defined]
+    sched._lifecycle_invoker = _failing_invoker
+    sched._lifecycle_debouncer = _StubDebouncer()
+    sched._refresh_scheduler = _StubScheduler()
+    sched._job_tracker = _StubJobTracker()
+    sched._config_manager = _ConfigManager()
+    sched.calculate_next_run = lambda a: "2099-01-01T00:00:00+00:00"  # type: ignore[method-assign]
     sched.get_stale_repos = lambda: []  # type: ignore[method-assign]
 
     return sched
@@ -460,6 +501,32 @@ class TestCounterResetsOnSuccess:
         _set_stale(sched, alias, str(repo_path), last_known_commit="old-commit")
         sched._run_loop_single_pass()
         assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test #1262: real LifecycleBatchRunner failures propagate to scheduler
+# ---------------------------------------------------------------------------
+
+
+class TestRealBatchRunnerFailurePropagation1262:
+    def test_single_alias_real_batch_failure_increments_counter_and_marks_failed(
+        self, tmp_path: Path
+    ) -> None:
+        alias = "commhandler"
+        repo_path = tmp_path / alias
+        repo_path.mkdir(parents=True)
+        _write_metadata(repo_path, "sha-1262")
+        _write_existing_md(tmp_path / "cidx-meta", alias)
+
+        sched = _build_scheduler_with_real_batch_runner(tmp_path)
+        _set_stale(sched, alias, str(repo_path), last_known_commit=None)
+
+        sched._run_loop_single_pass()
+
+        assert sched._prompt_failure_counts[alias] == 1
+        record = sched._tracking_backend.get_tracking_record(alias)
+        assert record is not None
+        assert record["status"] == "failed"
 
 
 # ---------------------------------------------------------------------------
