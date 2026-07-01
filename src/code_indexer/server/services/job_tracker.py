@@ -114,6 +114,23 @@ class _BackendUniqueViolation(Exception):
     """
 
 
+def is_active_job_unique_violation(exc: BaseException) -> bool:
+    """
+    True if exc is a unique-violation shape from idx_active_job_per_repo.
+
+    Cross-backend, driver-agnostic detection by exception class name only
+    (sqlite3.IntegrityError on SQLite, psycopg.errors.UniqueViolation on
+    PostgreSQL) — no driver import required. Matches the classification
+    already used on the INSERT path (Bug #1252/#1235) inside
+    _atomic_insert_impl, extracted here as the single source of truth
+    (Bug #1256, Messi Rule #4 anti-duplication) so the UPDATE path
+    (BackgroundJobManager._execute_job's update_status(running) call) can
+    classify the identical benign race for logging purposes without
+    duplicating the check.
+    """
+    return type(exc).__name__ in ("IntegrityError", "UniqueViolation")
+
+
 def _require_non_empty_str(name: str, value: Any) -> None:
     """
     Raise ValueError if value is not a non-empty string.
@@ -1189,7 +1206,7 @@ class JobTracker:
             except Exception as exc:
                 # Narrow detection: translate only the known unique-violation
                 # shapes into the marker; re-raise anything else untouched.
-                if type(exc).__name__ in ("IntegrityError", "UniqueViolation"):
+                if is_active_job_unique_violation(exc):
                     raise _BackendUniqueViolation(str(exc)) from exc
                 raise
             return
