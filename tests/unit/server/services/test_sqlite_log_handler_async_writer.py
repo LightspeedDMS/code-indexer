@@ -78,6 +78,28 @@ class _TrackingLogsBackend:
                 }
             )
 
+    def insert_log_batch(self, items: List[Any]) -> None:
+        """Batch insert: expand each 10-tuple and delegate to insert_log.
+
+        Preserves per-call tracking semantics so existing assertions on
+        len(calls) and call_thread_names remain valid after Issue #1241
+        switched _writer_loop to call insert_log_batch instead of insert_log.
+        """
+        for item in items:
+            (ts, lvl, src, msg, cid, uid, rpath, extra, nid, alias) = item
+            self.insert_log(
+                timestamp=ts,
+                level=lvl,
+                source=src,
+                message=msg,
+                correlation_id=cid,
+                user_id=uid,
+                request_path=rpath,
+                extra_data=extra,
+                node_id=nid,
+                alias=alias,
+            )
+
     def query_logs(self, *args: Any, **kwargs: Any):  # pragma: no cover
         return [], 0
 
@@ -405,6 +427,23 @@ def test_writer_thread_guard_prevents_recursive_requeue(tmp_path: Path) -> None:
                 # This fires from inside the writer thread — should be dropped
                 rec = _make_record("RECURSIVE — must be dropped")
                 handler_holder[0].emit(rec)
+
+        def insert_log_batch(self, items: List[Any]) -> None:
+            """Expand batch to insert_log calls (Issue #1241 protocol update)."""
+            for item in items:
+                (ts, lvl, src, msg, cid, uid, rpath, extra, nid, alias) = item
+                self.insert_log(
+                    timestamp=ts,
+                    level=lvl,
+                    source=src,
+                    message=msg,
+                    correlation_id=cid,
+                    user_id=uid,
+                    request_path=rpath,
+                    extra_data=extra,
+                    node_id=nid,
+                    alias=alias,
+                )
 
         def query_logs(self, *a: Any, **kw: Any):  # pragma: no cover
             return [], 0

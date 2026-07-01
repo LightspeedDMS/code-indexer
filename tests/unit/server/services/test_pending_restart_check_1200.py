@@ -28,8 +28,14 @@ from unittest.mock import patch
 # Named constants for source-scan windows
 # ---------------------------------------------------------------------------
 
-_POLL_LOOP_SCAN_WINDOW = 600
 _METHOD_SCAN_WINDOW = 4500
+
+# Marker for the statement that immediately follows the `_poll_loop` closure
+# in config_service.py (the thread is created right after the closure body
+# ends). Used to bound the `_poll_loop` body extraction precisely instead of
+# relying on a fixed character-count window, which is brittle to legitimate
+# additions inside the closure (see Bug #1249).
+_POLL_LOOP_END_MARKER = "self._reload_thread = threading.Thread("
 
 # ---------------------------------------------------------------------------
 # Source path
@@ -151,7 +157,15 @@ class TestCheckPendingLaunchRestartWiring:
         source = _CONFIG_SERVICE_PATH.read_text()
         poll_start = source.find("def _poll_loop(")
         assert poll_start != -1, "_poll_loop function not found"
-        poll_body = source[poll_start : poll_start + _POLL_LOOP_SCAN_WINDOW]
+        # Bound the extraction to the actual `_poll_loop` closure body: it
+        # ends right before the statement that spawns the thread for it.
+        # Falling back to end-of-file (rather than a fixed char window) on a
+        # malformed/missing marker keeps the assertion able to genuinely
+        # FAIL if check_pending_launch_restart is ever removed from the loop.
+        poll_end = source.find(_POLL_LOOP_END_MARKER, poll_start)
+        if poll_end == -1:
+            poll_end = len(source)
+        poll_body = source[poll_start:poll_end]
         assert "check_pending_launch_restart" in poll_body, (
             "AC3 CRITICAL-C1: check_pending_launch_restart must be called "
             "inside _poll_loop, NOT registered as a callback"

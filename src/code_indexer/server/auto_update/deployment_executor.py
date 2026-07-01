@@ -1098,6 +1098,210 @@ class DeploymentExecutor:
         )
         return False
 
+    def _deploy_tmpdir(self) -> str:
+        """Return a writable temp directory for deploy pip installs under sudo + PrivateTmp.
+
+        Bug #1243: Under systemd PrivateTmp=yes, pip's tempfile.gettempdir() finds no
+        usable temp dir (private /tmp isolated from sudo context, /var/tmp also isolated,
+        CWD / not writable, no TMPDIR env var set by the service unit).  This causes
+        FileNotFoundError: No usable temporary directory found in ['/tmp', '/var/tmp',
+        '/usr/tmp', '/'] on every pip build attempt, dead-looping the auto-updater.
+
+        Solution: use a path under _cidx_data_dir (.deploy-tmp) which is NOT under /tmp
+        and therefore unaffected by PrivateTmp isolation.  Pass it to pip via sudo `env`
+        (the POSIX env utility): sudo's env_reset strips inherited env vars but does NOT
+        strip env vars injected by a child `env` command, so `sudo env TMPDIR=<path> pip`
+        receives a writable TMPDIR regardless of the PrivateTmp setting.
+
+        Returns:
+            Absolute path string to the deploy temp directory (created if absent).
+        """
+        deploy_tmp = _cidx_data_dir / ".deploy-tmp"
+        deploy_tmp.mkdir(parents=True, exist_ok=True)
+        return str(deploy_tmp)
+
+    def _is_user_install(self, python_path: str) -> bool:
+        """Return True if pip can install code-indexer WITHOUT sudo (user install).
+
+        Bug #1245 (v11.10.0 fix was INCOMPLETE -- proven on the live staging
+        cluster): the original probe recognized a user install ONLY when
+        code_indexer.__file__ contained the substring "/.local/". Staging
+        nodes run an EDITABLE install at a jsbattig-owned path such as
+        /home/jsbattig/code-indexer/src/code_indexer/__init__.py -- which
+        has NO "/.local/" segment at all. The substring-only probe returned
+        False there -> use_sudo=True -> sudo's root pip targeted
+        /root/.local and /root/.cache/pip/wheels, both READ-ONLY on the
+        immutable host -> fatal "Pip install failed" -> the auto-updater
+        dead-looped forever, even though the auto-updater's OWN process user
+        (jsbattig, non-root) already owns and can write the install dir.
+
+        Re-fix: key on WRITABILITY instead of the "/.local/" substring. pip
+        (editable `-e .` plus dependency wheel builds such as hnswlib)
+        writes the install directory itself, the user pip cache, and the
+        user site-packages. If the CURRENT process user can already write
+        the install directory, sudo is not merely unnecessary -- it is
+        actively WRONG: it escalates to root and points pip at root's
+        separate (often read-only) cache/site-packages instead.
+        os.access(W_OK) correctly classifies every layout that matters: an
+        editable-home install (writable -> no sudo), a ~/.local install
+        (writable -> no sudo; the "/.local/" substring is also kept as a
+        fast-path signal so a probe that can list the file but not stat its
+        parent still classifies correctly), a genuine root-owned system
+        install (not writable as the service user -> sudo), and the
+        auto-updater running as root itself (writable -> sudo not needed,
+        already root).
+
+        Conservative: returns False (use sudo) on any subprocess failure,
+        empty probe output, or writability-check error. Each conservative
+        branch is DEBUG-logged for operator visibility into why sudo was
+        chosen.
+
+        Args:
+            python_path: Path to the Python interpreter to probe.
+
+        Returns:
+            True if code_indexer.__file__ is under ~/.local/ OR its
+            containing directory is writable by the current process user
+            (user install, no sudo). False otherwise, or on any probe/check
+            failure (system install, use sudo).
+        """
+        try:
+            result = subprocess.run(
+                [
+                    python_path,
+                    "-c",
+                    "import code_indexer; print(code_indexer.__file__)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                logger.debug(
+                    f"_is_user_install probe failed (rc={result.returncode}): "
+                    f"{result.stderr.strip()}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+            install_path = result.stdout.strip()
+            if not install_path:
+                logger.debug(
+                    "_is_user_install probe returned empty output; "
+                    "conservatively treating as system install",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return False
+        except Exception as e:
+            logger.debug(
+                f"_is_user_install probe raised an exception: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+        if "/.local/" in install_path:
+            return True
+
+        try:
+            install_dir = Path(install_path).resolve().parent
+            return os.access(install_dir, os.W_OK)
+        except Exception as e:
+            logger.debug(
+                f"_is_user_install writability check failed for {install_path}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
+    def _hnswlib_importable(self, python_path: str) -> bool:
+        """Return True if hnswlib can be imported by the server python.
+
+        Bug #1245: Used to (a) skip an unnecessary rebuild and (b) demote a
+        failed rebuild to WARNING when the existing module still works.
+
+        Args:
+            python_path: Path to the Python interpreter to probe.
+
+        Returns:
+            True if `import hnswlib` succeeds (rc=0), False otherwise.
+        """
+        try:
+            result = subprocess.run(
+                [python_path, "-c", "import hnswlib"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _get_hnswlib_submodule_commit(self) -> Optional[str]:
+        """Return the current hnswlib submodule commit hash from git, or None if unavailable.
+
+        Bug #1245: Used to detect whether the submodule has changed since the last
+        successful build, so an up-to-date importable hnswlib can skip the rebuild.
+
+        Returns:
+            The commit hash string, or None on any failure.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "-s", "third_party/hnswlib"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+            # Output format: "<mode> <hash> <stage>\t<path>"
+            parts = result.stdout.strip().split()
+            if len(parts) < 2:
+                return None
+            return parts[1]
+        except Exception:
+            return None
+
+    def _get_last_built_hnswlib_commit(self) -> Optional[str]:
+        """Return the commit hash recorded from the last successful hnswlib build.
+
+        Bug #1245: Persisted to _cidx_data_dir/hnswlib-last-built-commit so that
+        the rebuild-skip check survives process restarts.
+
+        Returns:
+            The stored commit hash string, or None if absent/unreadable.
+        """
+        try:
+            path = _cidx_data_dir / "hnswlib-last-built-commit"
+            if not path.exists():
+                return None
+            value = path.read_text().strip()
+            return value if value else None
+        except Exception:
+            return None
+
+    def _save_last_built_hnswlib_commit(self, commit: str) -> None:
+        """Persist the commit hash of a successful hnswlib build for future skip checks.
+
+        Bug #1245: Written atomically after build_custom_hnswlib() succeeds so the
+        next deploy can compare against it to skip an unchanged rebuild.
+
+        Args:
+            commit: The hnswlib submodule commit hash to record.
+        """
+        try:
+            path = _cidx_data_dir / "hnswlib-last-built-commit"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(commit)
+            logger.debug(
+                f"Saved hnswlib last-built commit: {commit[:8]}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not save hnswlib built-commit marker: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
     def build_custom_hnswlib(self, hnswlib_path: Optional[Path] = None) -> bool:
         """Build and install custom hnswlib from specified path or default submodule.
 
@@ -1136,17 +1340,50 @@ class DeploymentExecutor:
 
         try:
             python_path = self._get_server_python()
-            # Probe with use_sudo=True: both installs below run via sudo, so we must
-            # check the SAME pip binary (system pip) that sudo will resolve.
-            # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
-            # True) while the actual sudo install used the system pip (21.3.1, False).
+            # Bug #1245: Skip rebuild when hnswlib is already importable and the
+            # submodule commit is unchanged since the last successful build.
+            current_commit = self._get_hnswlib_submodule_commit()
+            last_built_commit = self._get_last_built_hnswlib_commit()
+            if self._hnswlib_importable(python_path):
+                if current_commit is not None and current_commit == last_built_commit:
+                    logger.info(
+                        f"hnswlib already importable and submodule commit unchanged "
+                        f"({current_commit[:8]}); skipping rebuild",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return True
+
+            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
+            # a writable temp dir under systemd PrivateTmp=yes.  sudo's env_reset strips
+            # inherited env vars but does NOT strip vars set by a child `env` command, so
+            # `sudo env TMPDIR=<dir> python3 -m pip install ...` receives a usable TMPDIR.
+            tmpdir = self._deploy_tmpdir()
+            # Bug #1245: Use sudo only for system installs. For a user-install layout
+            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
+            # site-packages and read-only on immutable hosts.
+            use_sudo = not self._is_user_install(python_path)
+            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
+            # pip binary (system pip for sudo installs, user pip for user installs).
             break_sys_pkg = self._pip_supports_break_system_packages(
-                python_path, use_sudo=True
+                python_path, use_sudo=use_sudo
             )
 
-            # Install pybind11 first - required because setup.py imports it at module level
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            pybind11_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            # Install pybind11 first - required because setup.py imports it at module level.
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            pybind11_cmd = (
+                [
+                    "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
+                    python_path,
+                    "-m",
+                    "pip",
+                    "install",
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
             if break_sys_pkg:
                 pybind11_cmd.append("--break-system-packages")
             pybind11_cmd.append("pybind11")
@@ -1189,8 +1426,21 @@ class DeploymentExecutor:
                 "pybind11 installed successfully",
                 extra={"correlation_id": get_correlation_id()},
             )
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            hnswlib_cmd = ["sudo", python_path, "-m", "pip", "install"]
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            hnswlib_cmd = (
+                [
+                    "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
+                    python_path,
+                    "-m",
+                    "pip",
+                    "install",
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
             if break_sys_pkg:
                 hnswlib_cmd.append("--break-system-packages")
             hnswlib_cmd.extend(["--force-reinstall", "--no-deps", "."])
@@ -1222,6 +1472,19 @@ class DeploymentExecutor:
                 )
 
             if result.returncode != 0:
+                # Bug #1245: Non-fatal when hnswlib is still importable (existing module works).
+                # Only hard-fail when hnswlib genuinely cannot be imported.
+                if self._hnswlib_importable(python_path):
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-042",
+                            f"Custom hnswlib build failed but hnswlib is still importable; "
+                            f"continuing deploy: "
+                            f"{result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return True
                 logger.error(
                     format_error_log(
                         "DEPLOY-GENERAL-042",
@@ -1235,6 +1498,9 @@ class DeploymentExecutor:
                 "Custom hnswlib build and install successful",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Bug #1245: Record successful build commit for future skip checks.
+            if current_commit:
+                self._save_last_built_hnswlib_commit(current_commit)
             return True
 
         except subprocess.TimeoutExpired:
@@ -1796,13 +2062,31 @@ class DeploymentExecutor:
         """
         try:
             python_path = self._get_server_python()
-            # Probe with use_sudo=True: the install runs via sudo, so the probe must
-            # check the same pip binary (system pip) that sudo will resolve.
-            # Bug #1234 (live-VM): probing without sudo returned the user pip (~26.x,
-            # True) while the actual sudo install used the system pip (21.3.1, False).
-            # Use sudo because pipx venv may be owned by root (e.g., /opt/pipx/venvs/)
-            pip_cmd = ["sudo", python_path, "-m", "pip", "install"]
-            if self._pip_supports_break_system_packages(python_path, use_sudo=True):
+            # Bug #1243: pass TMPDIR through sudo via the `env` utility so pip can find
+            # a writable temp dir under systemd PrivateTmp=yes.
+            tmpdir = self._deploy_tmpdir()
+            # Bug #1245: Use sudo only for system installs. For a user-install layout
+            # (code-indexer in ~/.local), sudo would target /root/.local — the wrong
+            # site-packages and read-only on immutable hosts.
+            use_sudo = not self._is_user_install(python_path)
+            # Bug #1234: Probe with use_sudo matching the install so we test the SAME
+            # pip binary (system pip for sudo installs, user pip for user installs).
+            # Bug #1243: For sudo installs, env TMPDIR= passes the temp dir through
+            # sudo's env_reset. For user installs, the environment is inherited as-is.
+            pip_cmd = (
+                [
+                    "sudo",
+                    "env",
+                    f"TMPDIR={tmpdir}",
+                    python_path,
+                    "-m",
+                    "pip",
+                    "install",
+                ]
+                if use_sudo
+                else [python_path, "-m", "pip", "install"]
+            )
+            if self._pip_supports_break_system_packages(python_path, use_sudo=use_sudo):
                 pip_cmd.append("--break-system-packages")
             pip_cmd.extend(["-e", "."])
             result = subprocess.run(
@@ -2934,8 +3218,16 @@ class DeploymentExecutor:
         This provides an additional safety net for OOM conditions when the
         server has large mmap'd virtual memory from HNSW indexes and SQLite DBs.
 
+        Bug #1254: best-effort / non-fatal. Swap is an OOM optimization, not
+        a correctness requirement -- the server runs correctly without it.
+        On read-only/immutable hosts (e.g. "/" mounted read-only) fallocate/
+        chmod/mkswap/swapon legitimately cannot succeed. Any subprocess
+        failure (or unexpected exception) here is logged at WARNING and the
+        method still returns True so deployment proceeds to the restart.
+
         Returns:
-            True if swap exists or was successfully created, False on error
+            True always (best-effort) -- swap setup failures are logged at
+            WARNING and never block deployment.
         """
         try:
             # Check if any swap is already active
@@ -2960,14 +3252,15 @@ class DeploymentExecutor:
                 timeout=60,
             )
             if fallocate_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-093",
-                        f"fallocate -l 4G /swapfile failed: {fallocate_result.stderr}",
+                        f"fallocate -l 4G /swapfile failed: {fallocate_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Set secure permissions (0600 - root only)
             chmod_result = subprocess.run(
@@ -2977,14 +3270,15 @@ class DeploymentExecutor:
                 timeout=30,
             )
             if chmod_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-094",
-                        f"chmod 600 /swapfile failed: {chmod_result.stderr}",
+                        f"chmod 600 /swapfile failed: {chmod_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Format as swap
             mkswap_result = subprocess.run(
@@ -2994,14 +3288,15 @@ class DeploymentExecutor:
                 timeout=30,
             )
             if mkswap_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-095",
-                        f"mkswap /swapfile failed: {mkswap_result.stderr}",
+                        f"mkswap /swapfile failed: {mkswap_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Enable swap immediately
             swapon_result = subprocess.run(
@@ -3011,14 +3306,15 @@ class DeploymentExecutor:
                 timeout=30,
             )
             if swapon_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-096",
-                        f"swapon /swapfile failed: {swapon_result.stderr}",
+                        f"swapon /swapfile failed: {swapon_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Add fstab entry for reboot persistence
             fstab_result = subprocess.run(
@@ -3054,14 +3350,15 @@ class DeploymentExecutor:
             return True
 
         except Exception as e:
-            logger.error(
+            logger.warning(
                 format_error_log(
                     "DEPLOY-GENERAL-098",
-                    f"Exception creating swap file: {e}",
+                    f"Exception creating swap file: {e} "
+                    "- swap is an OOM optimization, continuing without it",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
-            return False
+            return True  # Bug #1254: non-fatal, swap is best-effort
 
     def execute(self) -> bool:
         """Execute complete deployment: git pull + pip install.
@@ -3076,6 +3373,34 @@ class DeploymentExecutor:
             "Starting deployment execution",
             extra={"correlation_id": get_correlation_id()},
         )
+
+        # Bug #1251: Set TMPDIR for the entire deploy process BEFORE any
+        # subprocess is spawned. Bug #1243 set TMPDIR only on the explicit
+        # `sudo env TMPDIR=...` prefix used by the SUDO pip path; Bug #1245's
+        # writability fix routes editable-home installs (no /.local/ segment,
+        # writable directory -- the staging cluster layout) through the
+        # NO-SUDO command, which carried no TMPDIR at all. Under systemd
+        # PrivateTmp=yes + Python 3.12, the auto-updater's private /tmp is
+        # isolated and unusable, so pip's tempfile.gettempdir() raises
+        # FileNotFoundError at the pybind11/hnswlib build step, dead-looping
+        # the auto-updater (same self-perpetuating class as #1182/#1243/#1245).
+        #
+        # Mutating os.environ here -- rather than threading an explicit env=
+        # kwarg through every no-sudo call site -- is sufficient and
+        # exhaustive: every subprocess.run() invocation in this module either
+        # omits env= entirely (inherits the live process environment, which
+        # now carries TMPDIR) or explicitly builds its env from
+        # os.environ.copy() / dict(os.environ) (build_non_interactive_git_env()
+        # for git operations, the self-restart smoke test, the pace-maker
+        # no-sudo install, the Rust toolchain install + cargo build). So this
+        # single early mutation propagates TMPDIR to every no-sudo child
+        # process without requiring any per-call-site change.
+        #
+        # The SUDO path is unchanged: sudo's env_reset strips inherited
+        # environment variables, so it still requires (and keeps) the
+        # explicit ["sudo", "env", f"TMPDIR={tmpdir}", ...] prefix from
+        # Bug #1243.
+        os.environ["TMPDIR"] = self._deploy_tmpdir()
 
         # Step 0: Calculate hash of auto_update code BEFORE git pull
         hash_before = self._calculate_auto_update_hash()
@@ -4447,14 +4772,29 @@ class DeploymentExecutor:
         return True
 
     def _verify_c_compiler(self) -> bool:
-        """Return True if gcc, cc, or clang is available (needed by tree-sitter crate)."""
+        """Return True if gcc, cc, or clang is available (needed by tree-sitter crate).
+
+        Bug #1255/#1296: the deploy itself stays non-fatal on a missing C
+        compiler (xray is a non-core/optional feature and pip install +
+        restart must still complete), but this is logged at ERROR, not
+        WARNING: there is NO Python evaluation fallback for xray query-time
+        execution. xray_search/xray_explore call the native xray-cli binary
+        unconditionally; without it they return BinaryNotFound for every
+        file. A missing C compiler blocks the xray-cli build, so this is a
+        real capability loss that must stay loudly visible to operators.
+        """
         for cc in ["gcc", "cc", "clang"]:
             if shutil.which(cc) is not None:
                 return True
         logger.error(
             format_error_log(
                 "DEPLOY-GENERAL-172",
-                "No C compiler found (gcc/cc/clang) — tree-sitter build will fail",
+                "xray native search UNAVAILABLE: no C compiler found "
+                "(gcc/cc/clang) -- xray-cli native binary cannot be built; "
+                "xray_search/xray_explore will return BinaryNotFound until "
+                "a C compiler is installed and the binary is built. "
+                "(Evaluator pre-flight validation still works; query-time "
+                "evaluation does not.)",
             ),
             extra={"correlation_id": get_correlation_id()},
         )
@@ -4464,6 +4804,15 @@ class DeploymentExecutor:
         """Run cargo build --release -p xray-cli inside rust_dir.
 
         Returns True on success, False on nonzero exit or timeout.
+
+        Bug #1255/#1296: the caller (_ensure_rust_toolchain) still treats a
+        False return as non-fatal to the overall deploy (pip install +
+        restart must still complete), but the failure is logged at ERROR,
+        not WARNING: there is NO Python evaluation fallback for xray
+        query-time execution. xray_search/xray_explore call the native
+        xray-cli binary unconditionally; without it they return
+        BinaryNotFound for every file, so a failed build is a real
+        capability loss that must stay loudly visible to operators.
         """
         try:
             build_result = subprocess.run(
@@ -4478,7 +4827,12 @@ class DeploymentExecutor:
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"cargo build xray-cli failed: {exc}",
+                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"failed to build (cargo build error: {exc}); "
+                    f"xray_search/xray_explore will return BinaryNotFound "
+                    f"until the binary is built. (Evaluator pre-flight "
+                    f"validation still works; query-time evaluation does "
+                    f"not.)",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -4487,8 +4841,14 @@ class DeploymentExecutor:
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"cargo build xray-cli failed: "
-                    f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"failed to build (cargo build exited "
+                    f"{build_result.returncode}: "
+                    f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}); "
+                    f"xray_search/xray_explore will return BinaryNotFound "
+                    f"until the binary is built. (Evaluator pre-flight "
+                    f"validation still works; query-time evaluation does "
+                    f"not.)",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -4499,48 +4859,93 @@ class DeploymentExecutor:
         )
         return True
 
+    def _is_rust_toolchain_usable(self, env: dict) -> bool:
+        """Bug #1255: return True if BOTH rustc and cargo are present and
+        runnable directly from RUST_SYSTEM_DIR/bin, using the resolved
+        absolute binary paths (not a PATH lookup).
+
+        Immutable host images often ship a pre-provisioned RUST_SYSTEM_DIR
+        on a read-only root filesystem: the toolchain files are present and
+        world-executable, but `chown` can never succeed there.  Running a
+        binary only requires execute permission, not ownership, so this
+        probe is sufficient to recognize "already usable" without touching
+        ownership at all.
+        """
+        rust_bin = RUST_SYSTEM_DIR / "bin"
+        for binary_name in ("rustc", "cargo"):
+            binary_path = rust_bin / binary_name
+            try:
+                result = subprocess.run(
+                    [str(binary_path), "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=RUSTC_VERSION_TIMEOUT_SECONDS,
+                    env=env,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            if result.returncode != 0:
+                return False
+        return True
+
+    def _resolve_rust_build_env(self, env: dict) -> dict:
+        """Bug #1255: redirect CARGO_HOME to a writable fallback (~/.cargo)
+        for the xray-cli build step when RUST_SYSTEM_DIR exists but is not
+        writable (immutable host, read-only root filesystem).
+
+        RUSTUP_HOME is left untouched -- it must keep pointing at
+        RUST_SYSTEM_DIR so rustup's proxy binaries resolve the toolchain
+        that is actually installed there.  Only CARGO_HOME needs to be
+        writable, since `cargo build` may need to write to its registry
+        cache (new dependency downloads, index updates); build artifacts
+        themselves go to the project-local rust_dir/target, which is
+        writable because pip_install()/git_pull() already proved the repo
+        checkout itself is writable earlier in execute().
+
+        Returns a new dict; never mutates the input env.
+        """
+        build_env = dict(env)
+        if RUST_SYSTEM_DIR.exists() and not os.access(RUST_SYSTEM_DIR, os.W_OK):
+            writable_cargo_home = str(Path.home() / ".cargo")
+            build_env["CARGO_HOME"] = writable_cargo_home
+            logger.info(
+                "%s is not writable; using %s as CARGO_HOME for the xray-cli build",
+                RUST_SYSTEM_DIR,
+                writable_cargo_home,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        return build_env
+
     def _ensure_rust_toolchain(self) -> bool:
-        """Story #1024: Ensure Rust toolchain is installed and xray-cli binary is built.
+        """Story #1024 / Bug #1255: Ensure Rust toolchain is installed and
+        xray-cli binary is built.
 
         Installs to RUST_SYSTEM_DIR (/opt/rust) so the toolchain is accessible
         to the cidx-server service user (not just root).
 
+        Bug #1255: on immutable hosts RUST_SYSTEM_DIR may already be
+        provisioned (rustc/cargo present, world-executable) on a read-only
+        root filesystem.  Provisioning (mkdir/chown/install) is skipped
+        entirely when the toolchain already proves usable; if provisioning
+        IS attempted and mkdir/chown fails, a usability recheck makes the
+        failure non-fatal as long as the toolchain works anyway.
+
         Idempotent: skips install when rustc is already on PATH.
-        Returns True on success or when rust/ dir is absent (non-fatal skip).
-        Returns False on install failure, missing C compiler, or build failure (FATAL).
+        Returns True on success, when rust/ dir is absent (non-fatal skip),
+        or when the xray-cli build/C-compiler step fails. That failure is
+        non-fatal to the OVERALL deploy (pip install + restart must still
+        complete -- xray is a non-core/optional feature), but it is NOT a
+        graceful degrade to an alternate execution path: there is no Python
+        evaluation fallback for xray query-time execution, so
+        xray_search/xray_explore become genuinely unavailable
+        (BinaryNotFound) until the binary builds successfully. That
+        capability loss is logged at ERROR (see _verify_c_compiler /
+        _build_xray_cli) precisely because it is real, even though it does
+        not block the deploy.
+        Returns False ONLY when the toolchain is genuinely missing and
+        cannot be installed (FATAL) -- the host truly lacks Rust.
         """
         rust_bin = RUST_SYSTEM_DIR / "bin"
-        mkdir_result = subprocess.run(
-            ["sudo", "mkdir", "-p", str(RUST_SYSTEM_DIR)],
-            capture_output=True,
-            text=True,
-        )
-        if mkdir_result.returncode != 0:
-            logger.error(
-                format_error_log(
-                    "DEPLOY-GENERAL-172",
-                    f"sudo mkdir -p {RUST_SYSTEM_DIR} failed: "
-                    f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
-                ),
-                extra={"correlation_id": get_correlation_id()},
-            )
-            return False
-        uid_gid = f"{os.getuid()}:{os.getgid()}"
-        chown_result = subprocess.run(
-            ["sudo", "chown", "-R", uid_gid, str(RUST_SYSTEM_DIR)],
-            capture_output=True,
-            text=True,
-        )
-        if chown_result.returncode != 0:
-            logger.error(
-                format_error_log(
-                    "DEPLOY-GENERAL-172",
-                    f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} failed: "
-                    f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
-                ),
-                extra={"correlation_id": get_correlation_id()},
-            )
-            return False
         env = os.environ.copy()
         env["RUSTUP_HOME"] = str(RUST_SYSTEM_DIR)
         env["CARGO_HOME"] = str(RUST_SYSTEM_DIR)
@@ -4549,6 +4954,73 @@ class DeploymentExecutor:
             env["PATH"] = f"{rust_bin}:{current_path}"
         else:
             env["PATH"] = str(rust_bin)
+
+        if self._is_rust_toolchain_usable(env):
+            logger.info(
+                "Rust toolchain already present and usable at %s; "
+                "skipping provisioning",
+                RUST_SYSTEM_DIR,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            mkdir_result = subprocess.run(
+                ["sudo", "mkdir", "-p", str(RUST_SYSTEM_DIR)],
+                capture_output=True,
+                text=True,
+            )
+            if mkdir_result.returncode != 0:
+                if self._is_rust_toolchain_usable(env):
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-172",
+                            f"sudo mkdir -p {RUST_SYSTEM_DIR} failed but the "
+                            f"toolchain is already usable -- continuing "
+                            f"without provisioning: "
+                            f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.error(
+                        format_error_log(
+                            "DEPLOY-GENERAL-172",
+                            f"sudo mkdir -p {RUST_SYSTEM_DIR} failed: "
+                            f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return False
+            else:
+                uid_gid = f"{os.getuid()}:{os.getgid()}"
+                chown_result = subprocess.run(
+                    ["sudo", "chown", "-R", uid_gid, str(RUST_SYSTEM_DIR)],
+                    capture_output=True,
+                    text=True,
+                )
+                if chown_result.returncode != 0:
+                    if self._is_rust_toolchain_usable(env):
+                        logger.warning(
+                            format_error_log(
+                                "DEPLOY-GENERAL-172",
+                                f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} "
+                                f"failed but the toolchain is already usable "
+                                f"-- continuing without ownership change: "
+                                f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            ),
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    else:
+                        logger.error(
+                            format_error_log(
+                                "DEPLOY-GENERAL-172",
+                                f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} "
+                                f"failed: "
+                                f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            ),
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        return False
+
         self._ensure_systemd_rust_path()
 
         if not self._check_rustc_installed(env):
@@ -4568,9 +5040,18 @@ class DeploymentExecutor:
             return True  # Non-fatal: older code versions may not have rust/
 
         if not self._verify_c_compiler():
-            return False
+            # Bug #1255/#1296: non-fatal to the overall deploy, but NOT a
+            # graceful degrade -- there is no Python fallback, so xray
+            # native search is genuinely unavailable (logged at ERROR above).
+            return True
 
-        return self._build_xray_cli(rust_dir, env)
+        build_env = self._resolve_rust_build_env(env)
+        if not self._build_xray_cli(rust_dir, build_env):
+            # Bug #1255/#1296: non-fatal to the overall deploy, but NOT a
+            # graceful degrade -- there is no Python fallback, so xray
+            # native search is genuinely unavailable (logged at ERROR above).
+            return True
+        return True
 
 
 def read_execstart_flags(service_name: str = "cidx-server") -> dict:

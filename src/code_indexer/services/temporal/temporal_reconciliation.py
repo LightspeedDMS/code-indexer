@@ -195,9 +195,13 @@ def reconcile_temporal_index(
         # - end_indexing() requires collection to exist
         # - _calculate_and_save_unique_file_count() reads and updates it
         # NOTE: projection_matrix.npy is NOT deleted because:
-        # - It's a randomly generated matrix that cannot be recreated
-        # - Vector quantization depends on using the same projection matrix
-        # - Deleting it would make all queries return wrong results
+        # - It is WRITE-PATH ONLY: used to compute hex directory paths for JSON
+        #   payloads (vector @ matrix -> quantize -> hex bucket), not for search.
+        # - HNSW search is full-dimensional and matrix-independent — queries are
+        #   unaffected by which matrix is present (Bug #1242 verified this).
+        # - A regenerated matrix is safe (only future upsert path-bucketing changes;
+        #   existing payloads remain retrievable via id_index).
+        # - Preserving it avoids triggering the self-heal path on the next index run.
         collection_path / "temporal_meta.json",
         collection_path / "temporal_progress.json",
     ]

@@ -22,6 +22,12 @@ class FakeBackend:
     def insert_log(self, **kwargs):
         self.calls.append(kwargs)
 
+    def insert_log_batch(self, items):
+        # Issue #1241: _writer_loop now calls insert_log_batch instead of
+        # insert_log. Record each item so the delegation assertion still holds.
+        for item in items:
+            self.calls.append(item)
+
     def query_logs(self, **kwargs):
         return [], 0
 

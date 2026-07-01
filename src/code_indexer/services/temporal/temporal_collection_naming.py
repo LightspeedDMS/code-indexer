@@ -156,6 +156,26 @@ def is_sharded_temporal_collection(collection_name: str) -> bool:
     return bool(re.search(r"-\d{4}Q[1-4]$", collection_name))
 
 
+def base_collection_name(shard_name: str) -> str:
+    """Strip the quarter suffix from a sharded collection name.
+
+    Returns the base (monolith) collection name by removing the trailing
+    ``-YYYYQn`` segment.  Non-sharded names are returned unchanged.
+
+    This is the single source of truth for the quarter-suffix strip pattern
+    (``-\\d{4}Q[1-4]$``) shared by :func:`is_sharded_temporal_collection`
+    and any caller that needs to derive the base collection from a shard name.
+
+    Args:
+        shard_name: e.g. ``'code-indexer-temporal-voyage_code_3-2024Q1'``
+
+    Returns:
+        Base name, e.g. ``'code-indexer-temporal-voyage_code_3'``.
+        Unchanged when the name is not a sharded temporal collection.
+    """
+    return re.sub(r"-\d{4}Q[1-4]$", "", shard_name)
+
+
 def get_quarter_range(year: int, quarter: int) -> Tuple[datetime, datetime]:
     """Return (start_inclusive, end_exclusive) for the given quarter in UTC.
 

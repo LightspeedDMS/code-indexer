@@ -671,6 +671,9 @@ def make_lifespan(
                     backend_registry.audit_log if backend_registry is not None else None
                 ),
             )
+            # Issue #1241 P1.3: start the async background writer so log() and
+            # log_raw() enqueue records instead of blocking the request thread.
+            audit_service.start()
             app.state.audit_service = audit_service
             group_manager.set_audit_service(audit_service)
             # Inject into the module-level singleton so all log/query
@@ -3396,6 +3399,19 @@ def make_lifespan(
             logger.warning(
                 "Issue #1159: failed to drain search-event-log writer during shutdown: %s",
                 _sel_stop_exc,
+            )
+
+        # Issue #1241 P1.3: drain the audit-log async writer on shutdown so no
+        # enqueued audit records are lost on graceful restart/stop.
+        # Non-fatal LOG+RECOVER — never abort the remaining shutdown chain.
+        try:
+            _audit_svc = getattr(app.state, "audit_service", None)
+            if _audit_svc is not None:
+                _audit_svc.stop()
+        except Exception as _audit_stop_exc:
+            logger.warning(
+                "Issue #1241: failed to drain audit-log writer during shutdown: %s",
+                _audit_stop_exc,
             )
 
         # Shutdown: Stop the async-logging QueueListener FIRST (py-spy logging

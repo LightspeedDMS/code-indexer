@@ -354,3 +354,50 @@ def test_temporal_indexer_rejects_absolute_path(tmp_path):
     """TemporalIndexer raises ValueError for absolute path as collection_name."""
     with pytest.raises(ValueError):
         _make_indexer(tmp_path, "/abs/path")
+
+
+# ---------------------------------------------------------------------------
+# base_collection_name — single home for the quarter-suffix strip pattern
+# ---------------------------------------------------------------------------
+
+
+class TestBaseCollectionName:
+    """base_collection_name strips -YYYYQn suffix; non-sharded names pass through."""
+
+    def setup_method(self):
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            base_collection_name,
+        )
+
+        self.base_collection_name = base_collection_name
+
+    def test_strips_q1_suffix(self):
+        assert (
+            self.base_collection_name("code-indexer-temporal-voyage_code_3-2024Q1")
+            == "code-indexer-temporal-voyage_code_3"
+        )
+
+    def test_strips_q4_suffix(self):
+        assert (
+            self.base_collection_name("code-indexer-temporal-embed_v4_0-2026Q4")
+            == "code-indexer-temporal-embed_v4_0"
+        )
+
+    def test_strips_any_year_quarter(self):
+        assert (
+            self.base_collection_name("code-indexer-temporal-voyage_code_3-2099Q2")
+            == "code-indexer-temporal-voyage_code_3"
+        )
+
+    def test_non_sharded_name_unchanged(self):
+        name = "code-indexer-temporal-voyage_code_3"
+        assert self.base_collection_name(name) == name
+
+    def test_legacy_name_unchanged(self):
+        name = "code-indexer-temporal"
+        assert self.base_collection_name(name) == name
+
+    def test_does_not_strip_mid_name_quarter_pattern(self):
+        """Pattern must be anchored at end — mid-name occurrence left alone."""
+        name = "code-indexer-temporal-2024Q1-extra"
+        assert self.base_collection_name(name) == name

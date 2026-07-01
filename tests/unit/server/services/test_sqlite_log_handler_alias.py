@@ -57,6 +57,27 @@ class _FakeLogsBackend:
             }
         )
 
+    def insert_log_batch(self, items: Any) -> None:
+        """Batch insert: expand each 10-tuple and delegate to insert_log.
+
+        Issue #1241: _writer_loop now calls insert_log_batch; update the fake
+        backend so existing per-call assertions on self.calls remain valid.
+        """
+        for item in items:
+            (ts, lvl, src, msg, cid, uid, rpath, extra, nid, alias) = item
+            self.insert_log(
+                timestamp=ts,
+                level=lvl,
+                source=src,
+                message=msg,
+                correlation_id=cid,
+                user_id=uid,
+                request_path=rpath,
+                extra_data=extra,
+                node_id=nid,
+                alias=alias,
+            )
+
     # Protocol completeness (not exercised by these tests)
     def query_logs(self, *args: Any, **kwargs: Any):  # pragma: no cover
         return [], 0

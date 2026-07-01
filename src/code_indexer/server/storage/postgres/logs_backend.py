@@ -147,6 +147,43 @@ class LogsPostgresBackend:
         except Exception as exc:
             logger.warning("LogsPostgresBackend: insert_log failed: %s", exc)
 
+    def insert_log_batch(self, items: List[Any]) -> None:
+        """Insert a batch of log records in ONE transaction via executemany.
+
+        Issue #1241 P1.1: batched writer to eliminate per-record commit churn.
+        Uses SET LOCAL synchronous_commit = off for ephemeral log rows (safe:
+        rows are immediately visible; only crash-flush durability is relaxed).
+
+        Args:
+            items: List of 10-tuples in column order:
+                (timestamp, level, source, message, correlation_id,
+                 user_id, request_path, extra_data, node_id, alias)
+        """
+        if not items:
+            return
+        try:
+            with self._pool.connection() as conn:
+                # psycopg v3: executemany lives on the CURSOR, NOT the connection.
+                # Calling conn.executemany() raises AttributeError on real psycopg3
+                # (swallowed by the fail-open handler -> silently drops all rows).
+                # Mirror the pattern used by PayloadCachePostgresBackend and
+                # QueryEmbeddingCachePostgresBackend (payload_cache_backend.py:133,
+                # query_embedding_cache_backend.py:192).
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL synchronous_commit = off")
+                    cur.executemany(
+                        """
+                        INSERT INTO logs
+                            (timestamp, level, source, message, correlation_id,
+                             user_id, request_path, extra_data, node_id, alias)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        items,
+                    )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("LogsPostgresBackend: insert_log_batch failed: %s", exc)
+
     def _build_query_conditions(
         self,
         level: Optional[str],

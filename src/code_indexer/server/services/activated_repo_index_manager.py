@@ -110,6 +110,54 @@ class ActivatedRepoIndexManager:
                 extra=get_log_extra("SVC-MIGRATE-001"),
             )
 
+    def _compute_allowed_repo_roots(self) -> List[Path]:
+        """
+        Compute the set of allowed resolved root paths for repository confinement.
+
+        On a local backend, data_dir/activated-repos and data_dir/golden-repos are
+        real subdirectories, so data_dir.resolve() already covers them.
+
+        On a cow-daemon backend (Bug #1052), data_dir/activated-repos and
+        data_dir/golden-repos are SYMLINKS to the cow-daemon mount. Including the
+        resolved symlink targets as extra allowed roots lets paths that resolve via
+        the symlink pass the confinement check (Bug #1246), while a genuine traversal
+        path (e.g. ../../etc) is under none of the roots and is still rejected.
+
+        Returns:
+            List of resolved Path objects that are valid containment roots.
+        """
+        allowed: List[Path] = [Path(self.data_dir).resolve()]
+        for sub in ("activated-repos", "golden-repos"):
+            p = Path(self.data_dir) / sub
+            if p.exists():
+                resolved = p.resolve()
+                if resolved not in allowed:
+                    allowed.append(resolved)
+        return allowed
+
+    @staticmethod
+    def _path_is_within_any(repo_path: Path, roots: List[Path]) -> bool:
+        """
+        Return True if repo_path is a sub-path of at least one root in roots.
+
+        Uses Path.relative_to() per root; immune to prefix-string attacks (e.g.
+        /data-extra would not match /data).
+
+        Args:
+            repo_path: Fully resolved absolute path to test.
+            roots: Sequence of resolved absolute paths that are allowed parents.
+
+        Returns:
+            True if repo_path is under any root; False otherwise.
+        """
+        for root in roots:
+            try:
+                repo_path.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
     def trigger_reindex(
         self,
         repo_alias: str,
@@ -156,12 +204,16 @@ class ActivatedRepoIndexManager:
                 )
             raise
 
-        # Security: Validate path doesn't escape data directory
+        # Security: Validate path doesn't escape managed storage roots.
+        # On cow-daemon backends, data_dir/activated-repos and data_dir/golden-repos
+        # are SYMLINKS to the cow-daemon mount (Bug #1052). Path.resolve() follows
+        # symlinks, so a repo path under data_dir/activated-repos resolves OUTSIDE
+        # data_dir itself. We must accept paths under any resolved allowed root,
+        # not just data_dir (Bug #1246).
         repo_path_obj = Path(repo_path).resolve()
-        data_dir_obj = Path(self.data_dir).resolve()
-        try:
-            repo_path_obj.relative_to(data_dir_obj)
-        except ValueError:
+        if not self._path_is_within_any(
+            repo_path_obj, self._compute_allowed_repo_roots()
+        ):
             raise ValueError(
                 "Security violation: Repository path escapes data directory"
             )
