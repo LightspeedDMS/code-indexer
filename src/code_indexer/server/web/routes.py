@@ -928,11 +928,8 @@ def dashboard_cache_metrics_partial(request: Request):
         try:
             snap = _metrics.snapshot()
             _shadow = snap.get("shadow", {})
-            _on = snap.get("on", {})
             shadow_hits = _shadow.get("hits", 0)
             shadow_requests = shadow_hits + _shadow.get("misses", 0)
-            on_hits = _on.get("hits", 0)
-            on_requests = on_hits + _on.get("misses", 0)
             shadow_cosine_p50 = snap.get("shadow_cosine_p50")
             # Story #1152: histogram + min + p05
             shadow_cosine_histogram = snap.get("shadow_cosine_histogram")
@@ -946,6 +943,30 @@ def dashboard_cache_metrics_partial(request: Request):
         except Exception as _exc:
             logger.warning(
                 "dashboard_cache_metrics_partial: snapshot() failed: %s", _exc
+            )
+
+    # Issue #1257: On-Mode Hit Rate must be REQUEST-denominated (one row per
+    # user request in search_event_log), NOT operation-denominated. The
+    # in-process QueryEmbeddingCacheMetrics tallies above increment once per
+    # cache OPERATION, and some paths (e.g. MCP activated-repo search) perform
+    # more than one on-mode embedding operation per request, which made the
+    # dashboard number diverge from the analytics search_event_log rate that
+    # is written exactly once per request. get_hit_rate_counts("on") on the
+    # search_event_log backend aggregates REQUESTS (rows), matching the
+    # analytics denominator. Fail-open: on_hits/on_requests (already
+    # initialized to 0 above) stay at 0 when the writer is not wired or the
+    # query fails.
+    sel_writer = getattr(request.app.state, "search_event_log_writer", None)
+    sel_backend = sel_writer.backend if sel_writer is not None else None
+    if sel_backend is not None:
+        try:
+            _on_counts = sel_backend.get_hit_rate_counts("on")
+            on_hits = _on_counts.get("hits", 0)
+            on_requests = _on_counts.get("requests", 0)
+        except Exception as _exc:
+            logger.warning(
+                "dashboard_cache_metrics_partial: get_hit_rate_counts failed: %s",
+                _exc,
             )
 
     # Story #1146: coalescer dedup counters (per-node in-memory tallies).

@@ -47,7 +47,7 @@
         <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> <strong>Shadow mode</strong> measures the cache without using it: share of queries that <em>would</em> have been served from cache (results are still computed live, so nothing changes for users)</small></footer>
     </article>
     <article class="stat-card">
-        <header><h3>On-Mode Hit Rate <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>
+        <header><h3>On-Mode Hit Rate</h3></header>
         <div class="stat-value">
             {% if cache_metrics and cache_metrics.on_requests > 0 %}
                 {{ "%.1f"|format(cache_metrics.on_hits / cache_metrics.on_requests * 100) }}%
@@ -55,7 +55,7 @@
                 --
             {% endif %}
         </div>
-        <footer><small><span class="cache-metrics-volatile-note"><strong>Node {{ node_id }}</strong> &middot; in-memory &middot; per-node &middot; resets on restart.</span> <strong>On mode</strong> actively serves from the cache: share of queries answered with a cached embedding, skipping the embedding provider call</small></footer>
+        <footer><small><strong>On mode</strong> actively serves from the cache: share of user searches served from a cached embedding, skipping the embedding provider call &mdash; durable, request-denominated (one row per search from search_event_log; persists across restarts and aggregates across cluster nodes)</small></footer>
     </article>
     <article class="stat-card">
         <header><h3>Shadow Cosine P50 <span class="cache-metrics-volatile-badge" title="Node {{ node_id }} &middot; in-memory, per-node metric — resets on restart and is not aggregated across cluster nodes.">volatile</span></h3></header>

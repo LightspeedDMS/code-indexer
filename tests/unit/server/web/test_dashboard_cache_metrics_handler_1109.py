@@ -172,7 +172,13 @@ class TestHandlerUsesRealCacheDataSource:
         # Should not blow up; should render 0 gracefully
 
     def test_handler_renders_per_mode_hits(self, client, admin_session_cookie):
-        """Shadow and on-mode hits/misses must appear from the metrics snapshot."""
+        """Shadow hits/misses must appear from the metrics snapshot.
+
+        Note (Issue #1257): On-Mode Hit Rate is deliberately NOT asserted
+        here — it is no longer sourced from QueryEmbeddingCacheMetrics.
+        snapshot()["on"] (see test_dashboard_on_mode_hit_rate_1257.py for the
+        request-denominated on-mode coverage).
+        """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
             clear_query_embedding_cache,
@@ -198,8 +204,6 @@ class TestHandlerUsesRealCacheDataSource:
             # shadow hits = 7, shadow requests = 7+3 = 10
             assert "7" in html, "Expected shadow hits '7' in HTML"
             assert "10" in html, "Expected shadow requests '10' in HTML"
-            # on hits = 5, on requests = 5+5 = 10
-            assert "5" in html, "Expected on hits '5' in HTML"
         finally:
             clear_query_embedding_cache()
             clear_query_embedding_cache_metrics()
@@ -337,22 +341,26 @@ def _extract_article_cards(html: str) -> list:
 
 
 class TestNodeIdOnVolatileCards:
-    """Node id appears on the three volatile cards but NOT on Cache Entries.
+    """Node id appears on the volatile cards but NOT on the durable cards.
 
-    The three volatile cards are Shadow Hit Rate, On-Mode Hit Rate, and
-    Shadow Cosine P50.  Cache Entries is DB-backed and cluster-wide so it
-    must not carry a per-node label.
+    The two remaining volatile (in-process, per-node) cards are Shadow Hit
+    Rate and Shadow Cosine P50. Cache Entries and On-Mode Hit Rate are both
+    DB-backed and cluster-wide (Issue #1257 moved On-Mode Hit Rate from the
+    in-process operation tallies to the durable, request-denominated
+    search_event_log table), so neither carries a per-node label.
     """
 
     def test_node_id_in_template_context_and_volatile_cards(
         self, client, admin_session_cookie, app
     ):
-        """node_id is passed to the template and 'Node <id>' appears on each volatile card.
+        """node_id is passed to the template and 'Node <id>' appears on each
+        remaining volatile card, but NOT on the now-durable On-Mode Hit Rate
+        card.
 
         Verifies template-context presence by injecting a known node id via
         app.state.node_id and asserting it is reflected in the rendered HTML
-        on all three volatile cards (Shadow Hit Rate, On-Mode Hit Rate,
-        Shadow Cosine P50).
+        on the two volatile cards (Shadow Hit Rate, Shadow Cosine P50) while
+        confirming it is ABSENT from On-Mode Hit Rate (Issue #1257).
         """
         from code_indexer.server.services.governed_call import (
             set_query_embedding_cache,
@@ -395,8 +403,9 @@ class TestNodeIdOnVolatileCards:
             assert node_label in shadow_hit_card, (
                 f"'Node {test_node_name}' missing from Shadow Hit Rate card:\n{shadow_hit_card[:400]}"
             )
-            assert node_label in on_mode_card, (
-                f"'Node {test_node_name}' missing from On-Mode Hit Rate card:\n{on_mode_card[:400]}"
+            assert node_label not in on_mode_card, (
+                "On-Mode Hit Rate is now DB-backed (Issue #1257) and must NOT "
+                f"carry a per-node label:\n{on_mode_card[:400]}"
             )
             assert node_label in cosine_card, (
                 f"'Node {test_node_name}' missing from Shadow Cosine P50 card:\n{cosine_card[:400]}"
