@@ -24,6 +24,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
+
 logger = logging.getLogger(__name__)
 
 _THREAD_JOIN_GRACE_SECONDS = 5
@@ -304,6 +306,18 @@ class NodeMetricsWriterService:
         # Persistent state for I/O rate calculation across write cycles
         self._io_state: Dict[str, Any] = {}
         self._io_state_lock = threading.Lock()  # Bug #548: protect concurrent access
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback every tick.
+        # TWO independent instances (not shared) — the snapshot-write and
+        # cleanup calls are independent DB operations; sharing one instance
+        # would let a cleanup success reset the outage counter while writes
+        # keep failing, recreating the per-tick ERROR storm.
+        self._db_throttle = DbOutageThrottle(
+            service_name=f"NodeMetricsWriterService[{self._node_id}] write_snapshot"
+        )
+        self._cleanup_db_throttle = DbOutageThrottle(
+            service_name=f"NodeMetricsWriterService[{self._node_id}] cleanup"
+        )
 
     @property
     def node_id(self) -> str:
@@ -326,26 +340,35 @@ class NodeMetricsWriterService:
                     nfs_validator=self._nfs_validator,
                 )
             self._backend.write_snapshot(snapshot)
-        except Exception:
-            logger.exception(
-                "NodeMetricsWriterService [%s]: error writing snapshot", self._node_id
-            )
+            self._db_throttle.on_db_success(logger)
+        except Exception as exc:
+            # Bug #1249: a connectivity error is throttled (single ERROR
+            # transition, DEBUG follow-ups); anything else still logs
+            # normally every time.
+            if not self._db_throttle.on_db_error(exc, logger):
+                logger.exception(
+                    "NodeMetricsWriterService [%s]: error writing snapshot",
+                    self._node_id,
+                )
 
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(
                 seconds=self._retention_seconds
             )
             deleted = self._backend.cleanup_older_than(cutoff)
+            self._cleanup_db_throttle.on_db_success(logger)
             if deleted:
                 logger.debug(
                     "NodeMetricsWriterService [%s]: cleaned up %d old snapshots",
                     self._node_id,
                     deleted,
                 )
-        except Exception:
-            logger.exception(
-                "NodeMetricsWriterService [%s]: error during cleanup", self._node_id
-            )
+        except Exception as exc:
+            if not self._cleanup_db_throttle.on_db_error(exc, logger):
+                logger.exception(
+                    "NodeMetricsWriterService [%s]: error during cleanup",
+                    self._node_id,
+                )
 
     def start(self) -> None:
         """Start the background metrics writer thread (idempotent)."""
@@ -382,7 +405,8 @@ class NodeMetricsWriterService:
         )
         while not self._stop_event.is_set():
             self.write_once()
-            self._stop_event.wait(timeout=self._write_interval)
+            wait_seconds = self._db_throttle.next_wait_seconds(self._write_interval)
+            self._stop_event.wait(timeout=wait_seconds)
 
         logger.debug(
             "NodeMetricsWriterService [%s]: writer loop exiting", self._node_id

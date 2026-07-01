@@ -5,6 +5,7 @@ Orchestrates the complete refresh cycle: timer triggers git pull,
 change detection, index creation, alias swap, and cleanup scheduling.
 """
 
+import json
 import logging
 import os
 import random
@@ -33,6 +34,7 @@ from code_indexer.server.services.cidx_meta_backup import (
     detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
+from code_indexer.server.services.db_outage_throttle import DbOutageThrottle
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.storage.shared.nfs_visibility import (
     _configured_visibility_timeout,
@@ -221,6 +223,13 @@ class RefreshScheduler:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()  # Event-based signaling for efficient stop
+
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback on every
+        # per-repo _submit_refresh_job() failure during a PG outage. This is
+        # SEPARATE from the Bug #735 outer circuit breaker (whole-iteration
+        # failures) below — that one is untouched.
+        self._db_throttle = DbOutageThrottle(service_name="RefreshScheduler")
 
         # Per-repo locking for concurrent refresh serialization
         self._repo_locks: dict[str, threading.Lock] = {}
@@ -1089,6 +1098,7 @@ class RefreshScheduler:
                     _submit_failed = False
                     try:
                         self._submit_refresh_job(alias_name)
+                        self._db_throttle.on_db_success(logger)
                     except DuplicateJobError:
                         # Job already running for this repo — expected when prior refresh
                         # is still in flight (possibly extended by a verification pass).
@@ -1102,10 +1112,15 @@ class RefreshScheduler:
                         # Transient failure — do NOT advance next_refresh.
                         # The repo remains overdue and will be retried on the next poll.
                         _submit_failed = True
-                        logger.error(
-                            f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
-                            exc_info=True,
-                        )
+                        # Bug #1249: a connectivity error (e.g. PoolTimeout from
+                        # job_tracker._atomic_insert_or_raise during a PG outage)
+                        # is throttled (single ERROR transition, DEBUG
+                        # follow-ups); anything else still logs normally.
+                        if not self._db_throttle.on_db_error(e, logger):
+                            logger.error(
+                                f"Refresh failed for {alias_name}: {type(e).__name__}: {e}",
+                                exc_info=True,
+                            )
 
                     # Story #284 AC1: back-propagate next_refresh with jitter.
                     # Bug #1066: skip advancement when submit raised a generic exception.
@@ -1142,8 +1157,12 @@ class RefreshScheduler:
                     return
                 continue
 
-            # Short poll interval instead of full refresh_interval wait
-            poll_interval = self._calculate_poll_interval(refresh_interval)
+            # Short poll interval instead of full refresh_interval wait.
+            # Bug #1249: during a per-repo DB outage, back off the overall
+            # poll cadence too (capped) instead of hammering every tick.
+            poll_interval = self._db_throttle.next_wait_seconds(
+                self._calculate_poll_interval(refresh_interval)
+            )
             self._stop_event.wait(timeout=poll_interval)
 
         logger.debug("Refresh scheduler loop exited")
@@ -1331,6 +1350,45 @@ class RefreshScheduler:
                                 "alias": alias_name,
                                 "message": "Not yet initialized, skipped",
                             }
+
+                        # Bug #1253: Self-heal a .code-indexer/ directory that exists but
+                        # has no valid config.json. golden_repo_manager.register_local_repo()
+                        # runs `cidx init` exactly ONCE per alias at first registration; if
+                        # that init fails partway through (e.g. the directory gets created by
+                        # ConfigManager.save_with_documentation()'s mkdir() but config.json
+                        # never gets written, or config.json is later truncated/corrupted by
+                        # a concurrent writer), the CalledProcessError is only logged --
+                        # registration "continues" and the broken golden repo is registered
+                        # anyway. Because registration never retries, the repo is then stuck
+                        # forever: code_indexer_dir.exists() is True so the guard above never
+                        # fires, yet `cidx index` fails the SAME way on every scheduled cycle
+                        # with "Command 'index' is not available in no configuration found".
+                        # Observed as 231 recurring failures for langfuse_Claude_Code_*-global
+                        # repos on staging. Repair by re-running `cidx init` before indexing
+                        # instead of failing identically forever.
+                        config_json_path = code_indexer_dir / "config.json"
+                        if not self._is_local_config_valid(config_json_path):
+                            logger.warning(
+                                f"Local repo {alias_name} has .code-indexer/ but no valid "
+                                f"config.json at {config_json_path} (likely a partial "
+                                f"'cidx init' during registration -- Bug #1253). "
+                                f"Attempting self-heal via 'cidx init' before indexing."
+                            )
+                            if not self._repair_uninitialized_local_repo(
+                                source_path, alias_name
+                            ):
+                                return {
+                                    "success": False,
+                                    "alias": alias_name,
+                                    "message": (
+                                        "Local repo config invalid and repair via "
+                                        "cidx init failed"
+                                    ),
+                                }
+                            logger.info(
+                                f"Self-healed .code-indexer/ config for local repo "
+                                f"{alias_name}; proceeding with refresh"
+                            )
 
                         # Story #227: Skip CoW clone if an external writer holds the write lock.
                         # Writers (DependencyMapService, LangfuseTraceSyncService) acquire the lock
@@ -2295,6 +2353,77 @@ class RefreshScheduler:
         """
         self._index_source(alias_name=alias_name, source_path=source_path)
         return self._create_snapshot(alias_name=alias_name, source_path=source_path)
+
+    def _is_local_config_valid(self, config_json_path: Path) -> bool:
+        """
+        Check whether a local repo's .code-indexer/config.json is present and
+        parseable (Bug #1253).
+
+        Mirrors CommandModeDetector._validate_local_config()'s leniency: any
+        valid JSON file is accepted (mode detection does not require specific
+        fields). A missing file or invalid JSON means `cidx index` would fail
+        mode validation with "no configuration found".
+
+        Args:
+            config_json_path: Path to the candidate .code-indexer/config.json
+
+        Returns:
+            True if the file exists and contains valid JSON, False otherwise.
+        """
+        if not config_json_path.exists():
+            return False
+        try:
+            with open(config_json_path) as f:
+                json.load(f)
+            return True
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug(f"Invalid local config at {config_json_path}: {e}")
+            return False
+
+    def _repair_uninitialized_local_repo(
+        self, source_path: str, alias_name: str
+    ) -> bool:
+        """
+        Self-heal a local repo whose .code-indexer/ directory exists but has
+        no valid config.json (Bug #1253), by re-running the same `cidx init`
+        invocation used at registration time (golden_repo_manager.py
+        register_local_repo()).
+
+        `--force` is required here (unlike first-time registration) because
+        the .code-indexer/ directory already exists; init refuses to touch an
+        existing config.json without it. This is safe: FilesystemBackend's
+        initialize() only does `vectors_dir.mkdir(parents=True, exist_ok=True)`
+        and never deletes existing index data, so any already-indexed content
+        under .code-indexer/index/ survives the repair.
+
+        Args:
+            source_path: Path to the local repo directory (cwd for `cidx init`)
+            alias_name: Global alias name, for logging only
+
+        Returns:
+            True if the repair subprocess succeeded, False otherwise.
+        """
+        try:
+            subprocess.run(
+                ["cidx", "init", "--no-override-file", "--force"],
+                cwd=source_path,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            return True
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            OSError,
+        ) as e:
+            stderr = getattr(e, "stderr", None) or str(e)
+            logger.error(
+                f"Failed to repair uninitialized local repo {alias_name} via "
+                f"'cidx init' at {source_path}: {stderr}"
+            )
+            return False
 
     def _has_local_changes(self, source_path: str, alias_name: str) -> bool:
         """

@@ -6,8 +6,10 @@ AC1: rustc already at stable version -> skip install, build xray-cli, return Tru
 AC2: rustup install fails -> return False (FATAL path)
 AC3: cargo build succeeds when Rust is freshly installed -> return True
 AC4: rust/ directory not found -> logs WARNING, return True (non-fatal - older code)
-AC5: No C compiler found -> logs ERROR, return False
-AC6: cargo build fails -> return False
+AC5: No C compiler found -> logs WARNING, return True (Bug #1255: optional
+     xray native backend degrades gracefully, never blocks deployment)
+AC6: cargo build fails -> logs WARNING, return True (Bug #1255: same
+     optional-feature degrade as AC5)
 
 Only true external dependencies are mocked:
   - subprocess.run (for rustc, rustup, cargo, curl|sh commands)
@@ -88,6 +90,15 @@ def _rust_env(tmp_path: Path) -> Iterator[MagicMock]:
         patch(f"{_MODULE}.Path.home", return_value=tmp_path),
         patch(f"{_MODULE}.__file__", fake_file, create=True),
         patch(f"{_MODULE}.SYSTEMD_UNIT_DIR", tmp_path / "systemd"),
+        # Bug #1255: force the upfront "already usable" probe to report
+        # False so every test below drives through the SAME mkdir/chown
+        # (auto-succeeded above) -> _check_rustc_installed -> install/build
+        # flow as before the fix. Tests that specifically need the
+        # already-usable skip path are covered in
+        # test_deploy_rust_toolchain_immutable_1255.py.
+        patch.object(
+            DeploymentExecutor, "_is_rust_toolchain_usable", return_value=False
+        ),
         patch("subprocess.run", side_effect=_filtering_run),
     ):
         yield inner_mock
@@ -325,14 +336,18 @@ class TestRustDirMissing:
 
 
 # ---------------------------------------------------------------------------
-# AC5: No C compiler found -> log ERROR, return False
+# AC5: No C compiler found -> log WARNING, return True (Bug #1255: the
+# xray-cli native backend this gates is an OPTIONAL accelerator with a
+# Python xray fallback, so a missing C compiler must degrade gracefully
+# rather than abort the whole deployment -- pip install + restart must
+# still complete).
 # ---------------------------------------------------------------------------
 
 
 class TestNoCCompilerFound:
-    """When no gcc/cc/clang is found, log ERROR and return False."""
+    """When no gcc/cc/clang is found, log WARNING and return True (non-fatal)."""
 
-    def test_returns_false_when_no_c_compiler(self, tmp_path: Path) -> None:
+    def test_returns_true_when_no_c_compiler(self, tmp_path: Path) -> None:
         executor = _make_executor()
         rust_dir = tmp_path / "rust"
         rust_dir.mkdir()
@@ -345,16 +360,16 @@ class TestNoCCompilerFound:
             with patch(f"{_MODULE}.shutil.which", return_value=None):
                 result = executor._ensure_rust_toolchain()
 
-        assert result is False
+        assert result is True
 
-    def test_error_logged_when_no_c_compiler(
+    def test_warning_logged_when_no_c_compiler(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         executor = _make_executor()
         rust_dir = tmp_path / "rust"
         rust_dir.mkdir()
 
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             with _rust_env(tmp_path) as mock_run:
                 mock_run.side_effect = [
                     _proc(0, stdout="rustc 1.78.0"),
@@ -362,18 +377,19 @@ class TestNoCCompilerFound:
                 with patch(f"{_MODULE}.shutil.which", return_value=None):
                     executor._ensure_rust_toolchain()
 
-        assert _has_level(caplog, logging.ERROR)
+        assert _has_level(caplog, logging.WARNING)
 
 
 # ---------------------------------------------------------------------------
-# AC6: cargo build fails -> return False
+# AC6: cargo build fails -> log WARNING, return True (Bug #1255: same
+# optional-feature degrade as the missing-C-compiler case above).
 # ---------------------------------------------------------------------------
 
 
 class TestCargoBuildFails:
-    """When cargo build fails, return False."""
+    """When cargo build fails, log WARNING and return True (non-fatal)."""
 
-    def test_returns_false_when_cargo_build_fails(self, tmp_path: Path) -> None:
+    def test_returns_true_when_cargo_build_fails(self, tmp_path: Path) -> None:
         executor = _make_executor()
         rust_dir = tmp_path / "rust"
         rust_dir.mkdir()
@@ -386,16 +402,16 @@ class TestCargoBuildFails:
             with patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"):
                 result = executor._ensure_rust_toolchain()
 
-        assert result is False
+        assert result is True
 
-    def test_error_logged_when_cargo_build_fails(
+    def test_warning_logged_when_cargo_build_fails(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         executor = _make_executor()
         rust_dir = tmp_path / "rust"
         rust_dir.mkdir()
 
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             with _rust_env(tmp_path) as mock_run:
                 mock_run.side_effect = [
                     _proc(0, stdout="rustc 1.78.0"),
@@ -404,7 +420,7 @@ class TestCargoBuildFails:
                 with patch(f"{_MODULE}.shutil.which", return_value="/usr/bin/gcc"):
                     executor._ensure_rust_toolchain()
 
-        assert _has_level(caplog, logging.ERROR)
+        assert _has_level(caplog, logging.WARNING)
 
 
 # ---------------------------------------------------------------------------

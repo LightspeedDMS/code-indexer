@@ -3218,8 +3218,16 @@ class DeploymentExecutor:
         This provides an additional safety net for OOM conditions when the
         server has large mmap'd virtual memory from HNSW indexes and SQLite DBs.
 
+        Bug #1254: best-effort / non-fatal. Swap is an OOM optimization, not
+        a correctness requirement -- the server runs correctly without it.
+        On read-only/immutable hosts (e.g. "/" mounted read-only) fallocate/
+        chmod/mkswap/swapon legitimately cannot succeed. Any subprocess
+        failure (or unexpected exception) here is logged at WARNING and the
+        method still returns True so deployment proceeds to the restart.
+
         Returns:
-            True if swap exists or was successfully created, False on error
+            True always (best-effort) -- swap setup failures are logged at
+            WARNING and never block deployment.
         """
         try:
             # Check if any swap is already active
@@ -3244,14 +3252,15 @@ class DeploymentExecutor:
                 timeout=60,
             )
             if fallocate_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-093",
-                        f"fallocate -l 4G /swapfile failed: {fallocate_result.stderr}",
+                        f"fallocate -l 4G /swapfile failed: {fallocate_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Set secure permissions (0600 - root only)
             chmod_result = subprocess.run(
@@ -3261,14 +3270,15 @@ class DeploymentExecutor:
                 timeout=30,
             )
             if chmod_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-094",
-                        f"chmod 600 /swapfile failed: {chmod_result.stderr}",
+                        f"chmod 600 /swapfile failed: {chmod_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Format as swap
             mkswap_result = subprocess.run(
@@ -3278,14 +3288,15 @@ class DeploymentExecutor:
                 timeout=30,
             )
             if mkswap_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-095",
-                        f"mkswap /swapfile failed: {mkswap_result.stderr}",
+                        f"mkswap /swapfile failed: {mkswap_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Enable swap immediately
             swapon_result = subprocess.run(
@@ -3295,14 +3306,15 @@ class DeploymentExecutor:
                 timeout=30,
             )
             if swapon_result.returncode != 0:
-                logger.error(
+                logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-096",
-                        f"swapon /swapfile failed: {swapon_result.stderr}",
+                        f"swapon /swapfile failed: {swapon_result.stderr} "
+                        "- swap is an OOM optimization, continuing without it",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                return False
+                return True  # Bug #1254: non-fatal, swap is best-effort
 
             # Add fstab entry for reboot persistence
             fstab_result = subprocess.run(
@@ -3338,14 +3350,15 @@ class DeploymentExecutor:
             return True
 
         except Exception as e:
-            logger.error(
+            logger.warning(
                 format_error_log(
                     "DEPLOY-GENERAL-098",
-                    f"Exception creating swap file: {e}",
+                    f"Exception creating swap file: {e} "
+                    "- swap is an OOM optimization, continuing without it",
                     extra={"correlation_id": get_correlation_id()},
                 )
             )
-            return False
+            return True  # Bug #1254: non-fatal, swap is best-effort
 
     def execute(self) -> bool:
         """Execute complete deployment: git pull + pip install.
@@ -4759,14 +4772,29 @@ class DeploymentExecutor:
         return True
 
     def _verify_c_compiler(self) -> bool:
-        """Return True if gcc, cc, or clang is available (needed by tree-sitter crate)."""
+        """Return True if gcc, cc, or clang is available (needed by tree-sitter crate).
+
+        Bug #1255/#1296: the deploy itself stays non-fatal on a missing C
+        compiler (xray is a non-core/optional feature and pip install +
+        restart must still complete), but this is logged at ERROR, not
+        WARNING: there is NO Python evaluation fallback for xray query-time
+        execution. xray_search/xray_explore call the native xray-cli binary
+        unconditionally; without it they return BinaryNotFound for every
+        file. A missing C compiler blocks the xray-cli build, so this is a
+        real capability loss that must stay loudly visible to operators.
+        """
         for cc in ["gcc", "cc", "clang"]:
             if shutil.which(cc) is not None:
                 return True
         logger.error(
             format_error_log(
                 "DEPLOY-GENERAL-172",
-                "No C compiler found (gcc/cc/clang) — tree-sitter build will fail",
+                "xray native search UNAVAILABLE: no C compiler found "
+                "(gcc/cc/clang) -- xray-cli native binary cannot be built; "
+                "xray_search/xray_explore will return BinaryNotFound until "
+                "a C compiler is installed and the binary is built. "
+                "(Evaluator pre-flight validation still works; query-time "
+                "evaluation does not.)",
             ),
             extra={"correlation_id": get_correlation_id()},
         )
@@ -4776,6 +4804,15 @@ class DeploymentExecutor:
         """Run cargo build --release -p xray-cli inside rust_dir.
 
         Returns True on success, False on nonzero exit or timeout.
+
+        Bug #1255/#1296: the caller (_ensure_rust_toolchain) still treats a
+        False return as non-fatal to the overall deploy (pip install +
+        restart must still complete), but the failure is logged at ERROR,
+        not WARNING: there is NO Python evaluation fallback for xray
+        query-time execution. xray_search/xray_explore call the native
+        xray-cli binary unconditionally; without it they return
+        BinaryNotFound for every file, so a failed build is a real
+        capability loss that must stay loudly visible to operators.
         """
         try:
             build_result = subprocess.run(
@@ -4790,7 +4827,12 @@ class DeploymentExecutor:
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"cargo build xray-cli failed: {exc}",
+                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"failed to build (cargo build error: {exc}); "
+                    f"xray_search/xray_explore will return BinaryNotFound "
+                    f"until the binary is built. (Evaluator pre-flight "
+                    f"validation still works; query-time evaluation does "
+                    f"not.)",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -4799,8 +4841,14 @@ class DeploymentExecutor:
             logger.error(
                 format_error_log(
                     "DEPLOY-GENERAL-172",
-                    f"cargo build xray-cli failed: "
-                    f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                    f"xray native search UNAVAILABLE: xray-cli native binary "
+                    f"failed to build (cargo build exited "
+                    f"{build_result.returncode}: "
+                    f"{build_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}); "
+                    f"xray_search/xray_explore will return BinaryNotFound "
+                    f"until the binary is built. (Evaluator pre-flight "
+                    f"validation still works; query-time evaluation does "
+                    f"not.)",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )
@@ -4811,48 +4859,93 @@ class DeploymentExecutor:
         )
         return True
 
+    def _is_rust_toolchain_usable(self, env: dict) -> bool:
+        """Bug #1255: return True if BOTH rustc and cargo are present and
+        runnable directly from RUST_SYSTEM_DIR/bin, using the resolved
+        absolute binary paths (not a PATH lookup).
+
+        Immutable host images often ship a pre-provisioned RUST_SYSTEM_DIR
+        on a read-only root filesystem: the toolchain files are present and
+        world-executable, but `chown` can never succeed there.  Running a
+        binary only requires execute permission, not ownership, so this
+        probe is sufficient to recognize "already usable" without touching
+        ownership at all.
+        """
+        rust_bin = RUST_SYSTEM_DIR / "bin"
+        for binary_name in ("rustc", "cargo"):
+            binary_path = rust_bin / binary_name
+            try:
+                result = subprocess.run(
+                    [str(binary_path), "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=RUSTC_VERSION_TIMEOUT_SECONDS,
+                    env=env,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            if result.returncode != 0:
+                return False
+        return True
+
+    def _resolve_rust_build_env(self, env: dict) -> dict:
+        """Bug #1255: redirect CARGO_HOME to a writable fallback (~/.cargo)
+        for the xray-cli build step when RUST_SYSTEM_DIR exists but is not
+        writable (immutable host, read-only root filesystem).
+
+        RUSTUP_HOME is left untouched -- it must keep pointing at
+        RUST_SYSTEM_DIR so rustup's proxy binaries resolve the toolchain
+        that is actually installed there.  Only CARGO_HOME needs to be
+        writable, since `cargo build` may need to write to its registry
+        cache (new dependency downloads, index updates); build artifacts
+        themselves go to the project-local rust_dir/target, which is
+        writable because pip_install()/git_pull() already proved the repo
+        checkout itself is writable earlier in execute().
+
+        Returns a new dict; never mutates the input env.
+        """
+        build_env = dict(env)
+        if RUST_SYSTEM_DIR.exists() and not os.access(RUST_SYSTEM_DIR, os.W_OK):
+            writable_cargo_home = str(Path.home() / ".cargo")
+            build_env["CARGO_HOME"] = writable_cargo_home
+            logger.info(
+                "%s is not writable; using %s as CARGO_HOME for the xray-cli build",
+                RUST_SYSTEM_DIR,
+                writable_cargo_home,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        return build_env
+
     def _ensure_rust_toolchain(self) -> bool:
-        """Story #1024: Ensure Rust toolchain is installed and xray-cli binary is built.
+        """Story #1024 / Bug #1255: Ensure Rust toolchain is installed and
+        xray-cli binary is built.
 
         Installs to RUST_SYSTEM_DIR (/opt/rust) so the toolchain is accessible
         to the cidx-server service user (not just root).
 
+        Bug #1255: on immutable hosts RUST_SYSTEM_DIR may already be
+        provisioned (rustc/cargo present, world-executable) on a read-only
+        root filesystem.  Provisioning (mkdir/chown/install) is skipped
+        entirely when the toolchain already proves usable; if provisioning
+        IS attempted and mkdir/chown fails, a usability recheck makes the
+        failure non-fatal as long as the toolchain works anyway.
+
         Idempotent: skips install when rustc is already on PATH.
-        Returns True on success or when rust/ dir is absent (non-fatal skip).
-        Returns False on install failure, missing C compiler, or build failure (FATAL).
+        Returns True on success, when rust/ dir is absent (non-fatal skip),
+        or when the xray-cli build/C-compiler step fails. That failure is
+        non-fatal to the OVERALL deploy (pip install + restart must still
+        complete -- xray is a non-core/optional feature), but it is NOT a
+        graceful degrade to an alternate execution path: there is no Python
+        evaluation fallback for xray query-time execution, so
+        xray_search/xray_explore become genuinely unavailable
+        (BinaryNotFound) until the binary builds successfully. That
+        capability loss is logged at ERROR (see _verify_c_compiler /
+        _build_xray_cli) precisely because it is real, even though it does
+        not block the deploy.
+        Returns False ONLY when the toolchain is genuinely missing and
+        cannot be installed (FATAL) -- the host truly lacks Rust.
         """
         rust_bin = RUST_SYSTEM_DIR / "bin"
-        mkdir_result = subprocess.run(
-            ["sudo", "mkdir", "-p", str(RUST_SYSTEM_DIR)],
-            capture_output=True,
-            text=True,
-        )
-        if mkdir_result.returncode != 0:
-            logger.error(
-                format_error_log(
-                    "DEPLOY-GENERAL-172",
-                    f"sudo mkdir -p {RUST_SYSTEM_DIR} failed: "
-                    f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
-                ),
-                extra={"correlation_id": get_correlation_id()},
-            )
-            return False
-        uid_gid = f"{os.getuid()}:{os.getgid()}"
-        chown_result = subprocess.run(
-            ["sudo", "chown", "-R", uid_gid, str(RUST_SYSTEM_DIR)],
-            capture_output=True,
-            text=True,
-        )
-        if chown_result.returncode != 0:
-            logger.error(
-                format_error_log(
-                    "DEPLOY-GENERAL-172",
-                    f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} failed: "
-                    f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
-                ),
-                extra={"correlation_id": get_correlation_id()},
-            )
-            return False
         env = os.environ.copy()
         env["RUSTUP_HOME"] = str(RUST_SYSTEM_DIR)
         env["CARGO_HOME"] = str(RUST_SYSTEM_DIR)
@@ -4861,6 +4954,73 @@ class DeploymentExecutor:
             env["PATH"] = f"{rust_bin}:{current_path}"
         else:
             env["PATH"] = str(rust_bin)
+
+        if self._is_rust_toolchain_usable(env):
+            logger.info(
+                "Rust toolchain already present and usable at %s; "
+                "skipping provisioning",
+                RUST_SYSTEM_DIR,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        else:
+            mkdir_result = subprocess.run(
+                ["sudo", "mkdir", "-p", str(RUST_SYSTEM_DIR)],
+                capture_output=True,
+                text=True,
+            )
+            if mkdir_result.returncode != 0:
+                if self._is_rust_toolchain_usable(env):
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-172",
+                            f"sudo mkdir -p {RUST_SYSTEM_DIR} failed but the "
+                            f"toolchain is already usable -- continuing "
+                            f"without provisioning: "
+                            f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.error(
+                        format_error_log(
+                            "DEPLOY-GENERAL-172",
+                            f"sudo mkdir -p {RUST_SYSTEM_DIR} failed: "
+                            f"{mkdir_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                        ),
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    return False
+            else:
+                uid_gid = f"{os.getuid()}:{os.getgid()}"
+                chown_result = subprocess.run(
+                    ["sudo", "chown", "-R", uid_gid, str(RUST_SYSTEM_DIR)],
+                    capture_output=True,
+                    text=True,
+                )
+                if chown_result.returncode != 0:
+                    if self._is_rust_toolchain_usable(env):
+                        logger.warning(
+                            format_error_log(
+                                "DEPLOY-GENERAL-172",
+                                f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} "
+                                f"failed but the toolchain is already usable "
+                                f"-- continuing without ownership change: "
+                                f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            ),
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    else:
+                        logger.error(
+                            format_error_log(
+                                "DEPLOY-GENERAL-172",
+                                f"sudo chown -R {uid_gid} {RUST_SYSTEM_DIR} "
+                                f"failed: "
+                                f"{chown_result.stderr[:MAX_ERROR_SNIPPET_LENGTH]}",
+                            ),
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        return False
+
         self._ensure_systemd_rust_path()
 
         if not self._check_rustc_installed(env):
@@ -4880,9 +5040,18 @@ class DeploymentExecutor:
             return True  # Non-fatal: older code versions may not have rust/
 
         if not self._verify_c_compiler():
-            return False
+            # Bug #1255/#1296: non-fatal to the overall deploy, but NOT a
+            # graceful degrade -- there is no Python fallback, so xray
+            # native search is genuinely unavailable (logged at ERROR above).
+            return True
 
-        return self._build_xray_cli(rust_dir, env)
+        build_env = self._resolve_rust_build_env(env)
+        if not self._build_xray_cli(rust_dir, build_env):
+            # Bug #1255/#1296: non-fatal to the overall deploy, but NOT a
+            # graceful degrade -- there is no Python fallback, so xray
+            # native search is genuinely unavailable (logged at ERROR above).
+            return True
+        return True
 
 
 def read_execstart_flags(service_name: str = "cidx-server") -> dict:

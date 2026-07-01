@@ -28,6 +28,7 @@ from ..auto_update.deployment_executor import (
     RESTART_SIGNAL_PATH,
     read_execstart_flags,
 )
+from .db_outage_throttle import DbOutageThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,10 @@ class ConfigService:
         # Story #1200 FIX-6: consecutive pending-restart poll counter + rate-limit flag
         self._pending_restart_poll_count: int = 0
         self._pending_restart_warned: bool = False
+        # Bug #1249: collapse a PG-outage error storm into a single ERROR +
+        # DEBUG follow-ups instead of logging a fresh traceback every tick.
+        # Shared across both try/except blocks in start_config_reload's poll loop.
+        self._db_throttle = DbOutageThrottle(service_name="ConfigService")
 
     def register_on_change_callback(self, callback: Any) -> None:
         """Register a callback fired when config reloads from DB.
@@ -245,21 +250,36 @@ class ConfigService:
         self._stop_event.clear()
 
         def _poll_loop() -> None:
-            while not self._stop_event.wait(timeout=interval_seconds):
+            while not self._stop_event.wait(
+                timeout=self._db_throttle.next_wait_seconds(interval_seconds)
+            ):
                 try:
                     if self.check_config_update():
                         logger.info("ConfigService: reloaded config from PG")
-                except Exception:
-                    logger.exception("ConfigService: config reload poll failed")
+                    self._db_throttle.on_db_success(logger)
+                except Exception as exc:
+                    # Bug #1249: a connectivity error is throttled (single
+                    # ERROR transition, DEBUG follow-ups); anything else
+                    # still logs normally every time.
+                    if not self._db_throttle.on_db_error(exc, logger):
+                        logger.exception("ConfigService: config reload poll failed")
                 # Story #1200 AC3 CRITICAL-C1: check_pending_launch_restart fires
                 # on EVERY interval, independent of whether the version changed.
                 # NOT a callback — callbacks only fire on version-diff edge.
                 try:
                     self.check_pending_launch_restart()
-                except Exception:
-                    logger.exception(
-                        "ConfigService: check_pending_launch_restart poll failed"
-                    )
+                    # NOTE: no on_db_success() here — check_pending_launch_restart()
+                    # already swallows its own DB-read failures internally at
+                    # DEBUG (see _read_raw_launch_snapshot) and never raises a
+                    # connectivity exception. Calling on_db_success() here would
+                    # always fire regardless of real DB health and incorrectly
+                    # reset the outage counter set by check_config_update's
+                    # failure in the same tick (Bug #1249 wiring correctness).
+                except Exception as exc:
+                    if not self._db_throttle.on_db_error(exc, logger):
+                        logger.exception(
+                            "ConfigService: check_pending_launch_restart poll failed"
+                        )
 
         self._reload_thread = threading.Thread(
             target=_poll_loop, daemon=True, name="config-reload"
