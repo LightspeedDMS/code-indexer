@@ -21,6 +21,7 @@ import re
 import shutil
 import struct
 import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -525,6 +526,32 @@ def _backfill_quantization_range_if_missing(
         )
 
 
+def _atomic_replace_via_tmp(final_path: Path, write_fn: Callable[[Path], None]) -> None:
+    """Write final_path atomically: write_fn populates a uniquely-named temp
+    file in the SAME directory, then os.replace() renames it onto final_path.
+
+    Bug #1264 (code review follow-up): closes the torn-read window where a
+    concurrent reader/healer of the same target path could observe a
+    partially-written file. os.replace() is atomic on POSIX and overwrites
+    the destination, so any concurrent observer sees either the old (absent)
+    state or the fully-written new file -- never something in between. The
+    temp filename is unique per call (uuid4) so two concurrent callers
+    writing the same final_path never collide on the SAME temp file either.
+
+    Args:
+        final_path: Destination file path (parent directory must exist).
+        write_fn: Callable that fully writes the temp path given as its
+            single argument. Must not partially write on success.
+    """
+    tmp_path = final_path.parent / f"{final_path.name}.tmp.{uuid.uuid4().hex}"
+    try:
+        write_fn(tmp_path)
+        os.replace(tmp_path, final_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _ensure_shard_has_projection_matrix(
     shard_path: Path,
     source_collection_path: Optional[Path],
@@ -538,6 +565,11 @@ def _ensure_shard_has_projection_matrix(
     the write-path bucket layout (vector @ matrix -> hex dir) is consistent with
     any vectors previously written by the monolith.  Falls back to regenerating a
     fresh matrix when the source is None or lacks the file.
+
+    Both branches write atomically (temp file in the same directory, then
+    os.replace()) so two callers healing the same shard concurrently — e.g.
+    two temporal worker threads first-writing the same shard — never produce
+    or observe a torn/partial projection_matrix.npy (Bug #1264 follow-up).
 
     Also backfills quantization_range in the shard's collection_meta.json when the
     key is missing (both copy and regenerate paths).
@@ -557,7 +589,11 @@ def _ensure_shard_has_projection_matrix(
     if source_collection_path is not None:
         src_matrix = source_collection_path / "projection_matrix.npy"
         if src_matrix.exists():
-            shutil.copy2(src_matrix, matrix_file)
+
+            def _copy_matrix(tmp: Path, _src: Path = src_matrix) -> None:
+                shutil.copy2(_src, tmp)
+
+            _atomic_replace_via_tmp(matrix_file, _copy_matrix)
             logger.info(
                 "Bug #1242: copied projection_matrix.npy from %s into %s",
                 source_collection_path.name,
@@ -571,7 +607,12 @@ def _ensure_shard_has_projection_matrix(
         matrix = manager.create_projection_matrix(
             input_dim=vector_dim, output_dim=output_dim
         )
-        manager.save_matrix(matrix, shard_path)
+
+        def _write_matrix(tmp: Path) -> None:
+            with open(tmp, "wb") as f:
+                np.save(f, matrix)
+
+        _atomic_replace_via_tmp(matrix_file, _write_matrix)
         logger.info(
             "Bug #1242: regenerated projection_matrix.npy for %s (source absent)",
             shard_path.name,

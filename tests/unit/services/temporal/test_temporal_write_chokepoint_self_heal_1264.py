@@ -33,6 +33,8 @@ file -- FilesystemVectorStore, ProjectionMatrixManager, and VectorQuantizer
 are all real, exercised through the real upsert_points() write path.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -152,13 +154,13 @@ class TestWriteChokepointSelfHeal:
         healed_matrix = np.load(str(matrix_file))
         assert healed_matrix.shape == (_DIM, 64)
 
-    def test_upsert_points_genuine_failure_after_heal_attempt_still_propagates(
-        self, tmp_path
-    ):
+    def test_upsert_points_raises_for_never_created_collection_pre_heal(self, tmp_path):
         """Anti-silent-failure: if the collection itself does not really exist
         (no valid collection_meta.json), upsert_points must still raise --
         the chokepoint self-heal only covers a missing matrix on an otherwise
-        valid collection, never a collection that was never created.
+        valid collection, never a collection that was never created. This is
+        the PRE-heal ValueError guard (collection_exists() check), not a
+        failure surfacing after a heal attempt was made.
         """
         vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
 
@@ -168,3 +170,167 @@ class TestWriteChokepointSelfHeal:
                 [_make_point("repo:commit:" + "d" * 40 + ":0", _DIM, 915148800)],
                 watch_mode=True,
             )
+
+
+class TestAtomicShardHeal:
+    """Code-review follow-up on Bug #1264: two temporal worker threads that
+    both first-write the SAME missing-matrix shard concurrently must not hit
+    a torn-read window. _ensure_shard_has_projection_matrix() must write via
+    a temp file in the same directory then atomically os.replace() onto
+    projection_matrix.npy -- for BOTH the copy-from-base branch and the
+    regenerate branch -- so a concurrent reader/healer never observes a
+    partially-written file: either the old (absent) state, or the fully
+    written new file, never something in between.
+    """
+
+    def test_copy_branch_writes_via_tmp_file_then_atomic_replace(
+        self, tmp_path, monkeypatch
+    ):
+        """Copy-from-base branch: os.replace(tmp, projection_matrix.npy) must
+        be the final step, never a direct shutil.copy2 straight onto the
+        target path.
+        """
+        from code_indexer.services.temporal.temporal_migration_service import (
+            _ensure_shard_has_projection_matrix,
+        )
+
+        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        base_name = "code-indexer-temporal-voyage_code_3"
+        shard_name = f"{base_name}-2024Q1"
+
+        vector_store.create_collection(base_name, _DIM)
+        base_path = vector_store._get_collection_path(base_name)
+
+        vector_store.create_collection(shard_name, _DIM)
+        shard_path = vector_store._get_collection_path(shard_name)
+        matrix_file = shard_path / "projection_matrix.npy"
+        matrix_file.unlink()
+        ProjectionMatrixManager._matrix_cache.clear()
+
+        import os as os_module
+
+        real_replace = os_module.replace
+        replace_calls = []
+
+        def spy_replace(src, dst):
+            replace_calls.append((os_module.fspath(src), os_module.fspath(dst)))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(
+            "code_indexer.services.temporal.temporal_migration_service.os.replace",
+            spy_replace,
+        )
+
+        _ensure_shard_has_projection_matrix(shard_path, base_path, _DIM)
+
+        assert matrix_file.exists()
+        assert len(replace_calls) == 1, (
+            f"expected exactly one os.replace() call for the atomic write, "
+            f"got {replace_calls}"
+        )
+        tmp_src, dst = replace_calls[0]
+        assert dst == str(matrix_file)
+        assert tmp_src != str(matrix_file), (
+            "must replace FROM a distinct temp file, not write matrix_file directly"
+        )
+        assert Path(tmp_src).parent == matrix_file.parent
+        assert not Path(tmp_src).exists(), "temp file must be gone after the rename"
+
+    def test_regenerate_branch_writes_via_tmp_file_then_atomic_replace(
+        self, tmp_path, monkeypatch
+    ):
+        """Regenerate branch (no base collection available): same atomic
+        temp-file-then-os.replace contract applies.
+        """
+        from code_indexer.services.temporal.temporal_migration_service import (
+            _ensure_shard_has_projection_matrix,
+        )
+
+        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        shard_name = "code-indexer-temporal-voyage_code_3-2026Q2"
+        vector_store.create_collection(shard_name, _DIM)
+        shard_path = vector_store._get_collection_path(shard_name)
+        matrix_file = shard_path / "projection_matrix.npy"
+        matrix_file.unlink()
+        ProjectionMatrixManager._matrix_cache.clear()
+
+        import os as os_module
+
+        real_replace = os_module.replace
+        replace_calls = []
+
+        def spy_replace(src, dst):
+            replace_calls.append((os_module.fspath(src), os_module.fspath(dst)))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(
+            "code_indexer.services.temporal.temporal_migration_service.os.replace",
+            spy_replace,
+        )
+
+        _ensure_shard_has_projection_matrix(shard_path, None, _DIM)
+
+        assert matrix_file.exists()
+        assert len(replace_calls) == 1
+        tmp_src, dst = replace_calls[0]
+        assert dst == str(matrix_file)
+        assert tmp_src != str(matrix_file)
+        assert Path(tmp_src).parent == matrix_file.parent
+        assert not Path(tmp_src).exists()
+
+        healed = np.load(str(matrix_file))
+        assert healed.shape == (_DIM, 64)
+
+    def test_concurrent_healers_of_same_shard_both_succeed_with_valid_matrix(
+        self, tmp_path
+    ):
+        """Real-concurrency regression: two threads both self-healing the
+        SAME missing-matrix shard at the same time must both complete
+        without exception, and the file left on disk afterward must be a
+        valid, correctly-shaped, loadable matrix -- never a torn/corrupt
+        write. Uses a real threading.Barrier to line the threads up at the
+        same starting point (deterministic synchronization, not a sleep) to
+        maximize the chance both threads overlap on the write.
+
+        No mocks: real FilesystemVectorStore, real ProjectionMatrixManager,
+        real threads, real filesystem.
+        """
+        import threading
+
+        from code_indexer.services.temporal.temporal_migration_service import (
+            _ensure_shard_has_projection_matrix,
+        )
+
+        vector_store = FilesystemVectorStore(base_path=tmp_path / "index")
+        shard_name = "code-indexer-temporal-voyage_code_3-2025Q4"
+        vector_store.create_collection(shard_name, _DIM)
+        shard_path = vector_store._get_collection_path(shard_name)
+        matrix_file = shard_path / "projection_matrix.npy"
+        matrix_file.unlink()
+        ProjectionMatrixManager._matrix_cache.clear()
+
+        thread_count = 4
+        barrier = threading.Barrier(thread_count)
+        errors: list = []
+
+        def worker():
+            try:
+                barrier.wait(timeout=10)
+                _ensure_shard_has_projection_matrix(shard_path, None, _DIM)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive(), "healer thread did not finish in time"
+
+        assert not errors, f"concurrent self-heal raised: {errors}"
+        assert matrix_file.exists()
+
+        # The file left behind must be a fully-formed, loadable matrix -- not
+        # truncated/corrupt from an interleaved partial write.
+        healed = np.load(str(matrix_file))
+        assert healed.shape == (_DIM, 64)
