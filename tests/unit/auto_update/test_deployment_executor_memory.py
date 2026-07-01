@@ -279,7 +279,8 @@ class TestEnsureSwapFile:
     def test_swap_fallocate_failure(self, executor, caplog):
         """
         When fallocate returns non-zero,
-        the method must log DEPLOY-GENERAL-093 and return False.
+        the method must log DEPLOY-GENERAL-093 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
@@ -291,16 +292,19 @@ class TestEnsureSwapFile:
                 ),  # fallocate fails
             ]
 
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-093" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-093" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
     def test_swap_chmod_failure(self, executor, caplog):
         """
         When chmod returns non-zero,
-        the method must log DEPLOY-GENERAL-094 and return False.
+        the method must log DEPLOY-GENERAL-094 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
@@ -311,16 +315,19 @@ class TestEnsureSwapFile:
                 make_proc(returncode=1, stderr="chmod: cannot access"),  # chmod fails
             ]
 
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-094" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-094" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
     def test_swap_mkswap_failure(self, executor, caplog):
         """
         When mkswap returns non-zero,
-        the method must log DEPLOY-GENERAL-095 and return False.
+        the method must log DEPLOY-GENERAL-095 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
@@ -332,16 +339,19 @@ class TestEnsureSwapFile:
                 make_proc(returncode=1, stderr="mkswap: error"),  # mkswap fails
             ]
 
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-095" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-095" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
     def test_swap_swapon_failure(self, executor, caplog):
         """
         When swapon /swapfile returns non-zero,
-        the method must log DEPLOY-GENERAL-096 and return False.
+        the method must log DEPLOY-GENERAL-096 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
@@ -356,11 +366,13 @@ class TestEnsureSwapFile:
                 ),  # swapon fails
             ]
 
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-096" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-096" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
     def test_swap_fstab_already_contains_entry(self, executor, caplog):
         """
@@ -437,18 +449,21 @@ class TestEnsureSwapFile:
     def test_swap_exception_handling(self, executor, caplog):
         """
         When subprocess.run raises an unexpected exception,
-        the method must log DEPLOY-GENERAL-098 and return False.
+        the method must log DEPLOY-GENERAL-098 at WARNING and still return
+        True (Bug #1254: swap setup is best-effort/non-fatal).
         """
         import logging
 
         with patch(
             "subprocess.run", side_effect=RuntimeError("Unexpected system error")
         ):
-            with caplog.at_level(logging.ERROR):
+            with caplog.at_level(logging.WARNING):
                 result = executor._ensure_swap_file()
 
-        assert result is False
-        assert any("DEPLOY-GENERAL-098" in r.message for r in caplog.records)
+        assert result is True
+        warn_records = [r for r in caplog.records if "DEPLOY-GENERAL-098" in r.message]
+        assert len(warn_records) > 0
+        assert all(r.levelname == "WARNING" for r in warn_records)
 
 
 # ---------------------------------------------------------------------------
