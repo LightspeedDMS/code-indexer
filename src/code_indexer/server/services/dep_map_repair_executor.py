@@ -72,7 +72,7 @@ from code_indexer.server.services.dep_map_file_utils import (
     parse_yaml_frontmatter as _parse_yaml_frontmatter_util,
 )
 from code_indexer.server.services.dep_map_health_detector import (
-    REPAIRABLE_ANOMALY_TYPES,
+    PHASE1_REANALYSIS_ANOMALY_TYPES,
     DepMapHealthDetector,
     HealthReport,
 )
@@ -426,7 +426,7 @@ class DepMapRepairExecutor:
         broken_domains = [
             a
             for a in health_report.anomalies
-            if a.type in REPAIRABLE_ANOMALY_TYPES and a.domain is not None
+            if a.type in PHASE1_REANALYSIS_ANOMALY_TYPES and a.domain is not None
         ]
 
         if not broken_domains:

@@ -1339,3 +1339,89 @@ Additional integration tests verify backward compatibility on every release.
         assert any("absent-domain" in f for f in result.fixed), (
             f"absent-domain should be fixed. fixed={result.fixed}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug #1259: frontmatter_json_mismatch must NOT trigger Phase 1 Claude re-analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPhase1SkipsFrontmatterJsonMismatch1259:
+    """
+    frontmatter_json_mismatch has a free, deterministic fix in Phase 3.5
+    (_sync_frontmatter_repos). Phase 1 (expensive Claude CLI re-analysis)
+    must never be invoked for this anomaly type.
+    """
+
+    def test_frontmatter_json_mismatch_does_not_invoke_domain_analyzer(self, tmp_path):
+        """Only anomaly present is frontmatter_json_mismatch; analyzer must not be called."""
+        make_domains_json(
+            tmp_path,
+            [
+                {
+                    "name": "sync-domain",
+                    "description": "d",
+                    "participating_repos": ["repo-alpha"],
+                }
+            ],
+        )
+        # Default frontmatter contains participating_repos: [repo-alpha, repo-beta]
+        # -- mismatches the JSON's [repo-alpha] above. JSON is a SUBSET of the
+        # frontmatter repos (not a repo unknown to _index.md's matrix) so the
+        # Phase 3.5 sync only narrows participating_repos and never introduces
+        # a repo absent from _index.md's matrix -- keeping the scenario isolated
+        # to exactly the frontmatter_json_mismatch anomaly, with no incidental
+        # stale_index side effect once synced.
+        make_domain_file(tmp_path, "sync-domain")
+        make_index_md(tmp_path)
+
+        detector = _get_health_detector()
+        health_report = detector.detect(tmp_path)
+
+        anomaly_types = {a.type for a in health_report.anomalies}
+        assert anomaly_types == {"frontmatter_json_mismatch"}, (
+            f"Precondition failed: expected exactly frontmatter_json_mismatch, "
+            f"got {anomaly_types}"
+        )
+
+        analyzer_calls: List[str] = []
+
+        def recording_analyzer(output_dir, domain, domain_list, repo_list):
+            analyzer_calls.append(domain["name"])
+            content = VALID_DOMAIN_CONTENT.replace("test-domain", domain["name"])
+            (output_dir / f"{domain['name']}.md").write_text(content)
+            return True
+
+        executor = _get_executor(domain_analyzer=recording_analyzer)
+        result = executor.execute(tmp_path, health_report)
+
+        # Phase 1 must NOT invoke the Claude CLI analyzer for this anomaly type.
+        assert analyzer_calls == [], (
+            f"Claude CLI domain_analyzer was invoked for frontmatter_json_mismatch: "
+            f"{analyzer_calls}"
+        )
+
+        # Repair still converges: Phase 3.5's free frontmatter sync clears the anomaly.
+        final_report = detector.detect(tmp_path)
+        assert final_report.status == "healthy"
+        assert result.final_health_status == "healthy"
+        assert result.anomalies_after == 0
+
+    def test_frontmatter_json_mismatch_remains_repairable_but_not_phase1(self):
+        """
+        REPAIRABLE_ANOMALY_TYPES (health-detector "is this repairable at all" set)
+        must still include frontmatter_json_mismatch -- it IS repairable, just via
+        Phase 3.5, not Phase 1. The new PHASE1_REANALYSIS_ANOMALY_TYPES set (the
+        "does this anomaly need Claude CLI re-analysis" set) must exclude it while
+        keeping every other repairable anomaly type.
+        """
+        from code_indexer.server.services.dep_map_health_detector import (
+            PHASE1_REANALYSIS_ANOMALY_TYPES,
+            REPAIRABLE_ANOMALY_TYPES,
+        )
+
+        assert "frontmatter_json_mismatch" in REPAIRABLE_ANOMALY_TYPES
+        assert "frontmatter_json_mismatch" not in PHASE1_REANALYSIS_ANOMALY_TYPES
+        assert PHASE1_REANALYSIS_ANOMALY_TYPES == REPAIRABLE_ANOMALY_TYPES - {
+            "frontmatter_json_mismatch"
+        }
