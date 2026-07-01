@@ -1198,11 +1198,13 @@ Additional integration tests verify backward compatibility on every release.
 
 class TestRepairBugB_DeleteBeforeAnalyze:
     """
-    Bug B: _run_phase1() must delete the broken domain file BEFORE calling
-    the analyzer, so Claude starts fresh rather than building on broken content.
-
-    If the broken file is not deleted first, the analyzer (via previous_domain_dir)
-    receives the broken content as input and may preserve its broken structure.
+    Historical note: Story #342 "Bug B" originally made _run_phase1() delete the
+    broken domain file BEFORE calling the analyzer, so Claude would start fresh
+    rather than build on broken content. That directly defeated the sibling
+    Story #342 "Bug 2" fix (passing previous_domain_dir so Claude could EXTEND,
+    IMPROVE, and CORRECT existing content) -- see Bug #1260. Bug #1260 removed
+    the pre-analysis delete, so this class now asserts the CURRENT (corrected)
+    contract: the broken file is preserved, not deleted, before the analyzer runs.
     """
 
     def _make_incomplete_domain_content(self, name: str) -> str:
@@ -1243,10 +1245,11 @@ Version compatibility is enforced via semver pinning in requirements.txt.
 Additional integration tests verify backward compatibility on every release.
 """
 
-    def test_broken_file_deleted_before_analyzer_called(self, tmp_path):
+    def test_broken_file_no_longer_deleted_before_analyzer_called(self, tmp_path):
         """
         When _run_phase1() processes an incomplete_domain anomaly, the existing
-        broken domain file MUST be deleted before calling the analyzer.
+        broken domain file MUST still exist when the analyzer is called (Bug #1260
+        reversed the prior delete-before-analyze behavior).
 
         Verified by inspecting the filesystem state inside the analyzer callable.
         """
@@ -1286,12 +1289,14 @@ Additional integration tests verify backward compatibility on every release.
         executor = _get_executor(domain_analyzer=observing_analyzer)
         executor.execute(tmp_path, health_report)
 
-        # Bug B fix: file must NOT exist when analyzer is called
+        # Bug #1260 fix: file MUST exist when analyzer is called (preserved for
+        # previous_domain_dir reuse), reversing the old Bug B delete-before-analyze.
         assert len(file_existed_when_analyzer_called) > 0, (
             "Analyzer was never called -- check test setup"
         )
-        assert not any(file_existed_when_analyzer_called), (
-            "Bug B: broken domain file was NOT deleted before calling the analyzer. "
+        assert all(file_existed_when_analyzer_called), (
+            "Bug #1260: broken domain file was deleted before calling the "
+            "analyzer, defeating previous_domain_dir reuse. "
             f"file_existed_when_analyzer_called={file_existed_when_analyzer_called}"
         )
 
@@ -1338,6 +1343,120 @@ Additional integration tests verify backward compatibility on every release.
         )
         assert any("absent-domain" in f for f in result.fixed), (
             f"absent-domain should be fixed. fixed={result.fixed}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug #1260: broken domain file must be PRESERVED (not deleted) before the
+# analyzer runs, so the previous_domain_dir "EXTEND, IMPROVE, and CORRECT"
+# reuse block (Story #342 Bug 2) actually fires instead of being dead code.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRepairBug1260_FileNotDeletedBeforeAnalyze:
+    """
+    Bug #1260: _run_phase1() must NOT delete the broken domain file before
+    calling the analyzer. The Story #342 "Bug 2" fix passes previous_domain_dir
+    to the analyzer precisely so Claude can see the existing (partially correct)
+    content and extend/improve/correct it rather than regenerating from scratch.
+    The Story #342 "Bug B" fix (delete-before-analyze) defeated that reuse path
+    by removing the very file the analyzer needed to see. This test proves the
+    file is still present -- with its original content intact -- when the
+    analyzer callable is invoked.
+    """
+
+    def _make_incomplete_domain_content(self, name: str) -> str:
+        """
+        Content >1000 chars that passes size check but is MISSING ## Overview,
+        triggering incomplete_domain (not undersized_domain).
+        """
+        return f"""\
+---
+domain: {name}
+description: A domain missing the Overview section for repair testing
+participating_repos:
+  - repo-alpha
+  - repo-beta
+last_analyzed: "2026-01-01T00:00:00Z"
+---
+
+# Domain Analysis: {name}
+
+## Repository Roles
+
+- **repo-alpha**: Primary service provider implementing the core logic.
+  This repository contains the authoritative implementation of the business
+  rules and exposes a stable REST API consumed by downstream repositories.
+  It provides authentication, authorization, and session management features
+  that are critical for the entire platform security model.
+- **repo-beta**: Secondary consumer that depends on repo-alpha API.
+  This repository handles user-facing features and delegates domain logic
+  to repo-alpha via synchronous HTTP calls. It also maintains a local cache
+  of frequently accessed resources to reduce latency for end users.
+
+## Intra-Domain Dependencies
+
+repo-beta imports from repo-alpha via standard REST API calls.
+Evidence: repo-beta/src/client.py imports requests and calls /api/v1/items.
+The dependency is unidirectional. No circular dependency exists.
+Version compatibility is enforced via semver pinning in requirements.txt.
+Additional integration tests verify backward compatibility on every release.
+"""
+
+    def test_broken_file_preserved_for_previous_domain_dir_reuse_1260(self, tmp_path):
+        """
+        When _run_phase1() processes an incomplete_domain anomaly, the existing
+        broken-but-substantial domain file MUST still exist -- with its ORIGINAL
+        content unchanged -- at the moment the analyzer callable is invoked.
+
+        Verified by inspecting the filesystem state (existence AND content)
+        from inside the analyzer callable, before it writes anything.
+        """
+        broken_content = self._make_incomplete_domain_content("reuse-domain")
+        domain_file = tmp_path / "reuse-domain.md"
+        domain_file.write_text(broken_content)
+        make_domains_json(
+            tmp_path,
+            [
+                {
+                    "name": "reuse-domain",
+                    "description": "d",
+                    "participating_repos": ["repo-alpha", "repo-beta"],
+                }
+            ],
+        )
+        make_index_md(tmp_path)
+
+        detector = _get_health_detector()
+        health_report = detector.detect(tmp_path)
+        assert any(
+            a.type == "incomplete_domain" and a.domain == "reuse-domain"
+            for a in health_report.anomalies
+        ), "Precondition: reuse-domain must have incomplete_domain anomaly"
+
+        observed_content_when_analyzer_called = []
+
+        def observing_analyzer(output_dir, domain, domain_list, repo_list):
+            f = output_dir / f"{domain['name']}.md"
+            # Bug #1260 fix: file must still exist with ORIGINAL content so
+            # previous_domain_dir reuse (Story #342 Bug 2) can see it.
+            observed_content_when_analyzer_called.append(
+                f.read_text() if f.exists() else None
+            )
+            valid_content = VALID_DOMAIN_CONTENT.replace("test-domain", domain["name"])
+            f.write_text(valid_content)
+            return True
+
+        executor = _get_executor(domain_analyzer=observing_analyzer)
+        executor.execute(tmp_path, health_report)
+
+        assert len(observed_content_when_analyzer_called) > 0, (
+            "Analyzer was never called -- check test setup"
+        )
+        assert observed_content_when_analyzer_called[0] == broken_content, (
+            "Bug #1260: broken domain file was deleted (or altered) before "
+            "calling the analyzer, defeating previous_domain_dir reuse. "
+            f"observed={observed_content_when_analyzer_called[0]!r}"
         )
 
 

@@ -450,13 +450,15 @@ class DepMapRepairExecutor:
 
             for attempt in range(1, self.MAX_DOMAIN_RETRIES + 1):
                 try:
-                    # Bug B fix: delete broken file before analyzer runs,
-                    # so Claude starts fresh rather than building on broken content
-                    domain_file = output_dir / f"{anomaly.domain}.md"
-                    if domain_file.exists():
-                        domain_file.unlink()
-                        self._log(f"Removed broken domain file: {anomaly.domain}")
-
+                    # Bug #1260 fix: do NOT delete the broken domain file before
+                    # the analyzer runs. Deleting it here defeated the
+                    # previous_domain_dir "EXTEND, IMPROVE, and CORRECT" reuse
+                    # block (Story #342 Bug 2) -- that block is gated on the
+                    # domain file existing, so pre-emptively unlinking it made
+                    # the reuse plumbing permanently dead code. Leaving the
+                    # file in place lets the analyzer see and build upon the
+                    # existing (possibly partially correct) content instead of
+                    # always regenerating the domain from scratch.
                     self._domain_analyzer(output_dir, domain_info, domain_list, [])
                     domain_file = output_dir / f"{anomaly.domain}.md"
                     if domain_file.exists() and domain_file.stat().st_size > 0:
