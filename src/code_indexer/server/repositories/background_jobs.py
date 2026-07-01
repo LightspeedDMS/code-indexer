@@ -26,6 +26,12 @@ from dataclasses import dataclass, asdict, fields
 # class object, not just the type annotation.
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
+# Bug #1256: driver-agnostic classifier shared with the INSERT-path
+# unique-violation detection in job_tracker._atomic_insert_impl (Bug
+# #1252/#1235). No circular import risk: job_tracker.py does not import
+# from this module.
+from code_indexer.server.services.job_tracker import is_active_job_unique_violation
+
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
         ServerResourceConfig,
@@ -1127,11 +1133,27 @@ class BackgroundJobManager:
                 if self._job_tracker is not None:
                     try:
                         self._job_tracker.update_status(job_id, status="running")
-                    except Exception:
-                        logging.warning(
-                            f"JobTracker.update_status(running) failed for {job_id}",
-                            exc_info=True,
-                        )
+                    except Exception as exc:
+                        # Bug #1256: a unique-violation from idx_active_job_per_repo
+                        # here is a benign cluster-restart race (a stale row for the
+                        # same singleton (operation_type, repo_alias) key is still
+                        # active) — the job still executes correctly either way, so
+                        # this is log-noise, not a real failure. Classify via the
+                        # same driver-agnostic helper used on the INSERT path
+                        # (Bug #1252/#1235) and demote to DEBUG with no traceback.
+                        # Anything else keeps the original WARNING+traceback
+                        # (Messi #13 anti-silent-failure — never swallow silently).
+                        if is_active_job_unique_violation(exc):
+                            logging.debug(
+                                f"JobTracker.update_status(running) skipped for {job_id}: "
+                                f"tracker slot already owned by a concurrent/stale holder "
+                                f"(benign idx_active_job_per_repo dedup race)"
+                            )
+                        else:
+                            logging.warning(
+                                f"JobTracker.update_status(running) failed for {job_id}",
+                                exc_info=True,
+                            )
 
                 logging.info(f"Starting background job {job_id}")
 

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.14.0] - 2026-07-01
+
+### Fixed
+- **#1256 (P3): `JobTracker.update_status(running)` logged a full-traceback WARNING on a benign `idx_active_job_per_repo` UniqueViolation during multi-node cluster restart.** On a rolling restart, the `update_status('running')` UPDATE for the node-`server` singleton startup jobs (`reap_activated_repos` / `data_retention_cleanup` / `startup_reconcile`) collides on the `idx_active_job_per_repo` partial unique index with a stale-running row left by the SIGKILLed pre-restart process (before `startup_reconcile` demotes it). The raw `psycopg.errors.UniqueViolation` (PG) / `sqlite3.IntegrityError` (SQLite) bubbled to a generic `except` and logged a traceback at WARNING on every restart -- log-noise that trips the Story #1122 audit gate. The job executes correctly regardless (registration dedup already prevents genuine live duplicates); this is the UPDATE-path sibling of the INSERT-path #1252/#1235 fix. Discovered during the v11.13.0 staging post-deploy log audit. Fix (conservative, no execution-behavior change): extracted the `('IntegrityError','UniqueViolation')` class-name check already used inline by `JobTracker._atomic_insert_impl` into a shared driver-agnostic helper `is_active_job_unique_violation()` (single source of truth, Messi #4); the `update_status(running)` catch site now demotes the benign case to DEBUG (no traceback) while ALL other exceptions keep the original WARNING + traceback (Messi #13 anti-silent-failure). The dedup index, registration dedup, and `startup_reconcile` are untouched (out of scope).
+
 ## [11.13.0] - 2026-06-30
 
 ### Fixed
