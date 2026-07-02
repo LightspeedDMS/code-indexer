@@ -635,7 +635,7 @@ def register_auth_routes(
 
     @app.post("/api/keys", response_model=CreateApiKeyResponse, status_code=201)
     def create_api_key(
-        current_user: dependencies.User = Depends(dependencies.get_current_user),
+        current_user: dependencies.User = Depends(dependencies.get_current_user_hybrid),
         request: CreateApiKeyRequest = Body(...),
     ):
         """
@@ -687,7 +687,7 @@ def register_auth_routes(
 
     @app.get("/api/keys", response_model=ApiKeyListResponse)
     def list_api_keys(
-        current_user: dependencies.User = Depends(dependencies.get_current_user),
+        current_user: dependencies.User = Depends(dependencies.get_current_user_hybrid),
     ):
         """
         List all API keys for the authenticated user.
@@ -701,7 +701,7 @@ def register_auth_routes(
     @app.delete("/api/keys/{key_id}", status_code=200)
     def delete_api_key(
         key_id: str,
-        current_user: dependencies.User = Depends(dependencies.get_current_user),
+        current_user: dependencies.User = Depends(dependencies.get_current_user_hybrid),
     ):
         """
         Delete an API key.
