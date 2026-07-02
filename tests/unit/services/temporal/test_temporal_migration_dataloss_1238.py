@@ -760,30 +760,30 @@ def _setup_collection_with_missing_json_orphan(
 
 
 # ---------------------------------------------------------------------------
-# Test E: Structural orphan (missing JSON) proceeds with warning — no raise
+# Test E: Structural orphan (missing JSON) HARD ABORTS (Bug #1286 supersedes
+# the #1238 "proceed with warning" policy below)
 # ---------------------------------------------------------------------------
 
 
-class TestCaseE_StructuralOrphanProceedsWithWarning:
-    """Test E: A collection with a structural orphan (missing JSON payload) MUST NOT
-    raise.  It migrates resolvable points, writes the marker, and logs a WARNING.
+class TestCaseE_StructuralOrphanHardAborts:
+    """Test E: A collection with a structural orphan (missing JSON payload) MUST
+    raise, write no marker, and leave the monolith fully intact.
 
-    Structural orphans are permanently un-recoverable (data is gone regardless of any
-    git fix).  Raising would deadlock migration forever and block sibling collections.
-
-    Reason-aware policy (Bug #1238 code-review fix):
-      - missing_json / missing_id_index => structural orphan => WARNING, proceed
-      - timestamp_unresolved => recoverable => raise, preserve monolith for re-run
+    SUPERSEDES the original Bug #1238 policy (structural orphan => WARNING,
+    proceed). Bug #1286 production forensics showed this policy silently
+    discarded ~32K already-embedded vectors while still reporting success —
+    losslessness must be all-or-nothing: ANY unmatched point aborts the whole
+    migration, never a partial silent skip.
     """
 
-    def test_missing_json_orphan_proceeds_with_warning(self, tmp_path, caplog):
-        """One deleted JSON payload (missing_json=1) must not block migration.
+    def test_missing_json_orphan_raises_no_marker_monolith_intact(self, tmp_path):
+        """One deleted JSON payload (missing_json=1) must ABORT the migration.
 
         3 real git commits (Q1/Q2/Q3) + 3 empty JSON payloads.  First payload
-        deleted => structural orphan.  Expected: 2 shards, marker written, WARNING
-        logged about orphan drop.  No RuntimeError raised.
+        deleted => structural orphan.  Expected: RuntimeError raised, zero
+        shards built, no marker written, monolith fully intact.
         """
-        import logging
+        import pytest
 
         from code_indexer.services.temporal.temporal_migration_service import (
             run_temporal_migration,
@@ -793,8 +793,7 @@ class TestCaseE_StructuralOrphanProceedsWithWarning:
             tmp_path
         )
 
-        # MUST NOT raise — raising on structural orphans deadlocks migration forever.
-        with caplog.at_level(logging.WARNING):
+        with pytest.raises(RuntimeError, match=r"aborted|orphan|structural|vectors"):
             run_temporal_migration(
                 index_path=index_path,
                 repo_alias="test-repo",
@@ -802,21 +801,15 @@ class TestCaseE_StructuralOrphanProceedsWithWarning:
             )
 
         shards = _find_quarterly_shards(index_path)
-        assert len(shards) == 2, (
-            f"Expected 2 shards (1 structural orphan excluded): {[d.name for d in shards]}"
+        assert shards == [], (
+            f"Expected zero shards built on abort, got: {[d.name for d in shards]}"
         )
-        total_migrated = sum(_read_shard_vector_count(d) for d in shards)
-        assert total_migrated == 2, (
-            f"Expected 2 vectors migrated (orphan excluded), got {total_migrated}"
+        assert not (coll_dir / MIGRATION_COMPLETE_MARKER).exists(), (
+            "marker must NOT be written when a structural orphan aborts the migration"
         )
-        assert (coll_dir / MIGRATION_COMPLETE_MARKER).exists(), (
-            "marker must be written even when a structural orphan is present"
+        assert (coll_dir / "hnsw_index.bin").exists(), (
+            "monolith hnsw_index.bin must be preserved on abort"
         )
-        assert not (coll_dir / "hnsw_index.bin").exists(), (
-            "monolith hnsw_index.bin must be deleted after successful migration"
+        assert (coll_dir / "id_index.bin").exists(), (
+            "monolith id_index.bin must be preserved on abort"
         )
-        warns = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any(
-            "orphan" in m.lower() or "missing_json" in m or "structural" in m.lower()
-            for m in warns
-        ), f"Expected WARNING about structural orphan; got: {warns}"

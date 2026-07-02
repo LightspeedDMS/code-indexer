@@ -123,15 +123,58 @@ def _extract_sha_from_point_id(point_id: str) -> Optional[str]:
     return candidate
 
 
+def _parse_git_log_stdout(stdout: str, repo_path: Path) -> Dict[str, datetime]:
+    """Parse ``git log --no-walk --format="%H %cI"`` stdout into {sha: datetime}.
+
+    Shared by both the batched call and the per-SHA retry fallback in
+    :func:`_batch_get_commit_timestamps` so the two paths cannot drift apart.
+    """
+    result: Dict[str, datetime] = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            # Expected format: "<40-char-sha> <ISO-8601-strict>"
+            # e.g.  "2421d586942eb5c4eca700fbf6bfc0c99af679ef 2024-03-15T10:22:44+00:00"
+            # git 2.x emits trailing Z for UTC commits (e.g. "2026-03-25T05:18:38Z").
+            # Python 3.9 fromisoformat() cannot parse the Z suffix — only 3.11+ can.
+            # Normalise Z -> +00:00 before parsing so all Python 3.x versions work.
+            space_idx = line.index(" ")
+            sha = line[:space_idx]
+            ts_str = line[space_idx + 1 :]
+            if ts_str.endswith("Z"):
+                ts_str = ts_str[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts_str).astimezone(timezone.utc)
+            result[sha] = dt
+        except Exception as exc:
+            logger.debug(
+                "Migration: skipping unparseable git log line %r for %s: %s",
+                line,
+                repo_path,
+                exc,
+            )
+    return result
+
+
 def _batch_get_commit_timestamps(
     repo_path: Path,
     shas: Set[str],
 ) -> Dict[str, datetime]:
     """Return a mapping of {sha: UTC datetime} for the given set of SHAs.
 
-    Uses a single ``git log`` subprocess call for all SHAs.  Any SHAs that
-    git does not recognise (e.g. not in the repo, or a fake SHA) are silently
-    omitted from the result.
+    Uses a single ``git log`` subprocess call for all SHAs in a chunk.  Any
+    SHAs that git does not recognise (e.g. not in the repo, or a fake SHA)
+    are silently omitted from the result.
+
+    Bug #1286 follow-up (empirically confirmed): ``git log --no-walk sha1
+    sha2 ... shaN`` resolves ALL revision arguments atomically BEFORE
+    producing any output — if even ONE SHA in the chunk is unresolvable (e.g.
+    from a rebase/squash/force-push/gc rewriting history), the entire command
+    fails (non-zero exit, EMPTY stdout) and drops timestamps for every OTHER
+    valid SHA in that same chunk too, not just the bad one. On a chunk
+    failure this function now retries each SHA in the chunk individually so a
+    single unresolvable SHA cannot poison its siblings.
 
     Args:
         repo_path: Path to the git repository root.
@@ -145,8 +188,6 @@ def _batch_get_commit_timestamps(
         return {}
 
     # git log --no-walk accepts multiple SHA arguments; output one line per SHA.
-    # Use %cI (strict ISO 8601 with T separator, e.g. "2024-03-15T10:22:44+00:00")
-    # NOT %ci (space format rejected by datetime.fromisoformat on Python 3.9).
     # Bug #1238: chunk SHAs to avoid E2BIG on large repos.
     # At ~41 bytes/SHA, _SHA_CHUNK_SIZE=1000 -> ~41 KB per call, well under ARG_MAX.
     result: Dict[str, datetime] = {}
@@ -172,34 +213,47 @@ def _batch_get_commit_timestamps(
             )
             continue
 
-        if proc.returncode != 0 and not proc.stdout:
-            # git returned error with no output (e.g. repo not initialised)
+        if proc.returncode != 0:
+            # Bug #1286: the batch call failed — most commonly because ONE SHA in
+            # this chunk is unresolvable (rewritten/rebased/squashed/gc'd history).
+            # git aborts the WHOLE call in that case, so retry one SHA at a time —
+            # bounded by len(chunk) (<= _SHA_CHUNK_SIZE) — to recover every OTHER
+            # valid SHA's timestamp instead of losing the entire chunk.
+            logger.debug(
+                "Migration: batched git log failed for %s (chunk %d-%d, "
+                "returncode=%d) — retrying %d SHA(s) individually",
+                repo_path,
+                chunk_start,
+                chunk_start + len(chunk),
+                proc.returncode,
+                len(chunk),
+            )
+            for sha in chunk:
+                try:
+                    single_proc = subprocess.run(
+                        ["git", "log", "--no-walk", "--format=%H %cI", sha],
+                        cwd=str(repo_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Migration: per-SHA git log retry failed for %s in %s: %s",
+                        sha,
+                        repo_path,
+                        exc,
+                    )
+                    continue
+                if single_proc.returncode != 0:
+                    # This specific SHA genuinely does not resolve (e.g. truly
+                    # rewritten out of history) — leave it absent; the caller's
+                    # payload-commit_timestamp fallback handles it.
+                    continue
+                result.update(_parse_git_log_stdout(single_proc.stdout, repo_path))
             continue
 
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                # Expected format: "<40-char-sha> <ISO-8601-strict>"
-                # e.g.  "2421d586942eb5c4eca700fbf6bfc0c99af679ef 2024-03-15T10:22:44+00:00"
-                # git 2.x emits trailing Z for UTC commits (e.g. "2026-03-25T05:18:38Z").
-                # Python 3.9 fromisoformat() cannot parse the Z suffix — only 3.11+ can.
-                # Normalise Z -> +00:00 before parsing so all Python 3.x versions work.
-                space_idx = line.index(" ")
-                sha = line[:space_idx]
-                ts_str = line[space_idx + 1 :]
-                if ts_str.endswith("Z"):
-                    ts_str = ts_str[:-1] + "+00:00"
-                dt = datetime.fromisoformat(ts_str).astimezone(timezone.utc)
-                result[sha] = dt
-            except Exception as exc:
-                logger.debug(
-                    "Migration: skipping unparseable git log line %r for %s: %s",
-                    line,
-                    repo_path,
-                    exc,
-                )
+        result.update(_parse_git_log_stdout(proc.stdout, repo_path))
 
     return result
 
@@ -363,17 +417,23 @@ def _build_quarter_buckets(
 ) -> Tuple[Dict[str, List[Tuple[int, str, Path]]], Dict[str, int]]:
     """Group vectors into quarterly buckets based on commit timestamp.
 
-    Timestamp resolution strategy (primary → fallback):
-    1. sha_timestamps dict keyed by commit SHA (from git log) — production path.
-    2. commit_timestamp field inside the JSON payload file — backward-compat path.
+    Timestamp resolution strategy (primary → fallback), Bug #1286 follow-up:
+    1. commit_timestamp field inside the JSON payload file — PRIMARY. Every
+       temporal payload has carried this field unconditionally since v7.x; it
+       is immutable, captured once at index time.
+    2. sha_timestamps dict keyed by commit SHA (from git log) — FALLBACK, used
+       only when the payload lacks commit_timestamp (legacy/pre-v7.x payloads,
+       or a corrupt/unreadable payload file). git history is mutable
+       (rebase/squash/force-push/gc), so it is deliberately NOT authoritative
+       over the payload's stored value.
 
     Args:
         collection_path: Monolithic collection directory.
         label_to_point_id: {int_label: point_id} from collection_meta.json.
         point_id_to_rel_path: {point_id: rel_json_path} from id_index.bin.
-        sha_timestamps: Optional pre-built {sha: datetime_utc} from git log.
-            When provided, used as the primary timestamp source before opening
-            each JSON file.
+        sha_timestamps: Optional pre-built {sha: datetime_utc} from git log,
+            consulted only as a fallback when the JSON payload has no
+            commit_timestamp.
 
     Returns:
         Tuple of (buckets, drop_counts) where:
@@ -413,38 +473,65 @@ def _build_quarter_buckets(
             drop_counts["missing_json"] += 1
             continue
 
+        # Bug #1286 follow-up: PAYLOAD commit_timestamp is now the PRIMARY
+        # timestamp source, git log the FALLBACK. Every temporal payload has
+        # carried payload.commit_timestamp unconditionally since v7.x — it is
+        # captured once at index time and is immutable. git history is
+        # mutable: a rebase/squash/force-push/gc can make a commit SHA
+        # unresolvable via `git log` even though the vector was correctly
+        # embedded and its payload correctly stamped. Preferring the payload
+        # avoids falsely hard-aborting a healthy index just because its
+        # git history was later rewritten. A corrupt/unreadable payload or an
+        # invalid commit_ts value degrades gracefully to the git fallback
+        # rather than aborting the point outright.
+        commit_ts = None
         try:
-            # Primary: prefer git-derived commit timestamps (authoritative).
-            sha = _extract_sha_from_point_id(point_id)
-            dt: Optional[datetime] = _sha_ts.get(sha) if sha else None
-
-            if dt is None:
-                # Fallback: every temporal payload carries payload.commit_timestamp
-                # (written unconditionally by the indexer since v7.x; required by
-                # temporal query filtering), so this resolves every vector even when
-                # the git lookup fails (e.g. ARG_MAX/E2BIG on a very large SHA set).
-                with open(src_json) as f:
-                    payload_data = json.load(f)
-                commit_ts = payload_data.get("payload", {}).get("commit_timestamp")
-                if commit_ts is None:
-                    commit_ts = payload_data.get("commit_timestamp")
-                if commit_ts is None:
-                    logger.debug(
-                        "Migration: no commit_timestamp in %s and no git timestamp "
-                        "for point %s — skipping",
-                        src_json,
-                        point_id,
-                    )
-                    drop_counts["timestamp_unresolved"] += 1
-                    continue
-                dt = datetime.fromtimestamp(int(commit_ts), tz=timezone.utc)
-
-            q = quarter_suffix(dt)
+            with open(src_json) as f:
+                payload_data = json.load(f)
+            commit_ts = payload_data.get("payload", {}).get("commit_timestamp")
+            if commit_ts is None:
+                commit_ts = payload_data.get("commit_timestamp")
         except Exception as exc:
-            logger.debug("Migration: error processing %s: %s — skipping", src_json, exc)
+            logger.debug(
+                "Migration: could not read commit_timestamp from %s: %s — "
+                "falling back to git timestamp for point %s",
+                src_json,
+                exc,
+                point_id,
+            )
+
+        dt: Optional[datetime] = None
+        if commit_ts is not None:
+            try:
+                dt = datetime.fromtimestamp(int(commit_ts), tz=timezone.utc)
+            except Exception as exc:
+                logger.debug(
+                    "Migration: invalid commit_timestamp %r in %s: %s — "
+                    "falling back to git timestamp for point %s",
+                    commit_ts,
+                    src_json,
+                    exc,
+                    point_id,
+                )
+                dt = None
+
+        if dt is None:
+            # Fallback: git-derived commit timestamp (legacy/pre-v7.x payloads
+            # that never stored commit_timestamp, or a corrupt payload above).
+            sha = _extract_sha_from_point_id(point_id)
+            dt = _sha_ts.get(sha) if sha else None
+
+        if dt is None:
+            logger.debug(
+                "Migration: no commit_timestamp in %s and no git timestamp "
+                "for point %s — skipping",
+                src_json,
+                point_id,
+            )
             drop_counts["timestamp_unresolved"] += 1
             continue
 
+        q = quarter_suffix(dt)
         buckets.setdefault(q, []).append((label, point_id, src_json))
 
     return buckets, drop_counts
@@ -720,8 +807,73 @@ def _build_one_shard(
     os.replace(migrating_dir, final_shard_dir)
 
 
+def _verify_migration_lossless_and_complete(
+    collection_name: str,
+    index_path: Path,
+    label_to_point_id: Dict[int, str],
+    quarter_buckets: Dict[str, List[Tuple[int, str, Path]]],
+    vectors_migrated: int,
+) -> None:
+    """Defensive invariant gate (Bug #1286 defect 2): NEVER write the completion
+    marker or delete the monolith unless the migration is PROVABLY lossless and
+    complete.
+
+    This is an INDEPENDENT line of defense (Messi #15 defensive invariants), not
+    merely a restatement of the abort-on-any-drop guard in
+    :func:`_migrate_one_collection`. Even if a future code change accidentally
+    lets a dropped/miscounted point slip past that guard, this gate is the last
+    checkpoint before the monolith is destroyed.
+
+    Args:
+        collection_name: Base (monolithic) collection name.
+        index_path: Parent index directory containing shard subdirectories.
+        label_to_point_id: The full source label->point_id mapping (count-in).
+        quarter_buckets: The buckets that were built into shards (count-out grouping).
+        vectors_migrated: Number of vectors actually written across all shards.
+
+    Raises:
+        RuntimeError: If vectors_migrated does not exactly equal the number of
+            source points (count-in != count-out), or any quarter bucket lacks
+            a completed shard directory (collection_meta.json) on disk.
+    """
+    expected = len(label_to_point_id)
+    if vectors_migrated != expected:
+        raise RuntimeError(
+            f"Migration aborted for {collection_name}: count mismatch before "
+            f"finalize — {vectors_migrated} vectors migrated but {expected} "
+            f"expected (count-in != count-out). Monolithic index preserved "
+            f"untouched; migration_complete.marker NOT written."
+        )
+
+    for q_str in quarter_buckets:
+        shard_name = f"{collection_name}-{q_str}"
+        shard_meta = index_path / shard_name / "collection_meta.json"
+        if not shard_meta.exists():
+            raise RuntimeError(
+                f"Migration aborted for {collection_name}: expected shard "
+                f"'{shard_name}' is missing collection_meta.json after the shard "
+                f"build loop reported success. Monolithic index preserved "
+                f"untouched; migration_complete.marker NOT written."
+            )
+
+
 def _cleanup_monolithic_collection(collection_path: Path) -> None:
-    """Write migration marker; delete monolithic binaries and JSON payload files."""
+    """Write migration marker; delete monolithic binaries and vector payload files.
+
+    Bug #1286 defect 3: JSON deletion is scoped to the precise payload-file
+    naming convention "vector_*.json" (matching temporal_reconciliation.py and
+    FilesystemVectorStore's real production payload naming,
+    e.g. filesystem_vector_store.py:1246/1250/1686) instead of a blanket
+    "*.json minus collection_meta.json" glob. The blanket glob also matched
+    (and permanently destroyed) bookkeeping files that are NOT vector payloads:
+    temporal_progress.json (crash-resume completed-commits tracker) and
+    temporal_meta.json (last_indexed_commit anchor used by
+    TemporalIndexer._load_last_indexed_commit for incremental indexing).
+    Destroying those files forces the next indexing run to lose its
+    incremental-resume anchor and fall back to a full git-history walk —
+    exactly the "expensive recovery ignores intact source" failure mode this
+    bug report describes.
+    """
     # Step 6: Write migration_complete.marker.
     (collection_path / MIGRATION_COMPLETE_MARKER).write_text("migration complete\n")
 
@@ -731,10 +883,9 @@ def _cleanup_monolithic_collection(collection_path: Path) -> None:
         if p.exists():
             p.unlink()
 
-    # Step 8: Delete monolithic JSON payload files.
-    for json_file in list(collection_path.rglob("*.json")):
-        if json_file.name == "collection_meta.json":
-            continue
+    # Step 8: Delete monolithic vector payload JSON files ONLY (never bookkeeping
+    # files such as collection_meta.json, temporal_progress.json, temporal_meta.json).
+    for json_file in list(collection_path.rglob("vector_*.json")):
         try:
             json_file.unlink()
         except OSError as exc:
@@ -753,10 +904,13 @@ def _migrate_one_collection(
         collection_path: Monolithic collection directory (e.g. index/code-indexer-temporal-X/).
         index_path: Parent index directory.
         progress_callback: Optional callable(str) for progress reporting.
-        repo_path: Optional git repository root for timestamp lookup via git log.
+        repo_path: Optional git repository root for FALLBACK timestamp lookup via
+            git log — only consulted for points whose JSON payload lacks
+            commit_timestamp (Bug #1286: payload is now the primary, immutable
+            source; git history is mutable and not authoritative over it).
             When provided, commit SHAs are extracted from all point_ids and their
-            timestamps are fetched from git in one batch call before bucketing.
-            Falls back to JSON payload timestamps when repo_path is None or git fails.
+            timestamps are fetched from git in one batch call before bucketing,
+            so the fallback is ready without a second pass.
     """
     import hnswlib
 
@@ -805,31 +959,34 @@ def _migrate_one_collection(
             drop_counts["missing_id_index"] + drop_counts["missing_json"]
         )
         timestamp_unresolved = drop_counts["timestamp_unresolved"]
+        total_dropped = structural_orphans + timestamp_unresolved
 
-        # Bug #1238 (reason-aware guard):
-        # - timestamp_unresolved > 0: recoverable — git lookup failed or payloads empty.
-        #   Raise and preserve the monolith so the caller can fix git and re-run.
-        # - structural orphans only (missing id_index / JSON file): permanently gone.
-        #   Raising would deadlock migration forever on one corrupt entry and block all
-        #   sibling collections.  Log a loud WARNING and proceed with the rest.
-        if timestamp_unresolved > 0:
+        # Bug #1286 (supersedes the #1238 "warn-and-continue" policy for structural
+        # orphans): losslessness is all-or-nothing. There is no "recoverable" case for
+        # a point that cannot be matched — production data confirmed that "proceed with
+        # a WARNING" silently discarded tens of thousands of already-embedded vectors
+        # while still writing migration_complete.marker and deleting the monolith. ANY
+        # drop reason (structural orphan OR unresolved timestamp) now hard-aborts the
+        # whole migration BEFORE any shard is built, so the monolith is untouched and
+        # the run is retryable after investigation.
+        if total_dropped > 0:
+            reasons = []
+            if drop_counts["missing_id_index"]:
+                reasons.append(f"missing_id_index={drop_counts['missing_id_index']}")
+            if drop_counts["missing_json"]:
+                reasons.append(f"missing_json={drop_counts['missing_json']}")
+            if timestamp_unresolved:
+                reasons.append(
+                    f"timestamp_unresolved={timestamp_unresolved} (unresolved commit "
+                    f"timestamps: git lookup returned no results and JSON payloads "
+                    f"contain no commit_timestamp)"
+                )
             raise RuntimeError(
-                f"Migration aborted for {collection_name}: "
-                f"{timestamp_unresolved} of {len(label_to_point_id)} vector(s) have "
-                f"unresolved commit timestamps (git lookup returned no results and JSON "
-                f"payloads contain no commit_timestamp). "
-                f"Monolithic index preserved — fix git access and re-run."
-            )
-
-        if structural_orphans > 0:
-            logger.warning(
-                "Migration: %d structural orphan(s) in %s will be skipped "
-                "(missing_id_index=%d, missing_json=%d) — entries are permanently "
-                "unrecoverable; proceeding with migration of resolvable vectors.",
-                structural_orphans,
-                collection_name,
-                drop_counts["missing_id_index"],
-                drop_counts["missing_json"],
+                f"Migration aborted for {collection_name}: {total_dropped} of "
+                f"{len(label_to_point_id)} vectors could not be matched to a quarterly "
+                f"shard ({'; '.join(reasons)}). Bug #1286: structural orphans and "
+                f"unresolved timestamps are both hard failures now — no silent skips. "
+                f"Monolithic index preserved untouched — investigate and re-run."
             )
 
         vectors_migrated = 0
@@ -856,6 +1013,17 @@ def _migrate_one_collection(
                     f"{shard_idx + 1}/{total_shards} shards, "
                     f"{vectors_migrated}/{total_vectors} vectors"
                 )
+
+        # Bug #1286 defect 2: explicit, independent invariant gate BEFORE the
+        # marker is written or the monolith is touched — see
+        # _verify_migration_lossless_and_complete docstring.
+        _verify_migration_lossless_and_complete(
+            collection_name=collection_name,
+            index_path=index_path,
+            label_to_point_id=label_to_point_id,
+            quarter_buckets=quarter_buckets,
+            vectors_migrated=vectors_migrated,
+        )
 
         _cleanup_monolithic_collection(collection_path)
 

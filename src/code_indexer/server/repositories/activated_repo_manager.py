@@ -96,6 +96,14 @@ class ActivatedRepoManager:
     GIT_COMMAND_TIMEOUT = 30  # seconds for general git commands
     GIT_FETCH_TIMEOUT = 60  # seconds for git fetch operations
 
+    # Bug #1285: fallback CoW clone timeout (seconds) used only when
+    # golden_repo_manager.resource_config is unavailable. Kept in sync with
+    # ServerResourceConfig.cow_clone_timeout (1 hour, sized for very large
+    # repos e.g. evolution ~1M files, phoenix 40GB). Real deployments always
+    # have resource_config wired, so this is defense-in-depth, never the
+    # primary source of truth.
+    _COW_CLONE_TIMEOUT_DEFAULT: int = 3600  # 1 hour
+
     def __init__(
         self,
         data_dir: Optional[str] = None,
@@ -2795,11 +2803,26 @@ class ActivatedRepoManager:
                     "ActivatedRepoManager._clone_with_copy_on_write invoked without clone_backend — wiring bug. "
                     "Story #1034 Commit 4 requires clone_backend injection."
                 )
+            # Bug #1285: a fixed 120s wall-clock kill on the CoW clone
+            # subprocess terminated legitimately long clones of large golden
+            # repos (e.g. a repo with a populated .code-indexer/ index
+            # containing hundreds of thousands of files). Drive the deadline
+            # from the same resource_config.cow_clone_timeout knob
+            # GoldenRepoManager already uses for its own CoW operations
+            # (default 3600s / 1 hour, sized for very large repos e.g.
+            # evolution ~1M files, phoenix 40GB) instead of a fixed low
+            # literal.
+            rc = getattr(self.golden_repo_manager, "resource_config", None)
+            clone_timeout = (
+                getattr(rc, "cow_clone_timeout", self._COW_CLONE_TIMEOUT_DEFAULT)
+                if rc is not None
+                else self._COW_CLONE_TIMEOUT_DEFAULT
+            )
             self._clone_backend.create_clone_at_path(
                 source_path,
                 dest_path,
                 preserve_attrs=False,
-                timeout=120,
+                timeout=clone_timeout,
             )
 
             self.logger.info(
@@ -2942,6 +2965,17 @@ class ActivatedRepoManager:
             return True
 
         except subprocess.TimeoutExpired:
+            # Bug #1285 follow-up: a timed-out CoW clone must not leak the
+            # partial dest_path directory (measured 15-21GB per timed-out
+            # activation in production, ~99GB total orphaned). Path is
+            # trusted for the same reason as the generic Exception branch
+            # below: dest_path is the caller-supplied destination for
+            # cp --reflink=auto, computed with no user-controlled traversal,
+            # and the clone never completed so no metadata row was
+            # committed — the deactivation rename-to-trash pattern does not
+            # apply here either.
+            if os.path.exists(dest_path):
+                shutil.rmtree(dest_path, ignore_errors=True)
             raise ActivatedRepoError(
                 f"Clone operation timed out: {source_path} -> {dest_path}"
             )

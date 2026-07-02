@@ -328,14 +328,13 @@ def log_watermark(
     Uses admin_token_provider.get_token() at call time to ensure the token
     used for the watermark query is not stale.
     """
-    from tests.e2e.log_audit_gate import get_log_watermark
+    from tests.e2e.log_audit_gate import flush_log_pipeline, get_log_watermark
 
-    # Flush to drain any startup entries before recording the watermark
-    handler = getattr(
-        getattr(log_audit_app_client.app, "state", None), "sqlite_log_handler", None
-    )
-    if handler is not None:
-        handler.flush()
+    # Flush the full logging pipeline (async_logging queue + SQLiteLogHandler's
+    # own writer queue) to drain any startup entries before recording the
+    # watermark. See flush_log_pipeline()'s docstring for the two-queue race
+    # this closes.
+    flush_log_pipeline(log_audit_app_client)
 
     return get_log_watermark(log_audit_app_client, admin_token_provider.get_token())
 
@@ -349,7 +348,8 @@ def _phase3_log_audit_gate(
     """Autouse session fixture: run the log-audit gate at Phase 3 teardown.
 
     Yields first (tests run), then at teardown:
-      1. Flush SQLiteLogHandler (deterministic drain, Bug #1078 mitigation).
+      1. Flush the full logging pipeline (async_logging queue listener +
+         SQLiteLogHandler's own writer queue) via flush_log_pipeline().
       2. Query admin_logs_query via MCP front door.
       3. Diff against log_watermark to find new entries.
       4. Fail with detailed report if any new non-allowlisted ERROR/WARNING found.
@@ -357,17 +357,15 @@ def _phase3_log_audit_gate(
     Calls admin_token_provider.get_token() at teardown time so the audit
     query uses a fresh token even if the phase ran longer than the JWT TTL.
     """
-    from tests.e2e.log_audit_gate import run_log_audit_gate
+    from tests.e2e.log_audit_gate import flush_log_pipeline, run_log_audit_gate
 
     yield  # Tests run here
 
     # --- Teardown: audit phase logs ---
-    # Flush the async writer to drain buffered entries (Bug #1078)
-    handler = getattr(
-        getattr(log_audit_app_client.app, "state", None), "sqlite_log_handler", None
-    )
-    if handler is not None:
-        handler.flush()
+    # Flush the full logging pipeline (async_logging queue + SQLiteLogHandler's
+    # own writer queue) to drain buffered entries before auditing. See
+    # flush_log_pipeline()'s docstring for the two-queue race this closes.
+    flush_log_pipeline(log_audit_app_client)
 
     # Obtain a fresh-enough token at teardown time (not the session-start token).
     teardown_token = admin_token_provider.get_token()

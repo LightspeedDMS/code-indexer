@@ -32,6 +32,8 @@ from .temporal_diff_scanner import TemporalDiffScanner
 from .temporal_migration_service import (
     _cleanup_monolithic_collection,
     _ensure_shard_has_projection_matrix,
+    _needs_temporal_migration,
+    run_temporal_migration,
 )
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
 
@@ -363,6 +365,63 @@ class TemporalIndexer:
             temporal = None
         return temporal if temporal is not None else base
 
+    def _recover_from_monolith_if_needed(self) -> None:
+        """Bug #1286 defect 4: cheap monolith re-extraction BEFORE any git-history walk.
+
+        If a previous migration (Story #1172 server-startup background job, or a
+        prior sharded-indexing run via close()) left an unmigrated monolithic
+        temporal HNSW collection on disk (present but no
+        migration_complete.marker), re-extract it into quarterly shards via the
+        real, cheap ``run_temporal_migration`` path (hnswlib.get_items() +
+        JSON copy — ZERO embedding-provider calls) instead of letting the
+        caller fall through to an expensive full git-history re-embed.
+
+        This is the SINGLE wiring point for the recovery guard: it covers both
+        the CLI subprocess entry point (``cidx index --index-commits``) and any
+        in-process caller, since both ultimately call ``index_commits()``. Only
+        when no real monolith remains (``_needs_temporal_migration`` is False —
+        i.e. already sharded, or genuinely absent) does control fall through to
+        the normal incremental/full git-history indexing path below.
+
+        Failures are non-fatal (logged WARNING): a scan/migration error here
+        must never block ordinary indexing from proceeding.
+        """
+        index_path = self.vector_store.base_path
+        try:
+            needs_recovery = _needs_temporal_migration(index_path)
+        except Exception as exc:
+            logger.warning(
+                "Bug #1286: monolith-recovery scan failed for %s: %s — "
+                "proceeding with normal indexing",
+                index_path,
+                exc,
+            )
+            return
+
+        if not needs_recovery:
+            return
+
+        logger.info(
+            "Bug #1286: unsharded monolith detected under %s — running cheap "
+            "HNSW re-extraction before any git-history walk (zero embedding "
+            "calls)",
+            index_path,
+        )
+        try:
+            run_temporal_migration(
+                index_path=index_path,
+                repo_alias=self.collection_name,
+                repo_path=self.codebase_dir,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Bug #1286: cheap monolith recovery failed for %s: %s — "
+                "proceeding with normal indexing (may fall back to full "
+                "history walk for affected collections)",
+                index_path,
+                exc,
+            )
+
     def index_commits(
         self,
         all_branches: bool = False,
@@ -383,6 +442,11 @@ class TemporalIndexer:
         Returns:
             IndexingResult with statistics
         """
+        # Bug #1286 defect 4: recover any unmigrated monolith BEFORE walking git
+        # history, so a recoverable collection is never bypassed in favor of an
+        # expensive full re-embed.
+        self._recover_from_monolith_if_needed()
+
         # Step 1: Get commit history
         commits_from_git = self._get_commit_history(
             all_branches, max_commits, since_date

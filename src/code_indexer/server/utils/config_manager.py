@@ -159,7 +159,7 @@ class ServerResourceConfig:
     git_untracked_file_timeout: int = 60  # 1 minute for untracked file check
 
     # Refresh scheduler timeouts (in seconds)
-    cow_clone_timeout: int = 600  # 10 minutes for CoW clone of large repos (11GB)
+    cow_clone_timeout: int = 3600  # 1 hour for CoW clone of very large repos (e.g. evolution ~1M files, phoenix 40GB); ~2-3x headroom over measured ~17-19 min
     git_update_index_timeout: int = 300  # 5 minutes for git update-index during refresh
     git_restore_timeout: int = 300  # 5 minutes for git restore during refresh
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config

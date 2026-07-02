@@ -274,7 +274,6 @@ python3 -m pytest \
     --deselect=tests/unit/global_repos/test_regex_search.py::TestRipgrepInternalDirectoryExclusion::test_timeout_error_includes_context \
     --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_no_extra_mcp_parameters \
     --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_parameter_name_consistency_rest_mcp \
-    --deselect=tests/unit/services/temporal/test_temporal_none_vector_validation.py::TestLayer3APIValidation::test_voyage_ai_detects_none_embedding_in_multi_batch_response \
     --deselect=tests/unit/services/temporal/test_temporal_worker_exception_logging.py::test_worker_exception_is_logged_and_propagated \
     --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereErrorHandling401Bug595Issue2::test_401_error_message_mentions_api_key \
     --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereErrorHandling401Bug595Issue2::test_401_response_raises_value_error \
