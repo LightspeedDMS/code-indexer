@@ -1018,8 +1018,12 @@ def make_lifespan(
                     )
                 )
 
-            # Start scheduler (internally checks if enabled)
-            description_refresh_scheduler.start()
+            # Start scheduler (internally checks if enabled).
+            # C4 (Bug #580 extension): in cluster (postgres) mode this scheduler is
+            # leader-gated -- started in _on_become_leader so only the leader runs it
+            # (avoids N replicas duplicating work / racing). Solo mode starts now.
+            if storage_mode != "postgres":
+                description_refresh_scheduler.start()
             app.state.description_refresh_scheduler = description_refresh_scheduler
 
             if server_config.claude_integration_config.description_refresh_enabled:
@@ -1070,7 +1074,9 @@ def make_lifespan(
                 storage_mode=storage_mode,
                 backend_registry=backend_registry,
             )
-            data_retention_scheduler.start()
+            # C4: leader-gated in cluster mode (started in _on_become_leader).
+            if storage_mode != "postgres":
+                data_retention_scheduler.start()
             app.state.data_retention_scheduler = data_retention_scheduler
             logger.info(
                 "Data retention scheduler started",
@@ -1119,7 +1125,9 @@ def make_lifespan(
                 background_job_manager=background_job_manager,
                 config_service=_reaper_config_service,
             )
-            activated_reaper_scheduler.start()
+            # C4: leader-gated in cluster mode (started in _on_become_leader).
+            if storage_mode != "postgres":
+                activated_reaper_scheduler.start()
             app.state.activated_reaper_scheduler = activated_reaper_scheduler
             logger.info(
                 "Activated reaper scheduler started",
@@ -2251,6 +2259,22 @@ def make_lifespan(
                         _dist_worker.start()
                         if self_monitoring_service is not None:
                             self_monitoring_service.start()
+                        # C4: start the leader-gated schedulers (only the leader runs
+                        # these in cluster mode; each internally checks its enabled flag).
+                        for _sched in (
+                            description_refresh_scheduler,
+                            data_retention_scheduler,
+                            activated_reaper_scheduler,
+                        ):
+                            if _sched is not None:
+                                try:
+                                    _sched.start()
+                                except Exception as e:
+                                    logger.warning(
+                                        f"C4: Failed to start leader-gated scheduler "
+                                        f"{type(_sched).__name__}: {e}",
+                                        extra={"correlation_id": get_correlation_id()},
+                                    )
 
                     def _on_lose_leadership():
                         logger.info(
@@ -2279,6 +2303,21 @@ def make_lifespan(
                                     f"Bug #580: Failed to stop self-monitoring service: {e}",
                                     extra={"correlation_id": get_correlation_id()},
                                 )
+                        # C4: stop the leader-gated schedulers on losing leadership.
+                        for _sched in (
+                            description_refresh_scheduler,
+                            data_retention_scheduler,
+                            activated_reaper_scheduler,
+                        ):
+                            if _sched is not None:
+                                try:
+                                    _sched.stop()
+                                except Exception as e:
+                                    logger.warning(
+                                        f"C4: Failed to stop leader-gated scheduler "
+                                        f"{type(_sched).__name__}: {e}",
+                                        extra={"correlation_id": get_correlation_id()},
+                                    )
 
                     _leader_election._on_become_leader = _on_become_leader
                     _leader_election._on_lose_leadership = _on_lose_leadership
