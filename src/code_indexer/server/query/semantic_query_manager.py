@@ -33,6 +33,7 @@ from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
 
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
+from ..services.constants import is_internal_meta_repo
 from ...search.query import SearchResult
 from ...proxy.config_manager import ProxyConfigManager
 from ...proxy.cli_integration import _execute_query
@@ -535,6 +536,37 @@ class SemanticQueryManager:
                 raise SemanticQueryError(
                     f"Repository '{repository_alias}' not found for user '{username}'"
                 )
+        elif search_mode in ("fts", "hybrid"):
+            # Bug #1287 (Defect B): an implicit fan-out (no explicit
+            # repository_alias -- "search everything visible") that requires
+            # an FTS index must skip the internal, auto-bootstrapped
+            # cidx-meta* bookkeeping repos. They are git-metadata stores
+            # (AI-generated repo descriptions, dependency-map markdown) that
+            # are never FTS-indexed by design -- not real user source code.
+            # Without this skip, every such fan-out logs a benign
+            # "FTS index not available for repository 'cidx-meta-global'"
+            # failure at WARNING ([QUERY-MIGRATE-006]) and ERROR
+            # ([QUERY-MIGRATE-008]), and -- when cidx-meta* is the only
+            # visible repo -- propagates to a top-level "Error in
+            # search_code" ERROR log too. An EXPLICIT
+            # repository_alias='cidx-meta-global' FTS request is unaffected
+            # (handled by the branch above) and still fails loud.
+            #
+            # is_internal_meta_repo() is an ANCHORED/EXACT match against
+            # {"cidx-meta", "cidx-meta-global"} -- a loose
+            # str.startswith("cidx-meta") check (the original fix) would
+            # over-match legitimate user repos such as
+            # "cidx-metadata-global" or "cidx-meta-analytics-global" and
+            # silently drop them from the fan-out (code-reviewer finding).
+            #
+            # Note this also excludes cidx-meta's semantic half in hybrid
+            # mode -- acceptable, since cidx-meta is a discovery/bookkeeping
+            # repo, not source code, and is never a hybrid search target.
+            all_repos = [
+                repo
+                for repo in all_repos
+                if not is_internal_meta_repo(str(repo.get("user_alias", "")))
+            ]
 
         # Perform the search
         start_time = time.time()

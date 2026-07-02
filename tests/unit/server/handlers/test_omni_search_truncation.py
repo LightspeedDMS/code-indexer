@@ -101,7 +101,9 @@ class TestOmniSearchAppliesTruncation:
                 handlers, "_apply_payload_truncation", side_effect=tracking_fn
             ),
             patch.object(
-                handlers, "_expand_wildcard_patterns", side_effect=lambda x, u: x
+                handlers,
+                "_expand_wildcard_patterns",
+                side_effect=lambda x, u, **kwargs: x,
             ),
         ):
             mock_service = Mock()
@@ -159,7 +161,9 @@ class TestOmniSearchAppliesTruncation:
                 handlers, "_apply_fts_payload_truncation", side_effect=tracking_fn
             ),
             patch.object(
-                handlers, "_expand_wildcard_patterns", side_effect=lambda x, u: x
+                handlers,
+                "_expand_wildcard_patterns",
+                side_effect=lambda x, u, **kwargs: x,
             ),
         ):
             mock_service = Mock()

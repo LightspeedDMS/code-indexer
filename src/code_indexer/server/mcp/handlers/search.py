@@ -356,7 +356,13 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     from ...multi.multi_search_config import MultiSearchConfig
     from ...multi.multi_search_service import MultiSearchService
 
-    repo_aliases = _expand_wildcard_patterns(params.get("repository_alias", []), user)
+    # Bug #1287 Defect B: search_mode is needed BEFORE wildcard expansion so
+    # the internal cidx-meta* bookkeeping repo(s) can be excluded from
+    # fts/hybrid wildcard fan-out (they have no FTS index by design).
+    search_mode = params.get("search_mode", "semantic")
+    repo_aliases = _expand_wildcard_patterns(
+        params.get("repository_alias", []), user, search_mode=search_mode
+    )
     if isinstance(repo_aliases, CapBreach):
         return cap_breach_response(repo_aliases)
     # Bug #894: enforce total fan-out cap after wildcard expansion + literal union
@@ -446,7 +452,6 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     response_format = params.get(
         "response_format", "grouped" if len(repo_aliases) > 1 else "flat"
     )
-    search_mode = params.get("search_mode", "semantic")
     fts_truncation_meta: Dict[str, Any] = {}
     if final_results:
         final_results, fts_truncation_meta = _apply_search_truncation(
