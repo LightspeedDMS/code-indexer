@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [11.17.0] - 2026-07-02
+
+### Fixed
+- **#1286 (P1): Temporal shard migration is now a guaranteed lossless verified move.** The Story #1172 monolith->quarterly-shard migration silently dropped embedded vectors, wrote a false `migration_complete.marker`, and deleted the source vector files before verification -- irreversible data loss. Migration now verifies losslessness (exact count/point-id reconciliation) BEFORE deleting the monolith, hard-aborts on ANY unplaceable vector (missing id_index / missing JSON / unresolved timestamp) before building shards (no silent skips), derives the shard quarter from the immutable payload `commit_timestamp` first (git log fallback, per-SHA-resilient so one bad SHA can't poison a batch), and recovers by re-extracting vectors from the monolith with ZERO re-embedding. Covered by a real-VoyageAI E2E suite (no mocks).
+- **#1285 (P2): Activation CoW clone timeout is config-driven with partial-clone cleanup.** Large golden-repo activations (evolution/phoenix, ~1M-file index) failed at a hardcoded 120s subprocess timeout; it now honors `cow_clone_timeout` (default raised 600->3600) across LocalCloneBackend and CowDaemonBackend, and a timed-out activation removes its partial clone before re-raising so retries are not blocked.
+- **#1283 (P2): Web UI "Create API Key" no longer returns 401.** `POST/GET/DELETE /api/keys` used Bearer-only `get_current_user`; they now use `get_current_user_hybrid`, which accepts both the `Authorization: Bearer` header and the web session cookie, matching the other Web-UI-facing REST routes.
+- **#1284 (P3): Stale-mock dimension guard test fixed and un-hidden.** `TestLayer3APIValidation` mocked 3-dim embeddings that a newer dimension guard rejected before the None-detection path was reached; mocks are now dimension-correct (1024-dim) and the test is no longer `--deselect`'d by `fast-automation.sh`.
+- **#1287 (P4): e2e log-audit gate two-queue flush race fixed.** The Phase 3 gate captured its watermark after draining only `SQLiteLogHandler`, leaving the `async_logging` queue-listener undrained; a new `flush_log_pipeline()` drains both. The benign `cidx-meta-global` "FTS index not available" condition (auto-bootstrapped internal repo) is allowlisted, scoped to that exact alias.
+
 ## [11.16.0] - 2026-07-01
 
 ### Fixed
