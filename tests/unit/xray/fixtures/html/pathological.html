@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-version="1.0.0">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Pathological HTML - Deep Nesting Stress Test</title>
+</head>
+<body class="page page--test" data-env="test">
+  <div class="l1" id="level-1">
+    <div class="l2" data-level="2">
+      <div class="l3" role="region">
+        <div class="l4">
+          <div class="l5" aria-hidden="true">
+            <div class="l6">
+              <div class="l7">
+                <div class="l8">
+                  <div class="l9">
+                    <div class="l10" id="deepest">
+                      <span class="deep-content" data-value="42">Deep content</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table with many columns -->
+  <table class="wide-table" role="table" aria-label="Wide table">
+    <thead>
+      <tr>
+        <th scope="col">ID</th><th scope="col">Name</th><th scope="col">Email</th>
+        <th scope="col">Role</th><th scope="col">Status</th><th scope="col">Created</th>
+        <th scope="col">Updated</th><th scope="col">LastLogin</th><th scope="col">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1</td><td>Alice</td><td>alice@example.com</td>
+        <td>Admin</td><td>Active</td><td>2024-01-01</td>
+        <td>2024-06-01</td><td>2024-07-01</td>
+        <td>
+          <button type="button">Edit</button>
+          <button type="button">Delete</button>
+          <button type="button">Disable</button>
+        </td>
+      </tr>
+      <tr>
+        <td>2</td><td>Bob</td><td>bob@example.com</td>
+        <td>Editor</td><td>Active</td><td>2024-02-01</td>
+        <td>2024-05-01</td><td>2024-07-02</td>
+        <td>
+          <button type="button">Edit</button>
+          <button type="button">Delete</button>
+          <button type="button">Disable</button>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- Nested lists -->
+  <nav aria-label="Deep navigation">
+    <ul>
+      <li><a href="/a">A</a>
+        <ul>
+          <li><a href="/a/1">A-1</a>
+            <ul>
+              <li><a href="/a/1/x">A-1-X</a></li>
+              <li><a href="/a/1/y">A-1-Y</a></li>
+            </ul>
+          </li>
+          <li><a href="/a/2">A-2</a>
+            <ul>
+              <li><a href="/a/2/x">A-2-X</a></li>
+            </ul>
+          </li>
+        </ul>
+      </li>
+      <li><a href="/b">B</a>
+        <ul>
+          <li><a href="/b/1">B-1</a></li>
+        </ul>
+      </li>
+    </ul>
+  </nav>
+
+  <!-- Many attributes -->
+  <input
+    type="text"
+    id="complex-input"
+    name="search"
+    class="input input--large input--bordered"
+    placeholder="Search..."
+    autocomplete="off"
+    autocorrect="off"
+    autocapitalize="none"
+    spellcheck="false"
+    aria-label="Search"
+    aria-autocomplete="list"
+    aria-controls="search-results"
+    aria-expanded="false"
+    role="combobox"
+    data-analytics="search-input"
+    data-testid="global-search"
+    tabindex="0"
+    maxlength="200"
+    required
+  />
+</body>
+</html>

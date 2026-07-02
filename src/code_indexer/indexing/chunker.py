@@ -1,0 +1,997 @@
+"""Text chunking utilities for breaking large files into manageable pieces."""
+
+import re
+from typing import List, Optional, Dict, Any, Tuple
+from pathlib import Path
+
+from ..config import IndexingConfig
+from .image_extractor import ImageExtractorFactory
+from ..logging import AdaptiveLogger
+
+
+class TextChunker:
+    """Handles chunking of text content."""
+
+    def __init__(self, config: IndexingConfig):
+        self.config = config
+        self.chunk_size = config.chunk_size
+        self.chunk_overlap = config.chunk_overlap
+        self._adaptive_logger = AdaptiveLogger()
+
+    def _smart_split_with_lines(
+        self, text: str, text_lines: List[str], file_extension: str
+    ) -> List[Dict[str, Any]]:
+        """Simplified text chunking that prevents infinite loops."""
+        if not text_lines:
+            return []
+
+        chunk_data = []
+        current_line_idx = 0
+
+        while current_line_idx < len(text_lines):
+            chunk_start_line = current_line_idx + 1  # 1-based line number
+            current_chunk_size = 0
+            lines_in_chunk: List[str] = []
+
+            # Add lines until we reach chunk size limit
+            temp_line_idx = current_line_idx
+            while temp_line_idx < len(text_lines):
+                line = text_lines[temp_line_idx]
+                line_size = len(line) + 1  # +1 for newline
+
+                # If this would exceed chunk size and we have at least one line, break
+                if (
+                    current_chunk_size + line_size > self.chunk_size
+                    and len(lines_in_chunk) > 0
+                ):
+                    break
+
+                lines_in_chunk.append(line)
+                current_chunk_size += line_size
+                temp_line_idx += 1
+
+            # Handle case where single line exceeds chunk size
+            if len(lines_in_chunk) == 0 and current_line_idx < len(text_lines):
+                line = text_lines[current_line_idx]
+                if len(line) > self.chunk_size:
+                    # Split oversized line
+                    line_chunks = self._split_oversized_line(line, current_line_idx + 1)
+                    chunk_data.extend(line_chunks)
+                    current_line_idx += 1
+                    continue
+                else:
+                    # Include at least one line
+                    lines_in_chunk = [line]
+
+            if lines_in_chunk:
+                chunk_end_line = chunk_start_line + len(lines_in_chunk) - 1
+
+                # Build chunk text directly from collected lines
+                chunk_text = "\n".join(lines_in_chunk)
+
+                # Add final newline if this chunk doesn't go to end of file
+                # or if original text ends with newline
+                if chunk_end_line < len(text_lines) or text.endswith("\n"):
+                    chunk_text += "\n"
+
+                chunk_data.append(
+                    {
+                        "text": chunk_text,
+                        "line_start": chunk_start_line,
+                        "line_end": chunk_end_line,
+                    }
+                )
+
+                # For simplified chunker: move to next chunk without overlap to prevent duplication
+                # This eliminates the complex overlap logic that was causing content bleeding
+                current_line_idx += len(lines_in_chunk)
+            else:
+                # Safety: always advance at least one line
+                current_line_idx += 1
+
+        return chunk_data
+
+    def _split_oversized_line(
+        self, line: str, line_number: int
+    ) -> List[Dict[str, Any]]:
+        """Split a single oversized line into multiple chunks."""
+        chunks = []
+        start_pos = 0
+
+        while start_pos < len(line):
+            end_pos = start_pos + self.chunk_size
+            if end_pos >= len(line):
+                # Last chunk
+                chunk_text = line[start_pos:]
+            else:
+                # Try to break at a reasonable boundary
+                chunk_text = line[start_pos:end_pos]
+                # Look for space, comma, or other break characters
+                for break_char in [" ", ",", ";", "|", '"', "'", "}", "]", ")", ">"]:
+                    last_break = chunk_text.rfind(break_char)
+                    if last_break > self.chunk_size * 0.8:  # At least 80% of chunk size
+                        chunk_text = line[start_pos : start_pos + last_break + 1]
+                        break
+
+            chunks.append(
+                {
+                    "text": chunk_text,
+                    "line_start": line_number,
+                    "line_end": line_number,
+                }
+            )
+
+            start_pos += len(chunk_text)
+
+        return chunks
+
+    def _extract_line_range(
+        self, original_text: str, text_lines: List[str], start_line: int, end_line: int
+    ) -> str:
+        """Extract the exact text for a range of lines, preserving original structure."""
+        # Convert to 0-based indices
+        start_idx = start_line - 1
+        end_idx = end_line - 1
+
+        if start_idx < 0 or end_idx >= len(text_lines):
+            return ""
+
+        # Get the lines
+        lines = text_lines[start_idx : end_idx + 1]
+
+        # Reconstruct exactly as in original
+        if not lines:
+            return ""
+
+        result = "\n".join(lines)
+
+        # Add final newline if:
+        # 1. This is not the last line of the file, OR
+        # 2. This is the last line and original file ended with newline
+        if end_line < len(text_lines) or original_text.endswith("\n"):
+            result += "\n"
+
+        return result
+
+    def _is_good_break_point(self, line: str, file_extension: str) -> bool:
+        """Check if this line is a good place to break a chunk."""
+        line_stripped = line.strip()
+
+        # Never break on string continuations or certain patterns
+        # Common patterns that indicate we're in the middle of something
+        bad_break_patterns = [
+            '",',
+            '"),',
+            '";',
+            '");',
+            "',",
+            "'),",
+            "';",
+            "');",  # String endings with continuation
+            "},",
+            "],",
+            "),",  # Object/array/call endings with continuation
+            "||",
+            "&&",  # Logical operators
+            "+",
+            "-",
+            "*",
+            "/",
+            "%",  # Math operators at end of line
+            "=",
+            "+=",
+            "-=",
+            "*=",
+            "/=",  # Assignment operators
+            ".",  # Member access
+        ]
+
+        for pattern in bad_break_patterns:
+            if line_stripped.endswith(pattern):
+                return False
+
+        # Language-specific checks
+        if file_extension == "py":
+            # Never break on string continuations
+            if (
+                line_stripped.startswith('f"')
+                or line_stripped.startswith('"')
+                or line_stripped.startswith("'")
+                or (
+                    line_stripped
+                    and line_stripped[0] in "fF"
+                    and len(line_stripped) > 1
+                    and line_stripped[1] in "\"'"
+                )
+            ):
+                return False
+
+            # Good Python break points
+            return (
+                line_stripped.startswith("def ")
+                or line_stripped.startswith("class ")
+                or line_stripped.startswith("async def ")
+                or line_stripped.startswith("if __name__")
+                or (line_stripped.startswith("#") and len(line_stripped) > 10)
+                or line_stripped == ""  # Empty lines are good break points
+                or line_stripped.startswith("import ")
+                or line_stripped.startswith("from ")
+                or line_stripped.startswith("@")  # Decorators
+            )
+
+        elif file_extension in ["js", "ts", "jsx", "tsx"]:
+            # Never break on template literal continuations
+            if line_stripped.startswith("`") or line_stripped.endswith("`"):
+                return False
+
+            return (
+                line_stripped.startswith("function ")
+                or line_stripped.startswith("const ")
+                or line_stripped.startswith("let ")
+                or line_stripped.startswith("var ")
+                or line_stripped.startswith("class ")
+                or line_stripped.startswith("export ")
+                or line_stripped.startswith("import ")
+                or line_stripped.startswith("interface ")  # TypeScript
+                or line_stripped.startswith("type ")  # TypeScript
+                or line_stripped.startswith("enum ")  # TypeScript
+                or line_stripped.startswith("//")
+                or line_stripped.startswith("/*")
+                or line_stripped == ""
+            )
+
+        elif file_extension == "java":
+            return (
+                line_stripped.startswith("public ")
+                or line_stripped.startswith("private ")
+                or line_stripped.startswith("protected ")
+                or line_stripped.startswith("class ")
+                or line_stripped.startswith("interface ")
+                or line_stripped.startswith("enum ")
+                or line_stripped.startswith("@")  # Annotations
+                or line_stripped.startswith("//")
+                or line_stripped.startswith("/*")
+                or line_stripped == ""
+            )
+
+        elif file_extension == "go":
+            return (
+                line_stripped.startswith("func ")
+                or line_stripped.startswith("type ")
+                or line_stripped.startswith("var ")
+                or line_stripped.startswith("const ")
+                or line_stripped.startswith("package ")
+                or line_stripped.startswith("import ")
+                or line_stripped.startswith("//")
+                or line_stripped.startswith("/*")
+                or line_stripped == ""
+            )
+
+        elif file_extension in ["c", "cpp", "h", "hpp"]:
+            return (
+                line_stripped.startswith("int ")
+                or line_stripped.startswith("void ")
+                or line_stripped.startswith("class ")  # C++
+                or line_stripped.startswith("struct ")
+                or line_stripped.startswith("namespace ")  # C++
+                or line_stripped.startswith("#")  # Preprocessor
+                or line_stripped.startswith("//")
+                or line_stripped.startswith("/*")
+                or line_stripped == ""
+            )
+
+        elif file_extension == "rs":  # Rust
+            return (
+                line_stripped.startswith("fn ")
+                or line_stripped.startswith("pub ")
+                or line_stripped.startswith("struct ")
+                or line_stripped.startswith("enum ")
+                or line_stripped.startswith("impl ")
+                or line_stripped.startswith("trait ")
+                or line_stripped.startswith("mod ")
+                or line_stripped.startswith("use ")
+                or line_stripped.startswith("//")
+                or line_stripped.startswith("/*")
+                or line_stripped == ""
+            )
+
+        else:
+            # Generic break points
+            return (
+                line_stripped == ""
+                or line_stripped.startswith("#")
+                or line_stripped.startswith("//")
+                or line_stripped.startswith("/*")
+                # Avoid breaking on obvious continuations
+                and not any(line_stripped.endswith(p) for p in bad_break_patterns)
+            )
+
+    def _is_multiline_construct_start(
+        self, line: str, text_lines: List[str], line_idx: int, file_extension: str
+    ) -> Tuple[bool, str]:
+        """Check if this line starts a multi-line construct that should be kept together."""
+        line_stripped = line.strip()
+
+        # Common patterns across languages
+        # Check for unclosed parentheses, brackets, or braces
+        open_parens = line.count("(")
+        close_parens = line.count(")")
+        open_brackets = line.count("[")
+        close_brackets = line.count("]")
+        open_braces = line.count("{")
+        close_braces = line.count("}")
+
+        # Check if we have unclosed delimiters
+        unclosed_parens = open_parens > close_parens
+        unclosed_brackets = open_brackets > close_brackets
+        unclosed_braces = open_braces > close_braces
+
+        # Language-specific checks
+        if file_extension == "py":
+            # Check for multi-line strings
+            if '"""' in line or "'''" in line:
+                # Count quotes to see if string closes on same line
+                triple_double = line.count('"""')
+                triple_single = line.count("'''")
+                if triple_double % 2 == 1 or triple_single % 2 == 1:
+                    return True, "string"
+
+            # Check for multi-line statements (raise, assert, etc.)
+            if any(line_stripped.startswith(kw + " ") for kw in ["raise", "assert"]):
+                if unclosed_parens:
+                    return True, "statement"
+
+            # Check for function calls that span multiple lines
+            if unclosed_parens and not line_stripped.startswith("def "):
+                return True, "call"
+
+            # Check for f-string/string that continues on next line
+            if line_idx + 1 < len(text_lines):
+                next_line = text_lines[line_idx + 1].strip()
+                # Check if current line has unclosed string and next line continues it
+                if (line_stripped.endswith("(") or line_stripped.endswith(",")) and (
+                    next_line.startswith('f"')
+                    or next_line.startswith('"')
+                    or next_line.startswith("'")
+                    or next_line.startswith("f'")
+                ):
+                    return True, "multistring"
+
+        elif file_extension in ["js", "ts", "jsx", "tsx"]:
+            # Template literals (backticks)
+            backtick_count = line.count("`")
+            if backtick_count % 2 == 1:
+                return True, "template"
+
+            # JSX elements that span multiple lines
+            if file_extension in ["jsx", "tsx"]:
+                # Check for unclosed JSX tags
+                if "<" in line and ">" in line:
+                    # Simple check for self-closing tags
+                    if "/>" not in line and unclosed_parens:
+                        return True, "jsx"
+
+            # Object literals, arrays, function calls
+            if unclosed_braces or unclosed_brackets or unclosed_parens:
+                if any(
+                    kw in line_stripped for kw in ["throw new", "new Error", "console."]
+                ):
+                    return True, "statement"
+                return True, "expression"
+
+        elif file_extension == "java":
+            # Check for annotations that span multiple lines
+            if line_stripped.startswith("@") and unclosed_parens:
+                return True, "annotation"
+
+            # Exception throwing with multi-line messages
+            if "throw new" in line and unclosed_parens:
+                return True, "exception"
+
+            # String concatenation patterns in Java
+            if line_stripped.endswith(" +") or line_stripped.endswith(" + "):
+                return True, "string_concat"
+
+            # Check if current line is part of string concatenation
+            if line_stripped.startswith('"') and (
+                line_stripped.endswith(" +") or line_stripped.endswith(" + ")
+            ):
+                return True, "string_concat"
+
+            # Check if we're continuing a string concatenation from previous line
+            if line_idx > 0:
+                prev_line = text_lines[line_idx - 1].strip()
+                if (
+                    prev_line.endswith(" +") or prev_line.endswith(" + ")
+                ) and line_stripped.startswith('"'):
+                    return True, "string_concat"
+
+            # Method calls, constructors
+            if unclosed_parens:
+                return True, "call"
+
+        elif file_extension == "go":
+            # Go error formatting
+            if "fmt.Errorf(" in line or "errors.New(" in line:
+                if unclosed_parens:
+                    return True, "error"
+
+            # Struct literals
+            if unclosed_braces and "{" in line:
+                return True, "struct"
+
+            # Function calls
+            if unclosed_parens:
+                return True, "call"
+
+        elif file_extension in ["c", "cpp", "h", "hpp"]:
+            # Preprocessor directives
+            if line_stripped.startswith("#") and line_stripped.endswith("\\"):
+                return True, "preprocessor"
+
+            # Function calls, initializers
+            if unclosed_parens or unclosed_braces:
+                return True, "expression"
+
+        elif file_extension in ["rs"]:  # Rust
+            # Rust macros
+            if "!" in line and unclosed_parens:
+                return True, "macro"
+
+            # Match expressions, closures
+            if unclosed_braces:
+                return True, "expression"
+
+        # Generic check for any language
+        if unclosed_parens or unclosed_brackets or unclosed_braces:
+            # Check if next line continues the construct
+            if line_idx + 1 < len(text_lines):
+                next_line = text_lines[line_idx + 1].strip()
+                # If next line is indented or starts with certain characters
+                if next_line and (
+                    next_line[0] in "\"'}])|,"
+                    or next_line.startswith("    ")  # Indented continuation
+                    or next_line.startswith("\t")  # Tab indented
+                ):
+                    return True, "construct"
+
+        return False, ""
+
+    def _is_multiline_construct_end(
+        self,
+        line: str,
+        text_lines: List[str],
+        line_idx: int,
+        construct_type: str,
+        file_extension: str,
+    ) -> bool:
+        """Check if this line ends a multi-line construct."""
+        line_stripped = line.strip()
+
+        # Count delimiters in current line
+        open_parens = line.count("(")
+        close_parens = line.count(")")
+        open_brackets = line.count("[")
+        close_brackets = line.count("]")
+        open_braces = line.count("{")
+        close_braces = line.count("}")
+
+        # Common patterns across languages
+        if construct_type in ["call", "statement", "expression", "construct"]:
+            # Check if we have more closing delimiters
+            if (
+                close_parens > open_parens
+                or close_brackets > open_brackets
+                or close_braces > open_braces
+            ):
+                return True
+
+            # Check common ending patterns
+            if any(
+                line_stripped.endswith(end)
+                for end in [")", ");", "),", "]", "];", "],", "}", "};", "},"]
+            ):
+                return True
+
+        # Language-specific checks
+        if file_extension == "py":
+            if construct_type == "string":
+                # Check for closing triple quotes
+                return '"""' in line or "'''" in line
+
+            elif construct_type == "multistring":
+                # Check if multi-line f-string/string ends
+                return (
+                    line_stripped.endswith('"')
+                    or line_stripped.endswith('")')
+                    or line_stripped.endswith('",')
+                    or line_stripped.endswith("'")
+                    or line_stripped.endswith("')")
+                    or line_stripped.endswith("',")
+                )
+
+        elif file_extension in ["js", "ts", "jsx", "tsx"]:
+            if construct_type == "template":
+                # Check for closing backtick
+                backtick_count = line.count("`")
+                return backtick_count % 2 == 1
+
+            elif construct_type == "jsx":
+                # Check for closing JSX tag
+                if "/>" in line or (close_parens > open_parens and ">" in line):
+                    return True
+
+        elif file_extension == "java":
+            if construct_type == "annotation":
+                # Annotations typically end with )
+                return line_stripped.endswith(")")
+
+            elif construct_type == "exception":
+                # Exception messages typically end with ); or )
+                return line_stripped.endswith(");") or line_stripped.endswith(")")
+
+            elif construct_type == "string_concat":
+                # String concatenation ends when line doesn't end with +
+                return not (
+                    line_stripped.endswith(" +") or line_stripped.endswith(" + ")
+                )
+
+        elif file_extension == "go":
+            if construct_type == "error":
+                # Go errors typically end with )
+                return line_stripped.endswith(")")
+
+            elif construct_type == "struct":
+                # Struct literals end with }
+                return line_stripped.endswith("}") or line_stripped.endswith("},")
+
+        elif file_extension in ["c", "cpp", "h", "hpp"]:
+            if construct_type == "preprocessor":
+                # Preprocessor continues if line ends with \
+                return not line_stripped.endswith("\\")
+
+        elif file_extension == "rs":
+            if construct_type == "macro":
+                # Rust macros end with ) or ];
+                return line_stripped.endswith(")") or line_stripped.endswith("];")
+
+        # Default check - if the line doesn't look like a continuation
+        if line_idx + 1 < len(text_lines):
+            next_line = text_lines[line_idx + 1].strip()
+            # If next line doesn't look like a continuation
+            if next_line and not any(
+                [
+                    next_line[0] in "\"'}])|,",
+                    next_line.startswith("    "),  # Indented
+                    next_line.startswith("\t"),  # Tab indented
+                    next_line.startswith("."),  # Method chaining
+                ]
+            ):
+                return True
+
+        return False
+
+    def _calculate_construct_size(
+        self,
+        text_lines: List[str],
+        start_idx: int,
+        current_idx: int,
+        file_extension: str,
+    ) -> int:
+        """Calculate the size of a multi-line construct by finding its end."""
+        size = 0
+
+        # Look ahead to find the actual end of the construct
+        construct_type = ""
+        max_look_ahead = min(start_idx + 50, len(text_lines))  # Look ahead more lines
+
+        for i in range(start_idx, max_look_ahead):
+            line = text_lines[i]
+            size += len(line) + 1  # +1 for newline
+
+            # Try to determine construct type from first line if not set
+            if i == start_idx and not construct_type:
+                line_stripped = line.strip()
+                if "throw new" in line:
+                    construct_type = "exception"
+                elif line_stripped.endswith(" +"):
+                    construct_type = "string_concat"
+                else:
+                    construct_type = "generic"
+
+            # Check if construct ends at this line
+            if i > start_idx and self._is_multiline_construct_end(
+                line, text_lines, i, construct_type, file_extension
+            ):
+                break
+
+            # Safety valve - if we've gone too far, break
+            if size > self.chunk_size * 3:
+                break
+
+        return size
+
+    def _fallback_split_with_lines(
+        self, text: str, start_line: int, text_lines: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Fallback splitting when smart splitting doesn't work well, with line tracking."""
+        # Split the text into lines and process line by line
+        lines = text.splitlines()
+        chunk_data = []
+        current_line = 0
+
+        while current_line < len(lines):
+            chunk_lines: List[str] = []
+            chunk_start_line = start_line + current_line
+            current_chunk_size = 0
+
+            # Add lines until we reach the chunk size limit
+            while current_line < len(lines) and current_chunk_size < self.chunk_size:
+                line = lines[current_line]
+                line_with_newline = (
+                    line + "\n" if current_line < len(lines) - 1 else line
+                )
+
+                # If adding this line would greatly exceed the limit, break
+                if (
+                    current_chunk_size + len(line_with_newline) > self.chunk_size * 1.2
+                    and chunk_lines
+                ):
+                    break
+
+                chunk_lines.append(line)
+                current_chunk_size += len(line_with_newline)
+                current_line += 1
+
+            # If we didn't collect any lines, take at least one
+            if not chunk_lines and current_line < len(lines):
+                chunk_lines.append(lines[current_line])
+                current_line += 1
+
+            if chunk_lines:
+                chunk_text = "\n".join(chunk_lines)
+                chunk_end_line = chunk_start_line + len(chunk_lines) - 1
+
+                chunk_data.append(
+                    {
+                        "text": chunk_text,
+                        "line_start": chunk_start_line,
+                        "line_end": chunk_end_line,
+                    }
+                )
+
+                # Add overlap by backing up some lines
+                if current_line < len(lines):
+                    overlap_lines = min(
+                        self.chunk_overlap
+                        // 50,  # Estimate lines from character overlap
+                        len(chunk_lines) // 4,  # Or 25% of current chunk
+                        3,  # But no more than 3 lines for fallback
+                    )
+                    current_line = max(
+                        current_line - overlap_lines, chunk_start_line - start_line + 1
+                    )
+
+        return chunk_data
+
+    def _fallback_split(self, text: str) -> List[str]:
+        """Fallback splitting when smart splitting doesn't work well."""
+        if len(text) <= self.chunk_size:
+            return [text]
+
+        chunks = []
+        start = 0
+
+        while start < len(text):
+            end = start + self.chunk_size
+
+            if end >= len(text):
+                chunks.append(text[start:])
+                break
+
+            # Try to find a good break point
+            break_point = end
+
+            # Look for natural break points within overlap distance
+            search_start = max(end - self.chunk_overlap, start + 1)
+
+            for pos in range(end, search_start - 1, -1):
+                if text[pos] in "\n\r":
+                    break_point = pos + 1
+                    break
+                elif text[pos] in " \t":
+                    break_point = pos + 1
+                    break
+
+            chunks.append(text[start:break_point])
+            start = (
+                break_point - self.chunk_overlap
+                if break_point > start + self.chunk_overlap
+                else break_point
+            )
+
+        return chunks
+
+    def chunk_text(
+        self,
+        text: str,
+        file_path: Optional[Path] = None,
+        repo_root: Optional[Path] = None,
+    ) -> List[Dict[str, Any]]:
+        """Split text into chunks with metadata including line numbers and images.
+
+        Args:
+            text: Text content to chunk
+            file_path: Path to the source file (for image extraction)
+            repo_root: Repository root directory (for validating image paths)
+
+        Returns:
+            List of chunk dictionaries with metadata including images[] field
+        """
+        if not text or not text.strip():
+            return []
+
+        # Determine file extension for smart splitting
+        file_extension = ""
+        if file_path:
+            file_extension = file_path.suffix.lstrip(".")
+
+        # Extract images from supported file types (markdown, HTML, HTMX)
+        extracted_images: List[str] = []
+        if file_path and repo_root:
+            # Get appropriate extractor for file type
+            image_extractor = ImageExtractorFactory.get_extractor(f".{file_extension}")
+            if image_extractor:
+                extracted_images = image_extractor.extract_images(
+                    text, file_path, repo_root
+                )
+                # Filter images by validation
+                extracted_images = [
+                    img
+                    for img in extracted_images
+                    if image_extractor.validate_image(img, repo_root)
+                ]
+
+        # Split text into lines for line tracking
+        text_lines = text.splitlines()
+
+        # Create chunks with line position tracking
+        chunk_data = self._smart_split_with_lines(text, text_lines, file_extension)
+
+        # If smart splitting results in chunks that are still too large, use fallback
+        final_chunk_data = []
+        for chunk_info in chunk_data:
+            if len(chunk_info["text"]) <= self.chunk_size:
+                final_chunk_data.append(chunk_info)
+            else:
+                # Use fallback splitting while preserving line information
+                fallback_chunks = self._fallback_split_with_lines(
+                    chunk_info["text"], chunk_info["line_start"], text_lines
+                )
+                final_chunk_data.extend(fallback_chunks)
+
+        # Filter out tiny chunks and merge them with adjacent chunks
+        MIN_CHUNK_SIZE = 100  # Minimum meaningful chunk size
+        filtered_chunk_data: List[Dict[str, Any]] = []
+
+        for i, chunk_info in enumerate(final_chunk_data):
+            chunk_text = chunk_info["text"].strip()
+            if not chunk_text:  # Skip empty chunks
+                continue
+
+            # Check if this chunk is too small and might be a fragment
+            if len(chunk_text) < MIN_CHUNK_SIZE:
+                # Try to merge with the previous chunk if it exists and won't exceed chunk_size
+                # BUT: Only if this chunk doesn't overlap with the previous chunk's line range
+                if (
+                    filtered_chunk_data
+                    and len(filtered_chunk_data[-1]["text"] + "\n" + chunk_text)
+                    <= self.chunk_size
+                    and chunk_info["line_start"]
+                    > filtered_chunk_data[-1]["line_end"]  # No overlap
+                ):
+                    # Merge with previous chunk, extending line range
+                    prev_chunk = filtered_chunk_data[-1]
+                    prev_chunk["text"] = prev_chunk["text"] + "\n" + chunk_text
+                    prev_chunk["line_end"] = chunk_info["line_end"]
+                    continue
+                # Try to merge with next chunk if available
+                elif (
+                    i + 1 < len(final_chunk_data)
+                    and len(chunk_text + "\n" + final_chunk_data[i + 1]["text"].strip())
+                    <= self.chunk_size
+                ):
+                    # Merge with next chunk by modifying next iteration
+                    next_chunk = final_chunk_data[i + 1]
+                    next_chunk["text"] = chunk_text + "\n" + next_chunk["text"]
+                    next_chunk["line_start"] = chunk_info["line_start"]
+                    continue
+                # If we can't merge, only keep it if it has substantial content
+                elif not self._is_fragment(chunk_text):
+                    filtered_chunk_data.append(chunk_info)
+                # Otherwise drop the tiny fragment
+            else:
+                filtered_chunk_data.append(chunk_info)
+
+        # Create chunk metadata with line numbers and images
+        result = []
+        for i, chunk_info in enumerate(filtered_chunk_data):
+            chunk_text = chunk_info["text"]
+
+            # Don't add file headers to text chunks as they mess up line numbers
+            # The file path is already included in metadata
+            result.append(
+                {
+                    "text": chunk_text,
+                    "chunk_index": i,
+                    "total_chunks": len(filtered_chunk_data),
+                    "size": len(chunk_text),
+                    "file_path": str(file_path) if file_path else None,
+                    "file_extension": file_extension,
+                    "line_start": chunk_info["line_start"],
+                    "line_end": chunk_info["line_end"],
+                    "images": extracted_images,  # Add images field to chunk metadata
+                }
+            )
+
+        return result
+
+    def chunk_text_with_logging(
+        self,
+        text: str,
+        file_path: Optional[Path] = None,
+        repo_root: Optional[Path] = None,
+        verbose: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Split text into chunks with validation logging - Story #64 AC7.
+
+        Thin wrapper around chunk_text() that adds image validation logging.
+        Uses extract_images_with_validation() to get detailed skip reasons
+        and logs all skipped images using AdaptiveLogger.
+
+        Args:
+            text: Text content to chunk
+            file_path: Path to the source file (for image extraction)
+            repo_root: Repository root directory (for validating image paths)
+            verbose: Enable verbose logging in CLI mode (ignored in server mode)
+
+        Returns:
+            List of chunk dictionaries with metadata including images[] field
+        """
+        # Extract and validate images with detailed skip reasons
+        extracted_images: List[str] = []
+        if file_path and repo_root:
+            file_extension = file_path.suffix.lstrip(".")
+            image_extractor = ImageExtractorFactory.get_extractor(f".{file_extension}")
+
+            if image_extractor:
+                # Use extract_images_with_validation() for skip reasons
+                valid_images, all_results = (
+                    image_extractor.extract_images_with_validation(
+                        text, file_path, repo_root
+                    )
+                )
+                extracted_images = valid_images
+
+                # Log all skipped images with human-readable reasons
+                for result in all_results:
+                    if not result.is_valid:
+                        reason_messages = {
+                            "missing": "File not found",
+                            "remote_url": "Remote URL (not local file)",
+                            "oversized": "File exceeds size limit (10MB)",
+                            "unsupported_format": "Unsupported image format",
+                            "data_uri": "Data URI (not a file path)",
+                        }
+                        reason_message = reason_messages.get(
+                            result.skip_reason, f"Invalid: {result.skip_reason}"
+                        )
+
+                        self._adaptive_logger.warn_image_skipped(
+                            file_path=str(file_path),
+                            image_ref=result.path,
+                            reason=reason_message,
+                            verbose=verbose,
+                        )
+
+        # Delegate to existing chunk_text() for chunking logic
+        chunks = self.chunk_text(text, file_path, repo_root)
+
+        # Override images in chunks with our validated list (with logging)
+        for chunk in chunks:
+            chunk["images"] = extracted_images
+
+        return chunks
+
+    def _is_fragment(self, text: str) -> bool:
+        """Check if text is likely a meaningless fragment that should be dropped."""
+        text = text.strip()
+
+        # Remove file header for checking
+        if text.startswith("// File:"):
+            lines = text.split("\n", 1)
+            if len(lines) > 1:
+                text = lines[1].strip()
+            else:
+                return True  # Only file header, definitely a fragment
+
+        # Check for common fragment patterns
+        fragment_patterns = [
+            r'^"""$',  # Just docstring delimiter
+            r"^'''$",  # Just docstring delimiter
+            r"^def$",  # Just 'def' keyword
+            r"^class$",  # Just 'class' keyword
+            r"^async def$",  # Just 'async def' keywords
+            r"^def \w+$",  # Just function name without signature
+            r"^class \w+$",  # Just class name without body
+        ]
+
+        for pattern in fragment_patterns:
+            if re.match(pattern, text):
+                return True
+
+        # If it's very short and doesn't contain meaningful content, it's likely a fragment
+        if len(text) < 20 and not any(
+            char in text for char in ["{", "}", "(", ")", "=", ":", ";"]
+        ):
+            return True
+
+        return False
+
+    def chunk_file(
+        self, file_path: Path, repo_root: Optional[Path] = None
+    ) -> List[Dict[str, Any]]:
+        """Read and chunk a file.
+
+        Args:
+            file_path: Path to the file to chunk
+            repo_root: Repository root directory (for image extraction in markdown files)
+
+        Returns:
+            List of chunk dictionaries with metadata including images[] field
+        """
+        # Debug logging
+        import os
+        import datetime
+
+        debug_file = os.path.expanduser("~/.tmp/cidx_debug.log")
+        with open(debug_file, "a") as f:
+            f.write(
+                f"[{datetime.datetime.now().isoformat()}] TextChunker.chunk_file called for: {file_path}\n"
+            )
+            f.flush()
+
+        try:
+            # Try different encodings
+            encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
+            text = None
+
+            for encoding in encodings:
+                try:
+                    with open(file_path, "r", encoding=encoding) as f:
+                        text = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+
+            if text is None:
+                raise ValueError(f"Could not decode file {file_path}")
+
+            with open(debug_file, "a") as f:
+                f.write(
+                    f"[{datetime.datetime.now().isoformat()}] Read {len(text)} chars, calling chunk_text\n"
+                )
+                f.flush()
+
+            return self.chunk_text(text, file_path, repo_root=repo_root)
+
+        except Exception as e:
+            raise ValueError(f"Failed to process file {file_path}: {e}")
+
+    def estimate_chunks(self, text: str) -> int:
+        """Estimate number of chunks for given text."""
+        if not text:
+            return 0
+
+        # Simple estimation based on size
+        return max(1, len(text) // (self.chunk_size - self.chunk_overlap) + 1)

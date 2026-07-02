@@ -1,7 +1,0 @@
-#!/bin/bash
-SCRIPT="./node_modules/@lightspeed/mcp-tools/scripts/pre-commit.sh"
-if [ -f "$SCRIPT" ]; then
-    "$SCRIPT"
-else
-    echo "⚠️  pre-commit.sh not found — run npm install to enable pre-commit checks"
-fi

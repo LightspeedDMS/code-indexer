@@ -1,0 +1,12 @@
+<!-- Story #684: Dependency Map dashboard error partial -->
+<div id="depmap-job-status">
+    <div style="background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem; color: #721c24;">
+        Analysis failed: {{ error_message }}
+    </div>
+    <button class="outline"
+            hx-post="/admin/partials/depmap-job-status/retry"
+            hx-swap="outerHTML"
+            hx-target="#depmap-job-status">
+        Retry Analysis
+    </button>
+</div>

@@ -1,0 +1,374 @@
+{% extends "base.html" %}
+
+{% block title %}Golden Repositories - CIDX Admin{% endblock %}
+
+{% block content %}
+<div class="golden-repos-header">
+    <h1>Golden Repository Management</h1>
+    <div class="golden-repos-actions">
+        <button
+            id="add-repo-btn"
+            class="primary"
+            onclick="toggleAddForm()"
+        >
+            Add Repository
+        </button>
+        <button
+            id="refresh-btn"
+            class="outline"
+            hx-get="/admin/partials/golden-repos-list"
+            hx-target="#repos-list-section"
+            hx-swap="innerHTML"
+            hx-indicator="#refresh-indicator"
+        >
+            Refresh
+        </button>
+        <span id="refresh-indicator" class="htmx-indicator">Loading...</span>
+    </div>
+</div>
+
+<!-- Success/Error Messages -->
+{% if success_message %}
+<article class="message-success">
+    <p>{{ success_message }}</p>
+</article>
+{% endif %}
+
+{% if error_message %}
+<article class="message-error">
+    <p>{{ error_message }}</p>
+</article>
+{% endif %}
+
+<!-- Add Repository Form (hidden by default) -->
+<section id="add-repo-form" class="form-section" style="display: none;">
+    <article>
+        <header>
+            <h2>Add New Golden Repository</h2>
+        </header>
+        <form method="post" action="/admin/golden-repos/add">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+            <label for="alias">Repository Name (Alias)</label>
+            <input
+                type="text"
+                id="alias"
+                name="alias"
+                placeholder="Enter unique repository name"
+                required
+                autocomplete="off"
+            >
+            <small>A unique name to identify this repository (e.g., "my-project")</small>
+
+            <label for="repo_url">Repository Path or URL</label>
+            <input
+                type="text"
+                id="repo_url"
+                name="repo_url"
+                placeholder="Enter local path or git URL"
+                required
+                autocomplete="off"
+            >
+            <small>Local path (e.g., /home/user/project) or remote URL (e.g., https://github.com/user/repo)</small>
+
+            <label for="default_branch">Branch (optional)</label>
+            <input
+                type="text"
+                id="default_branch"
+                name="default_branch"
+                placeholder="main"
+                value="main"
+                autocomplete="off"
+            >
+            <small>Default branch to index (default: main)</small>
+
+            <div class="form-actions">
+                <button type="submit" class="primary">Add Repository</button>
+                <button type="button" class="secondary" onclick="toggleAddForm()">Cancel</button>
+            </div>
+        </form>
+    </article>
+</section>
+
+<!-- Golden Repositories List Section -->
+<section id="repos-list-section">
+    {% include "partials/golden_repos_list.html" %}
+</section>
+
+<!-- Activate Repository Modal -->
+<dialog id="activate-modal">
+    <article>
+        <header>
+            <button aria-label="Close" rel="prev" onclick="closeActivateModal()"></button>
+            <h3>Activate Repository</h3>
+        </header>
+        <form id="activate-form" method="post" action="/admin/golden-repos/activate">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" id="activate-golden-alias" name="golden_alias" value="">
+
+            <label for="activate-username">Username</label>
+            <select id="activate-username" name="username" required>
+                <option value="">Select a user...</option>
+                {% for user in users %}
+                <option value="{{ user.username }}">{{ user.username }}</option>
+                {% endfor %}
+            </select>
+            <small>User who will have access to this repository</small>
+
+            <label for="activate-user-alias">User Alias (optional)</label>
+            <input
+                type="text"
+                id="activate-user-alias"
+                name="user_alias"
+                placeholder="Leave blank to use golden repo name"
+                autocomplete="off"
+            >
+            <small>Custom name for this user's copy (defaults to golden repo name)</small>
+
+            <footer>
+                <button type="button" class="secondary" onclick="closeActivateModal()">Cancel</button>
+                <button type="submit">Activate</button>
+            </footer>
+        </form>
+    </article>
+</dialog>
+
+<script>
+// Track open details rows and add-index forms
+let openDetailsSet = new Set();
+let openAddIndexForms = new Set();
+
+function toggleAddForm() {
+    const form = document.getElementById('add-repo-form');
+    form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+function confirmDelete(alias) {
+    if (confirm('Are you sure you want to delete repository "' + alias + '"? This action cannot be undone.')) {
+        document.getElementById('delete-form-' + alias).submit();
+    }
+}
+
+function confirmRefresh(alias) {
+    if (confirm('Re-index repository "' + alias + '"? This may take some time.')) {
+        document.getElementById('refresh-form-' + alias).submit();
+    }
+}
+
+function confirmForceResync(alias) {
+    if (confirm('Force re-sync repository "' + alias + '"?\n\nThis will reset any local divergence (e.g. after a force-push) and re-index from the remote. Existing index data may be lost. This action cannot be undone.')) {
+        document.getElementById('force-resync-form-' + alias).submit();
+    }
+}
+
+function _initDetailsRow(alias) {
+    // Per-row post-swap initializer (Finding 1): populates sub-sections after
+    // the details fragment is swapped into #details-content-{alias}.
+    loadRepoDescription(alias);
+    var branchSelect = document.getElementById('branch-select-' + alias);
+    if (branchSelect) {
+        branchSelect.dataset.loaded = 'false';
+        loadBranches(branchSelect);
+    }
+    var globalSection = document.querySelector('.global-activated-section[data-alias="' + alias + '"]');
+    if (!globalSection) {
+        var contentCell = document.getElementById('details-content-' + alias);
+        if (contentCell) {
+            globalSection = contentCell.querySelector('.global-activated-section');
+        }
+    }
+    if (globalSection) {
+        var globalAliasEl = globalSection.querySelector('code.global-alias');
+        if (globalAliasEl) {
+            loadGlobalActivatedIndexes(alias, globalAliasEl.textContent.trim());
+        }
+    }
+    // Finding 1b: restore nested sub-panels for this alias after the per-row swap.
+    // These calls happen here (not in htmx:afterSettle) so the DOM nodes exist.
+    if (openAddIndexForms.has(alias)) {
+        var addIndexForm = document.getElementById('add-index-form-' + alias);
+        if (addIndexForm) {
+            addIndexForm.style.display = 'block';
+        }
+    }
+    if (openHealthDetailsSet && openHealthDetailsSet.has(alias)) {
+        var healthContainer = document.getElementById('health-details-' + alias);
+        var healthIndicator = document.getElementById('health-indicator-' + alias);
+        if (healthContainer) {
+            healthContainer.style.display = 'block';
+            if (healthIndicator) {
+                healthIndicator.classList.add('expanded');
+            }
+            healthContainer.dataset.loaded = 'false';
+            if (typeof loadHealthDetails === 'function') {
+                loadHealthDetails(alias, false);
+            }
+        }
+    }
+}
+
+function toggleDetails(alias) {
+    // Three-state cache machine: data-loaded = '' (unset) | 'loading' | 'true' | 'error'
+    const details = document.getElementById('details-' + alias);
+    if (!details) return;
+    const isHidden = details.style.display === 'none';
+    details.style.display = isHidden ? 'table-row' : 'none';
+    if (isHidden) {
+        openDetailsSet.add(alias);
+        // AC3: skip fetch if content already loaded
+        if (details.dataset.loaded === 'true') return;
+        details.dataset.loaded = 'loading';
+        htmx.ajax('GET', '/admin/partials/golden-repos/' + alias + '/details', {
+            target: '#details-content-' + alias,
+            swap: 'innerHTML'
+        }).then(function() {
+            details.dataset.loaded = 'true';
+            _initDetailsRow(alias);
+        }).catch(function(err) {
+            details.dataset.loaded = 'error';
+            console.error('[CIDX] Failed to load details for:', alias, err);
+        });
+    } else {
+        openDetailsSet.delete(alias);
+    }
+}
+
+function restoreOpenDetails() {
+    // AC4: after Refresh swap, re-fetch details for all previously-open rows
+    if (openDetailsSet.size === 0) return;
+    openDetailsSet.forEach(function(alias) {
+        const details = document.getElementById('details-' + alias);
+        if (!details) return;
+        details.style.display = 'table-row';
+        details.dataset.loaded = 'loading';
+        htmx.ajax('GET', '/admin/partials/golden-repos/' + alias + '/details', {
+            target: '#details-content-' + alias,
+            swap: 'innerHTML'
+        }).then(function() {
+            details.dataset.loaded = 'true';
+            _initDetailsRow(alias);
+        }).catch(function(err) {
+            details.dataset.loaded = 'error';
+            console.error('[CIDX] Failed to restore details for:', alias, err);
+        });
+    });
+}
+
+// Finding 2 / AC6-AC8: allow htmx to swap error fragments (4xx/5xx) into
+// details cells so the user sees the inline error message, not a blank cell.
+document.body.addEventListener('htmx:beforeSwap', function(event) {
+    var targetId = event.detail.target && event.detail.target.id;
+    if (targetId && targetId.indexOf('details-content-') === 0) {
+        event.detail.shouldSwap = true;
+        event.detail.isError = false;
+    }
+});
+
+// Finding 2 / AC8: Retry handler — re-fetch details when user clicks Retry.
+document.body.addEventListener('click', function(event) {
+    var btn = event.target.closest('.details-error-retry');
+    if (!btn) return;
+    var alias = btn.dataset.alias;
+    if (!alias) return;
+    var details = document.getElementById('details-' + alias);
+    if (details) {
+        details.dataset.loaded = 'loading';
+    }
+    htmx.ajax('GET', '/admin/partials/golden-repos/' + alias + '/details', {
+        target: '#details-content-' + alias,
+        swap: 'innerHTML'
+    }).then(function() {
+        if (details) { details.dataset.loaded = 'true'; }
+        _initDetailsRow(alias);
+    }).catch(function(err) {
+        if (details) { details.dataset.loaded = 'error'; }
+        console.error('[CIDX] Retry failed for:', alias, err);
+    });
+});
+
+function restoreOpenAddIndexForms() {
+    // Restore previously open add-index forms after content refresh
+    console.log('[CIDX] restoreOpenAddIndexForms() called');
+    console.log('[CIDX] openAddIndexForms size:', openAddIndexForms.size);
+
+    if (openAddIndexForms.size > 0) {
+        openAddIndexForms.forEach(alias => {
+            const form = document.getElementById('add-index-form-' + alias);
+            if (form) {
+                form.style.display = 'block';
+                console.log('[CIDX] Restored add-index form for:', alias);
+            }
+        });
+    }
+}
+
+// Load marked.js for markdown rendering (Story #218) - pinned version
+(function() {
+    var script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js';
+    document.head.appendChild(script);
+})();
+
+// Load DOMPurify for XSS sanitization of marked.js output (Story #218)
+(function() {
+    var purifyScript = document.createElement('script');
+    purifyScript.src = 'https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js';
+    document.head.appendChild(purifyScript);
+})();
+
+// Load index management functions
+(function() {
+    const script = document.createElement('script');
+    script.src = '/admin/static/js/golden_repo_indexes.js';
+    document.head.appendChild(script);
+})();
+
+// Load repository health functions (Story #60)
+(function() {
+    const script = document.createElement('script');
+    script.src = '/admin/static/js/repo_health.js';
+    document.head.appendChild(script);
+})();
+
+// Load activated repository management functions (Story #161)
+(function() {
+    const script = document.createElement('script');
+    script.src = '/admin/static/js/activated_repo_management.js';
+    document.head.appendChild(script);
+})();
+
+function showActivateModal(alias) {
+    const modal = document.getElementById('activate-modal');
+    const aliasInput = document.getElementById('activate-golden-alias');
+    const userAliasInput = document.getElementById('activate-user-alias');
+
+    aliasInput.value = alias;
+    userAliasInput.placeholder = alias + ' (default)';
+    modal.showModal();
+}
+
+function closeActivateModal() {
+    const modal = document.getElementById('activate-modal');
+    modal.close();
+}
+
+// Check after htmx swaps and restore open details and forms
+document.body.addEventListener('htmx:afterSettle', function(event) {
+    // Only restore for repos list swaps
+    const target = event.detail.target;
+    if (target && target.id === 'repos-list-section') {
+        // Use requestAnimationFrame to ensure DOM is fully ready
+        requestAnimationFrame(() => {
+            restoreOpenDetails();
+            // Note: restoreOpenAddIndexForms() and restoreOpenHealthDetails() are NOT called
+            // here (Finding 1b fix): they raced against in-flight per-row htmx.ajax fetches.
+            // Nested sub-panel restoration is now driven from _initDetailsRow(alias) instead.
+            // Restore grouped view preference from localStorage
+            if (typeof applyStoredGroupedView === 'function') {
+                applyStoredGroupedView();
+            }
+        });
+    }
+});
+</script>
+{% endblock %}

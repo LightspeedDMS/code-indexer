@@ -1,0 +1,153 @@
+<!-- Story #168: Langfuse Sync Status Card -->
+<!-- AC1: Only visible when pull_enabled is true -->
+{% if langfuse and langfuse.config.pull_enabled %}
+<h2>Langfuse Trace Sync</h2>
+
+<div class="health-grid">
+    <!-- Overall Health Card -->
+    <article class="health-card langfuse-health-card">
+        <header>
+            <h3>Sync Status</h3>
+        </header>
+        <div class="status-content">
+            {% set status_map = {'healthy': 'status-healthy', 'degraded': 'status-degraded', 'unhealthy': 'status-unhealthy', 'unknown': 'status-unhealthy', 'error': 'status-unhealthy', 'disabled': 'status-unhealthy'} %}
+            <span class="status-indicator {{ status_map.get(langfuse.health, 'status-unhealthy') }}"></span>
+            <span class="status-text">{{ langfuse.health | capitalize }}</span>
+        </div>
+        <footer>
+            <small>Sync interval: {{ langfuse.config.interval }}s</small>
+        </footer>
+    </article>
+
+    <!-- Folder Statistics Card (AC5) -->
+    <article class="health-card">
+        <header>
+            <h3>Storage</h3>
+        </header>
+        <div class="system-metrics">
+            <div class="metric">
+                <span class="metric-label">User Folders</span>
+                <span class="metric-value">{{ langfuse.folder_stats.user_folders }}</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Total Traces</span>
+                <span class="metric-value">{{ langfuse.folder_stats.total_traces }}</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Size</span>
+                <span class="metric-value" style="white-space: nowrap;">{{ langfuse.folder_stats.total_size_mb }} MB</span>
+            </div>
+        </div>
+    </article>
+
+    <!-- Manual Sync Button (AC4) -->
+    <article class="health-card">
+        <header>
+            <h3>Actions</h3>
+        </header>
+        <div style="padding: 1rem;">
+            <button
+                id="langfuse-sync-btn"
+                hx-post="/admin/langfuse-sync/trigger"
+                hx-swap="none"
+                onclick="this.setAttribute('aria-busy', 'true'); this.disabled = true;"
+            >
+                Sync Now
+            </button>
+            <div id="langfuse-sync-status" style="margin-top: 0.5rem; font-size: 0.9rem;"></div>
+        </div>
+    </article>
+</div>
+
+<!-- Per-Project Metrics (AC2) -->
+{% if langfuse.metrics %}
+<h3 style="margin-top: 1rem;">Project Metrics</h3>
+
+<table role="grid">
+    <thead>
+        <tr>
+            <th>Project</th>
+            <th>Checked</th>
+            <th>New</th>
+            <th>Updated</th>
+            <th>Unchanged</th>
+            <th>Errors</th>
+            <th>Change Rate</th>
+            <th>Last Sync</th>
+            <th>Duration</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for project_key, metrics in langfuse.metrics.items() %}
+        <tr>
+            <td>{{ project_key }}</td>
+            <td>{{ metrics.traces_checked }}</td>
+            <td>{{ metrics.traces_written_new }}</td>
+            <td>{{ metrics.traces_written_updated }}</td>
+            <td>{{ metrics.traces_unchanged }}</td>
+            <td {% if metrics.errors_count > 0 %}style="color: var(--pico-color-red-550);"{% endif %}>
+                {{ metrics.errors_count }}
+            </td>
+            <td>
+                <!-- AC7: Sync change rate -->
+                {% set total_written = metrics.traces_written_new + metrics.traces_written_updated %}
+                {% set efficiency = (total_written / metrics.traces_checked * 100) if metrics.traces_checked > 0 else 0.0 %}
+                {{ "%.1f"|format(efficiency) }}%
+            </td>
+            <td>
+                {% if metrics.last_sync_time %}
+                    {{ metrics.last_sync_time[:19] }}
+                {% else %}
+                    Never
+                {% endif %}
+            </td>
+            <td>
+                {% if metrics.last_sync_duration_ms > 0 %}
+                    {{ "%.2f"|format(metrics.last_sync_duration_ms / 1000) }}s
+                {% else %}
+                    -
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p style="color: var(--pico-muted-color); font-style: italic; margin-top: 1rem;">
+    No sync metrics available yet. Sync will run every {{ langfuse.config.interval }}s.
+</p>
+{% endif %}
+
+<script>
+// Handle manual sync button response
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.elt.id === 'langfuse-sync-btn') {
+        const btn = evt.detail.elt;
+        const statusDiv = document.getElementById('langfuse-sync-status');
+
+        btn.removeAttribute('aria-busy');
+        btn.disabled = false;
+
+        if (evt.detail.successful) {
+            statusDiv.innerHTML = '<span style="color: var(--pico-color-green-550);">Sync triggered successfully</span>';
+
+            // Refresh the Langfuse card after 2 seconds
+            setTimeout(function() {
+                htmx.ajax('GET', '/admin/partials/dashboard-langfuse', {
+                    target: '#langfuse-section',
+                    swap: 'innerHTML'
+                });
+            }, 2000);
+        } else {
+            statusDiv.innerHTML = '<span style="color: var(--pico-color-red-550);">Sync failed</span>';
+        }
+
+        // Clear status after 5 seconds
+        setTimeout(function() {
+            statusDiv.innerHTML = '';
+        }, 5000);
+    }
+});
+</script>
+
+{% endif %}

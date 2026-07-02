@@ -1,0 +1,1425 @@
+{% extends "base.html" %}
+
+{% block title %}Auto-Discovery - CIDX Admin{% endblock %}
+
+{% block content %}
+<!-- Hidden CSRF token for JavaScript access -->
+<input type="hidden" name="csrf_token" id="csrf_token" value="{{ csrf_token }}">
+
+<div class="auto-discovery-header">
+    <h1>Repository Auto-Discovery</h1>
+    <p class="subtitle">Discover repositories from GitLab and GitHub to add as golden repos</p>
+</div>
+
+<!-- Selection Summary Bar (top placement) -->
+<div id="selection-bar" class="selection-bar" style="display: none;">
+    <span id="selection-count">0 repositories selected</span>
+    <div class="selection-actions">
+        <button onclick="clearSelection()" class="outline small">Clear Selection</button>
+        <button onclick="showCreateDialog()" class="small" id="create-btn" disabled>
+            Create Golden Repos
+        </button>
+    </div>
+</div>
+
+<!-- Platform tabs -->
+<div class="platform-tabs" role="tablist">
+    <button
+        id="tab-gitlab"
+        role="tab"
+        aria-selected="true"
+        aria-controls="panel-gitlab"
+        class="tab-btn active"
+        onclick="switchPlatform('gitlab')"
+    >GitLab</button>
+    <button
+        id="tab-github"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-github"
+        class="tab-btn"
+        onclick="switchPlatform('github')"
+    >GitHub</button>
+</div>
+
+<!-- Per-platform panels -->
+<div id="panel-gitlab" role="tabpanel" aria-labelledby="tab-gitlab" class="platform-panel">
+    <div id="panel-content-gitlab"></div>
+</div>
+<div id="panel-github" role="tabpanel" aria-labelledby="tab-github" class="platform-panel" hidden>
+    <div id="panel-content-github"></div>
+</div>
+
+<!-- Batch Create Modal -->
+<dialog id="batch-create-modal">
+    <article>
+        <header>
+            <h3>Create Golden Repositories</h3>
+            <button type="button" class="close-btn" aria-label="Close" onclick="closeBatchModal()">&times;</button>
+        </header>
+        <p>Select the branch to use for each repository:</p>
+        <div id="batch-repo-list" class="batch-repo-list">
+            <!-- Populated dynamically with branch dropdowns -->
+        </div>
+        <div id="batch-create-status" class="error-banner" style="display:none;"></div>
+        <footer>
+            <button onclick="closeBatchModal()" class="outline">Cancel</button>
+            <button onclick="executeBatchCreate()" class="primary" id="execute-batch-btn">
+                Create <span id="batch-count">0</span> Repositories
+            </button>
+        </footer>
+    </article>
+</dialog>
+
+<script>
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+var PAGE_SIZE = 50;
+
+// Per-platform state keyed by platform string
+var _state = {
+    gitlab: {
+        repos: [],          // full unfiltered dataset from /all
+        enrichments: {},    // clone_url -> enrichment data
+        currentPage: 1,
+        sortField: 'name',
+        sortDir: 'asc',
+        searchQuery: '',
+        showHidden: false,
+        loading: false,
+        error: null
+    },
+    github: {
+        repos: [],
+        enrichments: {},
+        currentPage: 1,
+        sortField: 'name',
+        sortDir: 'asc',
+        searchQuery: '',
+        showHidden: false,
+        loading: false,
+        error: null
+    }
+};
+
+var _activePlatform = 'gitlab';
+
+// Compound key selection map: "{platform}:{clone_url_https}" -> repo data
+var selectedRepos = new Map();
+
+// ---------------------------------------------------------------------------
+// URL helpers
+// ---------------------------------------------------------------------------
+
+function preferredCloneUrl(repo) {
+    return repo.is_private ? repo.clone_url_ssh : repo.clone_url_https;
+}
+
+// ---------------------------------------------------------------------------
+// Platform switching
+// ---------------------------------------------------------------------------
+
+function switchPlatform(platform) {
+    _activePlatform = platform;
+
+    ['gitlab', 'github'].forEach(function(p) {
+        var tab = document.getElementById('tab-' + p);
+        var panel = document.getElementById('panel-' + p);
+        var active = (p === platform);
+        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        tab.classList.toggle('active', active);
+        if (active) {
+            panel.removeAttribute('hidden');
+        } else {
+            panel.setAttribute('hidden', '');
+        }
+    });
+
+    // Fetch if not already loaded and not currently loading
+    var st = _state[platform];
+    if (st.repos.length === 0 && !st.loading && !st.error) {
+        fetchAll(platform, false);
+    } else {
+        renderPanel(platform);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data fetching
+// ---------------------------------------------------------------------------
+
+function fetchAll(platform, force) {
+    var st = _state[platform];
+    st.loading = true;
+    st.error = null;
+    renderPanel(platform);
+
+    var url = '/admin/api/discovery/' + platform + '/all';
+    if (force) {
+        url += '?force=true';
+    }
+    if (st.showHidden) {
+        url += (url.indexOf('?') === -1 ? '?' : '&') + 'show_hidden=true';
+    }
+
+    fetch(url, { credentials: 'same-origin' })
+        .then(function(resp) {
+            if (!resp.ok) {
+                return resp.json().catch(function() {
+                    return { error: 'HTTP ' + resp.status };
+                }).then(function(body) {
+                    throw new Error(body.error || ('HTTP ' + resp.status));
+                });
+            }
+            return resp.json();
+        })
+        .then(function(data) {
+            st.loading = false;
+            st.repos = data.repositories || [];
+            st.currentPage = 1;
+            // On refresh, prune selections that are no longer in dataset
+            if (force) {
+                var urlSet = new Set(st.repos.map(function(r) { return r.clone_url_https; }));
+                Array.from(selectedRepos.keys()).forEach(function(key) {
+                    var parts = key.split(':');
+                    var keyPlatform = parts[0];
+                    var keyUrl = parts.slice(1).join(':');
+                    if (keyPlatform === platform && !urlSet.has(keyUrl)) {
+                        selectedRepos.delete(key);
+                    }
+                });
+            }
+            renderPanel(platform);
+            updateSelectionUI();
+        })
+        .catch(function(err) {
+            st.loading = false;
+            st.error = err.message || String(err);
+            renderPanel(platform);
+        });
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment
+// ---------------------------------------------------------------------------
+
+function enrichVisible(platform, visibleRepos) {
+    var st = _state[platform];
+    var toEnrich = visibleRepos
+        .map(function(r) { return r.clone_url_https; })
+        .filter(function(u) { return u && !st.enrichments[u]; });
+
+    if (toEnrich.length === 0) return;
+
+    // Batch in chunks of 50 (API max)
+    var chunks = [];
+    for (var i = 0; i < toEnrich.length; i += 50) {
+        chunks.push(toEnrich.slice(i, i + 50));
+    }
+
+    chunks.forEach(function(chunk) {
+        fetch('/admin/api/discovery/' + platform + '/enrich', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clone_urls: chunk })
+        })
+        .then(function(resp) {
+            if (!resp.ok) return null;
+            return resp.json();
+        })
+        .then(function(data) {
+            if (!data) return;
+            // data is a dict mapping clone_url -> enrichment info
+            Object.keys(data).forEach(function(url) {
+                st.enrichments[url] = data[url];
+            });
+            patchEnrichmentRows(platform, data);
+        })
+        .catch(function() {
+            // Enrichment failures are non-fatal — rows just stay without enrichment
+        });
+    });
+}
+
+function patchEnrichmentRows(platform, enrichmentData) {
+    Object.keys(enrichmentData).forEach(function(url) {
+        var row = document.querySelector(
+            '[data-platform="' + platform + '"][data-clone-url="' + CSS.escape(url) + '"]'
+        );
+        if (!row) return;
+        var info = enrichmentData[url];
+
+        var commitCell = row.querySelector('.cell-last-commit');
+        if (commitCell && info && info.commit_hash) {
+            var html = '<code class="commit-hash">' + escHtml(info.commit_hash.substring(0, 7)) + '</code>';
+            if (info.commit_author) {
+                html += '<span class="commit-author">' + escHtml(info.commit_author) + '</span>';
+            }
+            if (info.commit_date) {
+                html += '<span class="commit-date">' + escHtml(info.commit_date.substring(0, 10)) + '</span>';
+            }
+            commitCell.innerHTML = html;
+        }
+
+        var activityCells = row.querySelectorAll('td');
+        // Last Activity is the 7th td (index 6): checkbox, platform, name, description, branch, last-commit, last-activity
+        var activityCell = activityCells.length >= 7 ? activityCells[6] : null;
+        if (activityCell && info && info.last_activity) {
+            var d = new Date(info.last_activity);
+            var formatted = d.getUTCFullYear() + '-' +
+                String(d.getUTCMonth() + 1).padStart(2, '0') + '-' +
+                String(d.getUTCDate()).padStart(2, '0') + ' ' +
+                String(d.getUTCHours()).padStart(2, '0') + ':' +
+                String(d.getUTCMinutes()).padStart(2, '0');
+            activityCell.textContent = formatted;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Filtering and sorting
+// ---------------------------------------------------------------------------
+
+function getFilteredSorted(platform) {
+    var st = _state[platform];
+    var q = st.searchQuery.toLowerCase().trim();
+
+    var filtered = st.repos.filter(function(r) {
+        if (!st.showHidden && r.is_hidden) return false;
+        if (!q) return true;
+        var name = (r.name || '').toLowerCase();
+        var url = (r.clone_url_https || '').toLowerCase();
+        var ns = (r.namespace || '').toLowerCase();
+        return name.indexOf(q) !== -1 || url.indexOf(q) !== -1 || ns.indexOf(q) !== -1;
+    });
+
+    var field = st.sortField;
+    var dir = st.sortDir === 'asc' ? 1 : -1;
+    filtered.sort(function(a, b) {
+        var av = (a[field] || '').toLowerCase();
+        var bv = (b[field] || '').toLowerCase();
+        if (av < bv) return -dir;
+        if (av > bv) return dir;
+        return 0;
+    });
+
+    return filtered;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function renderPanel(platform) {
+    var container = document.getElementById('panel-content-' + platform);
+    if (!container) return;
+
+    var st = _state[platform];
+
+    if (st.loading) {
+        container.innerHTML = '<div class="loading-container"><p>Loading repositories...</p></div>';
+        return;
+    }
+
+    if (st.error) {
+        container.innerHTML =
+            '<div class="error-banner">' +
+                '<p class="error-msg">Error loading repositories: ' + escHtml(st.error) + '</p>' +
+                '<button onclick="fetchAll(\'' + platform + '\', false)" class="outline small">Retry</button>' +
+            '</div>';
+        return;
+    }
+
+    var filtered = getFilteredSorted(platform);
+    var totalFiltered = filtered.length;
+
+    // Count total repos and unregistered repos in full dataset
+    var totalSource = st.repos.filter(function(r) { return !r.is_hidden; }).length + st.repos.filter(function(r) { return r.is_hidden; }).length;
+    var totalUnregistered = st.repos.filter(function(r) { return !r.is_hidden; }).length;
+
+    var totalPages = Math.max(1, Math.ceil(totalFiltered / PAGE_SIZE));
+    if (st.currentPage > totalPages) st.currentPage = totalPages;
+
+    var startIdx = (st.currentPage - 1) * PAGE_SIZE;
+    var pageRepos = filtered.slice(startIdx, startIdx + PAGE_SIZE);
+
+    var html = '';
+
+    // Controls bar
+    html += '<div class="controls-bar">';
+    html += '<span class="count-label">' +
+        escHtml(String(totalUnregistered)) + ' unregistered of ' + escHtml(String(st.repos.length)) + ' total' +
+        (st.searchQuery ? ' (' + escHtml(String(totalFiltered)) + ' matching search)' : '') +
+        '</span>';
+    html += '<div class="controls-right">';
+    html += '<input type="text" class="search-input" placeholder="Search..." ' +
+        'value="' + escHtml(st.searchQuery) + '" ' +
+        'oninput="onSearch(\'' + platform + '\', this.value)">';
+    html += '<label class="show-hidden-label">' +
+        '<input type="checkbox" ' + (st.showHidden ? 'checked' : '') + ' ' +
+        'onchange="onShowHidden(\'' + platform + '\', this.checked)"> ' +
+        'Show hidden</label>';
+    html += '<button onclick="fetchAll(\'' + platform + '\', true)" class="outline small">Refresh</button>';
+    html += '</div></div>';
+
+    // Table
+    html += '<div class="table-container"><table class="discovery-table"><thead><tr>';
+    html += '<th><input type="checkbox" id="select-all-' + platform + '" ' +
+        'onchange="toggleSelectAll(\'' + platform + '\', this.checked)"></th>';
+    html += '<th>Platform</th>';
+    html += sortHeader(platform, 'name', 'Name', st);
+    html += sortHeader(platform, 'description', 'Description', st);
+    html += '<th>Branch</th>';
+    html += '<th>Last Commit</th>';
+    html += '<th>Last Activity</th>';
+    html += '<th>Visibility</th>';
+    html += '<th>Actions</th>';
+    html += '</tr></thead><tbody>';
+
+    if (pageRepos.length === 0) {
+        html += '<tr><td colspan="9" class="empty-cell">No repositories found</td></tr>';
+    } else {
+        var csrfToken = getCsrfToken() || '';
+        pageRepos.forEach(function(repo) {
+            var key = platform + ':' + repo.clone_url_https;
+            var isSelected = selectedRepos.has(key);
+            var rowClass = repo.is_hidden ? 'row-hidden' : '';
+            var enrichment = st.enrichments[repo.clone_url_https];
+            // Last Commit: hash (7 chars) + author + date from enrichment,
+            // falling back to repo-level fields (populated for GitHub since /enrich is a no-op)
+            var hash = (enrichment && enrichment.commit_hash) || repo.last_commit_hash;
+            var author = (enrichment && enrichment.commit_author) || repo.last_commit_author;
+            var date = (enrichment && enrichment.commit_date) || repo.last_commit_date;
+            var lastCommitHtml = '';
+            if (hash) {
+                lastCommitHtml = '<code class="commit-hash">' + escHtml(hash.substring(0, 7)) + '</code>';
+                if (author) {
+                    lastCommitHtml += '<span class="commit-author">' + escHtml(author) + '</span>';
+                }
+                if (date) {
+                    lastCommitHtml += '<span class="commit-date">' + escHtml(date.substring(0, 10)) + '</span>';
+                }
+            }
+            // Last Activity from enrichment or repo field — format as YYYY-MM-DD HH:MM
+            function fmtActivity(isoStr) {
+                if (!isoStr) return '';
+                var d = new Date(isoStr);
+                if (isNaN(d.getTime())) return isoStr.substring(0, 10);
+                return d.getUTCFullYear() + '-' +
+                    String(d.getUTCMonth() + 1).padStart(2, '0') + '-' +
+                    String(d.getUTCDate()).padStart(2, '0') + ' ' +
+                    String(d.getUTCHours()).padStart(2, '0') + ':' +
+                    String(d.getUTCMinutes()).padStart(2, '0');
+            }
+            var lastActivity = (enrichment && enrichment.last_activity)
+                ? fmtActivity(enrichment.last_activity)
+                : fmtActivity(repo.last_activity);
+            html += '<tr class="' + rowClass + '" ' +
+                'data-platform="' + escHtml(platform) + '" ' +
+                'data-clone-url="' + escHtml(repo.clone_url_https) + '">';
+            html += '<td><input type="checkbox" class="repo-checkbox" ' +
+                'data-platform="' + escHtml(platform) + '" ' +
+                'data-name="' + escHtml(repo.name || '') + '" ' +
+                'data-branch="' + escHtml(repo.default_branch || 'main') + '" ' +
+                'data-preferred-url="' + escHtml(preferredCloneUrl(repo)) + '" ' +
+                'value="' + escHtml(repo.clone_url_https) + '" ' +
+                (isSelected ? 'checked' : '') + ' ' +
+                'onchange="onCheckboxChange(\'' + platform + '\', this)"></td>';
+            html += '<td><span class="platform-badge ' + escHtml(platform) + '">' + escHtml(platform.charAt(0).toUpperCase() + platform.slice(1)) + '</span></td>';
+            html += '<td><strong>' + escHtml(repo.name || '') + '</strong></td>';
+            html += '<td class="repo-description">' + escHtml(repo.description || '-') + '</td>';
+            html += '<td><code>' + escHtml(repo.default_branch || '') + '</code></td>';
+            html += '<td class="cell-last-commit last-commit-cell">' + lastCommitHtml + '</td>';
+            html += '<td>' + escHtml(lastActivity) + '</td>';
+            var visClass = repo.is_private ? 'private' : 'public';
+            var visLabel = repo.is_private ? 'Private' : 'Public';
+            html += '<td><span class="visibility-badge ' + visClass + '">' + visLabel + '</span></td>';
+            // Hide/Unhide button: toggles the hidden flag via the discovery API.
+            // (Per-row Add removed — use the checkbox + top "Create Golden Repos" flow.)
+            var repoId = escHtml(platform + ':' + (repo.clone_url_https || ''));
+            html += '<td class="actions-cell">';
+            if (repo.is_hidden) {
+                html += '<button type="button" class="small outline" style="display:block;margin-top:4px;width:100%;" ' +
+                    'onclick="doUnhide(\'' + repoId + '\')">Unhide</button>';
+            } else {
+                html += '<button type="button" class="small outline secondary" style="display:block;margin-top:4px;width:100%;" ' +
+                    'onclick="doHide(\'' + repoId + '\')">Hide</button>';
+            }
+            html += '</td>';
+            html += '</tr>';
+        });
+    }
+
+    html += '</tbody></table></div>';
+
+    // Pagination controls
+    html += renderPagination(platform, st.currentPage, totalPages, totalFiltered);
+
+    container.innerHTML = html;
+
+    // Trigger enrichment for visible rows that haven't been enriched
+    enrichVisible(platform, pageRepos);
+}
+
+function sortHeader(platform, field, label, st) {
+    var indicator = '';
+    if (st.sortField === field) {
+        indicator = st.sortDir === 'asc' ? ' &uarr;' : ' &darr;';
+    }
+    return '<th class="sortable" onclick="onSort(\'' + platform + '\', \'' + field + '\')">' +
+        escHtml(label) + indicator + '</th>';
+}
+
+function renderPagination(platform, currentPage, totalPages, totalItems) {
+    if (totalPages <= 1) return '';
+
+    var html = '<div class="pagination">';
+    html += '<button onclick="goPage(\'' + platform + '\', 1)" ' +
+        (currentPage <= 1 ? 'disabled' : '') + ' class="outline small">First</button>';
+    html += '<button onclick="goPage(\'' + platform + '\', ' + (currentPage - 1) + ')" ' +
+        (currentPage <= 1 ? 'disabled' : '') + ' class="outline small">Prev</button>';
+    html += '<span class="page-info">Page ' + currentPage + ' of ' + totalPages +
+        ' (' + totalItems + ' repos)</span>';
+    html += '<button onclick="goPage(\'' + platform + '\', ' + (currentPage + 1) + ')" ' +
+        (currentPage >= totalPages ? 'disabled' : '') + ' class="outline small">Next</button>';
+    html += '<button onclick="goPage(\'' + platform + '\', ' + totalPages + ')" ' +
+        (currentPage >= totalPages ? 'disabled' : '') + ' class="outline small">Last</button>';
+    html += '<input type="number" class="page-jump" min="1" max="' + totalPages + '" ' +
+        'value="' + currentPage + '" ' +
+        'onchange="goPage(\'' + platform + '\', parseInt(this.value))" ' +
+        'title="Jump to page">';
+    html += '</div>';
+    return html;
+}
+
+// ---------------------------------------------------------------------------
+// Event handlers
+// ---------------------------------------------------------------------------
+
+function onSearch(platform, value) {
+    var st = _state[platform];
+    st.searchQuery = value;
+    st.currentPage = 1;
+    renderPanel(platform);
+}
+
+function onShowHidden(platform, checked) {
+    var st = _state[platform];
+    st.showHidden = checked;
+    st.currentPage = 1;
+    renderPanel(platform);
+}
+
+function onSort(platform, field) {
+    var st = _state[platform];
+    if (st.sortField === field) {
+        st.sortDir = st.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        st.sortField = field;
+        st.sortDir = 'asc';
+    }
+    renderPanel(platform);
+}
+
+function goPage(platform, page) {
+    var st = _state[platform];
+    var filtered = getFilteredSorted(platform);
+    var totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    if (page < 1) page = 1;
+    if (page > totalPages) page = totalPages;
+    st.currentPage = page;
+    renderPanel(platform);
+}
+
+function onCheckboxChange(platform, checkbox) {
+    var url = checkbox.value;
+    var key = platform + ':' + url;
+    if (checkbox.checked) {
+        selectedRepos.set(key, {
+            platform: platform,
+            name: checkbox.dataset.name,
+            branch: checkbox.dataset.branch,
+            clone_url: checkbox.dataset.preferredUrl
+        });
+    } else {
+        selectedRepos.delete(key);
+    }
+    updateSelectionUI();
+}
+
+function toggleSelectAll(platform, checked) {
+    var st = _state[platform];
+    var filtered = getFilteredSorted(platform);
+    var startIdx = (st.currentPage - 1) * PAGE_SIZE;
+    var pageRepos = filtered.slice(startIdx, startIdx + PAGE_SIZE);
+
+    pageRepos.forEach(function(repo) {
+        var key = platform + ':' + repo.clone_url_https;
+        if (checked) {
+            selectedRepos.set(key, {
+                platform: platform,
+                name: repo.name || '',
+                branch: repo.default_branch || 'main',
+                clone_url: preferredCloneUrl(repo)
+            });
+        } else {
+            selectedRepos.delete(key);
+        }
+    });
+
+    // Sync checkboxes in DOM
+    document.querySelectorAll('input.repo-checkbox[data-platform="' + platform + '"]')
+        .forEach(function(cb) {
+            var k = platform + ':' + cb.value;
+            cb.checked = selectedRepos.has(k);
+        });
+
+    updateSelectionUI();
+}
+
+function updateSelectionUI() {
+    var count = selectedRepos.size;
+    var countEl = document.getElementById('selection-count');
+    if (countEl) {
+        countEl.textContent = count + ' repositor' + (count === 1 ? 'y' : 'ies') + ' selected';
+    }
+    var bar = document.getElementById('selection-bar');
+    if (bar) bar.style.display = count > 0 ? 'flex' : 'none';
+    var btn = document.getElementById('create-btn');
+    if (btn) btn.disabled = count === 0;
+}
+
+function clearSelection() {
+    selectedRepos.clear();
+    document.querySelectorAll('input.repo-checkbox').forEach(function(cb) {
+        cb.checked = false;
+    });
+    document.querySelectorAll('#select-all-gitlab, #select-all-github').forEach(function(cb) {
+        cb.checked = false;
+    });
+    updateSelectionUI();
+}
+
+// ---------------------------------------------------------------------------
+// Batch create modal
+// ---------------------------------------------------------------------------
+
+async function showCreateDialog() {
+    var modal = document.getElementById('batch-create-modal');
+    var list = document.getElementById('batch-repo-list');
+    var countSpan = document.getElementById('batch-count');
+
+    if (!modal || !list || !countSpan) {
+        alert('Error: Dialog elements not found. Please refresh the page.');
+        return;
+    }
+
+    list.innerHTML = '';
+    countSpan.textContent = selectedRepos.size;
+
+    selectedRepos.forEach(function(data, key) {
+        var item = document.createElement('div');
+        item.className = 'batch-repo-item';
+        item.dataset.key = key;
+        item.innerHTML =
+            '<div class="batch-repo-item-header">' +
+                '<div class="repo-info">' +
+                    '<span class="repo-platform">' + escHtml(data.platform.toUpperCase()) + '</span>' +
+                    '<span class="repo-name">' + escHtml(data.name) + '</span>' +
+                '</div>' +
+                '<button type="button" class="remove-repo-btn" aria-label="Remove ' + escHtml(data.name) + '" onclick="removeRepo(\'' + escHtml(key) + '\')">&times;</button>' +
+            '</div>' +
+            '<div class="branch-select-container">' +
+                '<span class="branch-loading">Loading branches...</span>' +
+            '</div>';
+        list.appendChild(item);
+    });
+
+    modal.showModal();
+    await fetchBranchesForSelectedRepos();
+}
+
+function removeRepo(key) {
+    var item = document.querySelector('.batch-repo-item[data-key="' + CSS.escape(key) + '"]');
+    if (item) item.remove();
+    selectedRepos.delete(key);
+
+    var countSpan = document.getElementById('batch-count');
+    if (countSpan) countSpan.textContent = selectedRepos.size;
+
+    var executeBtn = document.getElementById('execute-batch-btn');
+    var list = document.getElementById('batch-repo-list');
+
+    if (selectedRepos.size === 0) {
+        if (list) list.innerHTML = '<p class="batch-empty-msg">No repositories selected.</p>';
+        if (executeBtn) executeBtn.disabled = true;
+    }
+
+    updateSelectionUI();
+}
+
+async function fetchBranchesForSelectedRepos() {
+    var repos = [];
+    selectedRepos.forEach(function(data) {
+        repos.push({ clone_url: data.clone_url, platform: data.platform });
+    });
+
+    if (repos.length === 0) return;
+
+    try {
+        var response = await fetch('/admin/api/discovery/branches', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repos: repos })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to fetch branches: ' + response.status);
+        }
+
+        var results = await response.json();
+        selectedRepos.forEach(function(data, key) {
+            updateRepoBranchDropdown(key, data, results[data.clone_url] || { branches: [], error: 'Not found' });
+        });
+    } catch (error) {
+        selectedRepos.forEach(function(data, key) {
+            updateRepoBranchDropdown(key, data, { branches: [], default_branch: null, error: error.message });
+        });
+    }
+}
+
+function updateRepoBranchDropdown(key, repoData, branchResult) {
+    var item = document.querySelector('.batch-repo-item[data-key="' + CSS.escape(key) + '"]');
+    if (!item) return;
+    var container = item.querySelector('.branch-select-container');
+    if (!container) return;
+
+    if (branchResult.error) {
+        container.innerHTML =
+            '<div class="branch-error">' +
+                '<span class="error-msg" title="' + escHtml(branchResult.error) + '">Error loading branches</span>' +
+                '<span class="branch-fallback">Using: ' + escHtml(repoData.branch) + '</span>' +
+            '</div>';
+        return;
+    }
+
+    if (!branchResult.branches || branchResult.branches.length === 0) {
+        container.innerHTML = '<span class="branch-fallback">Branch: ' + escHtml(repoData.branch) + '</span>';
+        return;
+    }
+
+    var defaultBranch = branchResult.default_branch || repoData.branch;
+    var select = document.createElement('select');
+    select.className = 'branch-select';
+    select.dataset.key = key;
+    select.onchange = function() { onBranchChange(key, this.value); };
+
+    branchResult.branches.forEach(function(branch) {
+        var option = document.createElement('option');
+        option.value = branch;
+        option.textContent = branch;
+        if (branch === defaultBranch) option.selected = true;
+        select.appendChild(option);
+    });
+
+    if (defaultBranch && !branchResult.branches.includes(defaultBranch)) {
+        var extra = document.createElement('option');
+        extra.value = defaultBranch;
+        extra.textContent = defaultBranch + ' (default)';
+        extra.selected = true;
+        select.insertBefore(extra, select.firstChild);
+    }
+
+    container.innerHTML = '';
+    container.appendChild(select);
+
+    if (select.value !== repoData.branch) {
+        var updated = Object.assign({}, repoData, { branch: select.value });
+        selectedRepos.set(key, updated);
+    }
+}
+
+function onBranchChange(key, newBranch) {
+    var data = selectedRepos.get(key);
+    if (data) {
+        selectedRepos.set(key, Object.assign({}, data, { branch: newBranch }));
+    }
+}
+
+function removeSuccessfulSelections(results) {
+    results.forEach(function(item) {
+        if (item.status !== 'success') return;
+        selectedRepos.forEach(function(data, key) {
+            if (data.clone_url === item.clone_url) {
+                selectedRepos.delete(key);
+            }
+        });
+    });
+    updateSelectionUI();
+}
+
+function renderBatchCreateFailures(result) {
+    var status = document.getElementById('batch-create-status');
+    var failures = result.results.filter(function(item) { return item.status === 'failed'; });
+    if (!status || failures.length === 0) return;
+    status.innerHTML =
+        '<p class="error-msg"><strong>' + escHtml(result.summary) + '</strong></p>' +
+        failures.map(function(item) {
+            return '<p class="error-msg">' + escHtml(item.alias) + ': ' + escHtml(item.error) + '</p>';
+        }).join('');
+    status.style.display = 'block';
+}
+
+function closeBatchModal() {
+    document.getElementById('batch-create-modal').close();
+    var status = document.getElementById('batch-create-status');
+    if (status) { status.style.display = 'none'; status.innerHTML = ''; }
+}
+
+async function executeBatchCreate() {
+    var repos = [];
+    selectedRepos.forEach(function(data) {
+        repos.push({
+            clone_url: data.clone_url,
+            alias: data.name,
+            branch: data.branch,
+            platform: data.platform
+        });
+    });
+
+    var formData = new FormData();
+    formData.append('repos', JSON.stringify(repos));
+
+    var csrfToken = getCsrfToken();
+    if (csrfToken) formData.append('csrf_token', csrfToken);
+
+    var executeBtn = document.getElementById('execute-batch-btn');
+    executeBtn.disabled = true;
+    executeBtn.innerHTML = 'Creating...';
+
+    try {
+        var response = await fetch('/admin/golden-repos/batch-create', {
+            method: 'POST',
+            credentials: 'same-origin',
+            body: formData
+        });
+        var result = await response.json();
+        if (typeof result.success !== 'boolean' || !Array.isArray(result.results)) {
+            alert('Batch-create response malformed — see browser console');
+            console.error('Malformed batch-create response:', result);
+            return;
+        }
+        if (result.success) {
+            closeBatchModal();
+            clearSelection();
+            alert(result.summary);
+            fetchAll(_activePlatform, true);
+            return;
+        }
+        removeSuccessfulSelections(result.results);
+        renderBatchCreateFailures(result);
+        if (result.results.some(function(item) { return item.status === 'success'; })) {
+            fetchAll(_activePlatform, true);
+        }
+    } catch (error) {
+        alert('Error creating repositories: ' + error.message);
+    } finally {
+        executeBtn.disabled = false;
+        executeBtn.innerHTML = 'Create <span id="batch-count">' + selectedRepos.size + '</span> Repositories';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+function doHide(repoId) {
+    var csrfToken = getCsrfToken() || '';
+    var body = 'repo_identifier=' + encodeURIComponent(repoId) +
+               '&csrf_token=' + encodeURIComponent(csrfToken);
+    fetch('/admin/api/discovery/hide', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body
+    }).then(function(resp) {
+        if (resp.ok) {
+            // Update local state and re-render
+            var parts = repoId.split(':');
+            var p = parts[0];
+            var st = _state[p];
+            if (st) {
+                st.repos.forEach(function(r) {
+                    if ((p + ':' + r.clone_url_https) === repoId) {
+                        r.is_hidden = true;
+                    }
+                });
+                renderPanel(p);
+            }
+        }
+    }).catch(function() {
+        // Non-fatal — ignore hide failures silently
+    });
+}
+
+function doUnhide(repoId) {
+    var csrfToken = getCsrfToken() || '';
+    var body = 'repo_identifier=' + encodeURIComponent(repoId) +
+               '&csrf_token=' + encodeURIComponent(csrfToken);
+    fetch('/admin/api/discovery/unhide', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body
+    }).then(function(resp) {
+        if (resp.ok) {
+            var parts = repoId.split(':');
+            var p = parts[0];
+            var st = _state[p];
+            if (st) {
+                st.repos.forEach(function(r) {
+                    if ((p + ':' + r.clone_url_https) === repoId) {
+                        r.is_hidden = false;
+                    }
+                });
+                renderPanel(p);
+            }
+        }
+    }).catch(function() {
+        // Non-fatal — ignore unhide failures silently
+    });
+}
+
+function getCsrfToken() {
+    var csrfInput = document.querySelector('input[name="csrf_token"]');
+    if (csrfInput) return csrfInput.value;
+    var match = document.cookie.match(/(?:^|; )_csrf=([^;]*)/);
+    return match ? decodeURIComponent(match[1]) : null;
+}
+
+function escHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// ---------------------------------------------------------------------------
+// Initialise on load
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Viewport-aware table sizing
+// Measures the real distance from the table's top to the viewport bottom,
+// reserves space for the pagination bar, and applies the result as
+// max-height on the table container. Runs on load, on window resize, on
+// visualViewport resize (zoom), and after every renderPanel() call.
+// No hardcoded offsets — fully deterministic from actual DOM geometry.
+// ---------------------------------------------------------------------------
+function sizeTableContainer() {
+    var panel = document.getElementById('panel-' + _activePlatform);
+    if (!panel || panel.hasAttribute('hidden')) return;
+    var container = panel.querySelector('.table-container');
+    if (!container) return;
+    var pagination = panel.querySelector('.pagination');
+
+    var rect = container.getBoundingClientRect();
+    var paginationH = pagination ? pagination.getBoundingClientRect().height : 0;
+    var viewportH = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+
+    // Available = viewport bottom - table top - pagination - small bottom gap
+    var available = viewportH - rect.top - paginationH - 20;
+    if (available < 200) available = 200; // floor so it's still usable on tiny viewports
+    container.style.maxHeight = available + 'px';
+}
+
+window.addEventListener('resize', sizeTableContainer);
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', sizeTableContainer);
+}
+
+// Re-run after any render so new DOM structure is measured
+(function wrapRender() {
+    var _origRender = renderPanel;
+    renderPanel = function(platform) {
+        _origRender(platform);
+        // schedule after layout settles
+        requestAnimationFrame(sizeTableContainer);
+    };
+})();
+
+document.addEventListener('DOMContentLoaded', function() {
+    fetchAll('gitlab', false);
+    requestAnimationFrame(sizeTableContainer);
+});
+</script>
+
+<style>
+/* Platform tabs */
+.platform-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid var(--muted-border-color, #ccc);
+    margin-bottom: 1.5rem;
+}
+
+.tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    padding: 0.6rem 1.25rem;
+    font-size: 1rem;
+    cursor: pointer;
+    color: var(--muted-color, #666);
+    border-radius: 0;
+}
+
+.tab-btn:hover {
+    color: var(--color, #1a1a1a);
+}
+
+.tab-btn.active {
+    color: var(--primary, #1976d2);
+    border-bottom-color: var(--primary, #1976d2);
+    font-weight: 600;
+}
+
+/* Controls bar */
+.controls-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.count-label {
+    font-size: 0.9rem;
+    color: var(--muted-color, #666);
+}
+
+.controls-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.search-input {
+    padding: 0.45rem 0.7rem;
+    font-size: 0.95rem;
+    border: 1px solid var(--muted-border-color, rgba(255,255,255,0.2));
+    border-radius: 4px;
+    background: var(--form-element-background-color, rgba(0,0,0,0.2));
+    color: var(--color, inherit);
+    width: 260px;
+}
+
+.show-hidden-label {
+    font-size: 0.85rem;
+    color: var(--muted-color, #666);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+/* Panel: natural layout. Table scroll height is computed via JS on
+   load/resize/zoom to fit the remaining viewport, so the pagination row
+   beneath it is always visible without page scroll (see sizeTableContainer). */
+.platform-panel {
+    display: block;
+}
+
+.controls-bar,
+.pagination {
+    flex: 0 0 auto;
+}
+
+/* Table */
+.table-container {
+    overflow: auto;
+    border: 1px solid var(--muted-border-color, rgba(255,255,255,0.1));
+    border-radius: 4px;
+    /* maxHeight set dynamically via sizeTableContainer() in JS */
+}
+
+.discovery-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95rem;
+}
+
+.discovery-table th,
+.discovery-table td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--muted-border-color, rgba(255,255,255,0.08));
+    text-align: left;
+    vertical-align: middle;
+}
+
+.discovery-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--card-sectioning-background-color, rgba(255,255,255,0.07));
+    color: var(--color, inherit);
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    box-shadow: inset 0 -1px 0 var(--muted-border-color, rgba(255,255,255,0.15));
+}
+
+.discovery-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.discovery-table th.sortable:hover {
+    background: var(--primary-focus, #e3f2fd);
+}
+
+.discovery-table tbody tr:hover td {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.url-cell {
+    font-family: monospace;
+    font-size: 0.78rem;
+    word-break: break-all;
+    max-width: 280px;
+}
+
+.empty-cell {
+    text-align: center;
+    color: var(--muted-color, #888);
+    padding: 2rem;
+}
+
+/* Hidden rows */
+.row-hidden td {
+    color: var(--muted-color, #aaa);
+    font-style: italic;
+    background: var(--secondary-background, #f8f8f8);
+    opacity: 0.65;
+}
+
+/* Pagination */
+.pagination {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    flex-wrap: wrap;
+}
+
+.page-info {
+    font-size: 0.85rem;
+    color: var(--muted-color, #666);
+    white-space: nowrap;
+}
+
+.page-jump {
+    width: 70px;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.85rem;
+    border: 1px solid var(--muted-border-color, #ccc);
+    border-radius: 4px;
+    text-align: center;
+}
+
+/* Loading/Error states */
+.loading-container {
+    text-align: center;
+    padding: 3rem;
+    color: var(--muted-color, #888);
+}
+
+.error-banner {
+    padding: 1rem 1.25rem;
+    background: var(--del-color-light, #fff3f3);
+    border: 1px solid var(--del-color, #dc3545);
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.error-banner .error-msg {
+    color: var(--del-color, #dc3545);
+    margin: 0;
+    flex: 1;
+}
+
+/* Selection bar */
+.selection-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background-color: var(--primary-focus, #e3f2fd);
+    border: 1px solid var(--primary, #1976d2);
+    border-radius: 8px;
+    margin-top: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.selection-bar span {
+    font-weight: 500;
+    color: var(--primary, #1976d2);
+}
+
+.selection-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+/* Batch modal */
+#batch-create-modal {
+    max-width: 600px;
+    width: 90%;
+}
+
+#batch-create-modal article {
+    margin: 0;
+}
+
+#batch-create-modal header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--muted-border-color);
+}
+
+#batch-create-modal header h3 {
+    margin: 0;
+}
+
+#batch-create-modal .close-btn {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    color: var(--muted-color);
+}
+
+#batch-create-modal .close-btn:hover {
+    color: var(--color);
+}
+
+.remove-repo-btn {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    color: var(--muted-color);
+}
+
+.remove-repo-btn:hover {
+    color: var(--color);
+}
+
+.batch-repo-item-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    width: 100%;
+}
+
+.batch-repo-list {
+    max-height: 400px;
+    overflow-y: auto;
+    margin: 1rem 0;
+    padding: 0;
+}
+
+.batch-repo-item {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
+    gap: 0.5rem;
+}
+
+.batch-repo-item:last-child {
+    border-bottom: none;
+}
+
+.repo-info {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+}
+
+.repo-platform {
+    font-size: 0.75rem;
+    color: var(--muted-color, #666);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.repo-name {
+    font-weight: 500;
+    word-break: break-all;
+    line-height: 1.3;
+}
+
+.branch-select-container {
+    width: 100%;
+}
+
+.branch-loading {
+    color: var(--muted-color, #666);
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+.branch-select {
+    width: 100%;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.9rem;
+    border: 1px solid var(--muted-border-color, #ccc);
+    border-radius: 4px;
+    background-color: var(--background-color, #fff);
+    color: var(--color, #1a1a1a);
+    cursor: pointer;
+}
+
+.branch-select:focus {
+    outline: none;
+    border-color: var(--primary, #1976d2);
+    box-shadow: 0 0 0 2px var(--primary-focus, rgba(25, 118, 210, 0.2));
+}
+
+.branch-error {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+}
+
+.branch-error .error-msg {
+    color: var(--del-color, #dc3545);
+    font-size: 0.8rem;
+    cursor: help;
+}
+
+.branch-fallback {
+    font-size: 0.85rem;
+    color: var(--muted-color, #666);
+}
+
+#batch-create-modal footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--muted-border-color);
+}
+
+/* Header */
+.auto-discovery-header {
+    margin-bottom: 2rem;
+}
+
+.auto-discovery-header h1 {
+    margin-bottom: 0.5rem;
+}
+
+.auto-discovery-header .subtitle {
+    color: var(--muted-color);
+    margin: 0;
+}
+
+/* Platform and visibility badges */
+.platform-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.platform-badge.gitlab {
+    background-color: #fc6d26;
+    color: white;
+}
+
+.platform-badge.github {
+    background-color: #24292E;
+    color: white;
+}
+
+.visibility-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.visibility-badge.private {
+    background-color: #ffeeba;
+    color: #856404;
+}
+
+.visibility-badge.public {
+    background-color: #d4edda;
+    color: #155724;
+}
+
+/* Commit cell styling */
+.last-commit-cell {
+    font-size: 0.85rem;
+}
+
+.last-commit-cell .commit-hash {
+    background-color: var(--code-background-color, #f4f4f4);
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+.commit-author {
+    display: block;
+    color: var(--muted-color);
+    font-size: 0.8rem;
+    margin-top: 2px;
+}
+
+.commit-date {
+    display: block;
+    color: var(--muted-color);
+    font-size: 0.75rem;
+    margin-top: 2px;
+}
+
+/* Description cell */
+.repo-description {
+    color: var(--muted-color);
+    font-size: 0.9rem;
+}
+
+/* Actions cell */
+.actions-cell {
+    white-space: nowrap;
+}
+</style>
+{% endblock %}

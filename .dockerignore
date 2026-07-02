@@ -1,74 +1,22 @@
-# ── Build artefacts (created inside Docker) ─────────────────────────────────
-dist/
-build/
-.serverless/
-.webpack/
-coverage/
-*.tgz
-*.zip
-
-# ── Dependencies (installed inside Docker) ──────────────────────────────────
-node_modules/
-npm-debug.log
-yarn-error.log
-
-# ── Tests ────────────────────────────────────────────────────────────────────
-.nyc_output/
-test/
-tests/
-*.test.ts
-*.spec.ts
-
-# ── Environment / secrets ────────────────────────────────────────────────────
-.env
-.env.*
-!.env.example
-*.local
-.npmrc
-
-# ── IDE & OS ─────────────────────────────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-*.iml
-
-# ── Git ──────────────────────────────────────────────────────────────────────
-.git/
-.gitignore
-.gitattributes
-
-# ── Documentation ────────────────────────────────────────────────────────────
-*.md
-docs/
-
-# ── CI / CD ──────────────────────────────────────────────────────────────────
+# Keep the build context small + reproducible. The image needs only:
+#   third_party/hnswlib (custom native build), src/ (the package), pyproject.toml, README.md
+.git
 .gitlab-ci.yml
-.github/
-
-# ── Logs ─────────────────────────────────────────────────────────────────────
-logs/
-*.log
-
-# ── Dev tooling ──────────────────────────────────────────────────────────────
-.eslintrc.js
-.eslintrc.json
-.prettierrc
-.prettierrc.json
-.editorconfig
-jest.config.js
-.husky/
-scripts/
-webpack.config.js
-webpack.base.js
-webpack*.js
-serverless.yml
-serverless_helper.js
-
-# ── TypeScript config ────────────────────────────────────────────────────────
-# tsconfig.json and tsconfig.build.json MUST be present — nest build needs them
-tsconfig*.json
-!tsconfig.json
-!tsconfig.build.json
+.github
+tests/
+test-fixtures/
+docs/
+examples/
+third_party/hnswlib/examples/
+third_party/hnswlib/tests/
+**/__pycache__/
+**/*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+*.md
+!README.md

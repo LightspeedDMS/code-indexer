@@ -1,0 +1,15 @@
+# Cohere Embedding Model Specifications
+# Source: https://docs.cohere.com/docs/embed (2026)
+
+cohere_models:
+  embed-v4.0:
+    token_limit: 128000
+    texts_per_request: 96
+    context_length: 128000
+    dimensions: [1536, 1024, 768, 512, 384, 256]
+    default_dimension: 1536
+    description: "Cohere Embed v4 - state of the art embeddings"
+
+api_constraints:
+  max_texts_per_request: 96
+  safety_margin_percentage: 90

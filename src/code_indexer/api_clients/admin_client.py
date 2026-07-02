@@ -1,0 +1,1235 @@
+"""
+Admin API Client for CIDX Server Integration.
+
+Provides administrative functionality including user creation and management
+with real server authentication and network error handling. Follows anti-mock
+principles with real API integration.
+"""
+
+import logging
+from typing import Dict, Any, Optional
+from pathlib import Path
+
+import httpx
+
+from .base_client import (
+    CIDXRemoteAPIClient,
+    APIClientError,
+    AuthenticationError,
+    NetworkError,
+)
+from .elevation import ElevationRequiredError
+from .network_error_handler import (
+    NetworkConnectionError,
+    NetworkTimeoutError,
+    DNSResolutionError,
+    SSLCertificateError,
+    ServerError,
+    RateLimitError,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _check_elevation_required(response: httpx.Response) -> None:
+    """Inspect a 403 response body for elevation error codes.
+
+    FastAPI wraps HTTPException detail as ``{"detail": {"error": "..."}}``.
+    This function unwraps the ``detail`` key before reading the error code.
+
+    If the response body contains ``elevation_required`` or
+    ``totp_setup_required`` inside the detail, raises ``ElevationRequiredError``
+    so the CLI can handle the TOTP step-up flow.
+
+    Args:
+        response: httpx.Response with status_code == 403.
+
+    Raises:
+        ElevationRequiredError: When the 403 body signals elevation is needed.
+    """
+    try:
+        body = response.json()
+    except Exception as exc:
+        logger.warning("Failed to parse 403 response JSON for elevation check: %s", exc)
+        return
+
+    # FastAPI wraps HTTPException detail as {"detail": <value>}.
+    # When detail is a dict, elevation error codes are inside it.
+    # When detail is a plain string (e.g. "Insufficient privileges"), skip.
+    error_data = body.get("detail", {})
+    if not isinstance(error_data, dict):
+        return
+
+    error_code = error_data.get("error", "")
+    if error_code in ("elevation_required", "totp_setup_required"):
+        setup_url = error_data.get("setup_url")
+        message = error_data.get("message", "")
+        raise ElevationRequiredError(
+            error_code=error_code,
+            setup_url=setup_url,
+            message=message,
+        )
+
+
+class AdminAPIClient(CIDXRemoteAPIClient):
+    """Client for administrative operations with CIDX server."""
+
+    def __init__(
+        self,
+        server_url: str,
+        credentials: Dict[str, Any],
+        project_root: Optional[Path] = None,
+    ):
+        """Initialize Admin API client.
+
+        Args:
+            server_url: Base URL of the CIDX server
+            credentials: Encrypted credentials dictionary (must have admin role)
+            project_root: Project root for persistent token storage
+        """
+        super().__init__(
+            server_url=server_url,
+            credentials=credentials,
+            project_root=project_root,
+        )
+
+    def create_user(
+        self,
+        username: str,
+        password: str,
+        role: str,
+    ) -> Dict[str, Any]:
+        """Create a new user account with specified role.
+
+        Args:
+            username: Username for the new user
+            password: Password for the new user
+            role: Role for the new user (admin, power_user, normal_user)
+
+        Returns:
+            Dictionary with user creation response from server
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        user_data = {
+            "username": username,
+            "password": password,
+            "role": role,
+        }
+
+        try:
+            response = self._authenticated_request(
+                "POST", "/api/admin/users", json=user_data
+            )
+
+            if response.status_code == 201:
+                return dict(response.json())
+            elif response.status_code == 400:
+                # Bad request - validation error
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Invalid user data")
+                except Exception:
+                    error_detail = "Invalid user data"
+                raise APIClientError(f"Invalid user data: {error_detail}", 400)
+            elif response.status_code == 403:
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
+                raise AuthenticationError(
+                    "Insufficient privileges for user creation (admin role required)"
+                )
+            elif response.status_code == 409:
+                # Conflict - user already exists
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "User already exists")
+                except Exception:
+                    error_detail = "User already exists"
+                raise APIClientError(f"User creation conflict: {error_detail}", 409)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to create user: {error_detail}", response.status_code
+                )
+
+        except (
+            ElevationRequiredError,
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error creating user: {e}")
+
+    def list_users(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """List users from CIDX server with pagination.
+
+        Args:
+            limit: Maximum number of users to return
+            offset: Number of users to skip for pagination
+
+        Returns:
+            Dictionary with user listing response from server
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        # Build query parameters
+        params: Dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+        }
+
+        try:
+            response = self.get("/api/admin/users", params=params)
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 403:
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
+                raise AuthenticationError(
+                    "Insufficient privileges for user listing (admin role required)"
+                )
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to list users: {error_detail}", response.status_code
+                )
+
+        except (
+            ElevationRequiredError,
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error listing users: {e}")
+
+    def get_user(
+        self,
+        username: str,
+    ) -> Dict[str, Any]:
+        """Get user details by username.
+
+        Args:
+            username: Username to retrieve
+
+        Returns:
+            Dictionary with user details response from server
+
+        Raises:
+            APIClientError: If API request fails or user not found
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            # Use list_users to get all users, then filter for the specific user
+            # Note: Server doesn't have individual user GET endpoint, so we use list
+            response = self.list_users(limit=1000, offset=0)
+
+            users = response.get("users", [])
+            for user in users:
+                if user.get("username") == username:
+                    return {"user": user}
+
+            # User not found
+            raise APIClientError(f"User '{username}' not found", 404)
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error getting user: {e}")
+
+    def update_user(
+        self,
+        username: str,
+        role: str,
+    ) -> Dict[str, Any]:
+        """Update user role.
+
+        Args:
+            username: Username to update
+            role: New role for the user (admin, power_user, normal_user)
+
+        Returns:
+            Dictionary with update response from server
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        user_data = {"role": role}
+
+        try:
+            response = self._authenticated_request(
+                "PUT", f"/api/admin/users/{username}", json=user_data
+            )
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 400:
+                # Bad request - validation error
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Invalid user data")
+                except Exception:
+                    error_detail = "Invalid user data"
+                raise APIClientError(f"Invalid update data: {error_detail}", 400)
+            elif response.status_code == 403:
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
+                raise AuthenticationError(
+                    "Insufficient privileges for user update (admin role required)"
+                )
+            elif response.status_code == 404:
+                # Not found - user doesn't exist
+                raise APIClientError(f"User '{username}' not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to update user: {error_detail}", response.status_code
+                )
+
+        except (
+            ElevationRequiredError,
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error updating user: {e}")
+
+    def delete_user(
+        self,
+        username: str,
+    ) -> Dict[str, Any]:
+        """Delete user account.
+
+        Args:
+            username: Username to delete
+
+        Returns:
+            Dictionary with deletion response from server
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            response = self._authenticated_request(
+                "DELETE", f"/api/admin/users/{username}"
+            )
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 400:
+                # Bad request - probably trying to delete last admin
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Cannot delete user")
+                except Exception:
+                    error_detail = "Cannot delete user"
+                raise APIClientError(f"Delete failed: {error_detail}", 400)
+            elif response.status_code == 403:
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
+                raise AuthenticationError(
+                    "Insufficient privileges for user deletion (admin role required)"
+                )
+            elif response.status_code == 404:
+                # Not found - user doesn't exist
+                raise APIClientError(f"User '{username}' not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to delete user: {error_detail}", response.status_code
+                )
+
+        except (
+            ElevationRequiredError,
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error deleting user: {e}")
+
+    def change_user_password(
+        self,
+        username: str,
+        new_password: str,
+    ) -> Dict[str, Any]:
+        """Change user password (admin only).
+
+        Args:
+            username: Username whose password to change
+            new_password: New password for the user
+
+        Returns:
+            Dictionary with password change response from server
+
+        Raises:
+            APIClientError: If API request fails or user not found
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        password_data = {
+            "new_password": new_password,
+        }
+
+        try:
+            response = self._authenticated_request(
+                "PUT",
+                f"/api/admin/users/{username}/change-password",
+                json=password_data,
+            )
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 400:
+                # Bad request - validation error
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Invalid password data")
+                except Exception:
+                    error_detail = "Invalid password data"
+                raise APIClientError(f"Invalid password data: {error_detail}", 400)
+            elif response.status_code == 403:
+                # Check for elevation_required / totp_setup_required first
+                _check_elevation_required(response)
+                # Forbidden - insufficient privileges (plain 403, no elevation code)
+                raise AuthenticationError(
+                    "Insufficient privileges for password change (admin role required)"
+                )
+            elif response.status_code == 404:
+                # Not found - user doesn't exist
+                raise APIClientError(f"User '{username}' not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to change password: {error_detail}", response.status_code
+                )
+
+        except (
+            ElevationRequiredError,
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error changing password: {e}")
+
+    def add_golden_repository(
+        self,
+        git_url: str,
+        alias: str,
+        description: Optional[str] = None,
+        default_branch: str = "main",
+    ) -> Dict[str, Any]:
+        """Add a new golden repository from Git URL (admin only).
+
+        Args:
+            git_url: Git repository URL (https, ssh, or git protocol)
+            alias: Unique alias for the repository
+            description: Optional description for the repository
+            default_branch: Default branch name (defaults to "main")
+
+        Returns:
+            Dictionary with job ID and status for tracking the async operation
+
+        Raises:
+            APIClientError: If API request fails or validation error
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        # Build request payload
+        repo_data = {
+            "repo_url": git_url,
+            "alias": alias,
+            "default_branch": default_branch,
+        }
+
+        # Add description if provided
+        if description is not None:
+            repo_data["description"] = description
+
+        try:
+            response = self._authenticated_request(
+                "POST", "/api/admin/golden-repos", json=repo_data
+            )
+
+            if response.status_code == 202:
+                return dict(response.json())
+            elif response.status_code == 400:
+                # Bad request - validation error
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Invalid repository data")
+                except Exception:
+                    error_detail = "Invalid repository data"
+                raise APIClientError(f"Invalid request data: {error_detail}", 400)
+            elif response.status_code == 403:
+                # Forbidden - insufficient privileges
+                raise AuthenticationError(
+                    "Insufficient privileges for golden repository creation (admin role required)"
+                )
+            elif response.status_code == 409:
+                # Conflict - repository alias already exists
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Repository already exists")
+                except Exception:
+                    error_detail = "Repository already exists"
+                raise APIClientError(f"Repository conflict: {error_detail}", 409)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to add golden repository: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error adding golden repository: {e}")
+
+    def list_golden_repositories(self) -> Dict[str, Any]:
+        """List all golden repositories (admin only).
+
+        Returns:
+            Dictionary with golden repositories list and total count
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            response = self.get("/api/admin/golden-repos")
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 403:
+                # Forbidden - insufficient privileges
+                raise AuthenticationError(
+                    "Insufficient privileges for golden repository listing (admin role required)"
+                )
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to list golden repositories: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error listing golden repositories: {e}")
+
+    def refresh_golden_repository(self, alias: str) -> Dict[str, Any]:
+        """Refresh a golden repository (admin only).
+
+        Args:
+            alias: Alias of the repository to refresh
+
+        Returns:
+            Dictionary with job ID and status for tracking the async operation
+
+        Raises:
+            APIClientError: If API request fails or repository not found
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            response = self._authenticated_request(
+                "POST", f"/api/admin/golden-repos/{alias}/refresh"
+            )
+
+            if response.status_code == 202:
+                return dict(response.json())
+            elif response.status_code == 403:
+                # Forbidden - insufficient privileges
+                raise AuthenticationError(
+                    "Insufficient privileges for golden repository refresh (admin role required)"
+                )
+            elif response.status_code == 404:
+                # Not found - repository doesn't exist
+                raise APIClientError(f"Golden repository '{alias}' not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to refresh golden repository: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error refreshing golden repository: {e}")
+
+    def get_golden_repository_branches(self, alias: str) -> Dict[str, Any]:
+        """Get branches for a golden repository.
+
+        Args:
+            alias: Repository alias
+
+        Returns:
+            Dictionary with branch information
+        """
+        try:
+            response = self._authenticated_request(
+                "GET", f"/api/repos/golden/{alias}/branches"
+            )
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 403:
+                raise AuthenticationError(
+                    "Insufficient privileges for viewing repository branches (admin role required)"
+                )
+            elif response.status_code == 404:
+                raise APIClientError(f"Repository '{alias}' not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+                raise APIClientError(
+                    f"Failed to get repository branches: {error_detail}",
+                    response.status_code,
+                )
+        except (APIClientError, AuthenticationError):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error getting repository branches: {e}")
+
+    def delete_golden_repository(
+        self,
+        alias: str,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Delete a golden repository (admin only).
+
+        Args:
+            alias: Alias of the repository to delete
+            force: Force deletion without confirmation (for CLI automation)
+
+        Returns:
+            Dictionary with deletion confirmation (empty for successful 204 response)
+
+        Raises:
+            APIClientError: If API request fails or repository not found
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        # Validate alias parameter
+        if not alias or not isinstance(alias, str):
+            raise ValueError("Repository alias must be a non-empty string")
+
+        try:
+            response = self._authenticated_request(
+                "DELETE", f"/api/admin/golden-repos/{alias}"
+            )
+
+            if response.status_code == 204:
+                # Successful deletion - return empty dict for 204 No Content
+                return {}
+            elif response.status_code == 403:
+                # Forbidden - insufficient privileges
+                raise AuthenticationError(
+                    "Insufficient privileges for golden repository deletion (admin role required)"
+                )
+            elif response.status_code == 404:
+                # Not found - repository doesn't exist
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"Repository '{alias}' not found"
+                    )
+                except Exception:
+                    error_detail = f"Repository '{alias}' not found"
+                raise APIClientError(f"Repository not found: {error_detail}", 404)
+            elif response.status_code == 409:
+                # Conflict - repository has active instances
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", "Repository deletion conflict"
+                    )
+                except Exception:
+                    error_detail = "Repository deletion conflict"
+                raise APIClientError(
+                    f"Repository deletion conflict: {error_detail}", 409
+                )
+            elif response.status_code == 503:
+                # Service unavailable
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Service unavailable")
+                except Exception:
+                    error_detail = "Service unavailable"
+                raise APIClientError(f"Service unavailable: {error_detail}", 503)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to delete golden repository: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error deleting golden repository: {e}")
+
+    def add_index_to_golden_repo(self, alias: str, index_type: str) -> Dict[str, Any]:
+        """Add an index type to a golden repository (admin only).
+
+        Args:
+            alias: Golden repository alias
+            index_type: Type of index to add (semantic, fts, temporal, scip)
+
+        Returns:
+            Dictionary with job_id and status
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            request_data = {"index_type": index_type}
+            response = self._authenticated_request(
+                "POST", f"/api/admin/golden-repos/{alias}/indexes", json=request_data
+            )
+
+            if response.status_code == 202:
+                return dict(response.json())
+            elif response.status_code == 400:
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Invalid request")
+                except Exception:
+                    error_detail = "Invalid request"
+                raise APIClientError(f"Invalid request: {error_detail}", 400)
+            elif response.status_code == 403:
+                raise AuthenticationError(
+                    "Insufficient privileges for adding index to golden repository (admin role required)"
+                )
+            elif response.status_code == 404:
+                raise APIClientError(f"Golden repository '{alias}' not found", 404)
+            elif response.status_code == 409:
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get("detail", "Index already exists")
+                except Exception:
+                    error_detail = "Index already exists"
+                raise APIClientError(error_detail, 409)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to add index to golden repository: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(
+                f"Unexpected error adding index to golden repository: {e}"
+            )
+
+    def get_golden_repo_indexes(self, alias: str) -> Dict[str, Any]:
+        """Get index status for a golden repository (admin only).
+
+        Args:
+            alias: Golden repository alias
+
+        Returns:
+            Dictionary with alias and index presence information
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            response = self.get(f"/api/admin/golden-repos/{alias}/indexes")
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 403:
+                raise AuthenticationError(
+                    "Insufficient privileges for golden repository index query (admin role required)"
+                )
+            elif response.status_code == 404:
+                raise APIClientError(f"Golden repository '{alias}' not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to get golden repository indexes: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(
+                f"Unexpected error getting golden repository indexes: {e}"
+            )
+
+    def cleanup_jobs(self, max_age_hours: int = 24) -> Dict[str, Any]:  # type: ignore[empty-body]
+        """Clean up old completed/failed background jobs (admin only).
+
+        Note: Stub implementation - to be completed in future story.
+        """
+        pass
+
+    def list_mcp_credentials(self, username: str) -> Dict[str, Any]:
+        """List MCP credentials for a specific user (admin only).
+
+        Args:
+            username: Username to list credentials for
+
+        Returns:
+            Dictionary with credentials list
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            response = self._authenticated_request(
+                "GET", f"/api/admin/users/{username}/mcp-credentials"
+            )
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 403:
+                raise AuthenticationError(
+                    "Insufficient privileges to list user MCP credentials (admin role required)"
+                )
+            elif response.status_code == 404:
+                raise APIClientError(f"User '{username}' not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to list MCP credentials: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error listing MCP credentials: {e}")
+
+    def create_mcp_credential(
+        self, username: str, name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a new MCP credential for a user (admin only).
+
+        Args:
+            username: Username to create credential for
+            name: Optional name for the credential
+
+        Returns:
+            Dictionary with credential data including client_id and client_secret
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            payload = {}
+            if name:
+                payload["name"] = name
+
+            response = self._authenticated_request(
+                "POST", f"/api/admin/users/{username}/mcp-credentials", json=payload
+            )
+
+            if response.status_code == 201:
+                return dict(response.json())
+            elif response.status_code == 403:
+                raise AuthenticationError(
+                    "Insufficient privileges to create user MCP credentials (admin role required)"
+                )
+            elif response.status_code == 404:
+                raise APIClientError(f"User '{username}' not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to create MCP credential: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error creating MCP credential: {e}")
+
+    def revoke_mcp_credential(
+        self, username: str, credential_id: str
+    ) -> Dict[str, Any]:
+        """Revoke an MCP credential for a user (admin only).
+
+        Args:
+            username: Username
+            credential_id: Credential ID to revoke
+
+        Returns:
+            Dictionary with success status
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            response = self._authenticated_request(
+                "DELETE",
+                f"/api/admin/users/{username}/mcp-credentials/{credential_id}",
+            )
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 403:
+                raise AuthenticationError(
+                    "Insufficient privileges to revoke user MCP credentials (admin role required)"
+                )
+            elif response.status_code == 404:
+                raise APIClientError("Credential not found", 404)
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to revoke MCP credential: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error revoking MCP credential: {e}")
+
+    def list_all_mcp_credentials(self, limit: int = 100) -> Dict[str, Any]:
+        """List all MCP credentials across all users (admin only).
+
+        Args:
+            limit: Maximum number of credentials to return
+
+        Returns:
+            Dictionary with credentials list
+
+        Raises:
+            APIClientError: If API request fails
+            AuthenticationError: If authentication fails or insufficient privileges
+            NetworkError: If network request fails
+        """
+        try:
+            response = self._authenticated_request(
+                "GET", f"/api/admin/mcp-credentials?limit={limit}"
+            )
+
+            if response.status_code == 200:
+                return dict(response.json())
+            elif response.status_code == 403:
+                raise AuthenticationError(
+                    "Insufficient privileges to list all MCP credentials (admin role required)"
+                )
+            else:
+                error_detail = "Unknown error"
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get(
+                        "detail", f"HTTP {response.status_code}"
+                    )
+                except Exception:
+                    error_detail = f"HTTP {response.status_code}"
+
+                raise APIClientError(
+                    f"Failed to list all MCP credentials: {error_detail}",
+                    response.status_code,
+                )
+
+        except (
+            APIClientError,
+            AuthenticationError,
+            NetworkError,
+            NetworkConnectionError,
+            NetworkTimeoutError,
+            DNSResolutionError,
+            SSLCertificateError,
+            ServerError,
+            RateLimitError,
+        ):
+            raise
+        except Exception as e:
+            raise APIClientError(f"Unexpected error listing all MCP credentials: {e}")

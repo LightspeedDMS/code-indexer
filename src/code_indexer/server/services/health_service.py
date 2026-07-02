@@ -1,0 +1,899 @@
+"""
+Health Check Service.
+
+Provides real system health monitoring following CLAUDE.md Foundation #1: No mocks.
+All operations use real system checks, database connections, and service monitoring.
+"""
+
+from code_indexer.server.middleware.correlation import get_correlation_id
+
+import os
+
+import psutil
+import time
+import logging
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+
+from ..models.api_models import (
+    HealthCheckResponse,
+    ServiceHealthInfo,
+    SystemHealthInfo,
+    HealthStatus,
+    VolumeInfo,
+)
+from ...config import ConfigManager
+from .database_health_service import (
+    DatabaseHealthStatus,
+    DatabaseHealthResult,
+    get_database_health_service,
+)
+from .config_service import get_config_service
+from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+logger = logging.getLogger(__name__)
+
+# Health thresholds
+MEMORY_WARNING_THRESHOLD = 80.0  # 80% memory usage
+MEMORY_CRITICAL_THRESHOLD = 90.0  # 90% memory usage (Story #727 AC3: updated from 95%)
+DISK_WARNING_THRESHOLD = 5.0  # 5GB free space (legacy, for root volume only)
+DISK_CRITICAL_THRESHOLD = 1.0  # 1GB free space (legacy, for root volume only)
+# Percentage-based disk thresholds (used for multi-volume health checks)
+# These work correctly regardless of volume size (fixes small boot volume false positives)
+DISK_WARNING_THRESHOLD_PERCENT = 80.0  # 80% used = 20% free = warning
+DISK_CRITICAL_THRESHOLD_PERCENT = 90.0  # 90% used = 10% free = critical
+RESPONSE_TIME_WARNING = 1000  # 1 second
+RESPONSE_TIME_CRITICAL = 5000  # 5 seconds
+MAX_FAILURE_REASONS = 3  # Story #727 AC5: Limit displayed failure reasons
+PG_CONNECT_TIMEOUT_SECONDS = 5  # Timeout for PostgreSQL connectivity check
+
+# CPU sustained threshold detection (Story #727 AC4)
+CPU_SUSTAINED_THRESHOLD = 95.0  # CPU % threshold for sustained high load detection
+MIN_CPU_READINGS_FOR_DEGRADED = 3  # Minimum readings needed for 30s assessment
+MIN_CPU_READINGS_FOR_UNHEALTHY = 6  # Minimum readings needed for 60s assessment
+MAX_CPU_HISTORY_SIZE = 120  # Safety limit to prevent unbounded growth
+
+# Bytes-to-megabytes conversion constant (Story #358)
+BYTES_PER_MB = 1024 * 1024
+
+
+def _load_thresholds_from_config() -> None:
+    """
+    Load health thresholds from ConfigService (Story #3 Phase 2 AC4-AC8).
+
+    Updates module-level threshold constants from ConfigService if available.
+    Falls back to hardcoded defaults if ConfigService is unavailable.
+    """
+    global MEMORY_WARNING_THRESHOLD, MEMORY_CRITICAL_THRESHOLD
+    global DISK_WARNING_THRESHOLD_PERCENT, DISK_CRITICAL_THRESHOLD_PERCENT
+    global CPU_SUSTAINED_THRESHOLD
+
+    try:
+        config_service = get_config_service()
+        config = config_service.get_config()
+        if config.health_config is not None:
+            MEMORY_WARNING_THRESHOLD = (
+                config.health_config.memory_warning_threshold_percent
+            )
+            MEMORY_CRITICAL_THRESHOLD = (
+                config.health_config.memory_critical_threshold_percent
+            )
+            DISK_WARNING_THRESHOLD_PERCENT = (
+                config.health_config.disk_warning_threshold_percent
+            )
+            DISK_CRITICAL_THRESHOLD_PERCENT = (
+                config.health_config.disk_critical_threshold_percent
+            )
+            CPU_SUSTAINED_THRESHOLD = (
+                config.health_config.cpu_sustained_threshold_percent
+            )
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "DEPLOY-GENERAL-039",
+                f"Could not read health config, using defaults: {e}",
+            )
+        )
+
+
+class HealthCheckService:
+    """Service for system health monitoring."""
+
+    def __init__(
+        self,
+        storage_mode: str = "sqlite",
+        postgres_dsn: Optional[str] = None,
+    ):
+        """Initialize the health check service with real dependencies.
+
+        Args:
+            storage_mode: "sqlite" (default) or "postgres". Controls which
+                         backend is used for the database connectivity check.
+            postgres_dsn: PostgreSQL DSN for connectivity check when
+                         storage_mode == "postgres".
+        """
+        # CLAUDE.md Foundation #1: Direct instantiation of real services only
+        try:
+            config_manager = ConfigManager.create_with_backtrack()
+            self.config = config_manager.get_config()
+
+            # Server data directory
+            self.data_dir = Path.home() / ".cidx-server" / "data"
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+
+            # Real database URL for health checks (SQLite mode)
+            self.database_url = f"sqlite:///{self.data_dir}/cidx_server.db"
+
+            # Storage-mode awareness
+            self.storage_mode = storage_mode
+            self.postgres_dsn = postgres_dsn
+
+            # State tracking for interval-averaged I/O metrics
+            # These store the previous readings to calculate rates
+            self._last_disk_counters: Optional[Any] = None
+            self._last_disk_time: Optional[float] = None
+            self._last_net_counters: Optional[Any] = None
+            self._last_net_time: Optional[float] = None
+
+            # CPU history for sustained threshold detection (Story #727 AC4)
+            # List of (timestamp, cpu_percent) tuples for rolling 60s window
+            self._cpu_history: List[Tuple[float, float]] = []
+            self._cpu_history_lock = (
+                threading.Lock()
+            )  # Thread safety for concurrent requests
+
+            # Story #3 Phase 2: Load thresholds from ConfigService (AC4-AC8)
+            _load_thresholds_from_config()
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-040",
+                    f"Failed to initialize real dependencies: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            raise RuntimeError(f"Cannot initialize health check service: {e}")
+
+    def get_system_health(self) -> HealthCheckResponse:
+        """
+        Get comprehensive system health status.
+
+        Returns:
+            Health check response with service and system status
+        """
+        start_time = time.time()
+
+        # Check individual services
+        services = {
+            "database": self._check_database_health(),
+            "storage": self._check_storage_health(),
+        }
+
+        # Get system metrics
+        system_info = self._get_system_info()
+
+        # Story #727 AC1: Get all database health via DatabaseHealthService
+        # Story #30 Bug Fix: Use singleton to ensure cache is available even when
+        # using the uncached method. Health endpoint uses uncached for real-time data.
+        db_health_service = get_database_health_service()
+        database_health = db_health_service.get_all_database_health()
+
+        # Determine overall health status with all indicators (Story #727)
+        overall_status, failure_reasons = self._calculate_overall_status(
+            services, system_info, database_health
+        )
+
+        end_time = time.time()
+        logger.info(
+            f"Health check completed in {end_time - start_time:.3f} seconds",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
+        return HealthCheckResponse(
+            status=overall_status,
+            timestamp=datetime.now(timezone.utc),
+            services=services,
+            system=system_info,
+            failure_reasons=failure_reasons,
+        )
+
+    def _check_database_health(self) -> ServiceHealthInfo:
+        """
+        Check database connectivity and performance.
+
+        In postgres mode, checks PG connectivity. In sqlite mode, checks SQLite.
+
+        Returns:
+            Database service health information
+        """
+        start_time = time.time()
+
+        try:
+            if self.storage_mode == "postgres":
+                self._check_pg_connectivity()
+            else:
+                self._check_sqlite_connectivity()
+
+            response_time = int((time.time() - start_time) * 1000)
+
+            if response_time < RESPONSE_TIME_WARNING:
+                status = HealthStatus.HEALTHY
+            elif response_time < RESPONSE_TIME_CRITICAL:
+                status = HealthStatus.DEGRADED
+            else:
+                status = HealthStatus.UNHEALTHY
+
+            return ServiceHealthInfo(
+                status=status, response_time_ms=response_time, error_message=None
+            )
+
+        except Exception as e:
+            response_time = int((time.time() - start_time) * 1000)
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-041",
+                    f"Database health check failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+            return ServiceHealthInfo(
+                status=HealthStatus.UNHEALTHY,
+                response_time_ms=response_time,
+                error_message=str(e),
+            )
+
+    def _check_pg_connectivity(self) -> None:
+        """Verify PostgreSQL connectivity via SELECT 1. Raises on failure."""
+        if not self.postgres_dsn:
+            raise RuntimeError("postgres_dsn not configured for postgres storage mode")
+        import psycopg  # type: ignore
+
+        with psycopg.connect(
+            self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+        ) as conn:
+            conn.execute("SELECT 1")
+
+    def _check_sqlite_connectivity(self) -> None:
+        """Verify SQLite connectivity via SELECT 1. Raises on failure."""
+        try:
+            from sqlalchemy import create_engine, text
+        except ImportError:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            finally:
+                cursor.close()
+        else:
+            engine = create_engine(self.database_url, pool_pre_ping=True)
+            try:
+                with engine.connect() as connection:
+                    connection.execute(text("SELECT 1"))
+            finally:
+                engine.dispose()
+
+    def _check_storage_health(self) -> ServiceHealthInfo:
+        """
+        Check storage system health and availability.
+
+        Returns:
+            Storage service health information
+        """
+        start_time = time.time()
+
+        try:
+            # Check disk space (use percentage for consistency with multi-volume checks)
+            # Note: memory/RAM is NOT checked here — it is reported separately by
+            # _collect_resource_failures() to avoid duplicate "Storage: High memory usage"
+            # entries in failure_reasons (Bug #737).
+            # v10.4.10 (#71): use the data directory volume, not root, so the
+            # health badge reflects the actual data volume filling up.
+            data_path = "/"
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                config = get_config_service().get_config()
+                candidate = getattr(config, "server_dir", None) or "/"
+                if os.path.isdir(candidate):
+                    data_path = candidate
+                else:
+                    logger.debug(
+                        "Storage health: server_dir '%s' is not a directory, "
+                        "falling back to '/'",
+                        candidate,
+                    )
+            except RuntimeError as exc:
+                # Config service not yet initialized (common at early startup);
+                # fall back to root volume.
+                logger.debug(
+                    "Storage health: config not available, falling back to '/': %s", exc
+                )
+            except Exception as exc:
+                # Unexpected error resolving config; log at warning so operators
+                # can investigate misconfiguration while the check still proceeds.
+                logger.warning(
+                    "Storage health: unexpected error resolving data_path, "
+                    "falling back to '/': %s",
+                    exc,
+                )
+            disk_usage = psutil.disk_usage(data_path)
+            free_space_gb = disk_usage.free / (1024**3)
+            disk_used_percent = disk_usage.percent
+
+            response_time = int((time.time() - start_time) * 1000)
+
+            # Determine status based on disk usage only
+            if disk_used_percent < DISK_WARNING_THRESHOLD_PERCENT:
+                status = HealthStatus.HEALTHY
+            elif disk_used_percent < DISK_CRITICAL_THRESHOLD_PERCENT:
+                status = HealthStatus.DEGRADED
+            else:
+                status = HealthStatus.UNHEALTHY
+
+            error_message = None
+            if disk_used_percent >= DISK_WARNING_THRESHOLD_PERCENT:
+                error_message = f"Low disk space: {disk_used_percent:.0f}% used ({free_space_gb:.1f}GB free)"
+
+            return ServiceHealthInfo(
+                status=status,
+                response_time_ms=response_time,
+                error_message=error_message,
+            )
+
+        except Exception as e:
+            response_time = int((time.time() - start_time) * 1000)
+            logger.error(
+                format_error_log(
+                    "GIT-GENERAL-043",
+                    f"Storage health check failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+            return ServiceHealthInfo(
+                status=HealthStatus.UNHEALTHY,
+                response_time_ms=response_time,
+                error_message=str(e),
+            )
+
+    def _get_system_info(self) -> SystemHealthInfo:
+        """
+        Get current system resource information with interval-averaged metrics.
+
+        CPU, disk I/O, and network I/O are calculated as interval averages
+        between calls rather than spot readings, providing more meaningful
+        performance metrics for dashboard display.
+
+        Returns:
+            System health information with interval-averaged I/O rates
+        """
+        current_time = time.time()
+
+        # Get memory usage
+        memory = psutil.virtual_memory()
+        memory_percent = memory.percent
+
+        # Get CPU usage - interval=None for interval-averaged measurement
+        # This returns the average CPU usage since the last call (or 0.0 on first call)
+        cpu_percent = psutil.cpu_percent(interval=None)
+
+        # Get disk space (AC5: Complete disk metrics with used/free and percentages)
+        disk_usage = psutil.disk_usage("/")
+        free_space_gb = disk_usage.free / (1024**3)
+        used_space_gb = disk_usage.used / (1024**3)
+        # psutil provides percent as used percentage
+        disk_used_percent = disk_usage.percent
+        disk_free_percent = 100.0 - disk_used_percent
+
+        # Calculate disk I/O rates (KB/s) from counter diffs
+        disk_counters = psutil.disk_io_counters()
+        disk_read_kb_s = 0.0
+        disk_write_kb_s = 0.0
+
+        if (
+            self._last_disk_counters is not None
+            and self._last_disk_time is not None
+            and disk_counters is not None
+        ):
+            elapsed = current_time - self._last_disk_time
+            if elapsed > 0:
+                bytes_read_diff = (
+                    disk_counters.read_bytes - self._last_disk_counters.read_bytes
+                )
+                bytes_write_diff = (
+                    disk_counters.write_bytes - self._last_disk_counters.write_bytes
+                )
+                disk_read_kb_s = (bytes_read_diff / 1024) / elapsed
+                disk_write_kb_s = (bytes_write_diff / 1024) / elapsed
+
+        # Update disk state for next call
+        self._last_disk_counters = disk_counters
+        self._last_disk_time = current_time
+
+        # Calculate network I/O rates (KB/s) from counter diffs
+        net_counters = psutil.net_io_counters()
+        net_rx_kb_s = 0.0
+        net_tx_kb_s = 0.0
+
+        if (
+            self._last_net_counters is not None
+            and self._last_net_time is not None
+            and net_counters is not None
+        ):
+            elapsed = current_time - self._last_net_time
+            if elapsed > 0:
+                bytes_recv_diff = (
+                    net_counters.bytes_recv - self._last_net_counters.bytes_recv
+                )
+                bytes_sent_diff = (
+                    net_counters.bytes_sent - self._last_net_counters.bytes_sent
+                )
+                net_rx_kb_s = (bytes_recv_diff / 1024) / elapsed
+                net_tx_kb_s = (bytes_sent_diff / 1024) / elapsed
+
+        # Update network state for next call
+        self._last_net_counters = net_counters
+        self._last_net_time = current_time
+
+        # Get active job count
+        active_jobs = self._get_active_jobs_count()
+
+        # Get all mounted volumes
+        volumes = self._get_mounted_volumes()
+
+        # Process-specific metrics (Story #358)
+        process = psutil.Process(os.getpid())
+        process_rss_mb = process.memory_info().rss / BYTES_PER_MB
+
+        swap = psutil.swap_memory()
+        swap_used_mb = swap.used / BYTES_PER_MB
+        swap_total_mb = swap.total / BYTES_PER_MB
+
+        # Index memory from caches (HNSW heap + FTS mmap) - direct call avoids
+        # race condition where SystemMetricsCollector background cache stays at 0.0
+        from ..cache import get_total_index_memory_mb
+
+        index_memory_mb = get_total_index_memory_mb()
+
+        return SystemHealthInfo(
+            memory_usage_percent=memory_percent,
+            cpu_usage_percent=cpu_percent,
+            active_jobs=active_jobs,
+            disk_free_space_gb=free_space_gb,
+            disk_used_space_gb=used_space_gb,
+            disk_free_percent=disk_free_percent,
+            disk_used_percent=disk_used_percent,
+            disk_read_kb_s=disk_read_kb_s,
+            disk_write_kb_s=disk_write_kb_s,
+            net_rx_kb_s=net_rx_kb_s,
+            net_tx_kb_s=net_tx_kb_s,
+            volumes=volumes,
+            process_rss_mb=process_rss_mb,
+            index_memory_mb=index_memory_mb,
+            swap_used_mb=swap_used_mb,
+            swap_total_mb=swap_total_mb,
+        )
+
+    def _collect_database_failures(
+        self, database_health: List[DatabaseHealthResult]
+    ) -> Tuple[bool, bool, List[str]]:
+        """
+        Check all database health and collect failures (Story #727 AC1).
+
+        Args:
+            database_health: List of DatabaseHealthResult from DatabaseHealthService
+
+        Returns:
+            Tuple of (has_warning, has_error, failure_reasons)
+        """
+        reasons: List[str] = []
+        has_warning = False
+        has_error = False
+
+        for db_result in database_health:
+            if db_result.status == DatabaseHealthStatus.ERROR:
+                has_error = True
+                for check_name, check in db_result.checks.items():
+                    if not check.passed:
+                        reasons.append(
+                            f"{db_result.display_name} DB: {check.error_message or check_name}"
+                        )
+                        break
+            elif db_result.status == DatabaseHealthStatus.WARNING:
+                has_warning = True
+                for check_name, check in db_result.checks.items():
+                    if not check.passed:
+                        reasons.append(
+                            f"{db_result.display_name} DB: {check.error_message or check_name}"
+                        )
+                        break
+
+        return has_warning, has_error, reasons
+
+    def _collect_volume_failures(
+        self, volumes: List[VolumeInfo]
+    ) -> Tuple[bool, bool, List[str]]:
+        """
+        Check all volumes for low disk space (Story #727 AC2).
+
+        Args:
+            volumes: List of VolumeInfo from _get_mounted_volumes()
+
+        Returns:
+            Tuple of (has_warning, has_error, failure_reasons)
+        """
+        reasons: List[str] = []
+        has_warning = False
+        has_error = False
+
+        for volume in volumes:
+            # Use percentage-based thresholds (fixes false positives on small volumes like /boot)
+            if volume.used_percent >= DISK_CRITICAL_THRESHOLD_PERCENT:
+                has_error = True
+                reasons.append(
+                    f"Volume {volume.mount_point}: {volume.used_percent:.0f}% used ({volume.free_gb:.1f}GB free)"
+                )
+            elif volume.used_percent >= DISK_WARNING_THRESHOLD_PERCENT:
+                has_warning = True
+                reasons.append(
+                    f"Volume {volume.mount_point}: {volume.used_percent:.0f}% used ({volume.free_gb:.1f}GB free)"
+                )
+
+        return has_warning, has_error, reasons
+
+    def _collect_resource_failures(
+        self, memory_percent: float, cpu_percent: float
+    ) -> Tuple[bool, bool, List[str]]:
+        """
+        Check RAM and CPU thresholds (Story #727 AC3, AC4).
+
+        Args:
+            memory_percent: Current memory usage percentage
+            cpu_percent: Current CPU usage percentage
+
+        Returns:
+            Tuple of (has_warning, has_error, failure_reasons)
+        """
+        reasons: List[str] = []
+        has_warning = False
+        has_error = False
+
+        # AC3: RAM thresholds
+        if memory_percent >= MEMORY_CRITICAL_THRESHOLD:
+            has_error = True
+            reasons.append(f"RAM: {memory_percent:.0f}%")
+        elif memory_percent >= MEMORY_WARNING_THRESHOLD:
+            has_warning = True
+            reasons.append(f"RAM: {memory_percent:.0f}%")
+
+        # AC4: CPU sustained thresholds
+        cpu_degraded, cpu_unhealthy = self._check_cpu_sustained(cpu_percent)
+        if cpu_unhealthy:
+            has_error = True
+            reasons.append(f"CPU: {cpu_percent:.0f}% sustained >60s")
+        elif cpu_degraded:
+            has_warning = True
+            reasons.append(f"CPU: {cpu_percent:.0f}% sustained >30s")
+
+        return has_warning, has_error, reasons
+
+    def _check_cpu_sustained(self, current_cpu: float) -> Tuple[bool, bool]:
+        """
+        Check if CPU >95% for sustained periods (Story #727 AC4).
+
+        Tracks CPU history over rolling 60-second window and checks:
+        - 30+ seconds sustained >95% = degraded
+        - 60+ seconds sustained >95% = unhealthy
+
+        Thread-safe: Uses lock to protect _cpu_history from concurrent access.
+
+        Args:
+            current_cpu: Current CPU percentage reading
+
+        Returns:
+            Tuple of (is_degraded, is_unhealthy)
+        """
+        now = time.time()
+
+        with self._cpu_history_lock:
+            # Add current reading to history
+            self._cpu_history.append((now, current_cpu))
+
+            # Prune entries older than 60 seconds
+            self._cpu_history = [(t, c) for t, c in self._cpu_history if now - t <= 60]
+
+            # Safety limit to prevent unbounded growth
+            if len(self._cpu_history) > MAX_CPU_HISTORY_SIZE:
+                self._cpu_history = self._cpu_history[-MAX_CPU_HISTORY_SIZE:]
+
+            # Take snapshot for analysis outside lock
+            history_snapshot = list(self._cpu_history)
+
+        # Analysis proceeds outside lock using snapshot
+        if len(history_snapshot) < MIN_CPU_READINGS_FOR_DEGRADED:
+            return False, False
+
+        # Check readings in last 30 seconds
+        readings_30s = [c for t, c in history_snapshot if now - t <= 30]
+        # Check readings in last 60 seconds (already pruned to 60s max)
+        readings_60s = [c for t, c in history_snapshot]
+
+        # Degraded: CPU >95% sustained for 30+ seconds
+        is_degraded = len(readings_30s) >= MIN_CPU_READINGS_FOR_DEGRADED and all(
+            c > CPU_SUSTAINED_THRESHOLD for c in readings_30s
+        )
+
+        # Unhealthy: CPU >95% sustained for 60+ seconds
+        is_unhealthy = len(readings_60s) >= MIN_CPU_READINGS_FOR_UNHEALTHY and all(
+            c > CPU_SUSTAINED_THRESHOLD for c in readings_60s
+        )
+
+        return is_degraded, is_unhealthy
+
+    def _calculate_overall_status(
+        self,
+        services: Dict[str, ServiceHealthInfo],
+        system_info: SystemHealthInfo,
+        database_health: List[DatabaseHealthResult],
+    ) -> Tuple[HealthStatus, List[str]]:
+        """
+        Calculate overall system health based on all indicators (Story #727).
+
+        Args:
+            services: Dictionary of service health information
+            system_info: System resource information
+            database_health: List of DatabaseHealthResult from DatabaseHealthService
+
+        Returns:
+            Tuple of (overall_status, failure_reasons)
+        """
+        failure_reasons: List[str] = []
+        has_warning = False
+        has_error = False
+
+        # AC1: Database health
+        db_warn, db_err, db_reasons = self._collect_database_failures(database_health)
+        has_warning = has_warning or db_warn
+        has_error = has_error or db_err
+        failure_reasons.extend(db_reasons)
+
+        # AC2: Volume health
+        vol_warn, vol_err, vol_reasons = self._collect_volume_failures(
+            system_info.volumes
+        )
+        has_warning = has_warning or vol_warn
+        has_error = has_error or vol_err
+        failure_reasons.extend(vol_reasons)
+
+        # AC3 & AC4: RAM and CPU thresholds
+        res_warn, res_err, res_reasons = self._collect_resource_failures(
+            system_info.memory_usage_percent, system_info.cpu_usage_percent
+        )
+        has_warning = has_warning or res_warn
+        has_error = has_error or res_err
+        failure_reasons.extend(res_reasons)
+
+        # Check individual service statuses (database, storage services)
+        # Issue #3: Add error messages to failure_reasons when services fail
+        for name, svc in services.items():
+            if svc.status == HealthStatus.UNHEALTHY:
+                has_error = True
+                if svc.error_message:
+                    failure_reasons.append(f"{name.capitalize()}: {svc.error_message}")
+            elif svc.status == HealthStatus.DEGRADED:
+                has_warning = True
+                if svc.error_message:
+                    failure_reasons.append(f"{name.capitalize()}: {svc.error_message}")
+
+        # Determine overall status
+        if has_error:
+            status = HealthStatus.UNHEALTHY
+        elif has_warning:
+            status = HealthStatus.DEGRADED
+        else:
+            status = HealthStatus.HEALTHY
+
+        # AC5: Limit to MAX_FAILURE_REASONS with "+N more" indicator
+        if len(failure_reasons) > MAX_FAILURE_REASONS:
+            extra_count = len(failure_reasons) - MAX_FAILURE_REASONS
+            failure_reasons = failure_reasons[:MAX_FAILURE_REASONS] + [
+                f"+{extra_count} more"
+            ]
+
+        return status, failure_reasons
+
+    def _get_mounted_volumes(self) -> list:
+        """
+        Get all mounted non-removable volumes.
+
+        Filters out:
+        - Virtual filesystems (tmpfs, devtmpfs, proc, sysfs, etc.)
+        - Removable media (typically detected by mount options)
+        - Network filesystems (nfs, cifs, smbfs)
+        - Snap/loop mounts
+
+        Returns:
+            List of VolumeInfo for each real mounted volume
+        """
+        volumes = []
+
+        # Filesystem types to exclude (virtual, network, removable)
+        excluded_fstypes = {
+            "tmpfs",
+            "devtmpfs",
+            "proc",
+            "sysfs",
+            "devpts",
+            "securityfs",
+            "cgroup",
+            "cgroup2",
+            "pstore",
+            "debugfs",
+            "hugetlbfs",
+            "mqueue",
+            "fusectl",
+            "configfs",
+            "binfmt_misc",
+            "autofs",
+            "tracefs",
+            "nfs",
+            "nfs4",
+            "cifs",
+            "smbfs",
+            "squashfs",  # Snap packages
+            "overlay",  # Docker overlays
+            "fuse.snapfuse",
+        }
+
+        # Mount point prefixes to exclude
+        excluded_prefixes = (
+            "/snap/",
+            "/sys/",
+            "/proc/",
+            "/dev/",
+            "/run/",
+        )
+
+        try:
+            partitions = psutil.disk_partitions(all=False)
+
+            for partition in partitions:
+                # Skip excluded filesystem types
+                if partition.fstype.lower() in excluded_fstypes:
+                    continue
+
+                # Skip excluded mount point prefixes
+                if partition.mountpoint.startswith(excluded_prefixes):
+                    continue
+
+                # Skip loop devices (snap packages, ISO mounts)
+                if partition.device.startswith("/dev/loop"):
+                    continue
+
+                try:
+                    usage = psutil.disk_usage(partition.mountpoint)
+                    total_gb = usage.total / (1024**3)
+                    used_gb = usage.used / (1024**3)
+                    free_gb = usage.free / (1024**3)
+                    used_percent = usage.percent
+                    free_percent = 100.0 - used_percent
+
+                    volumes.append(
+                        VolumeInfo(
+                            mount_point=partition.mountpoint,
+                            device=partition.device,
+                            fstype=partition.fstype,
+                            total_gb=total_gb,
+                            used_gb=used_gb,
+                            free_gb=free_gb,
+                            used_percent=used_percent,
+                            free_percent=free_percent,
+                        )
+                    )
+                except (PermissionError, OSError) as e:
+                    # Skip volumes we can't access
+                    logger.debug(
+                        f"Cannot access volume {partition.mountpoint}: {e}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                    continue
+
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-044",
+                    f"Failed to get mounted volumes: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        return volumes
+
+    def _get_active_jobs_count(self) -> int:
+        """
+        Get count of active background jobs.
+
+        Queries the background job management system for active jobs.
+
+        Returns:
+            Number of active jobs
+        """
+        try:
+            # Access the global background job manager
+            from ...server.app import background_job_manager
+
+            if background_job_manager:
+                return background_job_manager.get_active_job_count()
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "GIT-GENERAL-045",
+                    f"Failed to get active job count: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
+        # Return 0 if job manager not available or failed to query
+        return 0
+
+
+# Lazy singleton - initialized on first call to get_health_service()
+# or on first import of the module-level `health_service` alias.
+_health_service_instance: Optional[HealthCheckService] = None
+
+
+def get_health_service(
+    storage_mode: str = "sqlite",
+    postgres_dsn: Optional[str] = None,
+) -> HealthCheckService:
+    """
+    Get or create the singleton HealthCheckService instance.
+
+    On first call, creates the instance with the given parameters.
+    Subsequent calls return the existing instance regardless of parameters
+    (call reset_health_service() to force re-creation in tests).
+
+    Args:
+        storage_mode: "sqlite" (default) or "postgres".
+        postgres_dsn: PostgreSQL DSN required when storage_mode == "postgres".
+
+    Returns:
+        The singleton HealthCheckService instance.
+    """
+    global _health_service_instance
+    if _health_service_instance is None:
+        _health_service_instance = HealthCheckService(
+            storage_mode=storage_mode,
+            postgres_dsn=postgres_dsn,
+        )
+    return _health_service_instance
+
+
+def _reset_health_service_for_testing() -> None:
+    """Reset the singleton for test isolation. Never call in production."""
+    global _health_service_instance
+    _health_service_instance = None
+
+
+# Backward-compatible module-level alias.
+# Callers that do `from .health_service import health_service` get the
+# singleton on demand without needing to call get_health_service() explicitly.
+class _LazyHealthServiceProxy:
+    """Proxy that lazily forwards attribute access to get_health_service()."""
+
+    def __getattr__(self, name: str):  # type: ignore[override]
+        return getattr(get_health_service(), name)
+
+
+health_service: Any = _LazyHealthServiceProxy()

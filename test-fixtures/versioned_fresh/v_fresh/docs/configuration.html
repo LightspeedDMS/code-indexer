@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Configuration Guide</title>
+</head>
+<body>
+    <h1>Server Configuration Guide</h1>
+    
+    <p>This guide covers all available configuration options for the server.</p>
+    
+    <h2>Configuration Screenshot</h2>
+    
+    <p>Below is a visual reference of all configuration options:</p>
+    
+    <img src="../images/config-options.webp" alt="Configuration Options">
+    
+    <h2>Environment Variables</h2>
+    
+    <p>Configuration can be set via environment variables or config files:</p>
+    
+    <ul>
+        <li><strong>SERVER_PORT</strong>: HTTP server listening port (default: 8000)</li>
+        <li><strong>SERVER_HOST</strong>: Bind address (default: 0.0.0.0)</li>
+        <li><strong>DATABASE_URL</strong>: PostgreSQL connection string</li>
+        <li><strong>CACHE_TTL</strong>: Cache time-to-live in seconds</li>
+        <li><strong>LOG_LEVEL</strong>: Logging verbosity (DEBUG, INFO, WARN, ERROR)</li>
+    </ul>
+    
+    <h2>Rate Limiting</h2>
+    
+    <p>The server implements rate limiting to prevent abuse:</p>
+    
+    <ul>
+        <li>100 requests per minute per IP address</li>
+        <li>Configurable via rate_limit.requests and rate_limit.window</li>
+        <li>Returns 429 Too Many Requests when exceeded</li>
+    </ul>
+</body>
+</html>

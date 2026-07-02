@@ -1,0 +1,270 @@
+<!-- Story #212: Dependency Map Job Status Partial -->
+<!-- AC5: HTMX auto-refresh every 5s when status=running -->
+<div id="depmap-job-status-content"
+     {% if job_status.status == "running" %}
+     hx-get="/admin/partials/depmap-job-status"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     hx-target="#depmap-job-status-content"
+     {% endif %}>
+
+<h2>Job Status</h2>
+
+<!-- AC3: Health badge with color -->
+{% set color_class_map = {
+    'GREEN':  'status-healthy',
+    'YELLOW': 'status-degraded',
+    'RED':    'status-unhealthy',
+    'BLUE':   'status-running',
+    'GRAY':   'status-disabled'
+} %}
+<div class="health-grid">
+    <article class="health-card"{% if job_status.content_anomaly_count is defined and job_status.content_anomaly_count > 0 %} style="grid-column: span 2;"{% endif %}>
+        <header>
+            <h3>Health</h3>
+        </header>
+        <div class="status-content">
+            <span class="status-indicator {{ color_class_map.get(job_status.color, 'status-disabled') }}"></span>
+            <span class="status-text">{{ job_status.health }}</span>
+        </div>
+        {% if job_status.content_anomaly_count is defined and job_status.content_anomaly_count > 0 and job_status.content_anomalies is defined %}
+        <div style="margin: 0.5rem 0; max-height: 10rem; overflow-y: auto;">
+            <ul style="margin: 0; padding: 0; list-style: none;">
+                {% for a in job_status.content_anomalies %}
+                <li style="font-size: 0.85em; color: var(--pico-color-amber-600, #d97706); padding: 0.15rem 0;">
+                    {% if a.type == "missing_domain_file" %}
+                        Missing file for domain: {{ a.domain }}
+                    {% elif a.type == "zero_char_domain" %}
+                        Empty file for domain: {{ a.domain }}
+                    {% elif a.type == "undersized_domain" %}
+                        Undersized file for domain: {{ a.domain }} ({{ a.size }} bytes)
+                    {% elif a.type == "incomplete_domain" %}
+                        Incomplete domain: {{ a.domain }} (missing required sections)
+                    {% elif a.type == "malformed_domain" %}
+                        Malformed domain: {{ a.domain }} ({{ a.detail }})
+                    {% elif a.type == "orphan_domain_file" %}
+                        Orphan file: {{ a.file }} (not in _domains.json)
+                    {% elif a.type == "domain_count_mismatch" %}
+                        Domain count mismatch: {{ a.json_count }} in JSON vs {{ a.file_count }} files
+                    {% elif a.type == "missing_index" %}
+                        Missing _index.md
+                    {% elif a.type == "stale_index" %}
+                        Stale _index.md (missing repos)
+                    {% elif a.type == "uncovered_repo" %}
+                        Uncovered repos: {{ a.missing_repos | join(", ") }}
+                    {% else %}
+                        {{ a.type }}{% if a.domain %}: {{ a.domain }}{% endif %}
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        <footer>
+            <small>
+                {% if job_status.content_anomaly_count is defined and job_status.content_anomaly_count > 0 %}
+                    {{ job_status.content_anomaly_count }} anomal{{ 'y' if job_status.content_anomaly_count == 1 else 'ies' }} — run Full Analysis
+                {% else %}
+                    Status: {{ job_status.status or "unknown" }}
+                {% endif %}
+            </small>
+        </footer>
+    </article>
+
+    <!-- AC2: Timestamps -->
+    <article class="health-card">
+        <header>
+            <h3>Schedule</h3>
+        </header>
+        <div class="system-metrics">
+            <div class="metric">
+                <span class="metric-label">Last Run</span>
+                <span class="metric-value" style="white-space: nowrap;">
+                    {% if job_status.last_run %}
+                        {{ job_status.last_run[:16] | replace("T", " ") }}
+                    {% else %}
+                        Never
+                    {% endif %}
+                </span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Next Run</span>
+                <span class="metric-value" style="white-space: nowrap;">
+                    {% if job_status.next_run %}
+                        {{ job_status.next_run[:16] | replace("T", " ") }}
+                    {% else %}
+                        Not scheduled
+                    {% endif %}
+                </span>
+            </div>
+        </div>
+    </article>
+
+    <!-- AC6: Run Now dropdown (admin context - this partial is admin-only) -->
+    <article class="health-card">
+        <header>
+            <h3>Actions</h3>
+        </header>
+        <div style="padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem;">
+            <div style="display: flex; gap: 0.5rem;">
+                <button hx-post="/admin/dependency-map/trigger"
+                        hx-vals='{"mode": "full"}'
+                        hx-swap="none"
+                        style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
+                    Full Analysis
+                </button>
+                <button class="secondary"
+                        hx-post="/admin/dependency-map/trigger"
+                        hx-vals='{"mode": "delta"}'
+                        hx-swap="none"
+                        style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;">
+                    Delta Refresh
+                </button>
+                <button class="outline small"
+                        hx-post="/admin/dependency-map/trigger-refinement"
+                        hx-swap="none"
+                        hx-headers='{"X-Requested-With": "XMLHttpRequest"}'
+                        style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.6rem;"
+                        title="Fact-check and refine existing dependency domain documents">
+                    Refinement Pass
+                </button>
+            </div>
+            <div id="depmap-trigger-status" style="font-size: 0.9rem;"></div>
+            <!-- Story #342: Conditional Repair Button -->
+            {% set show_repair = job_status.repairable_count is defined and job_status.repairable_count > 0 %}
+            <div id="depmap-repair-container" style="{% if not show_repair %}display: none;{% endif %}">
+                <button class="contrast"
+                        id="depmap-repair-btn"
+                        hx-post="/admin/dependency-map/repair"
+                        hx-swap="none"
+                        style="width: 100%; font-size: 0.85rem; padding: 0.4rem 0.6rem; margin-top: 0.25rem;">
+                    Repair
+                </button>
+                <small id="depmap-repair-summary" style="display: block; margin-top: 0.25rem; color: var(--pico-color-amber-550);">
+                    {% if show_repair %}
+                        {{ job_status.repairable_count }} repairable anomal{{ 'y' if job_status.repairable_count == 1 else 'ies' }} detected
+                    {% endif %}
+                </small>
+            </div>
+        </div>
+    </article>
+</div>
+
+<!-- AC4: Error banner - only shown when status=failed and error_message non-empty -->
+{% if job_status.status == "failed" and job_status.error_message %}
+<article style="border-left: 4px solid var(--pico-color-red-550); margin-top: 1rem; padding: 1rem;">
+    <header>
+        <strong style="color: var(--pico-color-red-550);">Analysis Error</strong>
+    </header>
+    <!-- Jinja2 auto-escaping prevents XSS (AC4) -->
+    <p>{{ job_status.error_message }}</p>
+</article>
+{% endif %}
+
+<!-- AC9 (Story #216): Run history metrics table — Story D Bug #874 redesign -->
+{% if job_status.run_history %}
+<style>
+.run-type-badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.25rem;
+    font-family: monospace;
+}
+.run-type-full    { background: #dbeafe; color: #1d4ed8; }
+.run-type-delta   { background: #dcfce7; color: #15803d; }
+.run-type-refinement { background: #ede9fe; color: #6d28d9; }
+.phase-pill {
+    display: inline-block;
+    font-size: 0.75rem;
+    background: #f3f4f6;
+    color: #374151;
+    padding: 0.1rem 0.35rem;
+    border-radius: 0.2rem;
+    margin-right: 0.2rem;
+    white-space: nowrap;
+}
+</style>
+<article id="recent-run-metrics" style="margin-top: 1rem;">
+    <header>
+        <h3>Recent Run Metrics</h3>
+    </header>
+    <div style="overflow-x: auto;">
+        <table style="font-size: 0.85rem; margin-bottom: 0;">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Type</th>
+                    <th>Domains</th>
+                    <th>Chars</th>
+                    <th>Edges</th>
+                    <th>Repos</th>
+                    <th>Phase timings</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in job_status.run_history %}
+                <tr>
+                    <td style="white-space: nowrap;">
+                        {% if run.timestamp %}{{ run.timestamp[:16] | replace("T", " ") }}{% else %}—{% endif %}
+                    </td>
+                    <td>
+                        {% if run.run_type %}
+                            <span class="run-type-badge run-type-{{ run.run_type }}">{{ run.run_type }}</span>
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>{{ run.domain_count or 0 }}</td>
+                    <td>{{ run.total_chars or 0 }}</td>
+                    <td>{{ run.edge_count or 0 }}</td>
+                    <td>{{ run.repos_analyzed or 0 }}</td>
+                    <td>
+                        {% if run.phase_timings_parsed %}
+                            {% for key, value in run.phase_timings_parsed.items() %}
+                                <span class="phase-pill">{{ key.replace("_s", "") }} {{ "%.1f"|format(value) }}s</span>
+                            {% endfor %}
+                        {% elif run.pass1_duration_s is not none or run.pass2_duration_s is not none %}
+                            {% if run.pass1_duration_s is not none %}
+                                <span class="phase-pill">P1 {{ "%.1f"|format(run.pass1_duration_s) }}s</span>
+                            {% endif %}
+                            {% if run.pass2_duration_s is not none %}
+                                <span class="phase-pill">P2 {{ "%.1f"|format(run.pass2_duration_s) }}s</span>
+                            {% endif %}
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</article>
+{% endif %}
+
+<!-- Story #342: Repair button click response handler -->
+<script>
+(function() {
+    if (!window._depmapRepairListenerAdded) {
+        window._depmapRepairListenerAdded = true;
+        document.body.addEventListener('htmx:afterRequest', function(evt) {
+            if (evt.detail.elt && evt.detail.elt.id === 'depmap-repair-btn') {
+                var statusEl = document.getElementById('depmap-trigger-status');
+                if (!statusEl) return;
+                var xhr = evt.detail.xhr;
+                if (xhr.status === 202) {
+                    statusEl.innerHTML = '<small style="color: var(--pico-color-green-550);">Repair triggered</small>';
+                } else if (xhr.status === 409) {
+                    statusEl.innerHTML = '<small style="color: var(--pico-color-amber-550);">Analysis in progress</small>';
+                } else {
+                    statusEl.innerHTML = '<small style="color: var(--pico-color-red-550);">Repair failed</small>';
+                }
+            }
+        });
+    }
+})();
+</script>
+
+</div>

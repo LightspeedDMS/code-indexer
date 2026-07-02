@@ -1,0 +1,192 @@
+[
+  {
+    "name": "search_semantic_small_tries",
+    "endpoint": "search_code",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "query_text": "command line argument parsing",
+      "repository_alias": "tries-global",
+      "search_mode": "semantic",
+      "limit": 5
+    },
+    "repo_alias": "tries-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "search_semantic_medium_click",
+    "endpoint": "search_code",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "query_text": "command line argument parsing",
+      "repository_alias": "click-global",
+      "search_mode": "semantic",
+      "limit": 5
+    },
+    "repo_alias": "click-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "search_semantic_large_flask",
+    "endpoint": "search_code",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "query_text": "request routing middleware",
+      "repository_alias": "flask-large-global",
+      "search_mode": "semantic",
+      "limit": 5
+    },
+    "repo_alias": "flask-large-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "search_hybrid_medium_click",
+    "endpoint": "search_code",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "query_text": "decorator pattern",
+      "repository_alias": "click-global",
+      "search_mode": "hybrid",
+      "limit": 5
+    },
+    "repo_alias": "click-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "search_hybrid_xlarge_code_indexer",
+    "endpoint": "search_code",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "query_text": "authentication token refresh",
+      "repository_alias": "code-indexer-global",
+      "search_mode": "hybrid",
+      "limit": 5
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "search_fts_medium_click",
+    "endpoint": "search_code",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "query_text": "BaseCommand",
+      "repository_alias": "click-global",
+      "search_mode": "fts",
+      "limit": 5
+    },
+    "repo_alias": "click-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "search_fts_xlarge_code_indexer",
+    "endpoint": "search_code",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "query_text": "SmartIndexer",
+      "repository_alias": "code-indexer-global",
+      "search_mode": "fts",
+      "limit": 5
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "rest_query_medium_click",
+    "endpoint": "/api/query",
+    "protocol": "rest",
+    "method": "POST",
+    "parameters": {
+      "query_text": "error handling exception",
+      "repository_alias": "click-global",
+      "search_mode": "semantic",
+      "limit": 5
+    },
+    "repo_alias": "click-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "rest_query_xlarge_code_indexer",
+    "endpoint": "/api/query",
+    "protocol": "rest",
+    "method": "POST",
+    "parameters": {
+      "query_text": "vector embedding storage",
+      "repository_alias": "code-indexer-global",
+      "search_mode": "semantic",
+      "limit": 5
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "rest_query_multi_click_flask",
+    "endpoint": "/api/query/multi",
+    "protocol": "rest",
+    "method": "POST",
+    "parameters": {
+      "query_text": "HTTP request handling",
+      "repository_aliases": ["click-global", "flask-large-global"],
+      "search_mode": "semantic",
+      "limit": 5
+    },
+    "repo_alias": "click-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "regex_search_medium_click",
+    "endpoint": "regex_search",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "pattern": "def \\w+Command",
+      "repository_alias": "click-global",
+      "case_sensitive": false
+    },
+    "repo_alias": "click-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "regex_search_xlarge_code_indexer",
+    "endpoint": "regex_search",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "pattern": "class \\w+Manager",
+      "repository_alias": "code-indexer-global",
+      "case_sensitive": false
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "highest",
+    "warmup_count": 3,
+    "measurement_count": 20
+  }
+]

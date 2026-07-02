@@ -1,0 +1,937 @@
+"""
+File Listing Service.
+
+Provides real file listing operations following CLAUDE.md Foundation #1: No mocks.
+All operations use real file system operations with proper pagination and filtering.
+"""
+
+from code_indexer.server.logging_utils import format_error_log, get_log_extra
+
+import os
+from pathlib import Path
+from typing import List, Optional, Tuple, Dict, Any, Set, cast
+from datetime import datetime, timezone
+import logging
+import math
+import hashlib
+
+import pathspec
+
+from ..models.api_models import (
+    FileListResponse,
+    FileInfo,
+    PaginationInfo,
+    FileListQueryParams,
+)
+from ..services.config_service import get_config_service
+
+logger = logging.getLogger(__name__)
+
+# Same language detection as stats service
+LANGUAGE_EXTENSIONS = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".java": "java",
+    ".c": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".go": "go",
+    ".rs": "rust",
+    ".php": "php",
+    ".rb": "ruby",
+    ".swift": "swift",
+    ".kt": "kotlin",
+    ".scala": "scala",
+    ".sql": "sql",
+    ".html": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sass": "sass",
+    ".less": "less",
+    ".vue": "vue",
+    ".jsx": "jsx",
+    ".tsx": "tsx",
+    ".md": "markdown",
+    ".rst": "rst",
+    ".txt": "text",
+    ".json": "json",
+    ".xml": "xml",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".toml": "toml",
+    ".ini": "ini",
+    ".cfg": "config",
+    ".conf": "config",
+    ".sh": "shell",
+    ".bash": "shell",
+    ".zsh": "shell",
+    ".fish": "shell",
+    ".ps1": "powershell",
+    ".bat": "batch",
+    ".cmd": "batch",
+}
+
+
+class FileListingService:
+    """Service for listing repository files."""
+
+    # Directories that are always excluded from file listings
+    ALWAYS_EXCLUDED_DIRS: Set[str] = {".code-indexer", ".git"}
+
+    # Story #686: Line-based default chunking limits
+    # Applied IN ADDITION to token limits - the stricter limit wins
+    DEFAULT_MAX_LINES: int = 500  # Default limit when no explicit limit provided
+    MAX_ALLOWED_LIMIT: int = 5000  # Maximum limit client can request
+
+    def __init__(self):
+        """Initialize the file listing service."""
+        # Import here to avoid circular imports
+        import os
+        from ..repositories.activated_repo_manager import ActivatedRepoManager
+
+        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+        self.activated_repo_manager = ActivatedRepoManager(
+            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
+        )
+
+    def _get_file_content_limits_config(self):
+        """Get file content limits config from ConfigService (Bug #939: unified ContentLimitsConfig).
+
+        Returns an adapter exposing .max_tokens_per_request and .chars_per_token
+        backed by ContentLimitsConfig so all call sites continue to work unchanged.
+        """
+        config_service = get_config_service()
+        content_limits = config_service.get_config().content_limits_config
+
+        class _Adapter:
+            """Thin adapter mapping ContentLimitsConfig fields to the legacy attribute names."""
+
+            def __init__(self, cl):
+                self._cl = cl
+
+            @property
+            def max_tokens_per_request(self):
+                return self._cl.file_content_max_tokens
+
+            @property
+            def file_content_max_tokens(self):
+                return self._cl.file_content_max_tokens
+
+            @property
+            def chars_per_token(self):
+                return self._cl.chars_per_token
+
+        return _Adapter(content_limits)
+
+    def list_files(
+        self, repo_id: str, username: str, query_params: FileListQueryParams
+    ) -> FileListResponse:
+        """
+        List files in repository with pagination and filtering.
+
+        Args:
+            repo_id: Repository identifier (user_alias)
+            username: Username owning the activated repository
+            query_params: Query parameters for filtering and pagination
+
+        Returns:
+            File list response with pagination
+
+        Raises:
+            FileNotFoundError: If repository doesn't exist
+            PermissionError: If repository access denied
+            ValueError: If query parameters are invalid
+        """
+        repo_path = self._get_repository_path(repo_id, username)
+
+        if not os.path.exists(repo_path):
+            raise FileNotFoundError(f"Repository {repo_id} not found")
+
+        # Collect all files
+        all_files = self._collect_files(repo_path)
+
+        # Apply filters
+        filtered_files = self._apply_filters(all_files, query_params)
+
+        # Apply sorting
+        sorted_files = self._apply_sorting(filtered_files, query_params.sort_by)
+
+        # Apply pagination
+        paginated_files, pagination_info = self._apply_pagination(
+            sorted_files, query_params.page, query_params.limit
+        )
+
+        return FileListResponse(files=paginated_files, pagination=pagination_info)
+
+    def list_files_by_path(
+        self, repo_path: str, query_params: FileListQueryParams
+    ) -> FileListResponse:
+        """
+        List files from a direct filesystem path (for global repos).
+
+        Unlike list_files() which looks up activated repos by alias,
+        this method accepts a direct path for global repository browsing.
+
+        Args:
+            repo_path: Direct filesystem path to repository
+            query_params: Query parameters for filtering and pagination
+
+        Returns:
+            File list response with pagination
+
+        Raises:
+            FileNotFoundError: If path doesn't exist
+        """
+        if not os.path.exists(repo_path):
+            raise FileNotFoundError(f"Path {repo_path} not found")
+
+        all_files = self._collect_files(repo_path)
+        filtered_files = self._apply_filters(all_files, query_params)
+        sorted_files = self._apply_sorting(filtered_files, query_params.sort_by)
+        paginated_files, pagination_info = self._apply_pagination(
+            sorted_files, query_params.page, query_params.limit
+        )
+        return FileListResponse(files=paginated_files, pagination=pagination_info)
+
+    def _get_repository_path(self, repo_id: str, username: str) -> str:
+        """
+        Get file system path for repository from activated repositories.
+
+        CRITICAL FIX: Searches activated repositories (user workspace) instead of
+        golden repositories (shared source).
+
+        Args:
+            repo_id: Repository identifier (user_alias)
+            username: Username owning the activated repository
+
+        Returns:
+            Real file system path to activated repository
+
+        Raises:
+            RuntimeError: If database lookup fails
+            FileNotFoundError: If repository not found
+        """
+        try:
+            # Use ActivatedRepositoryManager to search user's workspace
+            activated_path = self.activated_repo_manager.get_activated_repo_path(
+                username=username, user_alias=repo_id
+            )
+
+            # Verify path exists
+            if not activated_path or not Path(activated_path).exists():
+                raise FileNotFoundError(
+                    f"Repository '{repo_id}' not found for user '{username}'"
+                )
+
+            return cast(str, activated_path)
+
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "CACHE-GENERAL-011",
+                    "Failed to get repository path",
+                    repo_id=repo_id,
+                    username=username,
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-011"),
+            )
+            if isinstance(e, FileNotFoundError):
+                raise
+            raise RuntimeError(f"Unable to access repository {repo_id}: {e}")
+
+    def _collect_files(self, repo_path: str) -> List[FileInfo]:
+        """
+        Collect all files in repository, excluding system directories and gitignored files.
+
+        Excludes:
+        - .code-indexer/ directory (CIDX index storage)
+        - .git/ directory (Git internals)
+        - Files matching .gitignore patterns (if .gitignore exists)
+
+        Args:
+            repo_path: Repository file system path
+
+        Returns:
+            List of file information objects
+        """
+        files = []
+        repo_root = Path(repo_path)
+
+        # Load .gitignore patterns if present
+        gitignore_spec = self._load_gitignore_spec(repo_root)
+
+        try:
+            for file_path in repo_root.rglob("*"):
+                if file_path.is_file():
+                    try:
+                        relative_path = file_path.relative_to(repo_root)
+                        relative_path_str = str(relative_path)
+
+                        # Skip files in always-excluded directories
+                        if self._is_in_excluded_dir(relative_path):
+                            continue
+
+                        # Skip files matching .gitignore patterns
+                        if gitignore_spec and gitignore_spec.match_file(
+                            relative_path_str
+                        ):
+                            continue
+
+                        stat_info = file_path.stat()
+
+                        file_info = FileInfo(
+                            path=relative_path_str,
+                            size_bytes=stat_info.st_size,
+                            modified_at=datetime.fromtimestamp(
+                                stat_info.st_mtime, tz=timezone.utc
+                            ),
+                            language=self._detect_language(file_path),
+                            is_indexed=self._is_file_indexed(file_path),
+                        )
+                        files.append(file_info)
+
+                    except (OSError, PermissionError) as e:
+                        logger.warning(
+                            format_error_log(
+                                "CACHE-GENERAL-012",
+                                "Cannot access file",
+                                file_path=str(file_path),
+                                error=str(e),
+                            ),
+                            extra=get_log_extra("CACHE-GENERAL-012"),
+                        )
+                        continue
+
+        except PermissionError as e:
+            logger.error(
+                format_error_log(
+                    "CACHE-GENERAL-013",
+                    "Cannot access repository directory",
+                    repo_path=repo_path,
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-013"),
+            )
+            raise
+
+        return files
+
+    def _is_in_excluded_dir(self, relative_path: Path) -> bool:
+        """
+        Check if a file path is within an excluded directory.
+
+        Args:
+            relative_path: Path relative to repository root
+
+        Returns:
+            True if path is in an excluded directory
+        """
+        # Check each part of the path against excluded directories
+        for part in relative_path.parts:
+            if part in self.ALWAYS_EXCLUDED_DIRS:
+                return True
+        return False
+
+    def _load_gitignore_spec(self, repo_root: Path) -> Optional[pathspec.PathSpec]:
+        """
+        Load and parse .gitignore file if present.
+
+        Args:
+            repo_root: Repository root directory
+
+        Returns:
+            PathSpec object for matching gitignore patterns, or None if no .gitignore
+        """
+        gitignore_path = repo_root / ".gitignore"
+
+        if not gitignore_path.exists():
+            return None
+
+        try:
+            with open(gitignore_path, "r", encoding="utf-8") as f:
+                gitignore_content = f.read()
+
+            # Parse gitignore patterns using pathspec library
+            return pathspec.PathSpec.from_lines(
+                "gitwildmatch", gitignore_content.splitlines()
+            )
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning(
+                format_error_log(
+                    "CACHE-GENERAL-014",
+                    "Failed to read .gitignore",
+                    gitignore_path=str(gitignore_path),
+                    error=str(e),
+                ),
+                extra=get_log_extra("CACHE-GENERAL-014"),
+            )
+            return None
+
+    def _detect_language(self, file_path: Path) -> Optional[str]:
+        """
+        Detect programming language from file extension.
+
+        Args:
+            file_path: Path to file
+
+        Returns:
+            Programming language name or None if unknown
+        """
+        extension = file_path.suffix.lower()
+        return LANGUAGE_EXTENSIONS.get(extension)
+
+    def _is_file_indexed(self, file_path: Path) -> bool:
+        """
+        Check if file is likely indexed based on its extension.
+
+        Uses the server's indexable_extensions configuration (Story #223 - AC3)
+        to determine if CIDX would index this file type. No fallback to any
+        hardcoded set — if the config has no extensions, nothing is indexed.
+
+        Args:
+            file_path: Path to file
+
+        Returns:
+            Whether file is indexed
+        """
+        extension = file_path.suffix.lower()
+        config_service = get_config_service()
+        config = config_service.get_config()
+        if config.indexing_config is None:
+            return False
+        return extension in config.indexing_config.indexable_extensions
+
+    def _apply_filters(
+        self, files: List[FileInfo], query_params: FileListQueryParams
+    ) -> List[FileInfo]:
+        """
+        Apply filtering to file list.
+
+        Args:
+            files: List of files to filter
+            query_params: Query parameters containing filters
+
+        Returns:
+            Filtered list of files
+        """
+        filtered_files = files
+
+        # Filter by path pattern
+        if query_params.path_pattern:
+            pattern = query_params.path_pattern
+            # Use pathspec for proper ** glob support (gitignore-style)
+            # pathspec treats ** as "this directory and all subdirectories"
+            # while fnmatch treats ** as requiring 1+ subdirectories
+            spec = pathspec.PathSpec.from_lines("gitwildmatch", [pattern])
+            filtered_files = [f for f in filtered_files if spec.match_file(f.path)]
+
+        # Filter by language
+        if query_params.language:
+            target_language = query_params.language.lower()
+            filtered_files = [
+                f
+                for f in filtered_files
+                if f.language and f.language.lower() == target_language
+            ]
+
+        return filtered_files
+
+    def _apply_sorting(
+        self, files: List[FileInfo], sort_by: Optional[str]
+    ) -> List[FileInfo]:
+        """
+        Apply sorting to file list.
+
+        Args:
+            files: List of files to sort
+            sort_by: Sort field name
+
+        Returns:
+            Sorted list of files
+        """
+        valid_sort_fields = {"path", "size", "modified_at"}
+
+        if sort_by is None or sort_by not in valid_sort_fields:
+            if sort_by is not None:
+                logger.warning(
+                    format_error_log(
+                        "CACHE-GENERAL-015",
+                        "Invalid sort field, using default",
+                        sort_by=sort_by,
+                        default="path",
+                    ),
+                    extra=get_log_extra("CACHE-GENERAL-015"),
+                )
+            sort_by = "path"
+
+        if sort_by == "path":
+            return sorted(files, key=lambda f: f.path.lower())
+        elif sort_by == "size":
+            return sorted(files, key=lambda f: f.size_bytes)
+        elif sort_by == "modified_at":
+            return sorted(files, key=lambda f: f.modified_at)
+
+        return files
+
+    def _apply_pagination(
+        self, files: List[FileInfo], page: int, limit: int
+    ) -> Tuple[List[FileInfo], PaginationInfo]:
+        """
+        Apply pagination to file list.
+
+        Args:
+            files: List of files to paginate
+            page: Page number (1-based)
+            limit: Items per page
+
+        Returns:
+            Tuple of (paginated files, pagination info)
+        """
+        total_files = len(files)
+        total_pages = math.ceil(total_files / limit) if total_files > 0 else 0
+
+        # Calculate offset
+        offset = (page - 1) * limit
+
+        # Get page of files
+        paginated_files = files[offset : offset + limit]
+
+        # Check if there are more pages
+        has_next = page < total_pages
+
+        pagination_info = PaginationInfo(
+            page=page, limit=limit, total=total_files, has_next=has_next
+        )
+
+        return paginated_files, pagination_info
+
+    def _enforce_token_limits(
+        self, content: str, total_lines: int, effective_offset: int
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Enforce token limits on content and generate metadata.
+
+        Args:
+            content: Content to potentially truncate
+            total_lines: Total lines in the file
+            effective_offset: Starting line number (1-indexed)
+
+        Returns:
+            Tuple of (possibly truncated content, metadata dict with token info)
+        """
+        file_content_limits = self._get_file_content_limits_config()
+        max_chars = (
+            file_content_limits.file_content_max_tokens
+            * file_content_limits.chars_per_token
+        )
+
+        # Calculate estimated tokens from content length
+        estimated_tokens = len(content) // file_content_limits.chars_per_token
+
+        # Check if truncation needed
+        truncated = False
+        truncated_at_line = None
+        actual_content = content
+
+        if len(content) > max_chars:
+            # Truncate content to fit token budget
+            actual_content = content[:max_chars]
+            truncated = True
+
+            # Calculate which line we truncated at
+            lines_before_truncation = actual_content.count("\n")
+            truncated_at_line = effective_offset + lines_before_truncation
+
+            # Recalculate estimated tokens for truncated content
+            estimated_tokens = (
+                len(actual_content) // file_content_limits.chars_per_token
+            )
+
+        # Determine if pagination required
+        # Formula: last_returned_line = effective_offset + returned_lines - 1
+        # Has more if last_returned_line < total_lines, which simplifies to:
+        # effective_offset + returned_lines - 1 < total_lines
+        # OR: effective_offset + returned_lines <= total_lines
+        returned_lines = actual_content.count("\n") + (
+            1 if actual_content and not actual_content.endswith("\n") else 0
+        )
+        last_returned_line = effective_offset + returned_lines - 1
+        requires_pagination = truncated or (last_returned_line < total_lines)
+
+        # Generate pagination hint
+        pagination_hint = ""
+        if requires_pagination:
+            if truncated:
+                assert truncated_at_line is not None, (
+                    "truncated_at_line must be set when truncated=True"
+                )
+                pagination_hint = f"Content truncated at line {truncated_at_line} due to token limit. Use offset={truncated_at_line + 1} to continue reading."
+            else:
+                next_offset = effective_offset + returned_lines
+                pagination_hint = f"More content available. Use offset={next_offset} to continue reading."
+
+        # Build token enforcement metadata
+        token_metadata = {
+            "estimated_tokens": estimated_tokens,
+            "max_tokens_per_request": file_content_limits.file_content_max_tokens,
+            "truncated": truncated,
+            "truncated_at_line": truncated_at_line,
+            "requires_pagination": requires_pagination,
+            "pagination_hint": pagination_hint if requires_pagination else None,
+        }
+
+        return actual_content, token_metadata
+
+    def get_file_content(
+        self,
+        repository_alias: str,
+        file_path: str,
+        username: str,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        skip_truncation: bool = False,
+    ) -> Dict[str, Any]:
+        """Get content of a specific file from repository with optional pagination.
+
+        CRITICAL BEHAVIOR CHANGE: When offset and limit are both None, returns FIRST CHUNK ONLY
+        (not entire file) to prevent LLM context window exhaustion. Token limits are enforced
+        in all cases, UNLESS skip_truncation=True.
+
+        Args:
+            repository_alias: Repository user alias
+            file_path: Relative path to file within repository
+            username: Username owning the repository
+            offset: 1-indexed line number to start reading from (default: 1)
+            limit: Maximum number of lines to return (default: None = token-limited chunk)
+            skip_truncation: If True, bypasses line limits and token-based truncation.
+                Use this when the caller will apply its own truncation (e.g., MCP handlers
+                using TruncationHelper for cache_handle support). Default: False.
+
+        Returns:
+            Dict with 'content' and 'metadata' keys. Metadata includes pagination info:
+            - total_lines: Total lines in file
+            - returned_lines: Lines returned in this response
+            - offset: Starting line number (1-indexed)
+            - limit: Limit used (None if unlimited)
+            - has_more: True if more lines exist beyond returned range
+            - estimated_tokens: Estimated token count of returned content
+            - max_tokens_per_request: Current token limit from config
+            - truncated: True if content was truncated due to token limit
+            - truncated_at_line: Line number where truncation occurred (if truncated)
+            - requires_pagination: True if file has more content to read
+            - pagination_hint: Helpful message for navigating large files
+        """
+        repo_path = self._get_repository_path(repository_alias, username)
+        full_file_path = Path(repo_path) / file_path
+        full_file_path = full_file_path.resolve()
+        repo_root = Path(repo_path).resolve()
+        if not str(full_file_path).startswith(str(repo_root)):
+            raise PermissionError("Access denied")
+        if not full_file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        if not full_file_path.is_file():
+            raise FileNotFoundError(f"Not a file: {file_path}")
+
+        # Read all lines for pagination
+        with open(full_file_path, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+
+        total_lines = len(all_lines)
+
+        # CRITICAL: Default behavior changed - return first chunk only (not entire file)
+        # Apply offset (convert 1-indexed to 0-indexed for slicing)
+        effective_offset = offset if offset is not None else 1
+        start_index = max(0, effective_offset - 1)
+
+        # Story #33 Fix: skip_truncation bypasses line limits and token truncation
+        # This allows MCP handlers to get full content and apply TruncationHelper
+        # for proper cache_handle support
+        if skip_truncation:
+            # Return all lines from offset to end (or respect user-specified limit only)
+            if limit is not None:
+                # User specified limit is still respected (pagination boundary)
+                end_index = start_index + limit
+                selected_lines = all_lines[start_index:end_index]
+            else:
+                # No limit: return all remaining lines
+                selected_lines = all_lines[start_index:]
+
+            # Build content string (NO token truncation)
+            content = "".join(selected_lines)
+
+            # Calculate returned_lines from content
+            returned_lines = content.count("\n") + (
+                1 if content and not content.endswith("\n") else 0
+            )
+
+            # Calculate has_more: true if more content exists after returned lines
+            last_returned_line = effective_offset + returned_lines - 1
+            has_more = last_returned_line < total_lines
+
+            # Calculate next_offset for pagination
+            next_offset = effective_offset + returned_lines if has_more else None
+
+            # Build token metadata without truncation
+            file_limits = self._get_file_content_limits_config()
+            estimated_tokens = len(content) // file_limits.chars_per_token
+            token_metadata = {
+                "estimated_tokens": estimated_tokens,
+                "max_tokens_per_request": file_limits.max_tokens_per_request,
+                "truncated": False,
+                "truncated_at_line": None,
+                "requires_pagination": has_more,
+                "pagination_hint": (
+                    f"More content available. Use offset={next_offset} to continue reading."
+                    if has_more
+                    else None
+                ),
+            }
+
+            enforced_content = content
+        else:
+            # Original behavior: Apply line-based limits and token truncation
+
+            # Story #686: Apply line-based limits IN ADDITION to token limits
+            # The stricter of (line limit, token limit) wins
+            if limit is None:
+                # No user-specified limit: apply default max lines
+                effective_limit = self.DEFAULT_MAX_LINES
+            else:
+                # User specified limit: cap at max allowed
+                effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
+
+            # Apply the effective limit
+            end_index = start_index + effective_limit
+            selected_lines = all_lines[start_index:end_index]
+
+            # Build content string
+            content = "".join(selected_lines)
+
+            # Apply token enforcement (may truncate content further)
+            enforced_content, token_metadata = self._enforce_token_limits(
+                content, total_lines, effective_offset
+            )
+
+            # Calculate returned_lines from enforced content
+            returned_lines = enforced_content.count("\n") + (
+                1 if enforced_content and not enforced_content.endswith("\n") else 0
+            )
+
+            # Calculate has_more: true if more content exists after returned lines
+            last_returned_line = effective_offset + returned_lines - 1
+            has_more = last_returned_line < total_lines
+
+            # Story #686: Calculate next_offset for pagination
+            next_offset = effective_offset + returned_lines if has_more else None
+
+        # Story #7 AC2: Compute content_hash from FULL file content for optimistic locking
+        # Hash must be of entire file (not just paginated portion) so clients can
+        # use it for edit operations regardless of which portion they read
+        full_content = "".join(all_lines)
+        content_hash = hashlib.sha256(full_content.encode("utf-8")).hexdigest()
+
+        # Build metadata with pagination info
+        stat_info = full_file_path.stat()
+        metadata = {
+            "size": stat_info.st_size,
+            "modified_at": datetime.fromtimestamp(
+                stat_info.st_mtime, tz=timezone.utc
+            ).isoformat(),
+            "language": self._detect_language(full_file_path),
+            "path": file_path,
+            # Story #7 AC2: content_hash for optimistic locking
+            "content_hash": content_hash,
+            # Original pagination metadata
+            "total_lines": total_lines,
+            "returned_lines": returned_lines,
+            "offset": effective_offset,
+            "limit": limit,  # Keep original limit for client visibility
+            "has_more": has_more,
+            # Story #686: Add next_offset for easy pagination
+            "next_offset": next_offset,
+        }
+
+        # Merge token enforcement metadata
+        metadata.update(token_metadata)
+
+        return {"content": enforced_content, "metadata": metadata}
+
+    def get_file_content_by_path(
+        self,
+        repo_path: str,
+        file_path: str,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+        skip_truncation: bool = False,
+    ) -> Dict[str, Any]:
+        """Get content of a specific file from a direct filesystem path (for global repos).
+
+        Unlike get_file_content() which looks up activated repos by alias,
+        this method accepts a direct path for global repository file access.
+
+        CRITICAL BEHAVIOR CHANGE: When offset and limit are both None, returns FIRST CHUNK ONLY
+        (not entire file) to prevent LLM context window exhaustion. Token limits are enforced
+        in all cases, UNLESS skip_truncation=True.
+
+        Args:
+            repo_path: Direct filesystem path to repository root
+            file_path: Relative path to file within repository
+            offset: 1-indexed line number to start reading from (default: 1)
+            limit: Maximum number of lines to return (default: None = token-limited chunk)
+            skip_truncation: If True, bypasses line limits and token-based truncation.
+                Use this when the caller will apply its own truncation (e.g., MCP handlers
+                using TruncationHelper for cache_handle support). Default: False.
+
+        Returns:
+            Dict with 'content' and 'metadata' keys. Metadata includes pagination info:
+            - total_lines: Total lines in file
+            - returned_lines: Lines returned in this response
+            - offset: Starting line number (1-indexed)
+            - limit: Limit used (None if unlimited)
+            - has_more: True if more lines exist beyond returned range
+            - estimated_tokens: Estimated token count of returned content
+            - max_tokens_per_request: Current token limit from config
+            - truncated: True if content was truncated due to token limit
+            - truncated_at_line: Line number where truncation occurred (if truncated)
+            - requires_pagination: True if file has more content to read
+            - pagination_hint: Helpful message for navigating large files
+
+        Raises:
+            PermissionError: If path traversal attempted
+            FileNotFoundError: If file doesn't exist
+        """
+        full_file_path = Path(repo_path) / file_path
+        full_file_path = full_file_path.resolve()
+        repo_root = Path(repo_path).resolve()
+        if not str(full_file_path).startswith(str(repo_root)):
+            raise PermissionError("Access denied")
+        if not full_file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        if not full_file_path.is_file():
+            raise FileNotFoundError(f"Not a file: {file_path}")
+
+        # Read all lines for pagination
+        with open(full_file_path, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+
+        total_lines = len(all_lines)
+
+        # CRITICAL: Default behavior changed - return first chunk only (not entire file)
+        # Apply offset (convert 1-indexed to 0-indexed for slicing)
+        effective_offset = offset if offset is not None else 1
+        start_index = max(0, effective_offset - 1)
+
+        # Story #33 Fix: skip_truncation bypasses line limits and token truncation
+        # This allows MCP handlers to get full content and apply TruncationHelper
+        # for proper cache_handle support
+        if skip_truncation:
+            # Return all lines from offset to end (or respect user-specified limit only)
+            if limit is not None:
+                # User specified limit is still respected (pagination boundary)
+                end_index = start_index + limit
+                selected_lines = all_lines[start_index:end_index]
+            else:
+                # No limit: return all remaining lines
+                selected_lines = all_lines[start_index:]
+
+            # Build content string (NO token truncation)
+            content = "".join(selected_lines)
+
+            # Calculate returned_lines from content
+            returned_lines = content.count("\n") + (
+                1 if content and not content.endswith("\n") else 0
+            )
+
+            # Calculate has_more: true if more content exists after returned lines
+            last_returned_line = effective_offset + returned_lines - 1
+            has_more = last_returned_line < total_lines
+
+            # Calculate next_offset for pagination
+            next_offset = effective_offset + returned_lines if has_more else None
+
+            # Build token metadata without truncation
+            file_limits = self._get_file_content_limits_config()
+            estimated_tokens = len(content) // file_limits.chars_per_token
+            token_metadata = {
+                "estimated_tokens": estimated_tokens,
+                "max_tokens_per_request": file_limits.max_tokens_per_request,
+                "truncated": False,
+                "truncated_at_line": None,
+                "requires_pagination": has_more,
+                "pagination_hint": (
+                    f"More content available. Use offset={next_offset} to continue reading."
+                    if has_more
+                    else None
+                ),
+            }
+
+            enforced_content = content
+        else:
+            # Original behavior: Apply line-based limits and token truncation
+
+            # Bug #939: When limit=None, use MAX_ALLOWED_LIMIT so that token
+            # truncation is the authoritative constraint (not line truncation).
+            # Story #686 DEFAULT_MAX_LINES applies only to get_file_content (alias-based).
+            if limit is None:
+                effective_limit = self.MAX_ALLOWED_LIMIT
+            else:
+                # User specified limit: cap at max allowed
+                effective_limit = min(limit, self.MAX_ALLOWED_LIMIT)
+
+            # Apply the effective limit
+            end_index = start_index + effective_limit
+            selected_lines = all_lines[start_index:end_index]
+
+            # Build content string
+            content = "".join(selected_lines)
+
+            # Apply token enforcement (may truncate content further)
+            enforced_content, token_metadata = self._enforce_token_limits(
+                content, total_lines, effective_offset
+            )
+
+            # Calculate returned_lines from enforced content
+            returned_lines = enforced_content.count("\n") + (
+                1 if enforced_content and not enforced_content.endswith("\n") else 0
+            )
+
+            # Calculate has_more: true if more content exists after returned lines
+            last_returned_line = effective_offset + returned_lines - 1
+            has_more = last_returned_line < total_lines
+
+            # Story #686: Calculate next_offset for pagination
+            next_offset = effective_offset + returned_lines if has_more else None
+
+        # Build metadata with pagination info
+        stat_info = full_file_path.stat()
+        metadata = {
+            "size": stat_info.st_size,
+            "modified_at": datetime.fromtimestamp(
+                stat_info.st_mtime, tz=timezone.utc
+            ).isoformat(),
+            "language": self._detect_language(full_file_path),
+            "path": file_path,
+            # Original pagination metadata
+            "total_lines": total_lines,
+            "returned_lines": returned_lines,
+            "offset": effective_offset,
+            "limit": limit,  # Keep original limit for client visibility
+            "has_more": has_more,
+            # Story #686: Add next_offset for easy pagination
+            "next_offset": next_offset,
+        }
+
+        # Merge token enforcement metadata
+        metadata.update(token_metadata)
+
+        return {"content": enforced_content, "metadata": metadata}
+
+
+# Global service instance
+file_service = FileListingService()

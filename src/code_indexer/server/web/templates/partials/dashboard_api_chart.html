@@ -1,0 +1,38 @@
+<!-- Story #675: API Usage Trends Stacked Bar Chart Card -->
+<div class="col-12">
+    <article class="stat-card card">
+        <header class="card-header">
+            <h3>API Usage Trends</h3>
+        </header>
+        <div class="card-body">
+            <canvas id="apiUsageChart" style="max-height: 300px;"></canvas>
+        </div>
+    </article>
+</div>
+
+<script>
+(function() {
+    if (window._apiChart) {
+        window._apiChart.destroy();
+        window._apiChart = null;
+    }
+    var ctx = document.getElementById('apiUsageChart');
+    if (!ctx) return;
+    var chartData = {{ chart_data | tojson }};
+    if (!chartData || !chartData.labels || chartData.labels.length === 0) return;
+    window._apiChart = new Chart(ctx, {
+        type: 'bar',
+        data: chartData,
+        options: {
+            responsive: true,
+            scales: {
+                x: { stacked: true },
+                y: { stacked: true, beginAtZero: true }
+            },
+            plugins: {
+                legend: { position: 'bottom' }
+            }
+        }
+    });
+})();
+</script>

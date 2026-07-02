@@ -1,0 +1,1338 @@
+"""
+Git Operations REST API Router.
+
+Provides REST endpoints for git operations with OAuth authentication
+and service layer integration.
+"""
+
+from code_indexer.server.middleware.correlation import get_correlation_id
+
+import logging
+import os
+import subprocess
+from typing import Any, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from code_indexer.server.auth.dependencies import get_current_user
+from code_indexer.server.auth.user_manager import User
+from code_indexer.server.services.git_operations_service import git_operations_service
+from code_indexer.server.repositories.activated_repo_manager import ActivatedRepoManager
+from code_indexer.server.routers.git_models import (
+    GitStatusResponse,
+    GitDiffResponse,
+    GitLogResponse,
+    GitStageRequest,
+    GitStageResponse,
+    GitUnstageRequest,
+    GitUnstageResponse,
+    GitCommitRequest,
+    GitCommitResponse,
+    GitPushRequest,
+    GitPushResponse,
+    GitPullRequest,
+    GitPullResponse,
+    GitFetchRequest,
+    GitFetchResponse,
+    GitResetRequest,
+    GitResetResponse,
+    GitCleanRequest,
+    GitCleanResponse,
+    GitMergeAbortResponse,
+    GitCheckoutFileRequest,
+    GitCheckoutFileResponse,
+    GitBranchListResponse,
+    GitBranchCreateRequest,
+    GitBranchCreateResponse,
+    GitBranchSwitchResponse,
+    GitBranchDeleteResponse,
+)
+from code_indexer.server.logging_utils import format_error_log
+
+logger = logging.getLogger(__name__)
+
+# Create router with prefix and tags
+router = APIRouter(prefix="/api/v1/repos/{alias}/git", tags=["git"])
+_server_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+activated_repo_manager = ActivatedRepoManager(
+    data_dir=os.path.join(_server_data_dir, "data") if _server_data_dir else None
+)
+
+
+# Git Status/Inspection Endpoints
+
+
+@router.get(
+    "/status",
+    status_code=status.HTTP_200_OK,
+    response_model=GitStatusResponse,
+    responses={
+        200: {"description": "Git status retrieved successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Get git status",
+    description="Get the git status of the activated repository",
+)
+def git_status(alias: str, user: User = Depends(get_current_user)) -> GitStatusResponse:
+    """Get git status of the repository."""
+    try:
+        service = git_operations_service
+        result = service.get_status(repo_alias=alias, username=user.username)
+        return GitStatusResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-006",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-007",
+                f"Git status failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.get(
+    "/diff",
+    status_code=status.HTTP_200_OK,
+    response_model=GitDiffResponse,
+    responses={
+        200: {"description": "Git diff retrieved successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Get git diff",
+    description="Get the git diff for the activated repository",
+)
+def git_diff(
+    alias: str,
+    context_lines: Optional[int] = Query(
+        None, description="Number of context lines to show"
+    ),
+    from_revision: Optional[str] = Query(
+        None, description="Starting revision for diff"
+    ),
+    to_revision: Optional[str] = Query(None, description="Ending revision for diff"),
+    path: Optional[str] = Query(None, description="Specific path to diff"),
+    stat_only: Optional[bool] = Query(None, description="Show only file statistics"),
+    limit: Optional[int] = Query(
+        None, description="Maximum number of diff lines to return (default 500)"
+    ),
+    offset: Optional[int] = Query(
+        None, description="Number of lines to skip for pagination"
+    ),
+    user: User = Depends(get_current_user),
+) -> GitDiffResponse:
+    """Get git diff of the repository."""
+    try:
+        service = git_operations_service
+        # Build kwargs for optional parameters
+        kwargs: dict[str, Any] = {}
+        if context_lines is not None:
+            kwargs["context_lines"] = context_lines
+        if from_revision is not None:
+            kwargs["from_revision"] = from_revision
+        if to_revision is not None:
+            kwargs["to_revision"] = to_revision
+        if path is not None:
+            kwargs["path"] = path
+        if stat_only is not None:
+            kwargs["stat_only"] = stat_only
+        if limit is not None:
+            kwargs["limit"] = limit
+        if offset is not None:
+            kwargs["offset"] = offset
+
+        result = service.get_diff(repo_alias=alias, username=user.username, **kwargs)
+        return GitDiffResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-008",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-009",
+                f"Git diff failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.get(
+    "/log",
+    status_code=status.HTTP_200_OK,
+    response_model=GitLogResponse,
+    responses={
+        200: {"description": "Git log retrieved successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Get git log",
+    description="Get the git commit log for the activated repository",
+)
+def git_log(
+    alias: str,
+    limit: Optional[int] = Query(
+        None, description="Maximum number of commits to return"
+    ),
+    offset: Optional[int] = Query(
+        None, description="Number of commits to skip for pagination"
+    ),
+    path: Optional[str] = Query(None, description="Filter commits affecting this path"),
+    author: Optional[str] = Query(None, description="Filter commits by author"),
+    since: Optional[str] = Query(
+        None, description="Include only commits after this date"
+    ),
+    until: Optional[str] = Query(
+        None, description="Include only commits before this date"
+    ),
+    branch: Optional[str] = Query(None, description="Branch to get log from"),
+    aggregation_mode: Optional[str] = Query(
+        None, description="How to aggregate results across repos"
+    ),
+    response_format: Optional[str] = Query(
+        None, description="Response format (flat or grouped)"
+    ),
+    user: User = Depends(get_current_user),
+) -> GitLogResponse:
+    """Get git log of the repository."""
+    try:
+        service = git_operations_service
+        # Build kwargs for optional parameters
+        kwargs: dict[str, Any] = {}
+        if limit is not None:
+            kwargs["limit"] = limit
+        if offset is not None:
+            kwargs["offset"] = offset
+        if path is not None:
+            kwargs["path"] = path
+        if author is not None:
+            kwargs["author"] = author
+        if since is not None:
+            kwargs["since"] = since
+        if until is not None:
+            kwargs["until"] = until
+        if branch is not None:
+            kwargs["branch"] = branch
+        if aggregation_mode is not None:
+            kwargs["aggregation_mode"] = aggregation_mode
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+
+        result = service.get_log(repo_alias=alias, username=user.username, **kwargs)
+        return GitLogResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-010",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-011",
+                f"Git log failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+# Git Staging/Commit Endpoints
+
+
+@router.post(
+    "/stage",
+    status_code=status.HTTP_200_OK,
+    response_model=GitStageResponse,
+    responses={
+        200: {"description": "Files staged successfully"},
+        400: {"description": "Invalid parameters"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Stage files",
+    description="Stage files for commit in the activated repository",
+)
+def git_stage(
+    alias: str, request: GitStageRequest, user: User = Depends(get_current_user)
+) -> GitStageResponse:
+    """Stage files for commit."""
+    try:
+        service = git_operations_service
+        result = service.stage_files(
+            repo_alias=alias, file_paths=request.file_paths, username=user.username
+        )
+        return GitStageResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-012",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        logger.warning(
+            format_error_log(
+                "SVC-GENERAL-013",
+                f"Invalid request for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "SVC-GENERAL-014",
+                f"Git stage failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/unstage",
+    status_code=status.HTTP_200_OK,
+    response_model=GitUnstageResponse,
+    responses={
+        200: {"description": "Files unstaged successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Unstage files",
+    description="Unstage files in the activated repository",
+)
+def git_unstage(
+    alias: str, request: GitUnstageRequest, user: User = Depends(get_current_user)
+) -> GitUnstageResponse:
+    """Unstage files."""
+    try:
+        service = git_operations_service
+        result = service.unstage_files(
+            repo_alias=alias, file_paths=request.file_paths, username=user.username
+        )
+        return GitUnstageResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-001",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "TELEM-GENERAL-002",
+                f"Git unstage failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/commit",
+    status_code=status.HTTP_201_CREATED,
+    response_model=GitCommitResponse,
+    responses={
+        201: {"description": "Commit created successfully"},
+        400: {"description": "Invalid parameters"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Create commit",
+    description="Create a git commit in the activated repository",
+)
+def git_commit(
+    alias: str, request: GitCommitRequest, user: User = Depends(get_current_user)
+) -> GitCommitResponse:
+    """Create a git commit."""
+    try:
+        service = git_operations_service
+        result = service.create_commit(
+            repo_alias=alias,
+            message=request.message,
+            author_name=request.author_name,
+            author_email=request.author_email,
+            username=user.username,
+        )
+        return GitCommitResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-003",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-004",
+                f"Invalid request for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "TELEM-GENERAL-005",
+                f"Git commit failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+# Git Remote Endpoints
+
+
+@router.post(
+    "/push",
+    status_code=status.HTTP_200_OK,
+    response_model=GitPushResponse,
+    responses={
+        200: {"description": "Push completed successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+        500: {"description": "Network error or push failed"},
+    },
+    summary="Push commits",
+    description="Push commits to remote repository",
+)
+def git_push(
+    alias: str, request: GitPushRequest, user: User = Depends(get_current_user)
+) -> GitPushResponse:
+    """Push commits to remote."""
+    try:
+        service = git_operations_service
+        result = service.push_to_remote(
+            repo_alias=alias,
+            username=user.username,
+            remote=request.remote,
+            branch=request.branch,
+            set_upstream=request.set_upstream,
+        )
+        return GitPushResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-006",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "TELEM-GENERAL-007",
+                f"Git push failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/pull",
+    status_code=status.HTTP_200_OK,
+    response_model=GitPullResponse,
+    responses={
+        200: {"description": "Pull completed successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+        409: {"description": "Merge conflicts"},
+        500: {"description": "Network error or pull failed"},
+    },
+    summary="Pull commits",
+    description="Pull commits from remote repository",
+)
+def git_pull(
+    alias: str, request: GitPullRequest, user: User = Depends(get_current_user)
+) -> GitPullResponse:
+    """Pull commits from remote."""
+    try:
+        service = git_operations_service
+        result = service.pull_from_remote(
+            repo_alias=alias,
+            username=user.username,
+            remote=request.remote,
+            branch=request.branch,
+        )
+        return GitPullResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "TELEM-GENERAL-008",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "VALID-GENERAL-001",
+                f"Git pull failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/fetch",
+    status_code=status.HTTP_200_OK,
+    response_model=GitFetchResponse,
+    responses={
+        200: {"description": "Fetch completed successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+        500: {"description": "Network error or fetch failed"},
+    },
+    summary="Fetch from remote",
+    description="Fetch refs and objects from remote repository",
+)
+def git_fetch(
+    alias: str, request: GitFetchRequest, user: User = Depends(get_current_user)
+) -> GitFetchResponse:
+    """Fetch from remote."""
+    try:
+        service = git_operations_service
+        result = service.fetch_from_remote(
+            repo_alias=alias, username=user.username, remote=request.remote
+        )
+        return GitFetchResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-002",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "VALID-GENERAL-003",
+                f"Git fetch failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+# Git Recovery Endpoints
+
+
+@router.post(
+    "/reset",
+    status_code=status.HTTP_200_OK,
+    response_model=GitResetResponse,
+    responses={
+        200: {"description": "Reset completed successfully"},
+        400: {"description": "Invalid parameters"},
+        401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing confirmation token"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Reset repository",
+    description="Reset repository to a specific commit (requires confirmation for hard reset)",
+)
+def git_reset(
+    alias: str, request: GitResetRequest, user: User = Depends(get_current_user)
+) -> GitResetResponse:
+    """Reset repository to a specific state."""
+    try:
+        service = git_operations_service
+        result = service.reset_repository(
+            repo_alias=alias,
+            username=user.username,
+            mode=request.mode,
+            commit_hash=request.commit_hash,
+            confirmation_token=request.confirmation_token,
+        )
+        return GitResetResponse(**result)
+    except PermissionError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-004",
+                f"Confirmation required for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-005",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-006",
+                f"Invalid request for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "VALID-GENERAL-007",
+                f"Git reset failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/clean",
+    status_code=status.HTTP_200_OK,
+    response_model=GitCleanResponse,
+    responses={
+        200: {"description": "Clean completed successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing confirmation token"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Clean untracked files",
+    description="Remove untracked files from repository (requires confirmation)",
+)
+def git_clean(
+    alias: str,
+    request: GitCleanRequest = GitCleanRequest(),
+    user: User = Depends(get_current_user),
+) -> GitCleanResponse:
+    """Clean untracked files from repository."""
+    try:
+        service = git_operations_service
+        result = service.clean_repository(
+            repo_alias=alias,
+            username=user.username,
+            confirmation_token=request.confirmation_token,
+        )
+        return GitCleanResponse(**result)
+    except PermissionError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-008",
+                f"Confirmation required for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-009",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "VALID-GENERAL-010",
+                f"Git clean failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/merge-abort",
+    status_code=status.HTTP_200_OK,
+    response_model=GitMergeAbortResponse,
+    responses={
+        200: {"description": "Merge aborted successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found or no merge in progress"},
+    },
+    summary="Abort merge",
+    description="Abort an in-progress merge operation",
+)
+def git_merge_abort(
+    alias: str, user: User = Depends(get_current_user)
+) -> GitMergeAbortResponse:
+    """Abort an in-progress merge."""
+    try:
+        service = git_operations_service
+        result = service.abort_merge(repo_alias=alias, username=user.username)
+        return GitMergeAbortResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "VALID-GENERAL-011",
+                f"Repository not found or no merge in progress: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-001",
+                f"Git merge abort failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/checkout-file",
+    status_code=status.HTTP_200_OK,
+    response_model=GitCheckoutFileResponse,
+    responses={
+        200: {"description": "File restored successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository or file not found"},
+    },
+    summary="Restore file",
+    description="Restore a file to its last committed state",
+)
+def git_checkout_file(
+    alias: str, request: GitCheckoutFileRequest, user: User = Depends(get_current_user)
+) -> GitCheckoutFileResponse:
+    """Restore a file to its last committed state."""
+    try:
+        service = git_operations_service
+        result = service.checkout_file(
+            repo_alias=alias, file_path=request.file_path, username=user.username
+        )
+        return GitCheckoutFileResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-002",
+                f"Repository or file not found: {alias}/{request.file_path}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-003",
+                f"Git checkout file failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+# Git Branch Endpoints
+
+
+@router.get(
+    "/branches",
+    status_code=status.HTTP_200_OK,
+    response_model=GitBranchListResponse,
+    responses={
+        200: {"description": "Branch list retrieved successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="List branches",
+    description="List all local and remote branches in the repository",
+)
+def git_branch_list(
+    alias: str, user: User = Depends(get_current_user)
+) -> GitBranchListResponse:
+    """List all branches."""
+    try:
+        service = git_operations_service
+        result = service.list_branches(repo_alias=alias, username=user.username)
+        return GitBranchListResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-004",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-005",
+                f"Git branch list failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/branches",
+    status_code=status.HTTP_201_CREATED,
+    response_model=GitBranchCreateResponse,
+    responses={
+        201: {"description": "Branch created successfully"},
+        400: {"description": "Invalid parameters"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+        409: {"description": "Branch already exists"},
+    },
+    summary="Create branch",
+    description="Create a new branch in the repository",
+)
+def git_branch_create(
+    alias: str, request: GitBranchCreateRequest, user: User = Depends(get_current_user)
+) -> GitBranchCreateResponse:
+    """Create a new branch."""
+    try:
+        service = git_operations_service
+        result = service.create_branch(
+            repo_alias=alias, branch_name=request.branch_name, username=user.username
+        )
+        return GitBranchCreateResponse(**result)
+    except FileExistsError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-006",
+                f"Branch already exists: {alias}/{request.branch_name}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-007",
+                f"Repository not found: {alias}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-008",
+                f"Invalid request for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-009",
+                f"Git branch create failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.post(
+    "/branches/{name}/switch",
+    status_code=status.HTTP_200_OK,
+    response_model=GitBranchSwitchResponse,
+    responses={
+        200: {"description": "Branch switched successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository or branch not found"},
+    },
+    summary="Switch branch",
+    description="Switch to a different branch",
+)
+def git_branch_switch(
+    alias: str, name: str, user: User = Depends(get_current_user)
+) -> GitBranchSwitchResponse:
+    """Switch to a different branch."""
+    try:
+        service = git_operations_service
+        result = service.switch_branch(
+            repo_alias=alias, branch_name=name, username=user.username
+        )
+        return GitBranchSwitchResponse(**result)
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-010",
+                f"Repository or branch not found: {alias}/{name}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-011",
+                f"Git branch switch failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.delete(
+    "/branches/{name}",
+    status_code=status.HTTP_200_OK,
+    response_model=GitBranchDeleteResponse,
+    responses={
+        200: {"description": "Branch deleted successfully"},
+        401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Missing confirmation token"},
+        404: {"description": "Repository or branch not found"},
+    },
+    summary="Delete branch",
+    description="Delete a branch (requires confirmation)",
+)
+def git_branch_delete(
+    alias: str,
+    name: str,
+    confirmation_token: Optional[str] = Query(None, description="Confirmation token"),
+    user: User = Depends(get_current_user),
+) -> GitBranchDeleteResponse:
+    """Delete a branch."""
+    try:
+        service = git_operations_service
+        result = service.delete_branch(
+            repo_alias=alias,
+            branch_name=name,
+            confirmation_token=confirmation_token,
+            username=user.username,
+        )
+        return GitBranchDeleteResponse(**result)
+    except PermissionError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-012",
+                f"Confirmation required for {alias}: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except FileNotFoundError as e:
+        logger.warning(
+            format_error_log(
+                "WEB-GENERAL-013",
+                f"Repository or branch not found: {alias}/{name}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "WEB-GENERAL-014",
+                f"Git branch delete failed for {alias}: {e}",
+                exc_info=True,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@router.get(
+    "/cat",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "File content retrieved successfully"},
+        400: {"description": "Invalid path (traversal or absolute)"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository or file/revision not found"},
+    },
+    summary="Get file content at a revision",
+    description="Return utf-8 decoded content of a file at a given git revision",
+)
+def git_cat(
+    alias: str,
+    path: str = Query(..., description="Relative file path within the repository"),
+    rev: str = Query("HEAD", description="Git revision (branch, tag, or commit SHA)"),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Return the content of a file at the given revision."""
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid path: must be a relative path with no traversal components",
+        )
+
+    try:
+        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+    except FileNotFoundError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-CAT-001",
+                f"Repository not found for alias '{alias}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    try:
+        rev_result = subprocess.run(
+            ["git", "rev-parse", rev],
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        )
+        resolved_sha = rev_result.stdout.decode("utf-8", errors="replace").strip()
+
+        show_result = subprocess.run(
+            ["git", "show", f"{rev}:{path}"],
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        )
+        content = show_result.stdout.decode("utf-8", errors="replace")
+        return {
+            "content": content,
+            "path": path,
+            "size": len(show_result.stdout),
+            "rev": resolved_sha,
+        }
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-CAT-002",
+                f"git show/rev-parse failed for '{alias}' path='{path}' rev='{rev}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"File or revision not found: {path}@{rev}",
+        )
+
+
+# Length of a full Git SHA-1 hex string (40 lowercase hex characters)
+_GIT_SHA_HEX_LENGTH = 40
+
+
+def _parse_git_blame_porcelain(stdout: str) -> list:
+    """Parse output of `git blame --porcelain` into a list of line dicts.
+
+    Porcelain block structure per line of the blamed file:
+      <sha40> <orig_lineno> <final_lineno> [<group_count>]
+      author <name>
+      author-time <unix_epoch>
+      ... (other headers) ...
+      \t<content>   (TAB prefix marks the content line, ends the block)
+
+    Returns list of dicts: line_number, commit_hash, author, date, content.
+    """
+    from datetime import datetime, timezone
+
+    lines = []
+    line_number = 0
+    current: dict = {}
+
+    for raw in stdout.splitlines():
+        if not raw:
+            continue
+        if raw[0] == "\t":
+            # TAB-prefixed content line ends the current block
+            line_number += 1
+            lines.append(
+                {
+                    "line_number": line_number,
+                    "commit_hash": current.get("commit_hash", ""),
+                    "author": current.get("author", ""),
+                    "date": current.get("date", ""),
+                    "content": raw[1:],  # strip leading TAB
+                }
+            )
+            current = {}
+        elif raw.startswith("author "):
+            current["author"] = raw[len("author ") :]
+        elif raw.startswith("author-time "):
+            epoch = int(raw[len("author-time ") :])
+            dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            current["date"] = dt.isoformat()
+        else:
+            # Header line: first token is the 40-char commit SHA
+            parts = raw.split()
+            if parts and len(parts[0]) == _GIT_SHA_HEX_LENGTH:
+                current["commit_hash"] = parts[0]
+
+    return lines
+
+
+@router.get(
+    "/blame",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Blame output retrieved successfully"},
+        400: {"description": "Invalid path (traversal or absolute)"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository or file not found"},
+    },
+    summary="Get git blame for a file",
+    description="Return per-line blame information for a file at a given revision",
+)
+def git_blame(
+    alias: str,
+    path: str = Query(..., description="Relative file path within the repository"),
+    rev: str = Query("HEAD", description="Git revision (branch, tag, or commit SHA)"),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Return blame information for each line of a file."""
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid path: must be a relative path with no traversal components",
+        )
+
+    try:
+        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+    except FileNotFoundError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-BLAME-001",
+                f"Repository not found for alias '{alias}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    try:
+        result = subprocess.run(
+            ["git", "blame", "--porcelain", rev, "--", path],
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        )
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        blame_lines = _parse_git_blame_porcelain(stdout)
+        return {"lines": blame_lines}
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-BLAME-002",
+                f"git blame failed for '{alias}' path='{path}' rev='{rev}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"File or revision not found: {path}@{rev}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# git/file-history — commit history for a single file (Bug #824)
+# ---------------------------------------------------------------------------
+
+
+_FILE_HISTORY_DEFAULT_LIMIT = 50
+_FILE_HISTORY_MAX_LIMIT = 500
+
+
+def _parse_unit_separated_commits(stdout: str) -> list[dict]:
+    """Parse git log output formatted with "%H\\x1f%an\\x1f%ai\\x1f%s".
+
+    Each non-blank line is split on ASCII Unit Separator (\\x1f) with
+    maxsplit=3 into 4 fields: commit_hash, author, date, message.
+    Malformed lines (shouldn't occur with this format) are logged at
+    WARNING and skipped.  Mirrors Bug #825 fix in git_operations_service.
+    """
+    commits: list[dict] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\x1f", 3)
+        if len(parts) != 4:
+            logger.warning(
+                "git log produced malformed line (expected 4 unit-separated "
+                "fields, got %d): %r",
+                len(parts),
+                line,
+            )
+            continue
+        commit_hash, commit_author, commit_date, commit_message = parts
+        commits.append(
+            {
+                "commit_hash": commit_hash,
+                "author": commit_author,
+                "date": commit_date,
+                "message": commit_message,
+            }
+        )
+    return commits
+
+
+@router.get(
+    "/file-history",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "File commit history retrieved successfully"},
+        400: {"description": "Invalid path (traversal or absolute)"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Get commit history for a file",
+    description=(
+        "Return the commit history for a single file within the repository, "
+        "following renames via --follow."
+    ),
+)
+def git_file_history(
+    alias: str,
+    path: str = Query(..., description="Relative file path within the repository"),
+    rev: Optional[str] = Query(None, description="Optional git revision to start from"),
+    limit: int = Query(
+        _FILE_HISTORY_DEFAULT_LIMIT,
+        ge=1,
+        le=_FILE_HISTORY_MAX_LIMIT,
+        description="Maximum commits to return (1..500)",
+    ),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Return commit history for a single file (follows renames)."""
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid path: must be a relative path with no traversal components",
+        )
+
+    try:
+        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+    except FileNotFoundError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-FILE-HISTORY-001",
+                f"Repository not found for alias '{alias}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    cmd: list[str] = [
+        "git",
+        "log",
+        "--follow",
+        "--format=%H\x1f%an\x1f%ai\x1f%s",
+        f"-n{limit}",
+    ]
+    if rev:
+        cmd.append(rev)
+    cmd.extend(["--", path])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-FILE-HISTORY-002",
+                f"git log --follow failed for '{alias}' path='{path}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"File or revision not found: {path}",
+        )
+
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    return {"commits": _parse_unit_separated_commits(stdout)}

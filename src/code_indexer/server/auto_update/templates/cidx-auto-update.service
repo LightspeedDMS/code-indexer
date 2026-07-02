@@ -1,0 +1,19 @@
+[Unit]
+Description=CIDX Auto-Update Service
+Documentation=https://github.com/LightspeedDMS/code-indexer
+After=network.target
+
+[Service]
+Type=oneshot
+User={USER}
+Environment="CIDX_SERVER_REPO_PATH={REPO_PATH}"
+ExecStart=/usr/bin/python3 -m code_indexer.server.auto_update.run_once
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cidx-auto-update
+
+# Security hardening
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+{# Partial template for empty state when no sessions exist (Story #143 AC6) #}
+<div class="empty-state">
+    <h3>Welcome to Research Assistant</h3>
+    <p>Start your first investigation by creating a new session.</p>
+    <button hx-post="/admin/research/sessions"
+            hx-target="#sessions-sidebar"
+            hx-swap="innerHTML"
+            class="btn-primary">
+        New Session
+    </button>
+</div>

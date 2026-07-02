@@ -1,0 +1,10 @@
+{# Continue polling - this template is returned when job is still running (Bug #148 fix) #}
+<div hx-get="/admin/research/poll/{{ job_id }}?session_id={{ active_session_id }}"
+     hx-trigger="load delay:5s"
+     hx-target="#chat-messages"
+     hx-swap="innerHTML"
+     hx-timeout="0">
+    <div class="chat-message working">
+        <div class="message-content">Working...</div>
+    </div>
+</div>

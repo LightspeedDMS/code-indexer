@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+
+{% block title %}Activated Repositories - CIDX Admin{% endblock %}
+
+{% block content %}
+<div class="repos-header">
+    <h1>Activated Repository Management</h1>
+    <div class="repos-actions">
+        <button
+            id="refresh-btn"
+            class="outline"
+            hx-get="/admin/partials/repos-list"
+            hx-target="#repos-list-section"
+            hx-swap="innerHTML"
+            hx-indicator="#refresh-indicator"
+        >
+            Refresh
+        </button>
+        <span id="refresh-indicator" class="htmx-indicator">Loading...</span>
+    </div>
+</div>
+
+<!-- Success/Error Messages -->
+{% if success_message %}
+<article class="message-success">
+    <p>{{ success_message }}</p>
+</article>
+{% endif %}
+
+{% if error_message %}
+<article class="message-error">
+    <p>{{ error_message }}</p>
+</article>
+{% endif %}
+
+<!-- Filters Section -->
+<section id="filters-section" class="filters-section">
+    <form id="filter-form" method="get" action="/admin/repos">
+        <div class="filter-row">
+            <div class="filter-item">
+                <label for="search">Search</label>
+                <input
+                    type="search"
+                    id="search"
+                    name="search"
+                    placeholder="Search by name, user, or golden repo..."
+                    value="{{ search or '' }}"
+                    hx-get="/admin/partials/repos-list"
+                    hx-target="#repos-list-section"
+                    hx-swap="innerHTML"
+                    hx-trigger="keyup changed delay:300ms"
+                    hx-include="#filter-form"
+                >
+            </div>
+
+            <div class="filter-item">
+                <label for="golden_repo">Golden Repo</label>
+                <select
+                    id="golden_repo"
+                    name="golden_repo"
+                    hx-get="/admin/partials/repos-list"
+                    hx-target="#repos-list-section"
+                    hx-swap="innerHTML"
+                    hx-trigger="change"
+                    hx-include="#filter-form"
+                >
+                    <option value="">All Golden Repos</option>
+                    {% for repo in golden_repos %}
+                    <option value="{{ repo }}" {% if golden_repo_filter == repo %}selected{% endif %}>{{ repo }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="filter-item">
+                <label for="user">User</label>
+                <select
+                    id="user"
+                    name="user"
+                    hx-get="/admin/partials/repos-list"
+                    hx-target="#repos-list-section"
+                    hx-swap="innerHTML"
+                    hx-trigger="change"
+                    hx-include="#filter-form"
+                >
+                    <option value="">All Users</option>
+                    {% for u in users %}
+                    <option value="{{ u }}" {% if user_filter == u %}selected{% endif %}>{{ u }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="filter-item filter-actions">
+                <label>&nbsp;</label>
+                <button type="button" class="outline" onclick="clearFilters()">Clear Filters</button>
+            </div>
+        </div>
+    </form>
+</section>
+
+<!-- Activated Repositories List Section -->
+<section id="repos-list-section">
+    {% include "partials/repos_list.html" %}
+</section>
+
+<script>
+// Track open details rows
+let openDetailsSet = new Set();
+
+function clearFilters() {
+    document.getElementById('search').value = '';
+    document.getElementById('golden_repo').value = '';
+    document.getElementById('user').value = '';
+    // Trigger htmx request to refresh list
+    htmx.ajax('GET', '/admin/partials/repos-list', {target: '#repos-list-section', swap: 'innerHTML'});
+}
+
+function confirmDeactivate(username, userAlias) {
+    if (confirm('Are you sure you want to deactivate repository "' + userAlias + '" for user "' + username + '"? This action cannot be undone.')) {
+        document.getElementById('deactivate-form-' + username + '-' + userAlias).submit();
+    }
+}
+
+function toggleDetails(username, userAlias) {
+    const key = username + '-' + userAlias;
+    const details = document.getElementById('details-' + key);
+    if (details) {
+        const isHidden = details.style.display === 'none';
+        details.style.display = isHidden ? 'table-row' : 'none';
+        // Track open/closed state
+        if (isHidden) {
+            openDetailsSet.add(key);
+            console.log('[CIDX] Opened details for:', key);
+            // Load index status grid in the details card
+            loadDetailsIndexStatus(userAlias, username);
+        } else {
+            openDetailsSet.delete(key);
+            console.log('[CIDX] Closed details for:', key);
+        }
+    }
+}
+
+async function loadDetailsIndexStatus(userAlias, owner) {
+    try {
+        const indexData = await fetchActivatedRepoIndexes(userAlias, owner);
+        if (typeof updateIndexStatusGrid === 'function') {
+            updateIndexStatusGrid(userAlias, indexData);
+        }
+    } catch (error) {
+        console.error('[CIDX] Failed to load details index status for ' + userAlias + ':', error);
+        if (typeof updateIndexStatusGridError === 'function') {
+            updateIndexStatusGridError(userAlias);
+        }
+    }
+}
+
+function restoreOpenDetails() {
+    // Restore previously open details rows after content refresh
+    console.log('[CIDX] restoreOpenDetails() called');
+    console.log('[CIDX] openDetailsSet size:', openDetailsSet.size);
+    console.log('[CIDX] openDetailsSet contents:', Array.from(openDetailsSet));
+
+    if (openDetailsSet.size > 0) {
+        console.log('[CIDX] Attempting to restore open details...');
+        openDetailsSet.forEach(key => {
+            console.log('[CIDX] Looking for element: details-' + key);
+            const details = document.getElementById('details-' + key);
+            console.log('[CIDX] Element found:', details !== null);
+            if (details) {
+                console.log('[CIDX] Current display style:', details.style.display);
+                details.style.display = 'table-row';
+                console.log('[CIDX] New display style:', details.style.display);
+                console.log('[CIDX] ✅ Restored details for:', key);
+            } else {
+                console.error('[CIDX] ❌ Could not find details element for:', key);
+            }
+        });
+    } else {
+        console.log('[CIDX] No details to restore (openDetailsSet is empty)');
+    }
+}
+
+// Check after htmx swaps and restore open details
+document.body.addEventListener('htmx:afterSettle', function(event) {
+    // Only restore for repos list swaps
+    const target = event.detail.target;
+    if (target && target.id === 'repos-list-section') {
+        // Use requestAnimationFrame to ensure DOM is fully ready
+        requestAnimationFrame(() => {
+            restoreOpenDetails();
+            restoreOpenHealthDetails();  // Restore health details panels (Bug fix for Story #60)
+            applyStoredGroupedView();
+        });
+    }
+});
+</script>
+
+<!-- Load scripts synchronously in dependency order (Bug #170 fix) -->
+<!-- repo_health.js MUST load first - defines renderHealthIndicator, renderHealthDetails, escapeHtml -->
+<script src="/admin/static/js/repo_health.js?v={{ static_version }}"></script>
+<!-- activated_repo_management.js loads second - depends on repo_health.js functions -->
+<script src="/admin/static/js/activated_repo_management.js?v={{ static_version }}"></script>
+{% endblock %}

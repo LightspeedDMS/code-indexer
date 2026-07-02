@@ -1,0 +1,1642 @@
+/**
+ * Admin UI Custom Styles
+ * Minimal custom styles that complement Pico CSS
+ */
+
+/* Override Pico defaults for data-dense admin interface */
+:root {
+    --pico-font-size: 15px;
+    --pico-line-height: 1.4;
+}
+
+/* Dark mode customizations with off-black backgrounds */
+[data-theme="dark"] {
+    --pico-background-color: #1a1a1a;
+    --pico-card-background-color: #242424;
+    --pico-card-sectioning-background-color: #2a2a2a;
+    --pico-code-background-color: #2a2a2a;
+    --pico-table-border-color: #3a3a3a;
+    --pico-muted-border-color: #3a3a3a;
+    --pico-card-border-color: #3a3a3a;
+}
+
+html {
+    font-size: 15px;
+}
+
+h1 { font-size: 1.75rem; }
+h2 { font-size: 1.4rem; }
+h3 { font-size: 1.15rem; }
+
+/* Table font sizes */
+table {
+    font-size: 0.95rem;
+}
+
+table th, table td {
+    padding: 0.5rem 0.75rem;
+}
+
+/* Navigation enhancements */
+nav.admin-nav {
+    margin-bottom: 1rem;
+}
+
+nav.admin-nav ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+nav.admin-nav li {
+    margin: 0;
+}
+
+nav.admin-nav a[aria-current="page"] {
+    font-weight: bold;
+    text-decoration: underline;
+}
+
+/* Error message styling */
+.error-message {
+    color: var(--pico-color-red-550);
+    background-color: var(--pico-color-red-50);
+    padding: 0.75rem 1rem;
+    border-radius: 0.25rem;
+    margin-bottom: 1rem;
+    border-left: 4px solid var(--pico-color-red-550);
+}
+
+.info-message {
+    color: var(--pico-color-blue-550);
+    background-color: var(--pico-color-blue-50);
+    padding: 0.75rem 1rem;
+    border-radius: 0.25rem;
+    margin-bottom: 1rem;
+    border-left: 4px solid var(--pico-color-blue-550);
+}
+
+/* Login form centering */
+.login-container {
+    max-width: 400px;
+    margin: 2rem auto;
+}
+
+/* SSO section */
+.sso-section {
+    margin-top: 1.5rem;
+}
+
+.sso-section .divider {
+    display: flex;
+    align-items: center;
+    text-align: center;
+    margin: 1.5rem 0;
+}
+
+.sso-section .divider::before,
+.sso-section .divider::after {
+    content: '';
+    flex: 1;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+}
+
+.sso-section .divider span {
+    padding: 0 1rem;
+    color: var(--pico-muted-color);
+    font-size: 0.9rem;
+}
+
+.sso-button {
+    display: block;
+    width: 100%;
+    text-align: center;
+    padding: 0.75rem 1rem;
+    background-color: var(--pico-card-background-color);
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 0.25rem;
+    text-decoration: none;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.sso-button:hover {
+    background-color: var(--pico-card-sectioning-background-color);
+    border-color: var(--pico-primary);
+}
+
+/* Dashboard grid */
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1rem;
+}
+
+/* Header styling */
+header.admin-header {
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+/* Logout button */
+.logout-btn {
+    margin-left: auto;
+}
+
+/* Dashboard Header */
+.dashboard-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.dashboard-header h1 {
+    margin: 0;
+}
+
+.dashboard-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.auto-refresh-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+}
+
+.auto-refresh-toggle input[type="checkbox"] {
+    margin: 0;
+    width: auto;
+}
+
+/* htmx indicator */
+.htmx-indicator {
+    display: none;
+    color: var(--pico-muted-color);
+    font-style: italic;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-indicator.htmx-request {
+    display: inline;
+}
+
+/* Dashboard Sections */
+.dashboard-section {
+    margin-bottom: 2rem;
+}
+
+/* Health Grid */
+.health-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.health-card {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.health-card footer {
+    margin-top: auto;
+    background: none;
+    border-top: none;
+    padding: 0.25rem 0 0 0;
+}
+
+.health-card header {
+    padding-bottom: 0.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.health-card header h3 {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.server-version {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--pico-muted-color);
+    background: var(--pico-secondary-background);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+}
+
+.health-card .status-content {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+}
+
+.health-card footer {
+    padding-top: 0.5rem;
+}
+
+.health-card footer small {
+    color: var(--pico-muted-color);
+}
+
+/* Story #727 AC5: Failure reasons display in Server Status card */
+.failure-reasons {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--pico-muted-border-color);
+}
+
+.failure-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 0.8rem;
+}
+
+.failure-item {
+    color: var(--pico-muted-color);
+    padding: 0.15rem 0;
+    padding-left: 0.75rem;
+    position: relative;
+}
+
+.failure-item::before {
+    content: "-";
+    position: absolute;
+    left: 0;
+    color: #ef4444;
+}
+
+/* System metrics display (CPU/RAM bars) */
+.system-metrics {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+}
+
+.system-metrics .metric {
+    display: grid;
+    grid-template-columns: 55px 45px 1fr;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.system-metrics .metric-label {
+    font-weight: 500;
+    color: var(--pico-muted-color);
+    font-size: 0.85rem;
+}
+
+.system-metrics .metric-value {
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-align: right;
+}
+
+.system-metrics .metric-bar {
+    height: 8px;
+    background-color: var(--pico-card-border-color);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.system-metrics .metric-fill {
+    height: 100%;
+    background-color: #22c55e;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.system-metrics .metric-fill.medium {
+    background-color: #f59e0b;
+}
+
+.system-metrics .metric-fill.high {
+    background-color: #ef4444;
+}
+
+/* I/O Metrics (Disk I/O, Network I/O) - use flexbox instead of grid */
+.system-metrics .metric.io-metric {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    gap: 0.5rem !important;
+}
+
+.system-metrics .metric.io-metric .metric-label {
+    flex: 0 0 75px;  /* Fixed width label */
+    min-width: 75px;
+}
+
+.system-metrics .metric.io-metric .metric-value,
+.system-metrics .metric.io-metric .io-value {
+    flex: 1 1 auto;  /* Take remaining space */
+    display: inline-flex !important;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.system-metrics .io-separator {
+    color: var(--pico-muted-color);
+}
+
+/* Read/Rx indicators (incoming data) - blue tint */
+.system-metrics .io-read,
+.system-metrics .io-rx {
+    color: #3b82f6;
+}
+
+/* Write/Tx indicators (outgoing data) - orange tint */
+.system-metrics .io-write,
+.system-metrics .io-tx {
+    color: #f59e0b;
+}
+
+/* Status Indicators */
+.status-indicator {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+
+.status-indicator.status-healthy {
+    background-color: #22c55e;
+}
+
+.status-indicator.status-degraded {
+    background-color: #eab308;
+}
+
+.status-indicator.status-unhealthy {
+    background-color: #ef4444;
+}
+
+.status-indicator.status-running {
+    background-color: #22c55e;
+    animation: blink-dot 1s ease-in-out infinite;
+}
+
+@keyframes blink-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+.status-text {
+    font-weight: 500;
+}
+
+.response-time {
+    color: var(--pico-muted-color);
+    margin-left: auto;
+}
+
+.error-text {
+    color: #ef4444;
+}
+
+/* Stats Grid */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.stat-card {
+    margin: 0;
+    text-align: center;
+}
+
+.stat-card header {
+    padding-bottom: 0.25rem;
+}
+
+.stat-card header h3 {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--pico-muted-color);
+}
+
+.stat-card .stat-value {
+    font-size: 2rem;
+    font-weight: bold;
+    padding: 0.5rem 0;
+}
+
+.stat-card .stat-value a {
+    text-decoration: none;
+}
+
+.stat-card .stat-value a:hover {
+    text-decoration: underline;
+}
+
+.stat-card footer {
+    padding-top: 0.25rem;
+}
+
+.stat-card footer small {
+    color: var(--pico-muted-color);
+}
+
+.stat-card.stat-success .stat-value {
+    color: #22c55e;
+}
+
+.stat-card.stat-danger .stat-value {
+    color: #ef4444;
+}
+
+/* Recent Activity Table */
+.recent-activity {
+    margin-top: 1rem;
+}
+
+.recent-activity table {
+    margin-bottom: 0;
+}
+
+.job-status {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.job-status.status-completed {
+    background-color: rgba(34, 197, 94, 0.1);
+    color: #22c55e;
+}
+
+.job-status.status-failed {
+    background-color: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+}
+
+.job-status.status-running {
+    background-color: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+    /* Code Review Finding #4: Add animated pulse for running jobs */
+    animation: pulse-running 1.5s ease-in-out infinite;
+}
+
+/* Code Review Finding #3: Add styling for pending jobs (yellow/amber) */
+.job-status.status-pending {
+    background-color: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+}
+
+/* Code Review Finding #4: Pulse animation for running jobs */
+@keyframes pulse-running {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.6;
+    }
+}
+
+.no-activity {
+    color: var(--pico-muted-color);
+    text-align: center;
+    padding: 2rem;
+}
+
+/* Golden Repos Table */
+.golden-repos-table {
+    width: 100%;
+}
+
+.golden-repos-table .category-group-header td {
+    position: relative;
+}
+
+.golden-repos-table .category-group-header td::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 100%;
+    width: 500px;
+    background: var(--pico-primary-background);
+}
+
+.golden-repos-table .status-cell {
+    min-width: 80px;
+    white-space: nowrap;
+}
+
+.golden-repos-table .repo-url {
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.golden-repos-table .actions-cell {
+    white-space: nowrap;
+}
+
+.golden-repos-table .actions-cell button {
+    margin-right: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8rem;
+}
+
+/* Status indicators in tables */
+.status-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    white-space: nowrap;
+}
+
+.status-indicator.status-ready {
+    color: #22c55e;
+}
+
+.status-indicator.status-indexing {
+    color: #3b82f6;
+}
+
+.status-indicator.status-error {
+    color: #ef4444;
+}
+
+/* Spinner for indexing status */
+.spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #3b82f6;
+    border-radius: 50%;
+    border-top-color: transparent;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Small button variant */
+button.small, .button.small {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.8rem;
+}
+
+button.danger, .button.danger {
+    --pico-background-color: #ef4444;
+    --pico-border-color: #ef4444;
+    color: #ef4444;
+}
+
+/* Form sections */
+.form-section {
+    margin-bottom: 1.5rem;
+}
+
+.form-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+/* Details row in tables */
+.details-row {
+    background-color: var(--pico-card-background-color);
+}
+
+.repo-details {
+    margin: 0;
+    padding: 1rem;
+}
+
+.details-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.75rem;
+}
+
+.detail-item {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.detail-item label {
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+}
+
+.no-data {
+    text-align: center;
+    color: var(--pico-muted-color);
+    padding: 2rem;
+}
+
+/* Message styling */
+.message-success {
+    background-color: rgba(34, 197, 94, 0.1);
+    border-left: 4px solid #22c55e;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+}
+
+.message-error {
+    background-color: rgba(239, 68, 68, 0.1);
+    border-left: 4px solid #ef4444;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+}
+
+/* Indexes Management Styling */
+.indexes-management {
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--pico-muted-border-color);
+}
+
+.indexes-management h4 {
+    font-size: 1rem;
+    margin-bottom: 0.75rem;
+    color: var(--pico-h4-color);
+}
+
+.indexes-status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.index-status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem;
+    background-color: var(--pico-card-sectioning-background-color);
+    border-radius: 4px;
+}
+
+.index-status-item label {
+    font-weight: 500;
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+    margin-bottom: 0;
+}
+
+.index-status {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.status-icon {
+    font-size: 1rem;
+    font-weight: bold;
+}
+
+.status-icon.present {
+    color: #22c55e;
+}
+
+.status-icon.not-present {
+    color: #6b7280;
+}
+
+.status-text {
+    font-size: 0.85rem;
+}
+
+.add-index-container {
+    margin-top: 1rem;
+}
+
+.add-index-form {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background-color: var(--pico-card-sectioning-background-color);
+    border-radius: 4px;
+}
+
+.add-index-form label {
+    display: block;
+    font-weight: 500;
+    font-size: 0.85rem;
+    margin-bottom: 0.5rem;
+}
+
+.add-index-form select {
+    width: 100%;
+    margin-bottom: 0.75rem;
+}
+
+.add-index-form .form-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+/* Index type checkboxes - use traditional checkbox appearance */
+.index-checkboxes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.index-checkboxes .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0.25rem 0;
+}
+
+.index-checkboxes input[type="checkbox"] {
+    /* Override Pico CSS - show native checkbox appearance */
+    -webkit-appearance: checkbox;
+    -moz-appearance: checkbox;
+    appearance: checkbox;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: #3b82f6;
+}
+
+.index-checkboxes .rebuild-label {
+    font-size: 0.75rem;
+    color: var(--pico-muted-color);
+    font-style: italic;
+}
+
+/* Provider checkboxes - same native appearance override as index-checkboxes (Bug #606) */
+.provider-list .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0.25rem 0;
+}
+
+.provider-list input[type="checkbox"] {
+    /* Override Pico CSS - show native checkbox appearance */
+    -webkit-appearance: checkbox;
+    -moz-appearance: checkbox;
+    appearance: checkbox;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: #3b82f6;
+}
+
+.provider-list .rebuild-label {
+    font-size: 0.75rem;
+    color: var(--pico-muted-color);
+    font-style: italic;
+}
+
+/* Config section checkbox description text - render below label, not inline */
+.form-grid label small {
+    display: block;
+    margin-top: 0.25rem;
+}
+
+/* Config display-mode table — prevent label/note overlap */
+.config-table {
+    table-layout: fixed;
+    width: 100%;
+}
+.config-table .config-label {
+    width: 25%;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.config-table .config-value {
+    width: 15%;
+}
+.config-table .config-note {
+    width: 60%;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+.all-indexes-present {
+    color: var(--pico-muted-color);
+    font-size: 0.85rem;
+    margin: 0.5rem 0;
+}
+
+.job-progress-container {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background-color: var(--pico-card-sectioning-background-color);
+    border-radius: 4px;
+    border-left: 4px solid #3b82f6;
+}
+
+.job-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.job-status-text {
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.job-progress-details {
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+}
+
+.job-progress-details p {
+    margin: 0.25rem 0;
+}
+
+.job-progress-details .success-text {
+    color: #22c55e;
+}
+
+.job-progress-details .error-text {
+    color: #ef4444;
+}
+
+/* Spinner animation for loading states */
+.spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+
+/* ==========================================================================
+   Story #712 AC1-AC4: Database Health Honeycomb Styles
+   ========================================================================== */
+
+.database-health-card {
+    min-width: 280px;
+}
+
+.honeycomb-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.5rem;
+}
+
+.honeycomb-svg {
+    width: 100%;
+    max-width: 280px;
+    height: auto;
+}
+
+/* AC4: Responsive sizing - honeycomb auto-adjusts to fit within card */
+.honeycomb-svg polygon.hexagon {
+    stroke: var(--pico-card-border-color);
+    stroke-width: 1;
+    transition: all 0.2s ease;
+    cursor: pointer;
+}
+
+/* AC1: Color coding - green=healthy, yellow=warning, red=error */
+.hexagon.hex-healthy {
+    fill: #22c55e;
+}
+
+.hexagon.hex-warning {
+    fill: #eab308;
+}
+
+.hexagon.hex-error {
+    fill: #ef4444;
+}
+
+/* AC2/AC3: Hover effect for tooltips (title attribute provides native tooltip) */
+.honeycomb-svg polygon.hexagon:hover {
+    stroke-width: 2;
+    stroke: var(--pico-primary);
+    filter: brightness(1.1);
+}
+
+.hex-label {
+    fill: #fff;
+    font-size: 7px;
+    font-weight: 600;
+    pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+}
+
+/* Honeycomb legend */
+.honeycomb-legend {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--pico-muted-color);
+}
+
+.legend-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.legend-dot.healthy {
+    background-color: #22c55e;
+}
+
+.legend-dot.warning {
+    background-color: #eab308;
+}
+
+.legend-dot.error {
+    background-color: #ef4444;
+}
+
+/* ==========================================================================
+   Story #712 AC5: Disk Metrics Complete Display
+   ========================================================================== */
+
+.disk-metrics {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem 0;
+    font-size: 0.85rem;
+}
+
+.disk-metric {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.disk-metric .disk-value {
+    font-weight: 500;
+}
+
+.disk-metric .disk-percent {
+    color: var(--pico-muted-color);
+}
+
+.disk-metric.free .disk-value {
+    color: #22c55e;
+}
+
+.disk-metric.used .disk-value {
+    color: #f59e0b;
+}
+
+/* Multi-volume display (Story #712) */
+.volumes-card {
+    min-height: auto;
+}
+
+.volumes-container {
+    max-height: 200px;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+}
+
+.volume-entry {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+}
+
+.volume-entry:last-child {
+    border-bottom: none;
+}
+
+.volume-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+}
+
+.volume-mount {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--pico-color);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 70%;
+}
+
+.volume-fstype {
+    font-size: 0.7rem;
+    color: var(--pico-muted-color);
+    background: var(--pico-muted-border-color);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+}
+
+.volume-bar {
+    height: 8px;
+    background: var(--pico-muted-border-color);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 0.25rem;
+}
+
+.volume-bar-fill {
+    height: 100%;
+    background: #22c55e;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.volume-bar-fill.warning {
+    background: #f59e0b;
+}
+
+.volume-bar-fill.critical {
+    background: #ef4444;
+}
+
+.volume-stats {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+}
+
+.volume-used {
+    color: var(--pico-muted-color);
+}
+
+.volume-free {
+    color: #22c55e;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    nav.admin-nav ul {
+        flex-direction: column;
+    }
+
+    .login-container {
+        margin: 1rem;
+        max-width: none;
+    }
+
+    .dashboard-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .dashboard-actions {
+        flex-wrap: wrap;
+    }
+
+    .health-grid,
+    .stats-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    /* Honeycomb responsive */
+    .honeycomb-svg {
+        max-width: 240px;
+    }
+
+    .honeycomb-legend {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+}
+
+/* ============================================================================
+   Server Clock (Story #89)
+   ============================================================================ */
+
+.server-clock {
+    font-size: 0.85rem;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.5rem;
+    padding: 0.25rem 0;
+}
+
+.server-clock .clock-display {
+    font-family: 'Courier New', Courier, monospace;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+/* ============================================================================
+   Research Assistant - Markdown Rendering Styles
+   ============================================================================ */
+
+/* Message content with markdown rendering */
+.message-content {
+    line-height: 1.6;
+}
+
+/* Code blocks with syntax highlighting */
+.message-content pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.75rem 0;
+}
+
+.message-content code {
+    font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+    font-size: 0.9em;
+}
+
+/* Inline code */
+.message-content p code,
+.message-content li code {
+    background: #2d2d2d;
+    color: #e06c75;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+/* Code blocks inside pre tags (already have dark background) */
+.message-content pre code {
+    background: transparent;
+    color: inherit;
+    padding: 0;
+}
+
+/* Syntax highlighting for codehilite */
+.message-content .codehilite {
+    margin: 0.75rem 0;
+}
+
+.message-content .codehilite pre {
+    margin: 0;
+}
+
+/* Headers in markdown */
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4,
+.message-content h5,
+.message-content h6 {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+.message-content h1 { font-size: 1.5rem; }
+.message-content h2 { font-size: 1.3rem; }
+.message-content h3 { font-size: 1.15rem; }
+.message-content h4 { font-size: 1.05rem; }
+.message-content h5 { font-size: 0.95rem; }
+.message-content h6 { font-size: 0.85rem; }
+
+/* First heading doesn't need top margin */
+.message-content h1:first-child,
+.message-content h2:first-child,
+.message-content h3:first-child,
+.message-content h4:first-child,
+.message-content h5:first-child,
+.message-content h6:first-child {
+    margin-top: 0;
+}
+
+/* Lists */
+.message-content ul,
+.message-content ol {
+    margin: 0.75rem 0;
+    padding-left: 1.5rem;
+}
+
+.message-content li {
+    margin: 0.25rem 0;
+}
+
+/* Nested lists */
+.message-content li ul,
+.message-content li ol {
+    margin: 0.25rem 0;
+}
+
+/* Links */
+.message-content a {
+    color: var(--pico-primary);
+    text-decoration: underline;
+}
+
+.message-content a:hover {
+    color: var(--pico-primary-hover);
+}
+
+/* Paragraphs */
+.message-content p {
+    margin: 0.75rem 0;
+}
+
+.message-content p:first-child {
+    margin-top: 0;
+}
+
+.message-content p:last-child {
+    margin-bottom: 0;
+}
+
+/* Blockquotes */
+.message-content blockquote {
+    border-left: 4px solid var(--pico-primary);
+    padding-left: 1rem;
+    margin: 0.75rem 0;
+    color: var(--pico-muted-color);
+    font-style: italic;
+}
+
+/* Tables */
+.message-content table {
+    width: 100%;
+    margin: 0.75rem 0;
+    border-collapse: collapse;
+}
+
+.message-content table th,
+.message-content table td {
+    padding: 0.5rem;
+    border: 1px solid var(--pico-muted-border-color);
+    text-align: left;
+}
+
+.message-content table th {
+    background: var(--pico-card-sectioning-background-color);
+    font-weight: 600;
+}
+
+/* Strong and emphasis */
+.message-content strong {
+    font-weight: 600;
+}
+
+.message-content em {
+    font-style: italic;
+}
+
+/* Horizontal rules */
+.message-content hr {
+    border: none;
+    border-top: 1px solid var(--pico-muted-border-color);
+    margin: 1rem 0;
+}
+
+/* ========================================
+   Story #198: Restart Required Indicators
+   ======================================== */
+
+.restart-note {
+    color: #856404;
+    font-style: italic;
+}
+
+/* ========================================
+   Repository Health Status (Story #60)
+   ======================================== */
+
+/* Health Section Layout */
+.health-status-section {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--pico-muted-border-color);
+}
+
+.health-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.health-header h4 {
+    font-size: 1rem;
+    margin: 0;
+}
+
+/* Health Status Indicator (AC1, AC2) */
+.health-indicator-container {
+    padding: 0.5rem;
+    border-radius: 4px;
+    transition: background-color 0.2s ease;
+}
+
+.health-indicator-container:hover {
+    background-color: var(--pico-card-sectioning-background-color);
+}
+
+.health-indicator-container.expanded {
+    background-color: var(--pico-card-sectioning-background-color);
+}
+
+.health-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 500;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.health-icon {
+    font-size: 1.1rem;
+    font-weight: bold;
+}
+
+/* Health Status Colors */
+.health-healthy {
+    background-color: rgba(34, 197, 94, 0.15);
+    color: #16a34a;
+}
+
+.health-unhealthy {
+    background-color: rgba(239, 68, 68, 0.15);
+    color: #dc2626;
+}
+
+.health-unknown {
+    background-color: rgba(156, 163, 175, 0.15);
+    color: #6b7280;
+}
+
+/* Dark mode adjustments */
+[data-theme="dark"] .health-healthy {
+    background-color: rgba(34, 197, 94, 0.2);
+    color: #4ade80;
+}
+
+[data-theme="dark"] .health-unhealthy {
+    background-color: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+}
+
+[data-theme="dark"] .health-unknown {
+    background-color: rgba(156, 163, 175, 0.2);
+    color: #9ca3af;
+}
+
+/* Health Details Container (AC3) */
+.health-details-container {
+    margin-top: 0.75rem;
+    padding: 1rem;
+    background-color: var(--pico-card-sectioning-background-color);
+    border-radius: 4px;
+}
+
+/* Health Checks Grid (AC4) */
+.health-checks-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.health-check-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.health-check-item .check-icon {
+    font-size: 1.1rem;
+    font-weight: bold;
+}
+
+.check-pass {
+    background-color: rgba(34, 197, 94, 0.1);
+    color: #16a34a;
+}
+
+.check-pass .check-icon {
+    color: #16a34a;
+}
+
+.check-fail {
+    background-color: rgba(239, 68, 68, 0.1);
+    color: #dc2626;
+}
+
+.check-fail .check-icon {
+    color: #dc2626;
+}
+
+/* Dark mode for health checks */
+[data-theme="dark"] .check-pass {
+    background-color: rgba(34, 197, 94, 0.15);
+    color: #4ade80;
+}
+
+[data-theme="dark"] .check-pass .check-icon {
+    color: #4ade80;
+}
+
+[data-theme="dark"] .check-fail {
+    background-color: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+}
+
+[data-theme="dark"] .check-fail .check-icon {
+    color: #f87171;
+}
+
+/* Health Errors List (AC5) */
+.health-errors {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background-color: rgba(239, 68, 68, 0.05);
+    border-left: 3px solid #dc2626;
+    border-radius: 4px;
+}
+
+[data-theme="dark"] .health-errors {
+    background-color: rgba(239, 68, 68, 0.1);
+}
+
+.health-errors h5 {
+    font-size: 0.9rem;
+    margin: 0 0 0.5rem 0;
+    color: #dc2626;
+}
+
+[data-theme="dark"] .health-errors h5 {
+    color: #f87171;
+}
+
+.health-error-list {
+    margin: 0;
+    padding-left: 1.5rem;
+    list-style-type: disc;
+}
+
+.health-error-item {
+    font-size: 0.85rem;
+    color: var(--pico-color);
+    margin-bottom: 0.25rem;
+}
+
+/* Health Metadata */
+.health-metadata {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--pico-muted-border-color);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.5rem;
+}
+
+.metadata-item {
+    display: flex;
+    flex-direction: column;
+}
+
+.metadata-label {
+    font-size: 0.75rem;
+    color: var(--pico-muted-color);
+    margin-bottom: 0.25rem;
+}
+
+.metadata-value {
+    font-weight: 500;
+    font-size: 0.9rem;
+}
+
+/* Loading Spinner (AC8) */
+.health-loading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem;
+    color: var(--pico-muted-color);
+}
+
+.health-loading .spinner {
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid var(--pico-muted-color);
+    border-top-color: var(--pico-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+/* Health Error Message */
+.health-error {
+    padding: 0.75rem;
+    background-color: rgba(239, 68, 68, 0.1);
+    color: #dc2626;
+    border-radius: 4px;
+    margin-bottom: 0.5rem;
+}
+
+[data-theme="dark"] .health-error {
+    color: #f87171;
+}
+
+/* Dependency Latency Section (Story #680) */
+.dependency-latency-section {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--pico-muted-border-color);
+}
+
+.dependency-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    gap: 0.75rem;
+}
+
+.dependency-row:last-child {
+    border-bottom: none;
+}
+
+.dep-name {
+    font-size: 0.85rem;
+    font-weight: 500;
+    flex: 0 0 auto;
+    min-width: 6rem;
+}
+
+.dep-metrics {
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+    flex: 1 1 auto;
+}
+
+.dep-trend {
+    font-size: 0.8rem;
+    flex: 0 0 auto;
+}
+
+.dependency-status-healthy {
+    color: var(--pico-color);
+}
+
+.dependency-status-degraded {
+    color: #d97706;
+}
+
+[data-theme="dark"] .dependency-status-degraded {
+    color: #fbbf24;
+}
+
+.dependency-status-unhealthy {
+    color: #dc2626;
+}
+
+[data-theme="dark"] .dependency-status-unhealthy {
+    color: #f87171;
+}

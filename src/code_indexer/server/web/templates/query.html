@@ -1,0 +1,401 @@
+{% extends "base.html" %}
+
+{% block title %}Query - CIDX Admin{% endblock %}
+
+{% block content %}
+<div class="query-header">
+    <h1>Query Testing Interface</h1>
+</div>
+
+<!-- Success/Error Messages -->
+{% if success_message %}
+<article class="message-success">
+    <p>{{ success_message }}</p>
+</article>
+{% endif %}
+
+{% if error_message %}
+<article class="message-error">
+    <p>{{ error_message }}</p>
+</article>
+{% endif %}
+
+<div class="query-container">
+    <!-- Query Form Section -->
+    <section class="query-form-section">
+        <form id="query-form" method="post" action="/admin/query">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+            <!-- Search Mode Toggle -->
+            <fieldset class="search-mode-fieldset">
+                <legend>Search Mode</legend>
+                <div class="search-mode-options">
+                    <label>
+                        <input type="radio" name="search_mode" value="semantic"
+                            {% if search_mode == 'semantic' or not search_mode %}checked{% endif %}>
+                        <span>Semantic</span>
+                    </label>
+                    <label>
+                        <input type="radio" name="search_mode" value="fts"
+                            {% if search_mode == 'fts' %}checked{% endif %}>
+                        <span>Full-Text (FTS)</span>
+                    </label>
+                    <label>
+                        <input type="radio" name="search_mode" value="hybrid"
+                            {% if search_mode == 'hybrid' %}checked{% endif %}>
+                        <span>Hybrid</span>
+                    </label>
+                    <label>
+                        <input type="radio" name="search_mode" value="temporal"
+                            {% if search_mode == 'temporal' %}checked{% endif %}>
+                        <span>Temporal (Git History)</span>
+                    </label>
+                    <label>
+                        <input type="radio" name="search_mode" value="scip"
+                            {% if search_mode == 'scip' %}checked{% endif %}>
+                        <span>SCIP (Code Intelligence)</span>
+                    </label>
+                </div>
+            </fieldset>
+
+            <!-- FTS Search Options (shown only when FTS or Hybrid mode selected) -->
+            <fieldset id="fts-options-fieldset" class="fts-options-fieldset" style="{% if search_mode != 'fts' and search_mode != 'hybrid' %}display: none;{% endif %}">
+                <legend>Full-Text Search Options</legend>
+
+                <div class="fts-options-row">
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="case_sensitive" value="true"
+                            {% if case_sensitive %}checked{% endif %}>
+                        Case sensitive
+                    </label>
+
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="fuzzy" value="true"
+                            {% if fuzzy %}checked{% endif %}>
+                        Fuzzy matching
+                    </label>
+
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="regex" value="true"
+                            {% if regex %}checked{% endif %}>
+                        Regex pattern
+                    </label>
+                </div>
+
+                <small class="field-hint">Note: Fuzzy and Regex are mutually exclusive</small>
+            </fieldset>
+
+            <!-- Query Text -->
+            <label for="query_text">Query Text <span class="required">*</span></label>
+            <textarea
+                id="query_text"
+                name="query_text"
+                rows="4"
+                placeholder="Enter your search query..."
+                required
+            >{{ query_text or '' }}</textarea>
+
+            <!-- Repository Selection -->
+            <label for="repository">Repository <span class="required">*</span></label>
+            <select id="repository" name="repository" required>
+                <option value="">Select a repository...</option>
+                {% set has_global = repositories | selectattr('is_global', 'true') | list | length > 0 %}
+                {% set has_user = repositories | rejectattr('is_global', 'true') | list | length > 0 %}
+                {% if has_global %}
+                <optgroup label="Global Repositories">
+                    {% for repo in repositories %}
+                    {% if repo.is_global %}
+                    <option value="{{ repo.user_alias }}" {% if selected_repository == repo.user_alias %}selected{% endif %}>
+                        {{ repo.user_alias }}
+                    </option>
+                    {% endif %}
+                    {% endfor %}
+                </optgroup>
+                {% endif %}
+                {% if has_user %}
+                <optgroup label="User Repositories">
+                    {% for repo in repositories %}
+                    {% if not repo.is_global %}
+                    <option value="{{ repo.user_alias }}" {% if selected_repository == repo.user_alias %}selected{% endif %}>
+                        {{ repo.user_alias }} ({{ repo.username }})
+                    </option>
+                    {% endif %}
+                    {% endfor %}
+                </optgroup>
+                {% endif %}
+            </select>
+
+            <!-- Limit -->
+            <label for="limit">Result Limit</label>
+            <input
+                type="number"
+                id="limit"
+                name="limit"
+                min="1"
+                max="100"
+                value="{{ limit or 10 }}"
+                placeholder="10"
+            >
+
+            <!-- Temporal Search Options (shown only when temporal mode selected) -->
+            <fieldset id="temporal-options-fieldset" class="temporal-options-fieldset" style="{% if search_mode != 'temporal' %}display: none;{% endif %}">
+                <legend>Temporal Search Options</legend>
+
+                <label class="checkbox-label">
+                    <input type="checkbox" name="time_range_all" value="true"
+                        {% if time_range_all %}checked{% endif %}>
+                    Search all git history
+                </label>
+
+                <label for="time_range">Time Range</label>
+                <input type="text" id="time_range" name="time_range"
+                    placeholder="YYYY-MM-DD..YYYY-MM-DD"
+                    value="{{ time_range or '' }}">
+                <small class="field-hint">Format: 2024-01-01..2024-12-31</small>
+
+                <label for="at_commit">At Specific Commit</label>
+                <input type="text" id="at_commit" name="at_commit"
+                    placeholder="commit hash or ref"
+                    value="{{ at_commit or '' }}">
+
+                <label class="checkbox-label">
+                    <input type="checkbox" name="include_removed" value="true"
+                        {% if include_removed %}checked{% endif %}>
+                    Include removed files
+                </label>
+            </fieldset>
+
+            <!-- SCIP Query Options (shown only when SCIP mode selected) -->
+            <fieldset id="scip-options-fieldset" class="scip-options-fieldset" style="{% if search_mode != 'scip' %}display: none;{% endif %}">
+                <legend>SCIP Query Options</legend>
+
+                <label for="scip_query_type">Query Type <span class="required">*</span></label>
+                <select id="scip_query_type" name="scip_query_type">
+                    <option value="definition" {% if scip_query_type == 'definition' or not scip_query_type %}selected{% endif %}>Definition - Find where symbol is defined</option>
+                    <option value="references" {% if scip_query_type == 'references' %}selected{% endif %}>References - Find all usages</option>
+                    <option value="dependencies" {% if scip_query_type == 'dependencies' %}selected{% endif %}>Dependencies - What does symbol use</option>
+                    <option value="dependents" {% if scip_query_type == 'dependents' %}selected{% endif %}>Dependents - Who uses symbol</option>
+                    <option value="impact" {% if scip_query_type == 'impact' %}selected{% endif %}>Impact - Recursive dependency analysis</option>
+                    <option value="callchain" {% if scip_query_type == 'callchain' %}selected{% endif %}>Call Chain - Trace execution flow</option>
+                    <option value="context" {% if scip_query_type == 'context' %}selected{% endif %}>Context - Show symbol with callers and callees</option>
+                </select>
+                <small class="field-hint">Query text will be treated as symbol name</small>
+
+                <label class="checkbox-label">
+                    <input type="checkbox" name="scip_exact" value="true"
+                        {% if scip_exact %}checked{% endif %}>
+                    Exact match (no fuzzy symbol matching)
+                </label>
+            </fieldset>
+
+            <!-- Advanced Options (Collapsible) -->
+            <details class="advanced-options">
+                <summary>Show Advanced Options</summary>
+                <div class="advanced-options-content">
+                    <!-- Language Filter -->
+                    <label for="language">Language</label>
+                    <select id="language" name="language">
+                        <option value="">All Languages</option>
+                        <option value="python" {% if language == 'python' %}selected{% endif %}>Python</option>
+                        <option value="javascript" {% if language == 'javascript' %}selected{% endif %}>JavaScript</option>
+                        <option value="typescript" {% if language == 'typescript' %}selected{% endif %}>TypeScript</option>
+                        <option value="java" {% if language == 'java' %}selected{% endif %}>Java</option>
+                        <option value="c" {% if language == 'c' %}selected{% endif %}>C</option>
+                        <option value="cpp" {% if language == 'cpp' %}selected{% endif %}>C++</option>
+                        <option value="csharp" {% if language == 'csharp' %}selected{% endif %}>C#</option>
+                        <option value="go" {% if language == 'go' %}selected{% endif %}>Go</option>
+                        <option value="rust" {% if language == 'rust' %}selected{% endif %}>Rust</option>
+                        <option value="ruby" {% if language == 'ruby' %}selected{% endif %}>Ruby</option>
+                        <option value="php" {% if language == 'php' %}selected{% endif %}>PHP</option>
+                        <option value="html" {% if language == 'html' %}selected{% endif %}>HTML</option>
+                        <option value="css" {% if language == 'css' %}selected{% endif %}>CSS</option>
+                        <option value="sql" {% if language == 'sql' %}selected{% endif %}>SQL</option>
+                        <option value="markdown" {% if language == 'markdown' %}selected{% endif %}>Markdown</option>
+                    </select>
+
+                    <!-- File Path Pattern -->
+                    <label for="path_pattern">File Path Pattern</label>
+                    <input
+                        type="text"
+                        id="path_pattern"
+                        name="path_pattern"
+                        placeholder="e.g., */tests/*"
+                        value="{{ path_pattern or '' }}"
+                    >
+
+                    <!-- Minimum Score -->
+                    <label for="min_score">Minimum Score (0.0 - 1.0)</label>
+                    <input
+                        type="number"
+                        id="min_score"
+                        name="min_score"
+                        min="0"
+                        max="1"
+                        step="0.1"
+                        placeholder="0.0"
+                        value="{{ min_score or '' }}"
+                    >
+
+                    <!-- Query Strategy (Story #593) -->
+                    <label for="query_strategy">Query Strategy</label>
+                    <select id="query_strategy" name="query_strategy">
+                        <option value="primary_only" {% if query_strategy == 'primary_only' or not query_strategy %}selected{% endif %}>Primary Only (default)</option>
+                        <option value="failover" {% if query_strategy == 'failover' %}selected{% endif %}>Failover</option>
+                        <option value="parallel" {% if query_strategy == 'parallel' %}selected{% endif %}>Parallel (score fusion)</option>
+                        <option value="specific" {% if query_strategy == 'specific' %}selected{% endif %}>Specific Provider</option>
+                    </select>
+                    <small class="field-hint">How to route the query across embedding providers</small>
+
+                    <!-- Score Fusion (visible only when parallel selected) -->
+                    <div id="score_fusion_row" style="{% if query_strategy != 'parallel' %}display: none;{% endif %}">
+                        <label for="score_fusion">Score Fusion Method</label>
+                        <select id="score_fusion" name="score_fusion">
+                            <option value="rrf" {% if score_fusion == 'rrf' or not score_fusion %}selected{% endif %}>RRF - Reciprocal Rank Fusion (default)</option>
+                            <option value="multiply" {% if score_fusion == 'multiply' %}selected{% endif %}>Multiply</option>
+                            <option value="average" {% if score_fusion == 'average' %}selected{% endif %}>Average</option>
+                        </select>
+                    </div>
+
+                    <!-- Preferred Provider (visible only when specific selected) -->
+                    <div id="preferred_provider_row" style="{% if query_strategy != 'specific' %}display: none;{% endif %}">
+                        <label for="preferred_provider">Provider</label>
+                        <select id="preferred_provider" name="preferred_provider">
+                            <option value="voyage-ai" {% if preferred_provider == 'voyage-ai' %}selected{% endif %}>VoyageAI</option>
+                            <option value="cohere" {% if preferred_provider == 'cohere' %}selected{% endif %}>Cohere</option>
+                        </select>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Submit Button -->
+            <div class="form-actions">
+                <button type="submit"
+                    hx-post="/admin/partials/query-results"
+                    hx-target="#query-results"
+                    hx-swap="innerHTML"
+                    hx-indicator="#search-indicator"
+                    hx-include="#query-form"
+                >
+                    Search
+                </button>
+                <span id="search-indicator" class="htmx-indicator">Searching...</span>
+            </div>
+        </form>
+    </section>
+
+    <!-- Query History Section -->
+    <section class="query-history-section">
+        <h3>Recent Queries</h3>
+        <div id="query-history">
+            {% if query_history %}
+            <ul class="history-list">
+                {% for item in query_history %}
+                <li>
+                    <a href="#" onclick="loadHistoryQuery('{{ item.query_text }}', '{{ item.repository }}', '{{ item.search_mode }}'); return false;">
+                        <span class="history-query">{{ item.query_text[:50] }}{% if item.query_text|length > 50 %}...{% endif %}</span>
+                        <span class="history-mode">[{{ item.search_mode }}]</span>
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="no-history">No previous queries in this session.</p>
+            {% endif %}
+        </div>
+    </section>
+</div>
+
+<!-- Results Section -->
+<section id="query-results-section">
+    <h2>Results</h2>
+    <div id="query-results">
+        {% include "partials/query_results.html" %}
+    </div>
+</section>
+
+<script>
+// Show/hide temporal, FTS, and SCIP options based on search mode
+function updateSearchModeOptions() {
+    const temporalFieldset = document.getElementById('temporal-options-fieldset');
+    const ftsFieldset = document.getElementById('fts-options-fieldset');
+    const scipFieldset = document.getElementById('scip-options-fieldset');
+    const selectedMode = document.querySelector('input[name="search_mode"]:checked');
+
+    if (!selectedMode) return;
+
+    // Temporal options: only for temporal mode
+    if (temporalFieldset) {
+        temporalFieldset.style.display = (selectedMode.value === 'temporal') ? 'block' : 'none';
+    }
+
+    // FTS options: for fts or hybrid modes
+    if (ftsFieldset) {
+        ftsFieldset.style.display = (selectedMode.value === 'fts' || selectedMode.value === 'hybrid') ? 'block' : 'none';
+    }
+
+    // SCIP options: only for scip mode
+    if (scipFieldset) {
+        scipFieldset.style.display = (selectedMode.value === 'scip') ? 'block' : 'none';
+    }
+}
+
+// Attach event listeners to search mode radios
+document.querySelectorAll('input[name="search_mode"]').forEach(radio => {
+    radio.addEventListener('change', updateSearchModeOptions);
+});
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', updateSearchModeOptions);
+
+// Show/hide score_fusion and preferred_provider based on query_strategy (Story #593)
+function updateQueryStrategyOptions() {
+    const strategySelect = document.getElementById('query_strategy');
+    const scoreFusionRow = document.getElementById('score_fusion_row');
+    const preferredProviderRow = document.getElementById('preferred_provider_row');
+
+    if (!strategySelect) return;
+
+    const val = strategySelect.value;
+    if (scoreFusionRow) {
+        scoreFusionRow.style.display = (val === 'parallel') ? '' : 'none';
+    }
+    if (preferredProviderRow) {
+        preferredProviderRow.style.display = (val === 'specific') ? '' : 'none';
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const strategySelect = document.getElementById('query_strategy');
+    if (strategySelect) {
+        strategySelect.addEventListener('change', updateQueryStrategyOptions);
+        updateQueryStrategyOptions();
+    }
+});
+
+function loadHistoryQuery(queryText, repository, searchMode) {
+    // Fill form with history query
+    document.getElementById('query_text').value = queryText;
+    document.getElementById('repository').value = repository;
+
+    // Set search mode radio
+    const modeRadios = document.querySelectorAll('input[name="search_mode"]');
+    modeRadios.forEach(radio => {
+        radio.checked = (radio.value === searchMode);
+    });
+
+    // Update search mode options visibility after setting search mode
+    updateSearchModeOptions();
+
+    // Optionally auto-submit
+    // document.getElementById('query-form').submit();
+}
+
+// Handle form submission via htmx
+document.body.addEventListener('htmx:afterRequest', function(event) {
+    if (event.detail.target.id === 'query-results') {
+        // Scroll to results
+        document.getElementById('query-results-section').scrollIntoView({ behavior: 'smooth' });
+    }
+});
+</script>
+{% endblock %}

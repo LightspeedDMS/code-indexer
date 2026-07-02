@@ -1,0 +1,103 @@
+[
+  {
+    "name": "browse_directory_medium_click",
+    "endpoint": "browse_directory",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "repository_alias": "click-global",
+      "path": "src",
+      "limit": 100
+    },
+    "repo_alias": "click-global",
+    "priority": "medium",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "browse_directory_xlarge_code_indexer",
+    "endpoint": "browse_directory",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "repository_alias": "code-indexer-global",
+      "path": "src",
+      "limit": 100
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "medium",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "get_file_content_medium_click",
+    "endpoint": "get_file_content",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "repository_alias": "click-global",
+      "file_path": "src/click/core.py"
+    },
+    "repo_alias": "click-global",
+    "priority": "medium",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "get_file_content_xlarge_code_indexer",
+    "endpoint": "get_file_content",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "repository_alias": "code-indexer-global",
+      "file_path": "src/code_indexer/indexing/smart_indexer.py"
+    },
+    "repo_alias": "code-indexer-global",
+    "priority": "medium",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "list_repositories_all",
+    "endpoint": "list_global_repos",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {},
+    "repo_alias": "code-indexer-global",
+    "priority": "medium",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "wiki_article_analytics_most_viewed",
+    "endpoint": "wiki_article_analytics",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "repo_alias": "tldr-global",
+      "sort_by": "most_viewed",
+      "limit": 20
+    },
+    "repo_alias": "tldr-global",
+    "priority": "medium",
+    "warmup_count": 3,
+    "measurement_count": 20
+  },
+  {
+    "name": "wiki_article_analytics_with_search_filter",
+    "endpoint": "wiki_article_analytics",
+    "protocol": "mcp",
+    "method": "POST",
+    "parameters": {
+      "repo_alias": "tldr-global",
+      "sort_by": "most_viewed",
+      "limit": 20,
+      "search_query": "network tools",
+      "search_mode": "semantic"
+    },
+    "repo_alias": "tldr-global",
+    "priority": "medium",
+    "warmup_count": 3,
+    "measurement_count": 20
+  }
+]

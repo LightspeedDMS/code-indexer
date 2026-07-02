@@ -1,0 +1,240 @@
+<!-- Job Statistics Section -->
+<div style="display: flex; justify-content: space-between; align-items: center;">
+    <h2>Jobs</h2>
+    <!-- Story #69: Dropdown OUTSIDE refresh target to prevent disruption -->
+    <div>
+        <label for="time-filter" style="margin-right: 0.5rem;">Time Range:</label>
+        <select id="time-filter" onchange="updateJobStats()" style="padding: 0.25rem 0.5rem;">
+            <option value="24h" {{ 'selected' if time_filter == '24h' else '' }}>Last 24 Hours</option>
+            <option value="7d" {{ 'selected' if time_filter == '7d' else '' }}>Last 7 Days</option>
+            <option value="30d" {{ 'selected' if time_filter == '30d' else '' }}>Last 30 Days</option>
+        </select>
+    </div>
+</div>
+
+<!-- Story #69: Granular refresh target for job counts data ONLY -->
+<div id="job-counts-data" class="stats-grid">
+    <article class="stat-card">
+        <header>
+            <h3>Running</h3>
+        </header>
+        <div class="stat-value">
+            <a href="/admin/jobs?status=running">{{ job_counts.running if job_counts else 0 }}</a>
+        </div>
+        <footer>
+            <small>Currently executing</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
+            <h3>Queued</h3>
+        </header>
+        <div class="stat-value">
+            <a href="/admin/jobs?status=pending">{{ job_counts.queued if job_counts else 0 }}</a>
+        </div>
+        <footer>
+            <small>Waiting to run</small>
+        </footer>
+    </article>
+
+    <article class="stat-card stat-success">
+        <header>
+            <h3>Completed ({{ time_filter or '24h' }})</h3>
+        </header>
+        <div class="stat-value">
+            <a href="/admin/jobs?status=completed">{{ job_counts.completed_24h if job_counts else 0 }}</a>
+        </div>
+        <footer>
+            <small>Last {{ time_filter or '24h' }}</small>
+        </footer>
+    </article>
+
+    <article class="stat-card stat-danger">
+        <header>
+            <h3>Failed ({{ time_filter or '24h' }})</h3>
+        </header>
+        <div class="stat-value">
+            <a href="/admin/jobs?status=failed">{{ job_counts.failed_24h if job_counts else 0 }}</a>
+        </div>
+        <footer>
+            <small>Last {{ time_filter or '24h' }}</small>
+        </footer>
+    </article>
+</div>
+
+<!-- Repository Statistics Section -->
+<h2>Repositories</h2>
+
+<div class="stats-grid">
+    <article class="stat-card">
+        <header>
+            <h3>Golden Repos</h3>
+        </header>
+        <div class="stat-value">
+            <a href="/admin/golden-repos">{{ repo_counts.golden if repo_counts else 0 }}</a>
+        </div>
+        <footer>
+            <small>Source repositories</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
+            <h3>Activated Repos</h3>
+        </header>
+        <div class="stat-value">
+            <a href="/admin/repos">{{ repo_counts.activated if repo_counts else 0 }}</a>
+        </div>
+        <footer>
+            <small>User activated</small>
+        </footer>
+    </article>
+</div>
+
+<!-- API Activity Section (Story #4 AC3) - Rolling Window -->
+<div style="display: flex; justify-content: space-between; align-items: center;">
+    <h2>API Activity</h2>
+    <!-- Story #69: Dropdown OUTSIDE refresh target to prevent disruption -->
+    <div>
+        <label for="api-filter" style="margin-right: 0.5rem;">Time Window:</label>
+        <select id="api-filter" onchange="updateApiActivity()" style="padding: 0.25rem 0.5rem;">
+            <option value="900" {{ 'selected' if api_filter == 900 else '' }}>Last 15 Minutes</option>
+            <option value="3600" {{ 'selected' if api_filter == 3600 else '' }}>Last 1 Hour</option>
+            <option value="86400" {{ 'selected' if api_filter == 86400 or api_filter is none else '' }}>Last 24 Hours</option>
+            <option value="604800" {{ 'selected' if api_filter == 604800 else '' }}>Last 7 Days</option>
+            <option value="1296000" {{ 'selected' if api_filter == 1296000 else '' }}>Last 15 Days</option>
+        </select>
+    </div>
+</div>
+
+<!-- Story #69: Granular refresh target for API metrics data ONLY -->
+<div id="api-metrics-data" class="stats-grid">
+    <article class="stat-card">
+        <header>
+            <h3>Semantic Searches</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.semantic_searches if api_metrics else 0 }}</div>
+        <footer>
+            <small>search_code (semantic)</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
+            <h3>Other Index Searches</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.other_index_searches if api_metrics else 0 }}</div>
+        <footer>
+            <small>FTS, temporal, hybrid</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
+            <h3>Regex Searches</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.regex_searches if api_metrics else 0 }}</div>
+        <footer>
+            <small>regex_search calls</small>
+        </footer>
+    </article>
+
+    <article class="stat-card">
+        <header>
+            <h3>Other API Calls</h3>
+        </header>
+        <div class="stat-value">{{ api_metrics.other_api_calls if api_metrics else 0 }}</div>
+        <footer>
+            <small>All other endpoints</small>
+        </footer>
+    </article>
+</div>
+
+<!-- Story #674: Per-User API Usage Breakdown Card -->
+<section id="api-per-user-section" class="dashboard-section">
+    <div class="loading-indicator">
+        <p>Loading per-user API usage...</p>
+    </div>
+</section>
+
+<!-- Story #675: API Usage Trends Chart Card -->
+<section id="api-chart-section" class="dashboard-section">
+    <div class="loading-indicator">
+        <p>Loading API usage chart...</p>
+    </div>
+</section>
+
+<!-- Langfuse Sync Section (Story #168) -->
+<!-- M6/M8: Uses 30s HTMX-only refresh (not in refreshAll() JavaScript function)
+     because Langfuse data changes slowly (sync runs every 5min by default).
+     This avoids unnecessary API calls while keeping data reasonably fresh. -->
+<div id="langfuse-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-langfuse"
+    hx-trigger="load, every 30s"
+    hx-swap="innerHTML">
+    <!-- Loading indicator shown until HTMX fetches Langfuse data -->
+    <div class="loading-indicator">
+        <p>Loading Langfuse sync status...</p>
+    </div>
+</div>
+
+<!-- Recent Activity Section (Story #201: Fixed to 24h, dropdown removed) -->
+<h2>Recent Activity</h2>
+
+<div class="recent-activity">
+    <table role="grid">
+        <thead>
+            <tr>
+                <th>Repository</th>
+                <th>Job Type</th>
+                <th>Completed</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <!-- Story #69: Granular refresh target for table body ONLY -->
+        <tbody id="recent-jobs-tbody">
+            {% if recent_jobs and recent_jobs|length > 0 %}
+            {% for job in recent_jobs %}
+            <tr>
+                <td>
+                    <a href="/admin/jobs?job_id={{ job.job_id }}">{{ job.repo_name }}</a>
+                </td>
+                <td>{{ job.job_type }}</td>
+                <td>{{ job.completion_time[:19] if job.completion_time else 'N/A' }}</td>
+                <td>
+                    <span class="job-status status-{{ job.status }}">{{ job.status | capitalize }}</span>
+                </td>
+            </tr>
+            {% endfor %}
+            {% else %}
+            <tr>
+                <td colspan="4" style="text-align: center;">No recent activity to display.</td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+// Story #69: Surgical DOM updates for dropdown changes
+// Uses shared applyResponse() and _fetchOpts defined in dashboard.html
+function updateJobStats() {
+    var timeFilter = document.getElementById('time-filter').value;
+    fetch('/admin/partials/dashboard-job-counts?time_filter=' + encodeURIComponent(timeFilter), _fetchOpts)
+        .then(function(r) { applyResponse(r, '#job-counts-data'); });
+}
+
+function updateApiActivity() {
+    var apiFilter = document.getElementById('api-filter').value;
+    fetch('/admin/partials/dashboard-api-metrics?api_filter=' + encodeURIComponent(apiFilter), _fetchOpts)
+        .then(function(r) { applyResponse(r, '#api-metrics-data'); });
+    fetch('/admin/partials/dashboard-api-per-user?api_filter=' + encodeURIComponent(apiFilter), _fetchOpts)
+        .then(function(r) { applyResponse(r, '#api-per-user-section'); });
+    fetch('/admin/partials/dashboard-api-chart?api_filter=' + encodeURIComponent(apiFilter), _fetchOpts)
+        .then(function(r) { applyResponse(r, '#api-chart-section'); });
+}
+
+// Initial load: deferred so applyResponse/_fetchOpts from dashboard.html are available
+window.addEventListener('DOMContentLoaded', function() { updateApiActivity(); });
+</script>

@@ -1,0 +1,467 @@
+{% extends "base.html" %}
+
+{% block title %}Diagnostics - CIDX Admin{% endblock %}
+
+{% block content %}
+<!-- Hidden CSRF token for JavaScript access (Story #205) -->
+<div id="csrf-data" data-csrf-token="{{ csrf_token }}" style="display:none;"></div>
+
+<div class="diagnostics-header">
+    <h1>Diagnostics</h1>
+    <div class="diagnostics-actions">
+        <button
+            id="run-all-btn"
+            hx-post="/admin/diagnostics/run-all"
+            hx-target="#diagnostics-results"
+            hx-swap="innerHTML"
+        >
+            Run All Diagnostics
+        </button>
+    </div>
+</div>
+
+<p>Run comprehensive diagnostic checks across five categories to verify system health and configuration.</p>
+
+<!-- Story #205: Server Restart Button -->
+<div class="restart-section" style="margin-bottom: 2rem;">
+    <button
+        id="restart-server-btn"
+        class="restart-button"
+        onclick="restartServer()"
+    >
+        Restart Server
+    </button>
+    <p style="color: var(--muted-color); font-size: 0.875rem; margin-top: 0.5rem;">
+        Restart the CIDX server process. Use this after configuration changes that require a restart.
+    </p>
+    <div id="restart-status" style="margin-top: 0.5rem;"></div>
+</div>
+
+<!-- Story #233: Generate Missing Descriptions Button -->
+<div class="generate-descriptions-section" style="margin-bottom: 2rem;">
+    <button
+        id="generate-descriptions-btn"
+        class="generate-descriptions-button"
+        onclick="generateMissingDescriptions()"
+    >
+        Generate Missing Descriptions
+    </button>
+    <p style="color: var(--muted-color); font-size: 0.875rem; margin-top: 0.5rem;">
+        Queue description generation for all golden repositories that do not yet have a description.
+    </p>
+    <div id="generate-descriptions-status" style="margin-top: 0.5rem;"></div>
+</div>
+
+<!-- Diagnostics Results Section with HTMX Polling -->
+<section id="diagnostics-results" class="diagnostics-section">
+
+    <!-- Initial state - shows category sections with "Not yet run" status -->
+    <div class="diagnostics-categories">
+
+        <!-- Category 1: CLI Tool Dependencies -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>CLI Tool Dependencies</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for CLI tools have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/cli_tools"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run CLI Tools
+                </button>
+            </div>
+        </details>
+
+        <!-- Category 2: SDK Prerequisites -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>SDK Prerequisites</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for SDK prerequisites have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/sdk_prerequisites"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run SDK Prerequisites
+                </button>
+            </div>
+        </details>
+
+        <!-- Category 3: External API Integrations -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>External API Integrations</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for external APIs have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/external_apis"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run External APIs
+                </button>
+            </div>
+        </details>
+
+        <!-- Category 4: Credential & Connectivity -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>Credential & Connectivity</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for credentials have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/credentials"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run Credentials
+                </button>
+            </div>
+        </details>
+
+        <!-- Category 5: Core Infrastructure -->
+        <details class="diagnostic-category">
+            <summary>
+                <h3>Core Infrastructure</h3>
+                <span class="category-status not-run">Not yet run</span>
+            </summary>
+            <div class="category-content">
+                <p>Diagnostics for infrastructure have not been run yet.</p>
+                <button
+                    class="outline"
+                    hx-post="/admin/diagnostics/run/infrastructure"
+                    hx-target="#diagnostics-results"
+                    hx-swap="innerHTML"
+                >
+                    Re-run Infrastructure
+                </button>
+            </div>
+        </details>
+
+    </div>
+</section>
+
+<style>
+/* Story #205: Restart button styles (Code Review Issue #10) */
+.restart-button {
+    background-color: #d32f2f;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.restart-button:hover {
+    background-color: #b71c1c;
+}
+
+/* Story #233: Generate Missing Descriptions button */
+.generate-descriptions-button {
+    background-color: #1565c0;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.generate-descriptions-button:hover {
+    background-color: #0d47a1;
+}
+
+.diagnostics-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.diagnostics-actions button {
+    margin-bottom: 0;
+}
+
+.diagnostics-categories {
+    margin-top: 2rem;
+}
+
+.diagnostic-category {
+    margin-bottom: 1rem;
+    border: 1px solid var(--muted-border-color);
+    border-radius: 0.25rem;
+    padding: 0.5rem;
+}
+
+.diagnostic-category summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    list-style: none;
+    padding: 0.5rem;
+}
+
+.diagnostic-category summary::-webkit-details-marker {
+    display: none;
+}
+
+.diagnostic-category summary h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    flex: 1;
+}
+
+.diagnostic-category summary .category-status {
+    margin-left: auto;
+}
+
+.category-status {
+    padding: 0.25rem 0.75rem;
+    border-radius: 0.25rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    white-space: nowrap;
+}
+
+.category-status.not-run {
+    background-color: var(--muted-color);
+    color: var(--contrast);
+}
+
+.category-status.running {
+    background-color: var(--primary);
+    color: white;
+}
+
+.category-status.working {
+    background-color: var(--success);
+    color: white;
+}
+
+.category-status.warning {
+    background-color: var(--warning);
+    color: white;
+}
+
+.category-status.error {
+    background-color: var(--error);
+    color: white;
+}
+
+.category-status.not-configured {
+    background-color: var(--muted-color);
+    color: var(--contrast);
+}
+
+.category-status.not-applicable {
+    background-color: var(--muted-color);
+    color: var(--contrast);
+    opacity: 0.6;
+}
+
+.category-content {
+    padding: 1rem;
+    border-top: 1px solid var(--muted-border-color);
+    margin-top: 0.5rem;
+}
+
+.category-content p {
+    margin-bottom: 1rem;
+}
+
+.diagnostic-item {
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+    border-radius: 0.25rem;
+    background-color: var(--card-background-color);
+}
+
+.diagnostic-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.diagnostic-item-name {
+    font-weight: 600;
+}
+
+.diagnostic-item-message {
+    color: var(--muted-color);
+    font-size: 0.875rem;
+}
+
+/* Status icons */
+.status-icon {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    line-height: 1;
+}
+
+/* Spinner animation */
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.status-icon.spinner {
+    animation: spin 1s linear infinite;
+}
+
+/* Icon definitions using Unicode */
+.status-icon.spinner::before {
+    content: "⟳";
+    font-size: 1.2em;
+}
+
+.status-icon.check::before {
+    content: "✓";
+}
+
+.status-icon.error::before {
+    content: "✗";
+}
+
+.status-icon.info::before {
+    content: "ℹ";
+}
+</style>
+
+<script>
+// Story #233: Generate Missing Descriptions
+function generateMissingDescriptions() {
+    // Get CSRF token from data attribute
+    const csrfData = document.getElementById('csrf-data');
+    const csrfToken = csrfData ? csrfData.getAttribute('data-csrf-token') : '';
+
+    // Disable button while in-flight
+    const btn = document.getElementById('generate-descriptions-btn');
+    const statusDiv = document.getElementById('generate-descriptions-status');
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+    statusDiv.innerHTML = '';
+
+    // Call POST /admin/diagnostics/generate-missing-descriptions
+    fetch('/admin/diagnostics/generate-missing-descriptions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        }
+    })
+    .then(response => {
+        if (response.ok) {
+            return response.json();
+        } else if (response.status === 403) {
+            throw new Error('Insufficient permissions. Admin access required.');
+        } else {
+            throw new Error('Request failed. Status: ' + response.status);
+        }
+    })
+    .then(data => {
+        const msg = document.createElement('p');
+        msg.style.color = '#4caf50';
+        msg.style.fontWeight = '600';
+        msg.textContent = 'Queued ' + data.repos_queued + ' repositories for description generation. '
+            + data.repos_with_descriptions + ' of ' + data.total_repos + ' already have descriptions.';
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(msg);
+        btn.disabled = false;
+        btn.textContent = 'Generate Missing Descriptions';
+    })
+    .catch(error => {
+        const errorMsg = document.createElement('p');
+        errorMsg.style.color = '#d32f2f';
+        errorMsg.style.fontWeight = '600';
+        errorMsg.textContent = 'Error: ' + error.message;
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(errorMsg);
+        btn.disabled = false;
+        btn.textContent = 'Generate Missing Descriptions';
+    });
+}
+
+// Story #205: Server Restart from Diagnostics Tab
+function restartServer() {
+    // Show confirmation dialog (AC2)
+    if (!window.confirm("Are you sure you want to restart the server? This will temporarily interrupt service.")) {
+        return; // User cancelled
+    }
+
+    // Get CSRF token from data attribute
+    const csrfData = document.getElementById('csrf-data');
+    const csrfToken = csrfData ? csrfData.getAttribute('data-csrf-token') : '';
+
+    // Disable restart button
+    const restartBtn = document.getElementById('restart-server-btn');
+    const statusDiv = document.getElementById('restart-status');
+    restartBtn.disabled = true;
+    restartBtn.textContent = 'Restarting...';
+
+    // Call POST /admin/restart
+    fetch('/admin/restart', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        }
+    })
+    .then(response => {
+        if (response.status === 202) {
+            return response.json();
+        } else if (response.status === 403) {
+            throw new Error('Insufficient permissions. Admin access required.');
+        } else {
+            throw new Error('Failed to restart server. Status: ' + response.status);
+        }
+    })
+    .then(data => {
+        // Show success message (AC1) - Code Review Issue #5: Use textContent to prevent XSS
+        const successMsg = document.createElement('p');
+        successMsg.style.color = '#4caf50';
+        successMsg.style.fontWeight = '600';
+        successMsg.textContent = data.message + ' Page will reload shortly.';
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(successMsg);
+
+        // Reload page after 5 seconds (AC1)
+        setTimeout(function() {
+            window.location.reload();
+        }, 5000);
+    })
+    .catch(error => {
+        // Show error message - Code Review Issue #5: Use textContent to prevent XSS
+        const errorMsg = document.createElement('p');
+        errorMsg.style.color = '#d32f2f';
+        errorMsg.style.fontWeight = '600';
+        errorMsg.textContent = 'Error: ' + error.message;
+        statusDiv.innerHTML = '';
+        statusDiv.appendChild(errorMsg);
+        restartBtn.disabled = false;
+        restartBtn.textContent = 'Restart Server';
+    });
+}
+</script>
+{% endblock %}

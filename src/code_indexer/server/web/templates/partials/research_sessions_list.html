@@ -1,0 +1,46 @@
+{# Partial template for research sessions list (Story #143 AC1) #}
+<div class="sessions-list">
+    {% for session in sessions %}
+    <div class="session-item {% if session.id == active_session_id %}active{% endif %}"
+         data-session-id="{{ session.id }}"
+         hx-get="/admin/research/sessions/{{ session.id }}"
+         hx-target="#chat-messages"
+         hx-swap="innerHTML"
+         hx-on::before-request="document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active')); this.classList.add('active'); document.getElementById('active-session-id').value = '{{ session.id }}'; window.forceScrollOnNextSwap = true;">
+        <div class="session-name">{{ session.name }}</div>
+        <div class="session-timestamp">{{ session.updated_at | relative_time }}</div>
+        <div class="session-actions">
+            <button class="rename-btn"
+                    onclick="event.stopPropagation(); renameSession('{{ session.id }}', '{{ session.name }}')"
+                    title="Rename">R</button>
+            <button class="delete-btn"
+                    hx-delete="/admin/research/sessions/{{ session.id }}"
+                    hx-vals='{"active_session_id": "{{ active_session_id }}"}'
+                    hx-target="#sessions-sidebar"
+                    hx-swap="innerHTML"
+                    hx-confirm="Delete this session?"
+                    onclick="event.stopPropagation()"
+                    title="Delete">X</button>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<script>
+function renameSession(sessionId, currentName) {
+    var newName = prompt('Enter new session name:', currentName);
+    if (newName && newName !== currentName) {
+        var formData = new FormData();
+        formData.append('new_name', newName);
+
+        fetch('/admin/research/sessions/' + sessionId, {
+            method: 'PUT',
+            body: formData
+        }).then(response => response.text())
+        .then(html => {
+            document.getElementById('sessions-sidebar').innerHTML = html;
+            htmx.process(document.getElementById('sessions-sidebar'));
+        });
+    }
+}
+</script>

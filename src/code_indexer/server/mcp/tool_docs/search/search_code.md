@@ -1,0 +1,423 @@
+---
+name: search_code
+category: search
+required_permission: query_repos
+tl_dr: Search code using pre-built indexes.
+slim_description: "Search indexed repositories using semantic, full-text, hybrid, or regex modes with multi-repo wildcards, language/path filtering, and optional reranking."
+inputSchema:
+  type: object
+  properties:
+    query_text:
+      type: string
+      description: 'Search query text. MULTI-TERM FTS QUERIES: When using search_mode=''fts'' with multiple terms (e.g., ''authenticate
+        user''), ALL terms must match (AND semantics). Single-term queries match normally. For OR semantics, use separate
+        queries or regex mode with ''|'' operator (e.g., ''term1|term2'').'
+    repository_alias:
+      oneOf:
+      - type: string
+      - type: array
+        items:
+          type: string
+      description: 'Repository alias(es) to search. FORMATS: (1) String for single repo: ''backend-global'', (2) Array for
+        multi-repo: [''backend-global'', ''frontend-global''], (3) Wildcard pattern: ''*-global'' (all global repos) or ''pch-*-global''
+        (pattern match). Multi-repo searches support aggregation_mode and response_format parameters for result organization.'
+    aggregation_mode:
+      type: string
+      enum:
+      - global
+      - per_repo
+      default: global
+      description: 'Multi-repo aggregation. ''global'' (default): top N by score across all repos. ''per_repo'': distributes
+        N evenly across repos. IMPORTANT: limit=10 with 3 repos returns 10 TOTAL (not 30). per_repo distributes as 4+3+3=10.'
+    exclude_patterns:
+      type: array
+      items:
+        type: string
+      description: Regex patterns to exclude repositories from omni-search.
+    limit:
+      type: integer
+      description: 'Maximum number of results. IMPORTANT: Start with limit=5 to conserve context tokens. Each result consumes
+        tokens proportional to code snippet size. Only increase limit if initial results insufficient. High limits (>20) can
+        rapidly consume context window.'
+      default: 10
+      minimum: 1
+      maximum: 100
+    min_score:
+      type: number
+      description: Minimum similarity score
+      default: 0.5
+      minimum: 0
+      maximum: 1
+    search_mode:
+      type: string
+      description: 'Search mode: ''semantic'' for conceptual queries, ''fts'' for exact text/identifiers, ''hybrid'' runs both
+        in parallel and merges via Reciprocal Rank Fusion (common hits ranked highest). Default: semantic. FTS multi-term queries
+        use AND semantics (all terms must match).'
+      enum:
+      - semantic
+      - fts
+      - hybrid
+      default: semantic
+    language:
+      type: string
+      description: 'Filter by programming language name or extension (e.g., ''python'', ''py'', ''js'', ''typescript'').'
+    exclude_language:
+      type: string
+      description: Exclude files of specified language.
+    path_filter:
+      type: string
+      description: 'Filter by file path using glob syntax (e.g., ''*/tests/*'', ''*/src/**/*.py''). Supports *, **, ?, [seq].'
+    exclude_path:
+      type: string
+      description: 'Exclude files matching glob pattern (e.g., ''**/node_modules/**'', ''**/package-lock.json''). Comma-separate
+        multiple patterns.'
+    file_extensions:
+      type: array
+      items:
+        type: string
+      description: 'Filter by file extensions (e.g., [''.py'', ''.js'']).'
+    accuracy:
+      type: string
+      enum:
+      - fast
+      - balanced
+      - high
+      default: balanced
+      description: 'Search precision: ''fast'', ''balanced'' (default), ''high''.'
+    time_range:
+      type: string
+      description: 'Time range filter (format: YYYY-MM-DD..YYYY-MM-DD). Requires temporal index (cidx index --index-commits).
+        Check enable_temporal via repository_status.'
+    time_range_all:
+      type: boolean
+      default: false
+      description: Search all git history. Requires temporal index.
+    at_commit:
+      type: string
+      description: 'Code state at specific commit hash or ref (e.g., ''abc123'', ''HEAD~5''). Requires temporal index.'
+    include_removed:
+      type: boolean
+      default: false
+      description: Include removed files in results. Only for temporal queries.
+    show_evolution:
+      type: boolean
+      default: false
+      description: Include code change timeline with commit history. Requires temporal index.
+    evolution_limit:
+      type: integer
+      minimum: 1
+      description: Max evolution entries per result. Only with show_evolution=true.
+    case_sensitive:
+      type: boolean
+      default: false
+      description: Case-sensitive FTS matching. Only for fts/hybrid modes.
+    fuzzy:
+      type: boolean
+      default: false
+      description: Fuzzy matching with edit distance 1 (typo tolerance). Only for fts/hybrid. Incompatible with regex=true.
+    edit_distance:
+      type: integer
+      default: 0
+      minimum: 0
+      maximum: 3
+      description: Fuzzy tolerance 0-3 (0=exact). Only for fts/hybrid.
+    snippet_lines:
+      type: integer
+      default: 5
+      minimum: 0
+      maximum: 50
+      description: Context lines around FTS matches (0=list only, 1-50). Only for fts/hybrid.
+    regex:
+      type: boolean
+      default: false
+      description: Interpret query as regex pattern. Only for fts/hybrid. Incompatible with fuzzy=true.
+    diff_type:
+      type: string
+      description: Filter temporal results by diff type (added/modified/deleted/renamed/binary). Comma-separate multiple.
+    author:
+      type: string
+      description: Filter temporal results by commit author name or email.
+    chunk_type:
+      type: string
+      enum:
+      - commit_message
+      - commit_diff
+      description: 'Filter temporal results: ''commit_message'' or ''commit_diff''.'
+    query_strategy:
+      type: string
+      enum:
+      - primary_only
+      - failover
+      - parallel
+      - specific
+      description: 'Query strategy: primary_only, failover (switch on failure — API error or timeout, not empty results),
+        parallel (score fusion across both providers), specific (use one named provider). When both VoyageAI and Cohere
+        embedding providers are configured, the default strategy is automatically ''parallel'' with ''rrf'' fusion. Pass
+        query_strategy=''primary_only'' to override and use only the primary provider. With parallel strategy, each result
+        includes contributing_providers (which providers ranked it) and fusion_score (rank-derived combined score) alongside
+        the raw similarity_score.'
+    score_fusion:
+      type: string
+      enum:
+      - rrf
+      - multiply
+      - average
+      description: "Score fusion method for parallel strategy (default: rrf). 'rrf' (Reciprocal Rank Fusion): rank-position-based,\
+        \ immune to score-scale differences between providers — recommended default since VoyageAI and Cohere calibrate scores\
+        \ differently. 'multiply'/'average': raw score arithmetic, only meaningful when both providers produce comparably\
+        \ calibrated scores on the same corpus."
+    preferred_provider:
+      type: string
+      enum:
+      - voyage-ai
+      - cohere
+      description: 'Embedding provider to use when query_strategy=''specific''. Required for specific
+        strategy; ignored for all other strategies.'
+    response_format:
+      type: string
+      enum:
+      - flat
+      - grouped
+      default: flat
+      description: 'Multi-repo result format. ''flat'' (default): single array with source_repo field per result. ''grouped'':
+        results organized under results_by_repo by repository.'
+    rerank_query:
+      type: string
+      description: 'Query for cross-encoder reranking. When set, the server overfetches additional candidates, reranks them for the selected search mode, and returns up to limit results. Leave empty to preserve the default retrieval order.'
+    rerank_instruction:
+      type: string
+      description: 'Optional instruction prefix for the reranker (e.g. ''Find implementation, not tests''). Has no effect without rerank_query. Steers ranking only; does not widen recall.'
+  required:
+  - query_text
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether the search operation succeeded
+    results:
+      type: object
+      description: Search results (present when success=True)
+      properties:
+        results:
+          type: array
+          description: Array of code search results
+          items:
+            type: object
+            properties:
+              file_path:
+                type: string
+                description: Relative path to file
+              line_number:
+                type: integer
+                description: Line number where match found
+              code_snippet:
+                type: string
+                description: Code snippet containing match
+              similarity_score:
+                type: number
+                description: Semantic similarity score (0.0-1.0)
+              repository_alias:
+                type: string
+                description: Repository where result found
+              source_repo:
+                type:
+                - string
+                - 'null'
+                description: Component repository name for composite repositories. Null for single repositories. Indicates
+                  which repo in a composite this result came from.
+              source_provider:
+                type: string
+                description: 'Embedding provider that served this result. Values: ''voyage-ai'', ''cohere'',
+                  ''fused'' (parallel strategy), ''primary'' (primary_only default). Always present.'
+              fusion_score:
+                type:
+                - number
+                - 'null'
+                description: 'Fused score computed by the score fusion algorithm (e.g., RRF). Present when
+                  query_strategy=''parallel''. Reflects ranking order; do not compare directly to similarity_score.'
+              contributing_providers:
+                type:
+                - array
+                - 'null'
+                description: 'Sorted list of embedding providers that contributed this result (e.g., [''cohere'',
+                  ''voyage-ai'']). Present when query_strategy=''parallel''. A result from only one provider
+                  will list just that provider.'
+                items:
+                  type: string
+              match_text:
+                type:
+                - string
+                - 'null'
+                description: Exact matched text from FTS engine. Only present in FTS and hybrid search modes for
+                  FTS-originated results. Null or absent for pure semantic results.
+              file_last_modified:
+                type:
+                - number
+                - 'null'
+                description: Unix timestamp when file last modified (null if stat failed)
+              indexed_timestamp:
+                type:
+                - number
+                - 'null'
+                description: Unix timestamp when file was indexed (null if not available)
+              temporal_context:
+                type:
+                - object
+                - 'null'
+                description: Temporal metadata for time-range queries (null for non-temporal queries)
+                properties:
+                  first_seen:
+                    type: string
+                    description: ISO timestamp when code first appeared
+                  last_seen:
+                    type: string
+                    description: ISO timestamp when code last modified
+                  commit_count:
+                    type: integer
+                    description: Number of commits affecting this code
+                  commits:
+                    type: array
+                    description: List of commits affecting this code
+                    items:
+                      type: object
+                  is_removed:
+                    type: boolean
+                    description: Whether file was removed from current HEAD (only when include_removed=true)
+                  evolution:
+                    type:
+                    - array
+                    - 'null'
+                    description: Code evolution timeline (only when show_evolution=true)
+                    items:
+                      type: object
+        total_results:
+          type: integer
+          description: Total number of results returned
+        query_metadata:
+          type: object
+          description: Query execution metadata
+          properties:
+            query_text:
+              type: string
+              description: Original query text
+            execution_time_ms:
+              type: integer
+              description: Query execution time in milliseconds
+            repositories_searched:
+              type: integer
+              description: Number of repositories searched
+            timeout_occurred:
+              type: boolean
+              description: Whether query timed out
+            reranker_used:
+              type: boolean
+              description: Whether cross-encoder reranking was actually applied
+            reranker_provider:
+              type:
+              - string
+              - 'null'
+              description: Provider that performed reranking ('voyage', 'cohere'), or null when reranking was not used
+            rerank_time_ms:
+              type: integer
+              description: Time spent in the reranking stage in milliseconds
+    error:
+      type: string
+      description: Error message (present when success=False)
+  required:
+  - success
+---
+
+MANDATORY REPOSITORY DISCOVERY - READ THIS FIRST:
+If user does NOT explicitly specify a repository, you MUST:
+1. ALWAYS search cidx-meta-global FIRST: search_code('topic', repository_alias='cidx-meta-global', limit=5)
+2. cidx-meta-global contains AI-generated descriptions of every other repository on this server
+3. INTERPRETING RESULTS: file_path='auth-service.md' means auth-service-global is relevant. Rule: strip '.md', append '-global' to get the searchable alias
+4. DEPENDENCY MAP RESULTS: file_path='dependency-map/authentication.md' describes cross-repo relationships in that domain. These results are especially valuable when the topic spans multiple repos or you need architectural context. Read the snippet -- it lists participating repos, their roles, and how they interact. Then search those repos together using repository_alias as an array
+5. THEN search the identified repo(s) for actual code: search_code('topic', repository_alias='auth-service-global', limit=10)
+6. IF cidx-meta-global NOT FOUND: fall back to list_global_repos() and search candidates directly
+
+Skip discovery ONLY when user explicitly names a repository (e.g., "search in backend-global").
+
+REPOSITORY SELECTION:
+1. User specified exact repo? -> Search directly
+2. User mentioned topic WITHOUT repo? -> cidx-meta-global discovery (MANDATORY)
+3. Cross-repo comparison? -> repository_alias as array + aggregation_mode='per_repo'
+4. Best matches anywhere? -> repository_alias as array + aggregation_mode='global'
+
+SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid (runs both, merges via RRF - common hits ranked highest)
+
+RERANKING SMELL TEST: query_text is 2+ words and search_mode is semantic or hybrid? Add rerank_query. Write query_text short for retrieval, write rerank_query long for precision. Skipping reranking on a conceptual query typically costs 2-4 additional searches to find the right result; reranking adds ~200-500ms but is almost always cheaper than re-searching.
+
+SKIP RERANKING ONLY WHEN: exact single-identifier lookup (e.g., fts for 'def authenticate_user') | result set <= 3 | chronological/positional order matters more than relevance
+
+STANDARD CALL TEMPLATE:
+  query_text:          [short: 1-4 keywords for retrieval]
+  search_mode:         [semantic|fts|hybrid]
+  repository_alias:    [target repo]
+  limit:               [start at 5]
+  rerank_query:        [FILL THIS IN — verbose sentence describing your ideal result]
+  rerank_instruction:  [FILL THIS IN — what to deprioritize, e.g., "Focus on implementation, not tests"]
+
+CRITICAL: Semantic search finds code by MEANING, not exact text. Results are APPROXIMATE. For exhaustive exact-text results, use FTS mode or regex_search tool.
+
+LIMIT BEHAVIOR: limit=10 with 3 repos in 'global' mode may return 7+3+0=10. In 'per_repo' mode returns 4+3+3=10 (NOT 30 - per_repo does NOT multiply the limit).
+
+PERFORMANCE: Start with limit=5. Each result consumes tokens proportional to code snippet size. Large fields may be truncated to snippet_preview + snippet_cache_handle (use get_cached_content to retrieve full content).
+
+EXAMPLE (standard call with reranking):
+search_code('authentication logic', repository_alias='backend-global', search_mode='semantic', limit=5,
+            rerank_query='production code implementing user authentication flow',
+            rerank_instruction='Focus on implementation, not tests or config')
+
+### Reranking
+
+DEFAULT: Use reranking. Skip it only for exact identifier lookups, result sets <= 3, or when retrieval order already matches intent.
+
+**Mental model — two-query pattern**: Use `query_text` (short, 1-4 keywords) to retrieve candidates; use `rerank_query` (verbose natural language sentence) to pick the best ordering. These serve different purposes and should be written differently.
+
+- **rerank_query** = WHAT you want ranked highest. Write a detailed sentence describing your ideal result. The cross-encoder reads both this and each result snippet to score relevance. Cost: ~200-500ms latency. Benefit: saves 2-4 follow-up searches when the query is conceptual.
+- **rerank_instruction** = WHAT to deprioritize. Steer the reranker away from noise. Example: "Focus on production implementation, not test fixtures or mock helpers". Has no effect without rerank_query.
+
+Add rerank_query proactively (even without explicit user request) when:
+- The user's intent is conceptual or multi-faceted (not a simple identifier lookup)
+- The result set will likely be >5 candidates where ordering matters
+- The base retrieval order does not match what the user actually wants on top
+
+What reranking does NOT do: Reranking only reorders the candidate set already retrieved. It cannot recover a file the base query missed. Quality depends on the initial candidate pool.
+
+Returned telemetry: reranker_used, reranker_provider, rerank_time_ms. If providers are unavailable or all attempts fail, the tool falls back to base retrieval order.
+
+#### Examples
+
+**Finding login implementation:**
+```json
+{
+  "query_text": "login authentication",
+  "rerank_query": "function that validates user credentials and creates a session on successful login",
+  "rerank_instruction": "Focus on implementation, not test fixtures",
+  "repository_alias": "backend-global",
+  "limit": 10
+}
+```
+
+**Hybrid/FTS with semantic prioritization:**
+```json
+{
+  "query_text": "authenticate session token",
+  "search_mode": "hybrid",
+  "rerank_query": "production code that validates a session token and rejects expired or malformed credentials",
+  "repository_alias": "backend-global",
+  "limit": 10
+}
+```
+
+**Intentional opt-out (exact identifier lookup):**
+```json
+{
+  "query_text": "authenticate_user",
+  "search_mode": "fts",
+  "repository_alias": "backend-global",
+  "limit": 10
+}
+```

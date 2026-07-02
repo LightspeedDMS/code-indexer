@@ -1,0 +1,78 @@
+---
+name: list_ssh_keys
+category: ssh
+required_permission: repository:admin
+tl_dr: List all SSH keys (CIDX-managed and unmanaged).
+slim_description: "List all SSH keys: managed keys with metadata and unmanaged keys detected in ~/.ssh."
+inputSchema:
+  type: object
+  properties: {}
+  required: []
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    managed:
+      type: array
+      description: CIDX-managed keys with full metadata
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+            description: Key name
+          fingerprint:
+            type: string
+            description: SSH fingerprint (SHA256)
+          key_type:
+            type: string
+            description: Key type (ed25519/rsa)
+          hosts:
+            type: array
+            items:
+              type: string
+            description: Hostnames configured in SSH config
+          email:
+            type:
+            - string
+            - 'null'
+            description: Email address
+          description:
+            type:
+            - string
+            - 'null'
+            description: Key description
+          is_imported:
+            type: boolean
+            description: Whether key was imported (not yet implemented)
+    unmanaged:
+      type: array
+      description: Keys detected in ~/.ssh but not managed by CIDX
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+            description: Filename without extension
+          fingerprint:
+            type: string
+            description: SSH fingerprint (SHA256)
+          private_path:
+            type: string
+            description: Full path to private key file
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
+---
+
+TL;DR: List all SSH keys (CIDX-managed and unmanaged). Renamed from cidx_ssh_key_list in Story #992 — same signature, same response shape.
+
+WHEN TO USE: (1) See available keys, (2) Check key fingerprints, (3) View which hosts are assigned to each key, (4) Discover unmanaged keys in ~/.ssh.
+
+RELATED TOOLS: manage_ssh_key (create/delete/show_public/assign_host).
+
+EXAMPLE: {} Returns: {"success": true, "managed": [{"name": "github-key", "fingerprint": "SHA256:abc...", "key_type": "ed25519", "hosts": ["github.com"]}], "unmanaged": []}
