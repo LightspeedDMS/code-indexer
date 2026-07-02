@@ -1,0 +1,88 @@
+# cidx (code-indexer-internal) — build the deployable EKS server image and push to ECR.
+#
+# Mirrors the proven tools-v2 Docker cross-account pattern (ci-templates
+# node-tools-v2-docker-template.yml) but is pure-Python: no Stage-role assume / no
+# CodeArtifact .npmrc (cidx installs from public PyPI + the vendored third_party/hnswlib).
+#
+# The docker-autoscaler runner's identity IS the tools-test account (124169034092), so
+# `aws ecr get-login-password` on the runner authenticates directly to that account's ECR —
+# same account as the eks-test-tools-uswest2 cluster, so pods pull without cross-account policy.
+#
+# Produces:
+#   124169034092.dkr.ecr.us-west-2.amazonaws.com/claude-code-indexer:cidx-<version>-<sha>  (immutable)
+#   124169034092.dkr.ecr.us-west-2.amazonaws.com/claude-code-indexer:cidx-tools-latest      (moving)
+
+stages:
+  - build
+
+variables:
+  ECR_REGION: "us-west-2"
+  ECR_REPOSITORY_NAME: "claude-code-indexer"
+  IMAGE_PREFIX: "cidx"
+
+Build and Push cidx Image:
+  stage: build
+  tags:
+    - default
+  image: docker:24
+  services:
+    - name: docker:24-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+  resource_group: docker-deploy/tools
+  environment:
+    name: tools
+    action: prepare
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: manual
+  before_script:
+    - apk upgrade --no-cache libexpat
+    - apk add --no-cache aws-cli jq
+    - unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+    - until docker info; do sleep 2; done
+  script:
+    - |
+      set -euo pipefail
+      ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      ECR_REPOSITORY="${ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
+
+      echo "Logging in to ECR ${ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com ..."
+      aws ecr get-login-password --region "$ECR_REGION" | \
+        docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com"
+
+      VERSION=$(TZ=America/Denver date +"%Y.%m.%d.%H%M")
+      SHORT_SHA=$(echo "$CI_COMMIT_SHORT_SHA" | cut -c1-7)
+      IMAGE_TAG="${IMAGE_PREFIX}-${VERSION}-${SHORT_SHA}"
+      FULL_IMAGE_TAG="${ECR_REPOSITORY}:${IMAGE_TAG}"
+      LATEST_TAG="${IMAGE_PREFIX}-tools-latest"
+
+      echo "Building ${FULL_IMAGE_TAG} ..."
+      DOCKER_BUILDKIT=1 docker build \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        -t "$FULL_IMAGE_TAG" .
+
+      docker push "$FULL_IMAGE_TAG"
+      echo "Pushed ${FULL_IMAGE_TAG}"
+
+      # Move the ${IMAGE_PREFIX}-tools-latest tag to this build via manifest copy (no re-pull).
+      MANIFEST=$(aws ecr batch-get-image \
+        --repository-name "$ECR_REPOSITORY_NAME" \
+        --image-ids imageTag="$IMAGE_TAG" \
+        --region "$ECR_REGION" \
+        --query 'images[0].imageManifest' --output text)
+      aws ecr batch-delete-image \
+        --repository-name "$ECR_REPOSITORY_NAME" \
+        --image-ids imageTag="$LATEST_TAG" \
+        --region "$ECR_REGION" || true
+      aws ecr put-image \
+        --repository-name "$ECR_REPOSITORY_NAME" \
+        --image-tag "$LATEST_TAG" \
+        --image-manifest "$MANIFEST" \
+        --region "$ECR_REGION"
+
+      echo "Done: ${ECR_REPOSITORY}:${LATEST_TAG}"
