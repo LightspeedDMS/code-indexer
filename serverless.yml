@@ -1,0 +1,91 @@
+# TEMPLATE: Replace 'sourcename-mcp' with your service name (e.g. datadog-mcp, pagerduty-mcp)
+#           Replace SOURCENAME_* env vars with actual credential names
+#           Replace credentialsSecretName in serverless_helper.js (or use SSM directly)
+service: sourcename-mcp
+frameworkVersion: '3'
+
+custom:
+  short_region: ${file(./serverless_helper.js):short_region}
+  alphanumeric_stage: ${file(./serverless_helper.js):alphanumeric_stage}
+  tags:
+    created_by: "serverless"
+  webpack:
+    webpackConfig: "webpack.config.js"
+    includeModules: true
+    keepOutputDirectory: true
+    packager: "npm"
+    excludeFiles: test/**/*.spec.ts
+
+provider:
+  name: aws
+  deploymentBucket:
+    name: lightspeedevo-lambda-code-${opt:stage}-${self:custom.short_region}
+    blockPublicAccess: false
+  runtime: nodejs22.x
+  timeout: 25
+  apiGateway:
+    restApiId: ${file(./serverless_helper.js):restApiId, ''}
+    restApiRootResourceId: ${file(./serverless_helper.js):restApiRootResourceId, ''}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - "secretsmanager:GetSecretValue"
+            - "secretsmanager:DescribeSecret"
+          Resource:
+            # TODO: Update secret name pattern to match your secret
+            - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${file(./serverless_helper.js):credentialsSecretName}*"
+        - Effect: Allow
+          Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            - "ec2:CreateNetworkInterface"
+            - "ec2:DescribeNetworkInterfaces"
+            - "ec2:DeleteNetworkInterface"
+            - "ec2:AssignPrivateIpAddresses"
+            - "ec2:UnassignPrivateIpAddresses"
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - "lambda:GetFunctionConfiguration"
+          Resource:
+            - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${self:service}-${opt:stage}-${self:custom.short_region}"
+      name: "lightspeedevo-role-${self:service}-${self:custom.alphanumeric_stage}-${self:custom.short_region}"
+  stackTags: ${file(./serverless_helper.js):tags}
+
+functions:
+  SOURCENAMEMcp:
+    name: "${self:service}-${opt:stage}-${self:custom.short_region}"
+    handler: src/serverless.handler
+    tracing: Active
+    events: ${file(./serverless_helper.js):httpEvents}
+    deploymentSettings:
+      type: AllAtOnce
+      alias: ${self:custom.alphanumeric_stage}
+    vpc:
+      securityGroupIds: !Split
+        - ','
+        - "${ssm:/cicd/app/security_group_ids, 'sg-03a08976f937a2462'}"
+      subnetIds: !Split
+        - ','
+        - "${ssm:/cicd/app/subnet_ids, 'subnet-0c6436233d27e9160,subnet-0da44671166420ef6'}"
+    environment:
+      NODE_OPTIONS: "--enable-source-maps"
+
+      # TODO: Add your service's SSM-backed credentials here. Pattern:
+      #   SOURCENAME_API_KEY: ${ssm:/cicd/sourcename/api-key}
+      #   SOURCENAME_APP_KEY: ${ssm:/cicd/sourcename/app-key}
+      #   SOURCENAME_BASE_URL: ${ssm:/cicd/sourcename/base-url, 'https://api.sourcename.example.com'}
+
+plugins:
+  - serverless-webpack
+  - serverless-plugin-canary-deployments
+
+resources:
+  Resources: ${file(./serverless_helper.js):cfResources}
+  Outputs: ${file(./serverless_helper.js):cfOutputs}
+
+package:
+  individually: true

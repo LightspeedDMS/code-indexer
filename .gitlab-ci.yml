@@ -1,0 +1,23 @@
+include:
+  - project: 'lightspeeddms/private/ci-templates'
+    ref: 'master'
+    file:
+      - 'node-tools-project-template.yml'
+      - 'node-tools-v2-deploy-template.yml'
+      - 'node-tools-v2-docker-template.yml'
+
+stages:
+  - test
+  - Publish
+  - Deploy To Tools
+
+variables:
+  ECR_REGION: "us-west-2"
+  ECR_REPOSITORY_NAME: "gitlab-runner"
+  # TEMPLATE: Update IMAGE_PREFIX to match your service name (e.g. "datadog-mcp")
+  IMAGE_PREFIX: "sourcename-mcp"
+
+# Disable the default single-environment Lambda job — not used by MCP spokes.
+Deploy To Tools Lambda:
+  rules:
+    - when: never

@@ -1,0 +1,93 @@
+### SOURCENAME MCP Service
+### NestJS Lambda spoke for SOURCENAME integration
+###
+### Environment configuration:
+###   local      — no auth required, runs on localhost:3000
+###   tools-test — requires bearer token in http-client.private.env.json
+###
+### Set bearer token in http-client.private.env.json:
+###   { "local": {}, "tools-test": { "authToken": "your-token-here" } }
+
+# TEMPLATE: Update baseUrl in http-client.env.json with your deployed API GW URL.
+
+### =============================================================================
+### Health
+### =============================================================================
+
+### Health Check
+GET {{baseUrl}}/health
+Accept: application/json
+
+### =============================================================================
+### MCP Endpoints
+### =============================================================================
+
+### MCP — initialize
+POST {{baseUrl}}/v1/sourcename/mcp
+Content-Type: application/json
+Authorization: Bearer {{authToken}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {}
+}
+
+### MCP — tools/list
+POST {{baseUrl}}/v1/sourcename/mcp
+Content-Type: application/json
+Authorization: Bearer {{authToken}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list",
+  "params": {}
+}
+
+### MCP — tools/call (example_get)
+POST {{baseUrl}}/v1/sourcename/mcp
+Content-Type: application/json
+Authorization: Bearer {{authToken}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "example_get",
+    "arguments": {
+      "resource_id": "test-123",
+      "response_mode": "summary"
+    }
+  }
+}
+
+### MCP — dedicated tools/list endpoint
+POST {{baseUrl}}/v1/sourcename/mcp/tools/list
+Content-Type: application/json
+Authorization: Bearer {{authToken}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 4
+}
+
+### =============================================================================
+### Callback Endpoint (no auth — called by agent-router)
+### =============================================================================
+
+### Callback — job completed
+POST {{baseUrl}}/v1/sourcename/callback
+Content-Type: application/json
+
+{
+  "status": "completed",
+  "output": "Agent completed the task successfully.",
+  "source": "sourcename",
+  "intent": "TEST",
+  "metadata": {
+    "resourceId": "test-resource-1"
+  }
+}

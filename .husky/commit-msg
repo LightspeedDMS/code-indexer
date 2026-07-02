@@ -1,0 +1,7 @@
+#!/bin/bash
+SCRIPT="./node_modules/@lightspeed/mcp-tools/scripts/commit-msg.sh"
+if [ -f "$SCRIPT" ]; then
+    "$SCRIPT" "$1"
+else
+    echo "⚠️  commit-msg.sh not found — run npm install to enable ticket ID enforcement"
+fi
