@@ -4,13 +4,15 @@
 # node-tools-v2-docker-template.yml) but is pure-Python: no Stage-role assume / no
 # CodeArtifact .npmrc (cidx installs from public PyPI + the vendored third_party/hnswlib).
 #
-# The docker-autoscaler runner's identity IS the tools-test account (124169034092), so
-# `aws ecr get-login-password` on the runner authenticates directly to that account's ECR —
-# same account as the eks-test-tools-uswest2 cluster, so pods pull without cross-account policy.
+# The docker-autoscaler runner's identity is the shared tools ECR-home account
+# (601706661779 — the registry that hosts ALL tools-* images across test/validate/live),
+# resolved dynamically via `aws sts get-caller-identity`. eks-test-tools-uswest2 lives in
+# tools-test (124169034092) and pulls cross-account from this shared ECR home (the standard
+# tools-* pattern; the repo policy + node role already allow it).
 #
 # Produces:
-#   124169034092.dkr.ecr.us-west-2.amazonaws.com/claude-code-indexer:cidx-<version>-<sha>  (immutable)
-#   124169034092.dkr.ecr.us-west-2.amazonaws.com/claude-code-indexer:cidx-tools-latest      (moving)
+#   601706661779.dkr.ecr.us-west-2.amazonaws.com/claude-code-indexer:cidx-<version>-<sha>  (immutable)
+#   601706661779.dkr.ecr.us-west-2.amazonaws.com/claude-code-indexer:cidx-tools-latest      (moving)
 
 stages:
   - build
