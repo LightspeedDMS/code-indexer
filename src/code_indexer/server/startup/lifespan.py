@@ -1022,19 +1022,24 @@ def make_lifespan(
             # C4 (Bug #580 extension): in cluster (postgres) mode this scheduler is
             # leader-gated -- started in _on_become_leader so only the leader runs it
             # (avoids N replicas duplicating work / racing). Solo mode starts now.
+            app.state.description_refresh_scheduler = description_refresh_scheduler
             if storage_mode != "postgres":
                 description_refresh_scheduler.start()
-            app.state.description_refresh_scheduler = description_refresh_scheduler
-
-            if server_config.claude_integration_config.description_refresh_enabled:
-                logger.info(
-                    f"Description refresh scheduler started "
-                    f"(interval: {server_config.claude_integration_config.description_refresh_interval_hours}h)",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                if server_config.claude_integration_config.description_refresh_enabled:
+                    logger.info(
+                        f"Description refresh scheduler started "
+                        f"(interval: {server_config.claude_integration_config.description_refresh_interval_hours}h)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.info(
+                        "Description refresh scheduler is disabled (can be enabled in Web UI)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
             else:
                 logger.info(
-                    "Description refresh scheduler is disabled (can be enabled in Web UI)",
+                    "Description refresh scheduler leader-gated "
+                    "(starts on the elected leader in cluster mode)",
                     extra={"correlation_id": get_correlation_id()},
                 )
 
@@ -1075,13 +1080,19 @@ def make_lifespan(
                 backend_registry=backend_registry,
             )
             # C4: leader-gated in cluster mode (started in _on_become_leader).
+            app.state.data_retention_scheduler = data_retention_scheduler
             if storage_mode != "postgres":
                 data_retention_scheduler.start()
-            app.state.data_retention_scheduler = data_retention_scheduler
-            logger.info(
-                "Data retention scheduler started",
-                extra={"correlation_id": get_correlation_id()},
-            )
+                logger.info(
+                    "Data retention scheduler started",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Data retention scheduler leader-gated "
+                    "(starts on the elected leader in cluster mode)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
         except Exception as e:
             # Log error but don't block server startup
             logger.warning(
@@ -1126,13 +1137,19 @@ def make_lifespan(
                 config_service=_reaper_config_service,
             )
             # C4: leader-gated in cluster mode (started in _on_become_leader).
+            app.state.activated_reaper_scheduler = activated_reaper_scheduler
             if storage_mode != "postgres":
                 activated_reaper_scheduler.start()
-            app.state.activated_reaper_scheduler = activated_reaper_scheduler
-            logger.info(
-                "Activated reaper scheduler started",
-                extra={"correlation_id": get_correlation_id()},
-            )
+                logger.info(
+                    "Activated reaper scheduler started",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.info(
+                    "Activated reaper scheduler leader-gated "
+                    "(starts on the elected leader in cluster mode)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
         except Exception as e:
             logger.warning(
                 format_error_log(
