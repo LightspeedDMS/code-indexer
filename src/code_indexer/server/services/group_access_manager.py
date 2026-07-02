@@ -124,12 +124,38 @@ class GroupAccessManager:
         self._audit_service: Optional["AuditLogService"] = None
         self._backend = storage_backend
         if self._backend is not None:
-            # PG mode: backend owns its own schema and bootstrap; skip SQLite init
+            # PG mode: backend owns its own schema. BUT the SQLite-only
+            # _bootstrap_default_groups (below) was previously skipped here, so a
+            # fresh CLUSTER database ended up with NO admins/powerusers/users
+            # groups → admins could not add/access golden repos, and
+            # seed_users_to_groups failed with "admins group not found". Seed the
+            # default groups via the backend so cluster mode matches standalone.
+            self._bootstrap_default_groups_pg()
             return
         self.db_path = Path(db_path)
         self._conn_manager = DatabaseConnectionManager.get_instance(str(db_path))
         self._ensure_schema()
         self._bootstrap_default_groups()
+
+    def _bootstrap_default_groups_pg(self) -> None:
+        """PG/cluster equivalent of _bootstrap_default_groups (idempotent).
+
+        Seeds the default groups via the backend so a fresh cluster database has
+        admins/powerusers/users (mirrors the SQLite bootstrap). No-op per group
+        if it already exists.
+        """
+        ensure = getattr(self._backend, "ensure_default_group", None)
+        if ensure is None:
+            return
+        for group_def in DEFAULT_GROUPS:
+            try:
+                ensure(group_def["name"], group_def["description"])
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "PG default-group bootstrap failed for %s: %s",
+                    group_def["name"],
+                    e,
+                )
 
     def set_audit_service(self, audit_service: "AuditLogService") -> None:
         """

@@ -159,6 +159,25 @@ class GroupsPostgresBackend:
         assert group is not None
         return group
 
+    def ensure_default_group(self, name: str, description: str) -> None:
+        """Idempotently create a default group (``is_default=TRUE``).
+
+        Cluster/PG bootstrap: ``GroupAccessManager``'s SQLite-only
+        ``_bootstrap_default_groups`` is skipped in PG mode, so the default
+        groups (admins/powerusers/users) must be seeded here instead — otherwise
+        a fresh cluster database has no groups and admins cannot add/access
+        golden repos. No-op if the group already exists (``ON CONFLICT``).
+        """
+        now = datetime.now(timezone.utc)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO groups (name, description, is_default, created_at) "
+                    "VALUES (%s, %s, TRUE, %s) ON CONFLICT (name) DO NOTHING",
+                    (name, description, now),
+                )
+            conn.commit()
+
     def update_group(
         self,
         group_id: int,
