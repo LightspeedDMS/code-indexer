@@ -366,15 +366,18 @@ class TestBug1240PerPointLogLevel:
             "Per-point 'no commit_timestamp' message must still be emitted at DEBUG level"
         )
 
-    def test_aggregate_structural_orphan_warning_still_present(self, tmp_path, caplog):
-        """The per-collection aggregate WARNING in _migrate_one_collection must remain.
+    def test_aggregate_structural_orphan_reported_via_raise(self, tmp_path, caplog):
+        """Bug #1286 supersedes this test's original #1240 premise: a structural
+        orphan no longer logs a WARNING-and-continue aggregate — it now hard-aborts
+        the migration with a RuntimeError whose message carries the orphan
+        breakdown (the same information the old aggregate WARNING carried, now
+        delivered as a loud failure instead of a silent-success WARNING).
 
-        The fix demotes per-point messages but MUST NOT remove the aggregate
-        'N structural orphan(s) in ...' WARNING — that is the intentional summary
-        that operators rely on to detect corrupt indexes.
-
-        RED: N/A — aggregate warning is unchanged by fix; this tests it survives.
+        Per-point messages must still never appear above DEBUG (that part of the
+        #1240 fix is unrelated and remains intact).
         """
+        import pytest
+
         from code_indexer.services.temporal.temporal_migration_service import (
             run_temporal_migration,
         )
@@ -383,28 +386,26 @@ class TestBug1240PerPointLogLevel:
             tmp_path
         )
 
-        with caplog.at_level(logging.WARNING, logger=MIGRATION_LOGGER):
-            # Must not raise — structural orphan is logged as WARNING, not raised
-            run_temporal_migration(
-                index_path=index_path,
-                repo_alias="test-repo",
-                repo_path=repo_path,
-            )
+        with caplog.at_level(logging.DEBUG, logger=MIGRATION_LOGGER):
+            with pytest.raises(RuntimeError) as exc_info:
+                run_temporal_migration(
+                    index_path=index_path,
+                    repo_alias="test-repo",
+                    repo_path=repo_path,
+                )
 
+        # Orphan breakdown now carried in the raised exception, not a WARNING log
+        assert "missing_json" in str(exc_info.value), (
+            f"Expected orphan breakdown in raised message, got: {exc_info.value}"
+        )
+        assert not (coll_dir / "migration_complete.marker").exists(), (
+            "marker must NOT be written when a structural orphan aborts the migration"
+        )
+
+        # Per-point messages must NOT appear at WARNING (that part of #1240 stands)
         warning_msgs = [
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
-
-        # Aggregate summary WARNING must still be present after the fix
-        assert any(
-            "orphan" in m.lower() or "structural" in m.lower() or "missing_json" in m
-            for m in warning_msgs
-        ), (
-            f"Aggregate structural orphan WARNING must be present after log-level fix. "
-            f"Got WARNING messages: {warning_msgs}"
-        )
-
-        # Per-point messages must NOT appear at WARNING (that's the whole fix)
         assert not any("skipping point" in m for m in warning_msgs), (
             f"Bug #1240: per-point 'skipping point' still at WARNING after fix. "
             f"WARNING messages: {warning_msgs}"
