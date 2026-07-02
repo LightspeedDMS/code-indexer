@@ -1917,7 +1917,17 @@ def make_lifespan(
                 try:
                     import json as _json
 
-                    _cfg_path = Path.home() / ".cidx-server" / "config.json"
+                    # Bug: read config from the SAME path service_init.py uses
+                    # (CIDX_SERVER_DATA_DIR/config.json), not a hardcoded
+                    # ~/.cidx-server. When CIDX_SERVER_DATA_DIR is overridden
+                    # (e.g. /data in k8s), the old hardcoded path did not exist,
+                    # so postgres_dsn came back empty and the entire cluster-
+                    # services block (leader election, heartbeat, reconciliation)
+                    # was silently skipped in multi-pod deployments.
+                    _server_data_dir = os.environ.get(
+                        "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
+                    )
+                    _cfg_path = Path(_server_data_dir) / "config.json"
                     if _cfg_path.exists():
                         with open(_cfg_path) as _f:
                             _cfg_data = _json.load(_f)
